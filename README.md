@@ -1,6 +1,6 @@
 
 <div align="left">
-  <img src="https://docs.howso.com/_static/howso_logo_icon.svg">
+  <img src="MarkdownLogo.svg">
 </div>
 
 The Howso Engine&trade; is a natively and fully explainable ML engine, serving as an alternative to black box AI neural networks. Its core features give users data exploration and machine learning capabilities through the creation and use of Trainees that help users store, explore, and analyze the relationships in their data. Howso leverages an instance-based learning approach with strong ties to the [k-nearest neighbors algorithm](https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm) and [information theory](https://en.wikipedia.org/wiki/Information_theory) to scale for real world applications.
