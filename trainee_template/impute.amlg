@@ -1,0 +1,465 @@
+;module for trainee_template
+;contains methods for imputation of trainee and clearing of imputation data
+(null
+
+
+	;imputes the model, filling in all the (null) feature values
+	; parameters:
+	; features : optional, list of features to use for imputation. if unspecified will use all the features in the dataset
+	; features_to_impute : optional, list of features to impute. if unspecified will use features
+	; session: the session id for this impute
+	; batch_size : a positive integer, specifying how many rows to fill before recomputing entropy. default is 1 which should return the
+	;				best accuracy since it'll recompute it everytime.  Higher values should improve performance but may decrease accuracy of results
+	#Impute
+		(declare
+			(assoc
+				features (list)
+				features_to_impute (list)
+				batch_size 1
+				session "none"
+			)
+
+			;if session or batch_size being passed in as null from st, overwrite them with defaults
+			(if (= (null) session)
+				(assign (assoc session "none"))
+			)
+			(if (= (null) batch_size)
+				(assign (assoc batch_size 1))
+			)
+
+
+			(if (= (list) features)
+				(assign (assoc features defaultFeatures))
+			)
+
+			(if (= (list) features_to_impute)
+				(assign (assoc features_to_impute features))
+			)
+
+			;reset any cached feature or case entropies
+			(assign_to_entities (assoc
+				averageModelCaseEntropyAddition (null)
+				averageModelCaseEntropyRemoval (null)
+				storedCaseConvictionsFeatureAddition (null)
+				averageModelCaseDistanceContribution (null)
+			))
+
+			;pull all the cases that have nulls
+			(declare (assoc
+				;list of case ids
+				react_entity_ids (list)
+				;list of cases
+				react_cases (list)
+				;flag set when any row has remaining nulls after being filled
+				has_remaining_null 0
+				;flag set when any row had any value filled
+				has_value_filled 0
+				;id of entity currently being analyzed
+				case_entity_id (null)
+			))
+
+			;filter out any features where all cases are null (empty feature), they cannot be imputed
+			(assign (assoc
+				features_to_impute
+					(filter
+						(lambda
+							;keep features if they have any non-null cases for this feature
+							(>
+								(compute_on_contained_entities (list
+									(query_not_equals (target_value 1) (null))
+									(query_count)
+								))
+								0
+							)
+						)
+						features_to_impute
+					)
+			))
+
+			(while (true)
+
+				;get the list of entity ids that have null values
+				(assign (assoc
+					;get rid of duplicate values in the list by making them into an assoc and returning just the indeces
+					;then reduce the list of lists to one flat list of all the entity ids
+					react_entity_ids
+						(values
+							(apply
+								(lambda (append))
+								;make a list of lists of entity ids that have any features set to (null)
+								;find the entities that have a reference to replay sessions, only cases have this reference
+								(map
+									(lambda
+										(contained_entities (list
+											(query_equals (target_value 1) (null))
+											(query_exists internalLabelSession)
+										))
+									)
+									features_to_impute
+								)
+							)
+							(true)
+						)
+					;reset the flags for every iteration
+					has_remaining_null 0
+					has_value_filled 0
+				))
+
+				;pull the all the cases that have missing values by their entity id, and append the entity id to the end
+				(assign (assoc
+					react_cases
+						(map
+							(lambda (append (retrieve_from_entity (target_value) features) (target_value)))
+							react_entity_ids
+						)
+
+				))
+
+				;prevent infinite loop if there are no react cases
+				(if (= 0 (size react_cases))
+					(conclude (false))
+				)
+
+				;process all the cases that need to be filled
+				(while (> (size react_cases) 0)
+
+					;clear cached conviction values for cases
+					(assign_to_entities (assoc storedConvictionsFeatureSet (null)))
+
+					;compute entropy of each row, append it to the end of each row, and overwrite react_cases with these updated rows
+					(assign (assoc
+						react_cases
+							(map
+								(lambda (let
+
+									;pull the entity from the end of the row to compute the entropy of the case
+									(assoc
+										entropy_of_row
+											;taking the inverse of conviction to provide value proportional to entropy
+											(/
+												1
+												(call ComputeCaseAdditionFamiliarityConviction (assoc
+													features features
+													case_id (last (target_value 2))
+												))
+											)
+									)
+									;if entropy is ever nan, set the value to 1 so that only the number of nulls matters
+									;TODO: remove this statement after implementing 2992
+									(if (= .nan entropy_of_row )
+										(assign (assoc entropy_of_row 1))
+									)
+
+									;scale entropy for case by the number of nulls in the case
+									(declare (assoc num_of_nulls (size (filter (lambda (= (target_value) (null))) (target_value 1)))))
+
+									;append the entropy of the row as the last feature value
+									(append (target_value) (* entropy_of_row num_of_nulls))
+								))
+								react_cases
+							)
+					))
+
+					;sort react_cases by the entropies (low to high), which are the last values in each row
+					(assign (assoc
+						react_cases
+							(sort
+								(lambda (- (last (target_value)) (last (target_value 1))))
+								react_cases
+							)
+					))
+
+					;truncate all the entropy values now that they've been calculated
+					(assign (assoc react_cases (map (lambda (trunc (target_value))) react_cases)))
+
+
+					;react to the sorted react_cases and update the model with the filled in results (if any feature was filled)
+					;fills in the the number of cases specified by batch_size, and removes those cases from the react_cases list
+					;then repeats the outer loop until the the react_cases list is empty (every case was attempted to be filled)
+					(let
+						(assoc
+							;loop counter, stop looping when it reaches batch_size
+							counter 0
+							;list of features that need to be filled for this row
+							fill_features (list)
+							action_values (null)
+							context_values (list)
+						)
+
+						;loop batch_size times and while the react_cases is not empty
+						(while (and (< counter batch_size) (> (size react_cases) 0))
+
+							(assign (assoc
+								;context values from the first case in react_cases, truncate the entity id
+								context_values (trunc (first react_cases))
+								;the entity id is the last value in the row
+								case_entity_id (last (first react_cases))
+								;all the values for this case_entity_id
+								case_values (retrieve_from_entity (last (first react_cases)) features_to_impute)
+								;clear the lists
+								fill_features (list)
+
+							))
+
+							;set fill features to match only those that have nulls as their values
+							(assign (assoc
+								fill_features
+									(filter
+										(lambda (= (null) (get case_values (target_index))))
+										features_to_impute
+									)
+								non_null_features
+									(filter
+										(lambda (!= (null) (get case_values (target_index))))
+										features_to_impute
+									)
+								context_values_map (zip context_features context_values)
+							))
+
+							;react to row
+							(assign (assoc
+								action_values
+									(call ReactDiscriminative (assoc
+										return_action_values_only (true)
+										action_features fill_features
+										;query engine will automatically ignore any features that have null values
+										;TODO: 17214 revert this to all features, but use overwrite contexts flag
+										context_features non_null_features 
+										context_values (unzip context_values_map non_null_features)
+										;passing in raw feature values, so skip nominal encoding
+										skip_encoding 1
+										;output raw values as well
+										skip_decoding 1
+										;since we're imputing we want to explicitly only find neighbors that have matching (non-null) features
+										match_on_context_features (true)
+										substitute_output (false)
+										;ignore the case being reacted-to
+										ignore_case case_entity_id
+									))
+							))
+
+							;.nan value could possibly happen if either tiny or extremely sparse dataset can't find matching cases with valid distances to cases with filled
+							;feature value due to not having matching filled features, thus replace any .nan with the feature expected value
+							(if (contains_value action_values .nan)
+								(assign (assoc
+									action_values
+										(map
+											(lambda
+												(if (= .nan (target_value))
+													(get
+														(call CalculateFeatureExpectedValue (assoc
+															feature (get fill_features (target_index 1))
+															output_instead_of_store (true)
+														))
+														"expected_value"
+													)
+
+													;leave it as-is
+													(target_value)
+												)
+											)
+											action_values
+										)
+								))
+							)
+
+							(if (contains_value action_values (null))
+								(assign (assoc has_remaining_null 1))
+
+								(assign (assoc has_value_filled 1))
+							)
+
+							;set to 1 if there are any values in the action_values that aren't null
+							(if (not has_value_filled)
+								(assign (assoc
+									has_value_filled
+										;check if size of array with null filtered is more than 0
+										(> (size (filter action_values)) 0)
+								))
+							)
+
+							;overwrite this case features' with the updated values
+							(assign_to_entities case_entity_id (zip fill_features action_values))
+
+							;add imputed label to case if it already doesn't exist
+							(if (not (contains_label case_entity_id internalLabelImputed))
+								(call StoreCaseValues (assoc label_name internalLabelImputed case_values_map (associate case_entity_id fill_features)))
+
+								;else append to existing list
+								(let
+									(assoc current_imputed_features (retrieve_from_entity case_entity_id internalLabelImputed))
+
+									;append fill_features to the current list, then get rid of duplicates by converting to an assoc
+									;and returning just the indices
+									(assign (assoc
+										current_imputed_features
+											(values (append current_imputed_features fill_features) (true))
+									))
+
+									;overwrite the stored imputed features with this new list
+									(call StoreCaseValues (assoc
+										label_name internalLabelImputed
+										case_values_map (associate case_entity_id current_imputed_features)
+										overwrite 1
+									))
+								)
+							)
+
+							;store the case edit history for this case
+							(map
+								(lambda
+									(call AddCaseEditHistory (assoc
+										edit_type "impute"
+										case case_entity_id
+										feature (target_value 1)
+										feature_value (get action_values (target_index 1))
+										session session
+									))
+								)
+								fill_features
+							)
+
+							;pop the the first row off react_cases, looping will stop when react_cases is empty
+							(assign (assoc
+								react_cases (tail react_cases)
+								counter (+ counter 1)
+							))
+						)
+					)
+
+					;stop iterating if none of the filled cases have nulls left, or none of the cases had anything filled
+					(if (or (not has_remaining_null) (not has_value_filled))
+						(seq
+							(accum_to_entities (assoc revision 1))
+							(conclude (true))
+						)
+					)
+				) ; while (> (size react_cases) 0
+			) ;while (not stop_iterating)
+
+			(accum_to_entities (assoc revision 1))
+
+			(true)
+		)
+
+
+	;clear values that were imputed during a specified session, but won't clear values that were manually set by user after the impute
+	;parameters:
+	; session: session id of this action
+	; impute_session: session id of the impute for which to clear the data. if null, will clear all imputed
+	#ClearImputedSession
+		(declare
+			(assoc
+				session "clear_impute_none"
+				impute_session (null)
+			)
+
+			;get all cases that were imputed at some point
+			(declare (assoc imputed_cases (contained_entities (list (query_exists internalLabelImputed)))))
+
+			;create a map of case -> all currently imputed features
+			(declare (assoc
+				imputed_cases_features_map
+					(map
+						(lambda (retrieve_from_entity (target_index) internalLabelImputed))
+						(zip imputed_cases)
+					)
+			))
+
+			;if imputed session id is specified, generate a map of case_id -> remaining imputed features from the specified session
+			;otherwise just clear all currently imputed
+			(if (!= (null) impute_session )
+				(assign (assoc
+					imputed_cases_features_map
+						(map
+							(lambda (let
+								(assoc
+									;retrieve the history for the case
+									case_history_map (retrieve_from_entity (target_index 1) internalLabelCaseEditHistory)
+									all_imputed_features (target_value 1)
+								)
+
+								;only clear imputed cases that have not been manually overwritten and are still marked as imputed
+								(if (> (size all_imputed_features) 0)
+									;retrieve the list of edits for the specified impute session
+									(declare
+										(assoc session_edits (get case_history_map impute_session))
+
+										;if there were edits for the specified session, pull out the features that were imputed, else return empty list
+										(if (> (size session_edits) 0)
+											(seq
+												;keep only those edits that were impute
+												(assign (assoc
+													session_edits
+														(filter (lambda (= "impute" (get (target_value) "type"))) session_edits)
+												))
+
+												;iterate over all the features that were imputed during this session
+												;keeping and returning  only those features that are still marked as imputed
+												(weave
+													(lambda (let
+														(assoc
+															;get feature from the impute history
+															session_imputed_feature (get (first (target_value 1)) "feature")
+														)
+
+														;only output the features that are still marked as imputed
+														(if (contains_value all_imputed_features session_imputed_feature)
+															;weave value outputs are in a list format
+															(list session_imputed_feature)
+															;empty list means no output / filtered out
+															(list)
+														)
+													))
+													session_edits
+													;use weave as a map-filter by specifying null as the second list
+													(null)
+												)
+											)
+
+											;else there were no imputed values in this session, output empty list
+											(list)
+										)
+									)
+
+									;else there are no imputed values remaining, output empty list
+									(list)
+								)
+
+							))
+							imputed_cases_features_map
+						)
+				))
+			)
+
+			;iterate over the cases and clear out the imputed features from the specified session
+			(map
+				(lambda (let
+					(assoc case_id (target_index 1))
+					(if (> (size (target_value)) 0)
+						;iterate over the list of imputed features for this case and set each one to null
+						(map
+							(lambda
+								;set the value of this feature to (null) for this specific case
+								(call AddFeature (assoc
+									feature (target_value 1)
+									feature_value (null)
+									session session
+									entities (list case_id)
+									overwrite 1
+									internal_feature (true)
+								))
+							)
+							(target_value)
+						)
+					)
+				))
+
+				imputed_cases_features_map
+			)
+
+			(accum_to_entities (assoc revision 1))
+
+			(true)
+		)
+)

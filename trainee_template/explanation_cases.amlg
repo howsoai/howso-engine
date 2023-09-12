@@ -1,0 +1,809 @@
+;Module for trainee_template.
+;Contains methods for calculating explanations and audit data for cases.
+(null
+
+	;Helper method to compute and add to output influential cases and influence weights
+	#ComputeInfluentialCases
+	(let
+		(assoc
+			output_raw_influence_weights (get details "influential_cases_raw_weights")
+			closest_cases_map (assoc)
+		)
+
+		;if there is aren't enough cases in the influence weights map  - ie, if the action value was specified by user and not from a reaction,
+		;then use the nearest neighbors as influencers
+		(if (or (< (size influence_weights_map) k_parameter) output_raw_influence_weights)
+			(seq
+				(assign (assoc
+					;map of case_id -> weight
+					closest_cases_map
+						(compute_on_contained_entities (append
+							filtering_queries
+							(query_nearest_generalized_distance
+								k_parameter
+								context_features
+								context_values
+								feature_weights
+								queryDistanceTypeMap
+								query_feature_attributes_map
+								context_deviations
+								p_parameter
+								dt_parameter
+								(if valid_weight_feature weight_feature (null))
+								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+								"fixed rand seed"
+								(null) ;radius
+								numericalPrecision
+							)
+						))
+				))
+
+				(assign (assoc
+					influence_weights_map
+						;if there are perfect matches (influence value is infinite), set all influence to same (or weighted), all others are 0
+						(if (contains_value (values closest_cases_map) .infinity)
+							(map
+								(lambda
+									(if (= (target_value) .infinity)
+										(if valid_weight_feature
+											;whatever the weight of the case, numerified so a null weight is 0
+											(+ (retrieve_from_entity (target_index) weight_feature))
+
+											;else all perfect matches have same weight
+											1
+										)
+
+										0
+									)
+								)
+								closest_cases_map
+							)
+
+							;keep as is
+							closest_cases_map
+						)
+
+				))
+			)
+		)
+
+		(declare (assoc
+			;influence weight will be scaled by this total and should add up to 1
+			total_influence_weight (apply "+" (values influence_weights_map))
+			;sort all influence cases by their influence, high to low
+			sorted_influence_cases
+				(sort
+					(lambda (>
+						(get influence_weights_map (target_value 1))
+						(get influence_weights_map (target_value))
+					))
+					(indices influence_weights_map)
+				)
+		))
+
+		(declare (assoc
+			accumulated_influence_weight_percent 0
+			;number of cases that make up the threshold (default of 99%) of the influence weight
+			influential_k 0
+		))
+
+
+		;figure out the influential_k that influences the majority (influenceWeightThreshold, default 99%) of the react value
+		;by incrementing the weight of each of the most influential cases until the total weight passes the threshold
+		;the count of those cases is the influential_k.
+		(while (and (<= accumulated_influence_weight_percent influenceWeightThreshold) (< influential_k k_parameter))
+			(accum (assoc
+				accumulated_influence_weight_percent
+					(/
+						(get influence_weights_map (get sorted_influence_cases influential_k))
+						total_influence_weight
+					)
+			))
+			(accum (assoc influential_k 1))
+		)
+
+		;return the influential_K
+		(declare (assoc candidate_case_ids (trunc sorted_influence_cases influential_k)))
+
+		;pull all the feature values for the cases
+		(declare (assoc
+			audit_data
+				(map
+					(lambda (let
+						(assoc
+							case_data
+								(retrieve_from_entity (target_value 1)
+									(zip (append
+										features
+										internalLabelSession
+										internalLabelSessionTrainingIndex
+										internalLabelImputed
+										extra_audit_features
+									))
+								)
+						)
+
+						;don't show imputed list if it's empty
+						(if (= (null) (get case_data internalLabelImputed))
+							(remove case_data internalLabelImputed)
+
+							case_data
+						)
+					))
+					candidate_case_ids
+				)
+		))
+
+		;append influence weight to output and normalize it by the total_influence_weight
+		(assign (assoc
+			audit_data
+				(map
+					(lambda
+						(append (target_value)
+							(assoc
+								".influence_weight"
+									(/ (or (get influence_weights_map (get candidate_case_ids (target_index 1)))) total_influence_weight)
+							)
+							(if output_raw_influence_weights
+								(assoc
+									".raw_influence_weight"
+										(get closest_cases_map (get candidate_case_ids (target_index 1)))
+								)
+								;else append nothing
+								(assoc)
+							)
+						)
+					)
+					audit_data
+				)
+		))
+
+		;compute and set conviction for each of the similar cases if requested
+		(if (and (get details "influential_cases_familiarity_convictions") (!= (null) storedCaseConvictionsFeatureAddition))
+			(assign (assoc
+				audit_data
+					(map
+						(lambda (let
+							(assoc
+								familiarity_conviction
+									(retrieve_from_entity (get candidate_case_ids (target_index 1)) storedCaseConvictionsFeatureAddition)
+							)
+
+							;set the conviction in the audit_data output
+							(set (target_value) storedCaseConvictionsFeatureAddition familiarity_conviction)
+						))
+						audit_data
+					)
+			))
+		)
+
+		;update the output explanation with this audit data
+		(accum (assoc
+			output
+				(assoc "influential_cases"
+					(if (and (not skip_decoding) (or hasEncodedFeatures has_rounded_features))
+						(call ConvertToOutputFromCaseList (assoc cases audit_data))
+
+						;else just return the cases as-is
+						audit_data
+					)
+				)
+		))
+	)
+
+	;Helper method to compute and add to output most similar cases
+	#ComputeMostSimilarCases
+	(let
+		(assoc
+			specified_num_exemplars most_similar_cases_parameter
+			;map of case_id -> weight
+			similar_cases_map (assoc)
+		)
+		(declare (assoc
+			num_exemplars
+				;only use the specified amount if it's between 1 and 100, true means use default
+				(if (= (true) (get_type specified_num_exemplars))
+					;use the default amount
+					k_parameter
+
+					(and (> specified_num_exemplars 0) (<= specified_num_exemplars 1000))
+					specified_num_exemplars
+
+					(< specified_num_exemplars 1)
+					1
+
+					(> specified_num_exemplars 1000)
+					1000
+				)
+		))
+
+		(assign (assoc
+			similar_cases
+				(compute_on_contained_entities (append
+					filtering_queries
+					(query_nearest_generalized_distance
+						num_exemplars
+						context_features
+						context_values
+						feature_weights
+						queryDistanceTypeMap
+						query_feature_attributes_map
+						context_deviations
+						p_parameter
+						1 ;dt of 1 queries distance in ascending order
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						numericalPrecision
+						(true) ;output_sorted_list
+					)
+				))
+		))
+
+		(declare (assoc
+			item_retrieval_map
+				(zip (append
+					features
+					internalLabelSession
+					internalLabelSessionTrainingIndex
+					internalLabelImputed
+					extra_audit_features
+				))
+		))
+
+		;pull all the feature values for the cases
+		(declare (assoc
+			audit_data
+				(map
+					(lambda (let
+						(assoc
+							case_data
+								(set
+									(retrieve_from_entity (get (target_value 1) 0) ;case index
+										item_retrieval_map
+									)
+									".distance"
+									(get (target_value 1) 1) ; distance
+								)
+						)
+
+						;don't show imputed list if it's empty
+						(if (= (null) (get case_data internalLabelImputed))
+							(remove case_data internalLabelImputed)
+
+							case_data
+						)
+					))
+					(get similar_cases 0) ;indices are the first item in similar_cases
+					(get similar_cases 1) ;distances are the second item in similar_cases
+				)
+		))
+
+		;update the output explanation with this audit data
+		(accum (assoc
+			output
+				(assoc
+					"most_similar_cases"
+						(if (and (not skip_decoding) hasEncodedFeatures)
+							(call ConvertToOutputFromCaseList (assoc cases audit_data))
+
+							;else just return the cases as-is
+							audit_data
+						)
+				)
+		))
+	)
+
+	;Helper method to compute and add to output boundary cases
+	#ComputeBoundaryCases
+	(let
+		(assoc specified_num_exemplars boundary_cases_parameter)
+		(declare (assoc
+			num_exemplars
+				;only use the specified amount if it's between 1 and 100, true means use default
+				(if (= (true) (get_type specified_num_exemplars))
+					;use the default amount
+					k_parameter
+
+					(and (> specified_num_exemplars 0) (<= specified_num_exemplars 1000))
+					specified_num_exemplars
+
+					(< specified_num_exemplars 1)
+					1
+
+					(> specified_num_exemplars 1000)
+					1000
+				)
+		))
+
+		;if getting boundary without specifying action features, use familiarity conviction as the boundary feature if it's been computed
+		(if (and
+				(= (list) action_features)
+				(!= (null) storedCaseConvictionsFeatureAddition)
+			)
+			(assign (assoc
+				action_features (list (get_value storedCaseConvictionsFeatureAddition))
+				action_values
+					;if conviction has already been computed because this is an existing case, use it
+					(if (!= (null) ignore_case)
+						(list (retrieve_from_entity ignore_case storedCaseConvictionsFeatureAddition))
+
+						;else use 1 as the default conviction value if none provided
+						(list 1)
+					)
+				;ensure that the boundary case familiarity conviction is output along with the boundary cases
+				details (set details "boundary_cases_familiarity_convictions" (true))
+			))
+		)
+
+		;get all the boundary case ids
+		(declare (assoc
+			candidate_case_ids
+				(call GetBoundaryCaseIds (assoc
+					context_features context_features
+					action_features action_features
+					context_values context_values
+					action_values action_values
+					extra_audit_features extra_audit_features
+					num_cases_returned num_exemplars
+				))
+		))
+
+		;if there is no influence_weights_map, calculate it
+		(if (= (size influence_weights_map) 0)
+			(let
+				(assoc
+					;map of case_id -> distance
+					closest_cases_map
+						(compute_on_contained_entities (append
+							filtering_queries
+							(query_nearest_generalized_distance
+								k_parameter
+								context_features
+								context_values
+								feature_weights
+								queryDistanceTypeMap
+								query_feature_attributes_map
+								context_deviations
+								p_parameter
+								dt_parameter
+								(if valid_weight_feature weight_feature (null))
+								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+								"fixed rand seed"
+								(null)
+								numericalPrecision
+							)
+						))
+				)
+
+				(assign (assoc
+					influence_weights_map
+						;if there are perfect matches (weight is infinite), all their influence is same, all others are 0
+						(if (contains_value (values closest_cases_map) .infinity)
+							(map
+								(lambda
+									(if (= (target_value) .infinity)
+										1
+										0
+									)
+								)
+								closest_cases_map
+							)
+
+							;keep as is
+							closest_cases_map
+						)
+				))
+			)
+		)
+
+		;pull all the feature values for the cases
+		(declare (assoc
+			audit_data
+				(map
+					(lambda (let
+						(assoc
+							case_data
+								(retrieve_from_entity (target_value 1)
+									(zip (append
+										features
+										internalLabelSession
+										internalLabelSessionTrainingIndex
+										internalLabelImputed
+										extra_audit_features
+									))
+								)
+						)
+						;don't show imputed list if it's empty
+						(if (= (null) (get case_data internalLabelImputed))
+							(remove case_data internalLabelImputed)
+
+							case_data
+						)
+					))
+					candidate_case_ids
+				)
+		))
+
+
+		;influence weight is scaled by the total and should add up to 1, assuming there are influence weights on boundary cases
+		(declare (assoc total_influence_weight (apply "+" (values influence_weights_map))))
+
+		;append influence weight to output and normalize it by the total_influence_weight
+		(assign (assoc
+			audit_data
+				(map
+					(lambda
+						(set (target_value) ".influence_weight"
+							(if total_influence_weight
+								(/ (or (get influence_weights_map (get candidate_case_ids (target_index)))) total_influence_weight)
+								; don't divide by an invalid total_influence_weight to prevent outputting nan
+								0
+							)
+						)
+					)
+					audit_data
+				)
+		))
+
+		;compute and set conviction for each of the boundary cases if requested
+		(if (and (get details "boundary_cases_familiarity_convictions") (!= (null) storedCaseConvictionsFeatureAddition))
+			(assign (assoc
+				audit_data
+					(map
+						(lambda (let
+							(assoc
+								familiarity_conviction
+									(retrieve_from_entity (get candidate_case_ids (target_index 1)) storedCaseConvictionsFeatureAddition)
+							)
+
+							;set the conviction in the audit_data output
+							(set (target_value) storedCaseConvictionsFeatureAddition familiarity_conviction)
+						))
+						audit_data
+					)
+			))
+		)
+
+		(accum (assoc
+			output
+				(assoc "boundary_cases"
+					(if (and (not skip_decoding) hasEncodedFeatures)
+						(call ConvertToOutputFromCaseList (assoc cases audit_data))
+
+						;else just return the cases as-is
+						audit_data
+					)
+				)
+		))
+	)
+
+	;a) for nominals look for closeslt cases that have a different action value
+	;b) for continuous, do one-at-a-time feature elimination (knockout) on local model, collate results with results from (a),
+	;c) sort by action distances and by context distances
+	;d) calculate distances of cases from C by actions and by contexts and sort by ratio of action distance /(context U action) distance
+	;e) if there aren't enough cases that have a ratio > 0 repeat from step (a) with double K value for the local model
+	;f) if still no luck after K > 240, give up - no boundary
+	;g) return the num exemplar cases with the highest action/(context U action) distance ratios as boundary cases
+	;return:
+	; boundary_case_ids  : cases with highest ratio of action_distance / context_distance.
+	;
+	;Parameters:
+	; context_features: list of context features
+	; context_values: current values of each context feature
+	; action_features: list of action features for action inputs
+	; action_values: current values of each action feature
+	; num_cases_returned: number of cases to return for each type of audit data
+	; extra_audit_features: list of additional features to return with audit data
+	#GetBoundaryCaseIds
+	(declare
+		(assoc
+			context_features (list)
+			action_features (list)
+			context_values (list)
+			action_values (list)
+			local_model_n regionalModelMinSize
+			num_cases_returned k_parameter
+			extra_audit_features (list)
+		)
+		;set the value to be the max of these, that way if closest k is large, it'll just use that as the local model n size
+		(assign (assoc local_model_n (max k_parameter local_model_n)))
+
+
+		;(a)get local model, (store num_cases_returned closest)
+		(declare (assoc
+			;assoc of this react case
+			react_case (zip (append context_features action_features) (append context_values action_values))
+
+			feature_deviations (if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+			feature_weights (get hyperparam_map "featureWeights")
+		))
+
+		;--- calculate boundary cases ---
+		; if one nominal, call function to get nominal case ids, return boundary cases
+		; else:
+		; for each nominal feature:
+		;  call function, contexts are contexts+actions with index of action deleted
+		;  OR the case ids together
+		; continuous actions = actions unzipped by non-nominals
+		; do one-by-one feature knockout for continuous actions where contexts are contexts+nominal actions with indices of continuous actions deleted
+		; OR the lists of nominal boundary case ids and continuous boundary case ids
+		; return top action/case ratio num_cases_returned
+
+		(declare (assoc boundary_case_ids (list)))
+
+		;if the action is exactly one nominal feature simply create the query and return the boundary cases
+		;otherwise do the full flow
+		(if (and (= 1 (size action_features)) (contains_index nominalsMap (first action_features)))
+			(assign (assoc
+				boundary_case_ids
+					;don't need to specify other parameters because they are passed in implicitly as they are
+					(call CalculateNominalBoundaryCaseIds (assoc
+						action_feature (first action_features)
+						action_value (first action_values)
+						num_cases_returned num_cases_returned
+					))
+			))
+
+			;full flow, using feature knockout for non-nominals and taking the cases with the highest ratio of action / case
+			(let
+				(assoc
+					;collection of all the nominal boundary case ids from each nominal feature
+					nominal_boundary_case_ids (list)
+					;list of action feature indices for all non-nominal action features
+					non_nominal_action_feature_indices (list)
+					;list of nominal action indices for all nominal action features
+					nominal_action_feature_indices (list)
+
+				)
+
+				;for each nominal feature:
+				;  calculate nominal boundary case ids, contexts are contexts + actions with index of action deleted
+				;  OR the case ids together
+				(map
+					(lambda (if
+						(contains_index nominalsMap (target_value))
+						(let
+							(assoc
+								filtered_action_features (remove action_features (target_index 1))
+								filtered_action_values (remove action_values (target_index 1))
+							)
+
+							(accum (assoc
+								nominal_boundary_case_ids
+									(call CalculateNominalBoundaryCaseIds (assoc
+										action_feature (get action_features (target_index 2))
+										action_value (get action_values (target_index 2))
+										context_features (append context_features filtered_action_features)
+										context_values (append context_values filtered_action_values)
+										num_cases_returned num_cases_returned
+									))
+							))
+
+							(accum (assoc nominal_action_feature_indices (target_index 1)))
+						)
+
+						;else not a nominal action feature, store its index
+						(accum (assoc non_nominal_action_feature_indices (target_index 1)))
+					))
+					action_features
+				)
+
+				(declare (assoc
+					candidate_boundary_case_ids
+						;if there are no non-nominals, take the necessary number of unique cases from the boundary_cases
+						;otherwise calculate candidate boundary cases for non-nominal actions
+						(if (= (size non_nominal_action_feature_indices) 0)
+							;remove duplicates from the nominal boundary case ids
+							(values nominal_boundary_case_ids (true))
+
+							;else create the revelant lists of values to use as contexts by appending contexts to nominal actions
+							(call CalculateNonNominalBoundaryCaseIds)
+						)
+				))
+
+
+				;calculate distances to all the neighbor candidate boundary cases using only the action values
+				;an assoc of case_id -> distance to reaction
+				(declare (assoc
+					candidate_boundary_cases_action_distance_map
+						(zip
+							candidate_boundary_case_ids
+							(map
+								(lambda (generalized_distance
+									feature_weights
+									queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									p_parameter
+									action_values
+									(retrieve_from_entity (target_value) action_features)
+									(null)
+									action_features
+									))
+								candidate_boundary_case_ids
+							)
+						)
+					;all neighbors using context+action values
+					candidate_boundary_cases_distance_map
+						(zip
+							candidate_boundary_case_ids
+							(map
+								(lambda (generalized_distance
+									feature_weights
+									queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									p_parameter
+									(append context_values action_values)
+									(retrieve_from_entity (target_value) (append context_features action_features))
+									(null)
+									(append context_features action_features)
+									))
+								candidate_boundary_case_ids
+							)
+						)
+				))
+
+				;calculate the ratios of action distance / full case distance for all the neighboring cases
+				(declare (assoc
+					neighbor_cases_by_ratio_of_action_to_case_distance_map
+						(map
+							(lambda
+								(/
+									(get candidate_boundary_cases_action_distance_map (target_index))
+									(get candidate_boundary_cases_distance_map (target_index))
+								)
+							)
+							candidate_boundary_cases_distance_map
+						)
+
+				))
+
+				;sort the case ids by their distance ratios, from high to low
+				(declare (assoc
+					sorted_neighbors_by_ratio_of_action_to_context_distance
+						(sort
+							(lambda (>
+								(get neighbor_cases_by_ratio_of_action_to_case_distance_map (target_value 1))
+								(get neighbor_cases_by_ratio_of_action_to_case_distance_map (target_value))
+							))
+							(indices neighbor_cases_by_ratio_of_action_to_case_distance_map )
+						)
+
+				))
+
+				(assign (assoc boundary_case_ids (trunc sorted_neighbors_by_ratio_of_action_to_context_distance num_cases_returned)))
+
+				;if there are boundary cases distance ratios of 0, can't list any, so let later code handle it
+				(if
+					(contains_value
+						(unzip
+							neighbor_cases_by_ratio_of_action_to_case_distance_map
+							boundary_case_ids
+						)
+						0
+					)
+					(assign (assoc boundary_case_ids (null)))
+				)
+			)
+		)
+
+
+		;if no boundary cases, repeat with double K value and rerun this method until K is at 240
+		; this can happen if there are many identical cases
+		(if (= (null) boundary_case_ids)
+			(if (<= local_model_n 240)
+				(call GetBoundaryCaseIds (assoc
+					context_features context_features
+					action_features action_features
+					context_values context_values
+					action_values action_values
+					local_model_n (* 2 local_model_n)
+					boundary_cases_only boundary_cases_only
+					extra_audit_features extra_audit_features
+				))
+
+				;if still no luck after K = 240, return nothing
+				(list)
+			)
+
+			boundary_case_ids
+		)
+	)
+
+	;return all the boundary cases for a nominal action
+	;helper method called only by #GetBoundaryCaseIds and implicitly uses values from the flow in #GetBoundaryCaseIds
+	#CalculateNominalBoundaryCaseIds
+	(declare
+		(assoc
+			action_feature ""
+			action_value (null)
+		)
+
+		(contained_entities
+			(list
+				;ignore all cases that match this exact action value for this action feature
+				(query_not_equals action_feature action_value)
+				;query to find the influential cases from the remaining set
+				(query_nearest_generalized_distance
+					num_cases_returned
+					context_features
+					context_values
+					feature_weights
+					queryDistanceTypeMap
+					query_feature_attributes_map
+					feature_deviations
+					p_parameter
+					1 ;dt
+					(if valid_weight_feature weight_feature (null))
+					;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+					"fixed rand seed"
+					(null) ;radius
+					numericalPrecision
+				)
+			)
+		)
+	)
+
+	;return all unique boundary case ids for non-nominal features in an explanation
+	;helper method called only by #explain_case and implicitly uses values from the flow in #explain_case
+	#CalculateNonNominalBoundaryCaseIds
+	(let
+		(assoc
+			context_and_nominal_action_features (append context_features (unzip action_features nominal_action_feature_indices))
+		)
+
+		;create a list of lists of closest cases for each knocked out context feature
+		;by knocking out features one by one and getting the local model of neighbors for the remaining context features
+		(assign (assoc
+			candidate_boundary_case_ids
+				(map
+					(lambda (let
+						(assoc feature (target_value 1))
+
+						;filter out this feature
+						(declare (assoc
+							filtered_context_features (filter (lambda (!= (target_value) feature)) context_and_nominal_action_features)
+						))
+
+						;output the closest cases to the filtered contexts
+						(contained_entities (list
+							(query_nearest_generalized_distance
+								local_model_n
+								filtered_context_features
+								;use only the corresponding values
+								(unzip react_case filtered_context_features)
+								feature_weights
+								queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								p_parameter
+								1
+								(if valid_weight_feature weight_feature (null))
+								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+								"fixed rand seed"
+								(null) ;radius
+								numericalPrecision
+							)
+						))
+					))
+					context_and_nominal_action_features
+				)
+		))
+
+		;append all the nominal boundary case ids to the non-nominal boundary_case ids
+		(assign (assoc
+			candidate_boundary_case_ids
+				(append
+					;convert the list of lists into a flat 1-d list
+					(apply "append" candidate_boundary_case_ids)
+					nominal_boundary_case_ids
+				)
+		))
+
+		;remove duplicate ids and return as output
+		(values candidate_boundary_case_ids (true))
+	)
+)

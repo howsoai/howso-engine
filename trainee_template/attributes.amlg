@@ -1,0 +1,941 @@
+;Module for trainee_template.
+;Contains methods to set and get feature attributes.
+(null
+
+	;set all features and their attributes for a trainee
+	;parameters:
+	; create_ts_attributes: flag, default to true. create time series feature attributes if necessary
+	; features: assoc of feature -> attributes, attributes defined below:
+	;
+	;	'type': string, one of 'continuous', 'ordinal' or 'nominal'. Default is 'continuous'.
+	;
+	;	'bounds' : assoc of of bounds for feature value generation, keys of assoc defined below as:
+	;		'min': number or date string, the minimum value to be output
+	;		'max': number or date string, the maximum value to be output
+	;		'allowed': list of explicitly allowed values to be output. Example: ["low", "medium", "high"]
+	;		'allow_null': flag, allow nulls to be output, per their distribution in the data. Defaults to true
+	;
+	;	'cycle_length': number, specifies cycle length of cyclic feature, default is no cycle length
+	;
+	;	'date_time_format': string datetime format, if specified, feature values should match the date format specified by
+	;						this string. Only applicable to continuous features. Example: "%Y-%m-%d"
+	;
+	;	'locale': string, the date time format locale. If unspecified, uses platform default locale. Example: "en_US"
+	;
+	;	'time_delta_format: string, format of the delta for times, default is "seconds".
+	;						valid values are: milliseconds, seconds, minutes, hours, days, weeks, years
+	;
+	;	'significant_digits': number, round to the specified significant digits, default is no rounding
+	;
+	;	'decimal_places': number, decimal places to round to, default is no rounding. If "significant_digits"
+	;					is also specified, the number will be rounded to the specified number of significant
+	;					digits first, then rounded to the number of decimal points as specified by this parameter
+	;
+	;	'observational_error': number, specify the observed error value for this feature. Use when the error
+	;						value is already known. Default is 0
+	;
+	;	'data_type': string, specify the data type for features with a type of nominal or continuous
+	;				Defaults to 'string' for nominals and 'number' for continuous
+	;				Valid values for both are: 'string', 'number', 'json', 'amalgam', 'yaml'
+	;				'string_mixable' is valid only when type is continuous
+	;				'boolean' is valid only when type is nominal
+	;
+	;	'id_feature': boolean, Set to true only for nominal features containing nominal IDs to specify that this
+	;				feature should be used to compute case weights for id based privacy. For time series,
+	;				this feature will be used as the id for each time series generation. Default is false
+	;
+	;	'unique': boolean, flag feature as only having unique values. Only applicable to nominal features. Defaults to false.
+	;
+	;	'dependent_features': list, a list of other feature names that this feature either depends on or features
+	;						that depend on this feature. Should be used when there are multi-type value
+	;						features that tightly depend on values based on other multi-type value features.
+	;
+	;	'null_is_dependent': boolean, modifies how dependent features with nulls are treated during a react, specifically
+	;						when they use null as a context value. Only applicable to dependent features. When false, the
+	;						feature will be treated as a non-dependent context feature. When true for nominal types,
+	;						treats null as an individual dependent class value, only cases that also have nulls as this
+	;						feature's value will be considered. When true for continuous types, only the cases with the
+	;						same dependent feature values as the cases that also have nulls as this feature's value
+	;						will be considered. Default is false.
+	;
+	;	'auto_derive_on_train': assoc, defines how to create and derive all the values for this feature from
+	;							the trained dataset. For full list of specific 'auto_derive_on_train' feature
+	;							attributes refer the comments at the top of the derive.amlg module.
+	;
+	;	'derived_feature_code': string, code defining how the value for this feature could be derived if this feature
+	;							is specified as a "derived_context_feature" or a "derived_action_feature" during
+	;							react flows. For react_series, the data referenced is the accumulated series data
+	;							(as a list of rows), and for non-series reacts, the data is the one single row.
+	;							Each row is comprised of all the combined context and action features. Referencing
+	;							data in these rows uses 0-based indexing, where the current row index is 0, the
+	;							previous row's is 1, etc. Specified code may do simple logic and numeric operations
+	;							on feature values referenced via feature name and row offset.
+	;							Examples:
+	;							"#x 1" - Use the value for feature 'x' from the previously processed row (offset of 1, one lag value).
+	;							"(- #y 0 #x 1)" - Feature 'y' value from current (offset 0) row minus feature 'x' value from previous (offset 1) row.
+	;
+	;	'post_process': string, custom Amalgam code that is called on resulting values of this feature during react operations.
+	;					Example: "(set_digits #x 0 3.1 (list 1 0) 2 3 (false))"
+	;
+	;	'non_sensitive': boolean, flag a categorical nominal feature as non-sensitive. It is recommended that
+	;					all nominal features be represented with either an 'int-id' subtype or another
+	;					available nominal subtype using the 'subtype' attribute. However, if the nominal
+	;					feature is non-sensitive, setting this parameter to true will bypass the 'subtype'
+	;					requirement. Only applicable to nominal features. Default is false
+	;
+	;	'subtype': string, the type used in novel nominal substitution.
+	;
+	;	'original_type': string, original data type details. Used by clients to determine how to serialize and deserialize  feature data.
+	;
+	;	'original_format': string, original data formats used by clients. Automatically populated by clients
+	;					to store client language specific context about features.
+	;
+	;	'time_series': assoc, defining time series options for a feature, keys of assoc defined below as:
+	;
+	;		'type': string, one of "rate" or "delta". When 'rate' is specified, uses the difference of the current value
+	;				from its previous value divided by the change in time since the previous value.
+	;				When 'delta' is specified, uses the difference of the current value from its previous value
+	;				regardless of the elapsed time. Set to 'delta' if feature has 'time_feature' set to true.
+	;
+	;		'time_feature': boolean, When true, the feature will be treated as the time feature for time
+	;						series modeling. Additionally, time features must use type 'delta'. Default is false.
+	;
+	;		'order': number, if provided, will generate the specified number of derivatives and boundary values. Default is 1
+	;
+	;		'derived_orders': number, The number of orders of derivatives that should be derived instead of synthesized.
+	;						Ignored if order is not provided. Default is 0.
+	;
+	;		'lags': list of number, if specified, generates lag features containing previous values using the enumerated lag offsets.
+	;				Takes precedence over 'num_lags'. If neither 'num_lags' nor 'lags' is specified for a feature, then a single
+	;				lag feature is generated. Example: [1,2]
+	;
+	;		'num_lags': number, if specified, generates the specified amount of lag features containing previous values.
+	;					If 'lags' is specified, then this parameter will be ignored. If neither 'num_lags' nor 'lags' is specified
+	;					for a feature, then a single lag feature is generated. Default is 1.
+	;
+	;		'rate_min': list of number, if specified, ensures that the rate or delta (the difference quotient, the discrete version
+	;					of derivative) for this feature won't be less than the value provided. A null value means no min boundary.
+	;					The value must be in epoch format for the time feature. The length of the list must match the number of
+	;					derivatives as specified by 'order'. Only applicable when time series type is set to 'rate'. Example: [0.1]
+	;
+	;		'rate_max': list of number, if specified, ensures that the rate or delta (the difference quotient, the discrete version
+	;					of derivative) for this feature won't be more than the value provided. A null value means no max boundary.
+	;					The value must be in epoch format for the time feature. The length of the list must match the number of
+	;					derivatives as specified by 'order'. Only applicable when time series type is set to 'rate'. Example: [0.8]
+	;
+	;		'delta_min': list of number, if specified, ensures that the smallest difference between features values is not smaller
+	;					than this specified value. A null value means no min boundary. The length of the list must match the number of
+	;					derivatives as specified by 'order'. Only applicable when time series type is set to 'delta'. Example: [0.2]
+	;
+	;		'delta_max': list of number, if specified, ensures that the largest difference between feature values is not larger than
+	;					this specified value. A null value means no max boundary. The length of the list must match the number of
+	;					derivatives as specified by 'order'. Only applicable when time series type is set to 'delta'. Example: [2.0]
+	;
+	;		'series_has_terminators': boolean, when true, requires that the model identify and learn values that explicitly denote
+	;								the end of a series. Only applicable to id features for a series. Default is false
+	;
+	;		'stop_on_terminator': boolean, when true, requires that a series ends on a terminator value.
+	;							Only applicable to id features for a series. Default is false
+	#SetFeatureAttributes
+	(declare
+		(assoc
+			features (assoc)
+			create_ts_attributes (true)
+		)
+
+		;filter out any features that start with reserved characters
+		(assign (assoc
+			features
+				(filter
+					(lambda (not (contains_index reservedFeatureCharacterSet (first (target_index)))))
+					features
+				)
+		))
+
+		(declare (assoc
+			ordinals (list)
+			nominals (list)
+
+			cyclics_map (assoc)
+			nominals_map (assoc)
+			ordinals_map (assoc)
+			boundaries_map (assoc)
+
+			source_to_derived_feature_map (assoc)
+			unique_nominals_set (assoc)
+			derived_features_map (assoc)
+
+			has_encoded_features (false)
+			has_string_ordinals (false)
+			has_rounded_features (false)
+			has_datetime_features (false)
+			has_dependent_features (false)
+			has_post_processing (false)
+
+			ordinal_string_to_ordinal_map (assoc)
+			ordinal_ordinal_to_string_map (assoc)
+			non_number_continuous_features_map (assoc)
+			non_string_nominal_features_map (assoc)
+			string_nominal_features_set (assoc)
+			feature_rounding_map (assoc)
+			user_specified_feature_errors_map (assoc)
+			feature_datetime_map (assoc)
+			feature_bounds_map (assoc)
+			post_process_map (assoc)
+			feature_custom_derived_methods (assoc)
+			time_series_feature (null)
+
+			continuous_to_nominal_dependents_map (null)
+			nominal_to_nominal_dependents_map (null)
+		))
+
+		(assign (assoc
+			ordinals_map
+				(filter
+					(lambda (= "ordinal" (get (target_value) "type")))
+					features
+				)
+			nominals_map
+				(filter
+					(lambda (= "nominal" (get (target_value) "type")))
+					features
+				)
+			boundaries_map
+				(filter
+					(lambda (or (!= (null) (get (target_value) "bounds")) (!= (null) (get (target_value) "allow_null"))))
+					features
+				)
+			custom_derived_features_map
+				(filter
+					(lambda (or
+						(!= (null) (get (target_value) "auto_derive_on_train"))
+						(!= (null) (get (target_value) "derived_feature_code"))
+					))
+					features
+				)
+			cyclics_map (call ComposeCyclicsMap)
+			feature_datetime_map (call ComposeDateTimeMap)
+			non_number_continuous_features_map (call ComposeNonNumberContinuousMap)
+			feature_rounding_map (call ComposeRoundingMap)
+			user_specified_feature_errors_map (call ComposeUserSpecifiedFeatureErrorsMap)
+			dependents_map (call ComposeDependentsMap)
+
+			time_series_feature
+				(filter
+					(lambda (get features (list (target_value 1) "time_series" "time_feature")))
+					(indices features)
+				)
+			post_process_map (call ComposePostProcessMap)
+		))
+
+		;TODO: add support for multiple time features
+		;output error setting invalid attributes
+		(if (> (size time_series_feature) 1)
+			(conclude "Only one time feature may be specified.")
+		)
+
+		;set time_series_feature to null if none are set, otherwise set it to the one time_series time_feature
+		(assign (assoc
+			time_series_feature (if (size time_series_feature) (first time_series_feature))
+		))
+
+		;set the smallest allowed time interval to be the min delta for the time feature
+		(if time_series_feature
+			(let
+				(assoc min_time_interval (+ (or 0 (get features (list time_series_feature "time_series" "delta_min" 0)))) )
+				;deafult to 1e-3 if not specified in the feature attribute
+				(assign_to_entities (assoc
+					tsMinTimeInterval (if (> min_time_interval 0) min_time_interval 1e-3)
+				))
+				;ensure that time feature time series type is always 'delta'
+				(assign "features" (list time_series_feature "time_series" "type") "delta")
+			)
+		)
+
+		(if (size dependents_map)
+			(assign (assoc
+				has_dependent_features (true)
+				;create an assoc of: continuous feature -> [ list of sorted nominal dependents ]
+				continuous_to_nominal_dependents_map (call ComposeContinuousToNominalDependenciesMap)
+			))
+		)
+
+		(if (size feature_rounding_map)
+			(assign (assoc has_rounded_features (true)))
+		)
+
+		(if (size ordinals_map)
+			(seq
+				(assign (assoc ordinals (indices ordinals_map) ))
+				(assign (assoc
+					;filter down only to sting ordinals
+					ordinals_map
+						(filter
+							(lambda (> (size (get (target_value) (list "bounds" "allowed"))) 0))
+							ordinals_map
+						)
+				))
+			)
+		)
+		(if (size feature_datetime_map)
+			(assign (assoc has_datetime_features (true)))
+		)
+		;process strng ordinals
+		(if (size ordinals_map)
+			(assign (assoc
+				ordinal_string_to_ordinal_map
+					(map
+						(lambda (let
+							(assoc ordered_ordinals (get (target_value 1) (list "bounds" "allowed")))
+							(zip
+								ordered_ordinals
+								(range 1 (size ordered_ordinals))
+							)
+						))
+						ordinals_map
+					)
+
+				ordinal_ordinal_to_string_map
+					(map
+						(lambda (let
+							(assoc ordered_ordinals (get (target_value 1) (list "bounds" "allowed")))
+							(zip
+								(range 1 (size ordered_ordinals))
+								ordered_ordinals
+							)
+						))
+						ordinals_map
+					)
+			))
+		)
+
+		(if (size ordinal_string_to_ordinal_map)
+			(assign (assoc has_string_ordinals (true) ))
+		)
+
+		(if (size nominals_map)
+			(assign (assoc
+				nominals (indices nominals_map)
+				non_string_nominal_features_map (call ComposeNonStringNominalsMap)
+				;this set is to track nominal features that have all unique values (e.g., UUIDs), so that residuals won't be computed for
+				;them since they are unpredictable
+				unique_nominals_set
+					(map
+						(null)
+						(filter
+							(lambda (= (true) (get (target_value) "unique")))
+							nominals_map
+						)
+					)
+			))
+		)
+
+		(if (size nominals)
+			(assign (assoc
+				;string nominals are those remaining after non-string ones are removed
+				string_nominal_features_set (remove (zip nominals) (indices non_string_nominal_features_map))
+			))
+		)
+
+		(if (size post_process_map)
+			(assign (assoc has_post_processing (true)))
+		)
+
+		;substition features may be set outside of setting attributes, so any of these means we have encoded values that need to be decoded for output
+		(if (or
+				hasSubstituteFeatureValues
+				has_rounded_features
+				has_string_ordinals
+				has_datetime_features
+				has_post_processing
+				;any non-number nominals
+				(size (filter (lambda (!= "number" (target_value)) ) non_string_nominal_features_map))
+				;any non-string continuous
+				(size (filter
+					(lambda (and (!= "string" (target_value)) (!= "string_mixable" (target_value))))
+					non_number_continuous_features_map
+				))
+			)
+			(assign (assoc has_encoded_features (true) ))
+		)
+
+		;the set of features that need to be encoded in some way during training: string nominals, string ordinals, booleans, datetimes, json and amalgam
+		(declare (assoc
+			encoding_needed_features_set
+				(zip
+					(append
+						(indices string_nominal_features_set)
+						(indices feature_datetime_map)
+						(indices ordinal_string_to_ordinal_map)
+						(indices
+							(filter
+								(lambda (!= "number" (target_value)) )
+								non_string_nominal_features_map
+							)
+						)
+						(indices
+							(filter
+								(lambda (and (!= "string" (target_value)) (!= "string_mixable" (target_value))))
+								non_number_continuous_features_map
+							)
+						)
+					)
+				)
+		))
+
+		(if (size boundaries_map)
+			(assign (assoc feature_bounds_map (call ComposeBoundariesMap) ))
+		)
+
+		(if (size custom_derived_features_map)
+			(seq
+				(assign (assoc
+					;leave only those that need to be derived on train
+					derived_features_map
+						(filter
+							(lambda (!= (null) (get (target_value) "auto_derive_on_train")))
+							custom_derived_features_map
+						)
+				))
+				(assign (assoc
+					;filter features, leaving only those with custom derivations
+					custom_derived_features_map
+						(filter
+							(lambda (or
+								(= "custom" (get (target_value) (list "auto_derive_on_train" "derive_type")))
+								(!= (null) (get (target_value) "derived_feature_code"))
+							))
+							custom_derived_features_map
+						)
+				))
+
+				;manually add .series_progress_delta to the map of derived features since it should be derived along with .series_progress
+				(if (contains_index derived_features_map ".series_progress")
+					(accum (assoc
+						derived_features_map  (assoc ".series_progress_delta" (null))
+					))
+				)
+
+				;Accumulate source_to_derived_feature_map from all the auto_derive_on_train features
+				(call AccumulateSourceToDerivedFeatureMap)
+
+				;cache all the custom specified derivation code
+				(assign (assoc feature_custom_derived_methods (call ComposeCustomDerivedMethods) ))
+			)
+		)
+
+		(declare (assoc query_distance_type_map (call ComposeDistanceTypeMap) ))
+
+		(assign_to_entities (assoc
+			featureAttributes features
+
+			hasEncodedFeatures has_encoded_features
+			hasStringOrdinals has_string_ordinals
+			hasRoundedFeatures has_rounded_features
+			hasDateTimeFeatures has_datetime_features
+			hasDependentFeatures has_dependent_features
+			hasFeaturesNeedEncodingFromInput (> (size encoding_needed_features_set) 0)
+			hasPostProcessing has_post_processing
+			encodingNeededFeaturesSet encoding_needed_features_set
+			uniqueNominalsSet unique_nominals_set
+			derivedFeaturesSet (map (null) derived_features_map)
+			sourceToDerivedFeatureMap source_to_derived_feature_map
+			postProcessMap post_process_map
+
+			dependentFeatureMap dependents_map
+			continuousToNominalDependenciesMap continuous_to_nominal_dependents_map
+			ordinalStringToOrdinalMap ordinal_string_to_ordinal_map
+			ordinalOrdinalToStringMap ordinal_ordinal_to_string_map
+			editDistanceFeatureTypesMap non_number_continuous_features_map
+			numericNominalFeaturesMap non_string_nominal_features_map
+			stringNominalFeaturesSet string_nominal_features_set
+			featureRoundingMap feature_rounding_map
+			userSpecifiedFeatureErrorsMap user_specified_feature_errors_map
+			featureDateTimeMap feature_datetime_map
+			featureBoundsMap feature_bounds_map
+			featureCustomDerivedMethods feature_custom_derived_methods
+
+			queryDistanceTypeMap query_distance_type_map
+			tsTimeFeature time_series_feature
+		))
+
+		(call SetOrdinalFeatures (assoc ordinal_features ordinals))
+		(call SetNominalFeatures (assoc nominal_features nominals))
+		(call SetCyclicFeatures (assoc features cyclics_map))
+
+		;if the model already has cases, update the nominal counts prior to updating all the feature limits and uncertainties in featureDomainAttributes
+		(if (> (call GetNumTrainingCases) 0) (call UpdateNominalClassCounts) )
+		(declare (assoc null_deviations_map (call ComposeFeatureLimitsMap) ))
+		(declare (assoc 
+			updated_hp_map (call UpdateHyperparametersWithFeatureDomainAttributes (assoc hp_map hyperparameterMetadataMap))
+			updated_default_hp_map (call UpdateHyperparametersWithFeatureDomainAttributes (assoc hp_map defaultHyperparameters))
+		))
+
+		;overwrite computed deviations with user specified ones if user specified ones were larger
+		(if (> (size userSpecifiedFeatureErrorsMap) 0)
+			(assign (assoc 
+				updated_hp_map (call UpdateHyperparametersWithUserErrors (assoc hp_map updated_hp_map))
+				updated_default_hp_map (call UpdateHyperparametersWithUserErrors (assoc hp_map updated_default_hp_map))
+			))
+		)
+
+		(assign_to_entities (assoc 
+			hyperparameterMetadataMap updated_hp_map
+			defaultHyperparameters updated_default_hp_map
+		))
+
+		;if time series, create TS features and attributes here if needed
+		(if (and create_ts_attributes time_series_feature) (call CreateTimeSeriesFeatures) )
+
+		;output null when done
+		(null)
+	)
+
+	#ComposeCustomDerivedMethods
+	(map
+		(lambda (let
+			(assoc
+				feature (target_index 1)
+				attributes (target_value 1)
+				train_derived_method (null)
+			)
+			(if (= "custom" (get attributes (list "auto_derive_on_train" "derive_type")))
+				(assign (assoc
+					train_derived_method
+						(call ParseDerivedFeatureCode (assoc
+							code_string (get attributes (list "auto_derive_on_train" "code"))
+							label_to_code
+								(lambda
+									(if (and (>= (- series_row_index label_value) 0) (contains_index feat_index_map label_name))
+										;pull the feature value
+										(get series_data (list (- series_row_index label_value) (get feat_index_map label_name)) )
+
+										(null)
+									)
+								)
+						))
+				))
+			)
+
+			;if feature has custom specified derived code, compute and cache it
+			(if (contains_index attributes "derived_feature_code")
+				(let
+					(assoc
+						;create a map of label -> value for all the labels referenced in the code
+						parsed_code_string_labels_map (get_all_labels (parse (get attributes "derived_feature_code")))
+						raw_code_string (get attributes "derived_feature_code")
+					)
+
+					;grab the the largest value in the code to find the max lag
+					(declare (assoc max_row_lag (apply "max" (values parsed_code_string_labels_map))))
+
+					;add the max_row_lag attribute to this feature attribute
+					(assign "features" (list feature "max_row_lag") max_row_lag)
+
+					;cache the parsed single and series react derived custom code methods for this feature
+					(assoc
+						"train"
+							train_derived_method
+						"react"
+							(call ParseDerivedFeatureCode (assoc
+								code_string raw_code_string
+								label_to_code
+									(lambda
+										;feature label offsets must all be 0 to derive valid values since we can only pull data from the
+										;one existing 'row' of data that is provided for computation. Any values other than 0 output a null.
+										(if (and (= label_value 0) (contains_index feature_values_map label_name))
+											(get feature_values_map label_name)
+											(null)
+										)
+									)
+							))
+						"series_react"
+							(call ParseDerivedFeatureCode (assoc
+								code_string raw_code_string
+								label_to_code
+									(lambda
+										(if (and (>= (- series_row_index label_value) 0) (contains_index feature_index_map label_name))
+											(let
+												(assoc
+													val
+														(get series_data (list (- series_row_index label_value) (get feature_index_map label_name)) )
+												)
+
+												;encode datetime by converting string date time into seconds since epoch
+												(if (contains_index featureDateTimeMap label_name)
+													(if (!= (null) val)
+														(call ConvertDateToEpoch (assoc date val feature label_name))
+													)
+
+													;not a datetime, return continuous value
+													val
+												)
+											)
+
+											;invalid input
+											(null)
+										)
+									)
+							))
+					)
+				)
+
+				;else feature only has a train-derive method, cache that
+				(!= (null) train_derived_method)
+				(assoc "train" train_derived_method)
+			)
+		))
+		custom_derived_features_map
+	)
+
+	;output all feature attributes as a list of assocs
+	#GetFeatureAttributes
+	(seq
+		;if feature attributes is empty but there are feature definitions, manually populate featureAttributes
+		(if (and
+				(!= (null) defaultFeatures)
+				(= (assoc) featureAttributes)
+			)
+			(assign_to_entities (assoc
+				featureAttributes
+					;iterate over the default features as an assoc, such that they keys are feature names
+					;and the values are the feature attributes
+					(map
+						(lambda (let
+							(assoc
+								type
+									(if (contains_index nominalsMap (target_index 1))
+										"nominal"
+
+										(contains_value ordinalFeatures (target_index 1))
+										"ordinal"
+
+										;else
+										"continuous"
+									)
+								decimal_places (get featureRoundingMap (list (target_index 2) 1))
+								significant_digits (get featureRoundingMap (list (target_index 2) 0))
+								cycle_length (get cyclicFeaturesMap (target_index 1))
+								date_time_format (get featureDateTimeMap (list (target_index 2) "date_time_format"))
+								locale (get featureDateTimeMap (list (target_index 2) "locale"))
+								time_delta_format (get featureDateTimeMap (list (target_index 2) "time_delta_format"))
+								observational_error (get userSpecifiedFeatureErrorsMap (target_index 1))
+							)
+
+							;create an assoc of feature attributes
+							(append
+								(assoc "type" type)
+
+								(if (!= (null) decimal_places)
+									(assoc "decimal_places" decimal_places)
+									(assoc)
+								)
+
+								(if (!= (null) significant_digits)
+									(assoc "significant_digits" significant_digits )
+									(assoc)
+								)
+
+								(if (!= (null) cycle_length)
+									(assoc "cycle_length" cycle_length )
+									(assoc)
+								)
+
+								(if (!= (null) observational_error)
+									(assoc "observational_error" observational_error)
+									(assoc)
+								)
+
+								(if (!= (null) date_time_format)
+									(assoc "date_time_format" date_time_format )
+									(assoc)
+								)
+
+								(if (!= (null) locale)
+									(assoc "locale" locale )
+									(assoc)
+								)
+
+								(if (!= (null) time_delta_format)
+									(assoc "time_delta_format" time_delta_format )
+									(assoc)
+								)
+							)
+						))
+						(zip defaultFeatures)
+					)
+			))
+		)
+
+		;output stored featureAttributes
+		(get_value featureAttributes)
+	)
+
+	;a recursive method to generate a nested assoc of feature values -> (feature values) -> min,max boundary for those values
+	;when provided a list of nominal features and a their dependent continuous value feature
+	;for example, if there are two nominal features named 'measure' and 'unit', and a continuous feature named 'amount',
+	;this would generate a nested dict of all measure-units -> min,max bounds for each respective measure and unit combination
+	;
+	;parameters:
+	; base_query_among_statements: the list of query_among's that should be appended to for each recursive call
+	; value_feature: name of the continuous feature for which we want to determine all the possible min/max bounds
+	; nominals: list of nominal features corresponding to the continuous value feature
+	#ComputeDependentBoundaries
+	(declare
+		(assoc
+			base_query_among_statements (list)
+			value_feature ""
+			nominals (list)
+
+			;not params
+			feature (null)
+		)
+
+		;store the first dependent nominal value
+		(assign (assoc feature (first nominals) ))
+		;the rest of the dependent nominal values, if there are any
+		(assign (assoc nominals (tail nominals) ))
+
+		;pull all the unique values for this nominal feature
+		(declare (assoc
+			feature_values
+				(indices
+					(compute_on_contained_entities (list
+						;if non-string nominal, pull as numeric count
+						(query_value_masses feature (null) (contains_index numericNominalFeaturesMap feature))
+					))
+				)
+			value_feature_nulls_are_dependent (get featureAttributes (list value_feature "null_is_dependent"))
+		))
+
+		;if the continuous feature's attribute is to treat null as dependent, add .nas as a valid value for this dependent nominal feature if it has nulls
+		(if value_feature_nulls_are_dependent
+			;if this feature has any nulls, add .nas as a unique nominal feature value for which to compute boundaries
+			(if
+				(compute_on_contained_entities (list
+					(query_equals feature (null))
+					(query_count)
+				))
+				(accum (assoc feature_values .nas))
+			)
+		)
+
+		;if there are more dependent nominals, we need to call this method for those nominals recursively,
+		;once for each feature value for this feature.  for example, if there are two nominal features A (with values 'h','i' and 'j')
+		;and B with values 'x','y','z', we'll call this method for each value of A, with nominals=[B] and base_query_among_statements = (list (query_among "A" (list "h"))),
+		;then again with base_query_among_statements = (list (query_among "A" (list "i"))), and finally with base_query_among_statements = (list (query_among "A" (list "j"))),
+		(if (> (size nominals) 0)
+			(map
+				(lambda
+					(call ComputeDependentBoundaries (assoc
+						base_query_among_statements
+							(append base_query_among_statements (list
+								(query_among feature
+									(list
+										;convert .nas to (null) for query_among usage
+										(if (= .nas (target_index 3))
+											(null)
+											;ensure that the value in the query_among is a number by wrapping it in a (+) if the nominal is not a string
+											(if (contains_index numericNominalFeaturesMap feature)
+												(+ (target_index 3))
+												(target_index 3)
+											)
+										)
+									)
+								)
+							))
+						nominals nominals
+						value_feature value_feature
+					))
+				)
+				(zip feature_values)
+			)
+
+			;else there are no more dependent nominals left, continuing the above example, we iterate over all the values of this last nominal feature 'B'
+			;appending to each of the query amongs passed in, to create all the combinations of feature values for A and B,
+			;eg., h+x, h+y, h+z, i+x, i+y, etc...  so h+x is in the format of (list (query_among "A" (list "h")) (query_among "B" (list "x")))
+			;given all these possible combinations of feature values, we determine the min and max value for the continuous feature and output it as a
+			;pair of (list min max) for feature value combinations that exist or (null) for those that don't, resulting in a nested assoc that may look like:
+			; { 'h': {'x': (list 0 10) }, 'h': {'y': (null) }, 'h': {'z': (null) }, 'i': {'x': (null) }, 'i': {'y': (list 10 100) }, etc... }
+			(map
+				(lambda (let
+					(assoc
+						query_among_statements
+							(append base_query_among_statements (list
+								(query_among feature
+									(list
+										;convert .nas to (null) for query_among usage
+										(if (= .nas (target_index 3))
+											(null)
+											;ensure that the value in the query_among is a number by wrapping it in a (+) if the nominal is not a string
+											(if (contains_index numericNominalFeaturesMap feature)
+												(+ (target_index 3))
+												(target_index 3)
+											)
+										)
+									)
+								)
+							))
+						min_value (null)
+					)
+
+					;pull the case with the smallest value for the continuous feature given the constructed query_among with the nominal value combinations
+					;if there are no cases for such query_among(s), min_case will be null and we output (null) for the bounds pair
+					(assign (assoc
+						min_case (contained_entities (append query_among_statements (query_min value_feature 1)))
+					))
+
+					;if there does exist a case with a minimum value, that means there must also be a max value, so we return the bounds pair for this
+					;combination of nominal values
+					(if (size min_case)
+						;if there are dependent nulls in this continuous value_feature, store null as a valid value for the feature bounds tuple
+						(if
+							(and
+								value_feature_nulls_are_dependent
+								(size (contained_entities (append query_among_statements (query_equals value_feature (null)))) )
+							)
+							;output a tuple of [min, (null), max]
+							(list
+								(retrieve_from_entity min_case value_feature)
+								(null)
+								(retrieve_from_entity (contained_entities (append query_among_statements (query_max value_feature 1))) value_feature)
+							)
+
+							;else output a tuple of [min, max]
+							(list
+								(retrieve_from_entity min_case value_feature)
+								(retrieve_from_entity (contained_entities (append query_among_statements (query_max value_feature 1))) value_feature)
+							)
+						)
+					)
+				))
+				(zip feature_values)
+			)
+		)
+	)
+
+	;Recursive method to process the computed dependent boundary map into a list of valid nominal value combinations
+	; If there are two dependent nominal features with 4 values each, while there may be 16 unique combinations of values,
+	; realistically only 4 are probably valid, so this method filters out all the combinations that do not have a min,max boundary,
+	; leaving a list of lists of valid feature values.  Example: 'heartrate' and 'BPM' are valid, but 'heartrate' and 'mSv' is not.
+	;
+	;parameters:
+	;
+	; nested_value_combinations_map: nested assocs of feature value -> [min, max], eg: {'heartrate : {'bpm' : [ 25, 180] }}
+	; values_lists: list of nominal values to append each corresponding feature value. e.g, [ "heartrate", "bpm"]
+	; value_feature: name of feature for the value being accumulated, e.g, 'measure'
+	; remaining_dependent_nominals: list of remaining dependent features, in the order corresponding to the layers of
+	; 			remaining nested assocs in nested_value_combinatinons_map. e.g., ['measure', 'unit']
+	#AccumulateDependentValuesCombinations
+	(values (map
+		(lambda (let
+			(assoc value (target_index 1) )
+
+			;numerify value if it's for a non-string nominal feature
+			(if (contains_index numericNominalFeaturesMap value_feature)
+				(assign (assoc value (+ value) ))
+			)
+
+			;call recursively to iterate down the nested assoc
+			(if (= "assoc" (get_type_string (target_value)))
+				(call AccumulateDependentValuesCombinations (assoc
+					nested_value_combinations_map (target_value 1)
+					values_lists (append values_lists value)
+					value_feature (first remaining_dependent_nominals)
+					remaining_dependent_nominals (tail remaining_dependent_nominals)
+				))
+				;else return the accumulated list of nested keys for this iteration and append the full list to the global list
+				(seq
+					(if (!= (null) (target_value))
+						(accum (assoc dependent_values_combinations (list (append values_lists value))))
+					)
+					(append values_lists value)
+				)
+			)
+		))
+		nested_value_combinations_map
+	))
+
+	;set the list of ordinal features, or clears it if empty list is specified
+	;parameters:
+	; ordinal_features: list of ordinal features
+	#SetOrdinalFeatures
+	(declare
+		(assoc ordinal_features (list))
+
+		(if (= 0 (size ordinal_features))
+			(assign_to_entities (assoc
+				;filter out all ordinal categorical features, leaving only nominal ones
+				categoricalFeaturesSet (remove categoricalFeaturesSet ordinalFeatures)
+				ordinalFeatures (list)
+				ordinalNumericFeaturesSet (assoc)
+			))
+
+			(assign_to_entities (assoc
+				ordinalFeatures ordinal_features
+				categoricalFeaturesSet (append categoricalFeaturesSet (zip ordinal_features))
+				ordinalNumericFeaturesSet (remove (zip ordinal_features) (indices ordinalStringToOrdinalMap))
+			))
+		)
+
+		;returns whether or not the trainee has ordinalFeatures
+		(if (> (size ordinalFeatures) 0) (true) (false))
+	)
+
+	; set the list of nominal features. If nominal features already exist, appends to them. passing in an empty list disables nominal features
+	;parameters
+	; nominal_features: list of nominal features
+	#SetNominalFeatures
+	(declare
+		(assoc nominal_features (list))
+
+		;clear the nominals if empty list is passed in
+		(if (= 0 (size nominal_features))
+			(assign_to_entities (assoc
+				nominalsMap (assoc)
+				;filter out all nominal categorical features, leaving only ordinal ones
+				categoricalFeaturesSet (remove categoricalFeaturesSet (indices nominalsMap))
+			))
+
+			;else set the nominal value maps
+			(assign_to_entities (assoc
+				categoricalFeaturesSet (append categoricalFeaturesSet (zip nominal_features))
+				nominalsMap (zip nominal_features)
+			))
+		)
+
+		;invalidate cached class probabilities
+		(assign_to_entities (assoc nominalClassProbabilitiesMap (assoc)))
+	)
+
+	;set cyclic feature lengths.  if passed in an empty assoc, clears out cyclic features.  all cycles start at 0
+	;parameters:
+	; features: assoc of feature -> cycle length
+	;example: (assoc "day" 7 "degrees" 360)
+	#SetCyclicFeatures
+	(declare
+		(assoc features (assoc))
+		(if (= 0 (size features))
+			(assign_to_entities (assoc
+				hasCyclicFeatures 0
+				cyclicFeaturesMap (null)
+			))
+
+			(assign_to_entities (assoc
+				hasCyclicFeatures 1
+				cyclicFeaturesMap features
+			))
+		)
+
+		;model definition has changed so clear out these cached value
+		(assign_to_entities (assoc
+			averageModelCaseEntropyAddition (null)
+			averageModelCaseEntropyRemoval (null)
+			storedCaseConvictionsFeatureAddition (null)
+			averageModelCaseDistanceContribution (null)
+		))
+
+		;returns whether or not the trainee has cyclic features
+		hasCyclicFeatures
+	)
+)

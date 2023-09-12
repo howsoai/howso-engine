@@ -1,0 +1,759 @@
+;Module for trainee_template.
+;Contains methods for reacting.
+(null
+
+	;Run reacts in a batch, output a an assoc of list of outputs from each individual react.
+	;
+	;parameters:  same as #react, unless listed here
+	;  num_reacts: number of reacts to do in a batch.
+	;  context_values - list of lists.  see #react for description. if specified must be either length of 1 or num_reacts.
+	;  action_values - list of lists.  see #react for description. if specified must be either length of 1 or num_reacts.
+	;  case_indices - list of lists.  see #react for description. if specified must be either length of 1 or num_reacts.
+	;  rand_seed - optional, see #react for description.  if specified must be length of num_reacts.
+	#BatchReact
+	(declare
+		(assoc
+			;if any of these are length of 1, the index will be 0 to pull the values and apply to all reacts
+			single_context (= 1 (size context_values))
+			single_action (= 1 (size action_values))
+			single_session (= 1 (size case_indices))
+			num_reacts 1
+		)
+
+		;action and context_values must be either a list of lists or null; if it's an empty list, treat it as null
+		(if (= (list) context_values) (assign (assoc context_values (null))) )
+		(if (= (list) action_values) (assign (assoc action_values (null))) )
+
+		;assoc of feature -> list of num_reacts unique values, pre-populated if there are unique features that need to be synthed
+		(declare (assoc
+			generated_uniques_list_map
+				;if doing generative reacts with unique nominals, generate the requested number of uniques values prior to synthesis
+				(if (and
+						(!= (null) desired_conviction)
+						(> (size uniqueNominalsSet) 0)
+						;generating unique nominal actions
+						(> (size (intersect (zip action_features) uniqueNominalsSet)) 0)
+					)
+					(call GenerateUniquesListMap (assoc
+						num_reacts num_reacts
+						action_features action_features
+						context_features context_features
+						preserve_feature_values preserve_feature_values
+					))
+				)
+			warnings (assoc)
+		))
+
+		(if (!= (null) into_series_store)
+			(accum_to_entities (assoc revision 1))
+		)
+
+		(declare (assoc
+			output_action_features
+				(if (size derived_action_features)
+					(append action_features derived_action_features)
+					action_features
+				)
+			react_list
+				;TODO: 11201: react into_series_store works with MT
+				(if (= (null) into_series_store)
+					||(range
+						#!ReactFunction
+						(lambda (let
+							(assoc
+								context_index (if single_context 0 (target_index 1))
+								action_index (if single_action 0 (target_index 1))
+								session_index (if single_session 0 (target_index 1))
+								react_rand_seed (if rand_seed (get rand_seed (target_index 1)))
+								react_session (null)
+								react_session_training_index (null)
+								pre_generated_uniques_map
+									(if (!= (null) generated_uniques_list_map)
+										(if (= 1 num_reacts )
+											generated_uniques_list_map
+
+											;create a map for each unique feature to its corresponding value by the index (target_index 2) of which case
+											;is being synthed when synthing > 1 case
+											(map
+												(lambda (get (target_value) (target_index 2)))
+												generated_uniques_list_map
+											)
+										)
+									)
+							)
+
+							;get the corresponding parameters by the index, values will be null if not specified
+							;context and action values when not provided should be an empty list
+							(declare (assoc
+								react_context_values (if context_values (get context_values context_index) (list))
+								react_action_values (if action_values (get action_values action_index) (list))
+							))
+
+							;if one of these is provided, both of them must be
+							(if case_indices
+								(assign (assoc react_case_index (get case_indices session_index) ))
+							)
+
+							(call React (assoc
+								context_values react_context_values
+								action_values react_action_values
+								case_indices react_case_index
+								rand_seed react_rand_seed
+
+								context_features context_features
+								action_features action_features
+								derived_action_features derived_action_features
+								derived_context_features derived_context_features
+								details details
+								extra_audit_features extra_audit_features
+								case_access_count_label case_access_count_label
+								ignore_case ignore_case
+								substitute_output substitute_output
+								input_is_substituted input_is_substituted
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+								leave_case_out leave_case_out
+								allow_nulls allow_nulls
+
+								desired_conviction desired_conviction
+								use_regional_model_residuals use_regional_model_residuals
+								feature_bounds_map feature_bounds_map
+								ordered_by_specified_features ordered_by_specified_features
+								generate_new_cases generate_new_cases
+								preserve_feature_values preserve_feature_values
+								new_case_threshold new_case_threshold
+								pre_generated_uniques_map pre_generated_uniques_map
+								into_series_store into_series_store
+							))
+						))
+						0 (- num_reacts 1) 1
+					)
+
+					;else run the same but without the use multi-threading
+					(range
+						(call !ReactFunction)
+						0 (- num_reacts 1) 1
+					)
+				)
+		))
+
+		;for generative reacts, filter out null reacts, ones that failed to generate
+		(if (!= (null) desired_conviction)
+			(assign (assoc
+				react_list
+					(filter
+						(lambda (!= (null) (get (target_value) "action_values")))
+						react_list
+					)
+			))
+		)
+
+		;convert react_list to a dict of explanation key -> lists of values (one per react)
+		(declare (assoc
+			react_output_map
+				(map
+					(lambda (let
+						(assoc explanation_key (target_index 1))
+						(map
+							(lambda (get (target_value) explanation_key) )
+							react_list
+						)
+					))
+					(first react_list)
+				)
+		))
+
+		(assoc
+			"payload" (append react_output_map (assoc "action_features" output_action_features))
+			"warnings" (if (size warnings) (indices warnings))
+		)
+	)
+
+	;wrapper method for #React that auto generated uniques if necessary for generative react flows
+	; parameters:
+	;	see comment block for #react in howso.amlg for details
+	#SingleReact
+	(seq
+		;assoc of feature -> unique value, pre-populated if there are unique features that need to be synthed
+		(declare (assoc
+			pre_generated_uniques_map
+				;if doing generative reacts with unique nominals, generate the uniques values prior to synthesis
+				(if (and
+						(!= (null) desired_conviction)
+						(> (size uniqueNominalsSet) 0)
+						;generating unique nominal actions
+						(> (size (intersect (zip action_features) uniqueNominalsSet)) 0)
+					)
+					(call GenerateUniquesListMap (assoc
+						num_reacts 1
+						action_features action_features
+						context_features context_features
+						preserve_feature_values preserve_feature_values
+					))
+				)
+				warnings (assoc)
+		))
+
+		(if (!= (null) into_series_store)
+			(accum_to_entities (assoc revision 1))
+		)
+
+		(declare (assoc
+			react_response
+				(call React (assoc
+					context_features context_features
+					context_values context_values
+					action_features action_features
+					action_values action_values
+					derived_action_features derived_action_features
+					derived_context_features derived_context_features
+					details details
+					extra_audit_features extra_audit_features
+					case_access_count_label case_access_count_label
+					ignore_case ignore_case
+					case_indices case_indices
+					substitute_output substitute_output
+					input_is_substituted input_is_substituted
+					use_case_weights use_case_weights
+					weight_feature weight_feature
+					rand_seed rand_seed
+					leave_case_out leave_case_out
+					allow_nulls allow_nulls
+
+					desired_conviction desired_conviction
+					use_regional_model_residuals use_regional_model_residuals
+					feature_bounds_map feature_bounds_map
+					ordered_by_specified_features ordered_by_specified_features
+					generate_new_cases generate_new_cases
+					preserve_feature_values preserve_feature_values
+					new_case_threshold new_case_threshold
+					pre_generated_uniques_map pre_generated_uniques_map
+					into_series_store into_series_store
+				))
+		))
+
+		;append action_features to response
+		(if (!= (null) react_response)
+			(accum (assoc
+				react_response
+					(assoc
+						"action_features"
+							(if (size derived_action_features)
+								(append action_features derived_action_features)
+								action_features
+							)
+					)
+			))
+		)
+
+		(assoc
+			"payload" react_response
+			"warnings" (if (size warnings) (indices warnings))
+		)
+	)
+
+	;Wrapper method for ReactDiscriminative and GenerateCase
+	;note: this method may overwmrite desired_conviction if it's specified along with generate_new_cases=true and the case isn't generated in one attempt
+	;parameters:
+	;  see comment block for #react in howso.amlg for details
+	;
+	;  for generative flows only, new parameter:
+	;  pre_generated_uniques_map: optional, map of feature -> value for all unique features whose output value has been pre-generated for output
+	#React
+	(declare
+		(assoc
+			context_features (list)
+			context_values (list)
+			action_features (list)
+			action_values (list)
+			extra_audit_features (list)
+			case_access_count_label ""
+			substitute_output (true)
+			input_is_substituted (false)
+			weight_feature ".case_weight"
+			use_case_weights (false)
+			rand_seed (null)
+			allow_nulls (false)
+
+			derived_context_features (list)
+			derived_action_features (list)
+
+			leave_case_out (false)
+			case_indices (null)
+			use_regional_model_residuals (true)
+			feature_bounds_map (assoc)
+			preserve_feature_values (list)
+			new_case_threshold "min"
+			pre_generated_uniques_map (null)
+		)
+
+		(if (!= (null) rand_seed)
+			(set_rand_seed rand_seed)
+		)
+
+		;unsubstitute nominal feature values if necessary
+		(if
+			(and input_is_substituted hasSubstituteFeatureValues)
+			(assign (assoc
+				context_values
+					(call UnsubstituteFeatureValues (assoc
+						features context_features
+						feature_values context_values
+					))
+				action_values
+					;most discriminative reacts will have action_features but no action_values, skip this step if no action_values are provided
+					(if (> (size action_values) 0)
+						(call UnsubstituteFeatureValues (assoc
+							features action_features
+							feature_values action_values
+						))
+
+						action_values
+					)
+			))
+		)
+
+
+		;derive context features prior to react and append the computed values to context values
+		(if (size derived_context_features)
+			(seq
+				(assign (assoc
+					context_values
+						(append context_values
+							(call ComputeFeatureValuesFromCode (assoc
+								derived_features derived_context_features
+								feature_values_map (zip context_features context_values)
+							))
+						)
+				))
+				(assign (assoc context_features (append context_features derived_context_features) ))
+			)
+		)
+
+		;generative react
+		(if (!= desired_conviction (null))
+			(let
+				(assoc
+					generated_case (null)
+					;allow up to 5 retries normally, but add one extra for 'attempt' to attempt one more round and output any generated case
+					total_attempts (if (= "attempt" generate_new_cases) 6 5)
+					original_action_features (null)
+				)
+
+				(if (= 0 (size action_features))
+					(assign (assoc action_features (retrieve_from_entity trainee "defaultFeatures")))
+				)
+
+				;don't generate any features in the pre_generated_uniques_map by filtering them out of the action_features list
+				(if (> (size pre_generated_uniques_map) 0)
+					(seq
+						(assign (assoc original_action_features action_features))
+						;remove the generated unique features from the action_features and restore them below after case is generated
+						(assign (assoc
+							action_features
+								(filter
+									(lambda (not (contains_index pre_generated_uniques_map (target_value))))
+									action_features
+								)
+						))
+					)
+				)
+
+				(assign (assoc
+					generated_case
+						(call GenerateCase (assoc
+							context_features context_features
+							context_values context_values
+							action_features action_features
+							desired_conviction desired_conviction
+							use_regional_model_residuals use_regional_model_residuals
+							feature_bounds_map feature_bounds_map
+							ordered_by_specified_features ordered_by_specified_features
+							;forcibly attempt to generate a novel case on all passes except for the last one if generate_new_cases = 'attempt'
+							generate_novel_case
+								(if (or (= generate_new_cases (null)) (= generate_new_cases "no"))
+									(false)
+									(true)
+								)
+							case_indices case_indices
+							leave_case_out leave_case_out
+							preserve_feature_values preserve_feature_values
+							new_case_threshold new_case_threshold
+							weight_feature weight_feature
+							use_case_weights use_case_weights
+							original_substitute_output substitute_output
+							substitute_output substitute_output
+						))
+				))
+
+
+				;retry up to total_attempt times if case is generated as all nulls
+				(if (and generate_new_cases (= (null) generated_case))
+					(let
+						(assoc attempts 0)
+						(while (< attempts total_attempts)
+							;decrease desired_conviction by a factor of (1 - e^-1)
+							(assign (assoc desired_conviction (* 0.632120558 desired_conviction)))
+
+							(assign (assoc
+								generated_case
+									(call GenerateCase (assoc
+										context_features context_features
+										context_values context_values
+										action_features action_features
+										desired_conviction desired_conviction
+										use_regional_model_residuals use_regional_model_residuals
+										feature_bounds_map feature_bounds_map
+										ordered_by_specified_features ordered_by_specified_features
+										;forcibly generate a novel case on all passes except for the last one if generate_new_cases = 'attempt'
+										generate_novel_case
+											(if (and
+													(or (= generate_new_cases "always") (= generate_new_cases "attempt"))
+													(< attempts 5)
+												)
+												(true)
+												(false)
+											)
+										case_indices case_indices
+										leave_case_out leave_case_out
+										preserve_feature_values preserve_feature_values
+										new_case_threshold new_case_threshold
+										weight_feature weight_feature
+										use_case_weights use_case_weights
+										original_substitute_output substitute_output
+										substitute_output substitute_output
+									))
+							))
+							;try again if failed to generate
+							(if (= (null) generated_case )
+								(accum (assoc attempts 1))
+								;else stop
+								(assign (assoc attempts total_attempts))
+
+							)
+						)
+					)
+				)
+
+				;if there are pre-generated unique values that should be in the output, append them to the generated case and then
+				;unzip by the original_action_features to preserve the original feature ordering
+				(if (and
+						(> (size pre_generated_uniques_map) 0)
+						;only append if the case was generated or if there were no features that needed to be generated
+						(or (= 0 (size action_features)) (!= (null) generated_case) )
+					)
+					(seq
+						(assign (assoc
+							generated_case
+								(unzip
+									(append (zip action_features generated_case) pre_generated_uniques_map)
+									original_action_features
+								)
+						))
+						;re-set action features to what they used to be
+						(assign (assoc action_features original_action_features))
+					)
+				)
+
+				;output generated case with explanation of the case if needed
+				(if (!= details (null))
+					(seq
+						;if user doesn't want to use case weights, change weight_feature to '.none'
+						(if (not use_case_weights)
+							(assign (assoc weight_feature ".none"))
+						)
+
+						(if hasFeaturesNeedEncodingFromInput
+							(assign (assoc
+								context_values
+									(call ConvertFromInput (assoc
+										feature_values context_values
+										features context_features
+									))
+								action_values
+									(call ConvertFromInput (assoc
+										feature_values generated_case
+										features action_features
+									))
+							))
+
+							;else dataset has no nominal values, just set action_values to be same as the generated ones
+							(assign (assoc
+								action_values generated_case
+							))
+						)
+
+						(declare (assoc
+							hyperparam_map
+								(call GetHyperparameters (assoc
+									feature ".targetless"
+									mode "robust"
+									context_features context_features
+									weight_feature weight_feature
+								))
+						))
+
+						(assign (assoc
+							generated_case
+								(call RetrieveAuditData (assoc
+									details details
+									action_features action_features
+									action_values action_values
+									context_features context_features
+									context_values context_values
+									num_features_returned num_features_returned
+									extra_audit_features extra_audit_features
+									force_targetless (true)
+									ignore_case (null)
+									hyperparam_map hyperparam_map
+								))
+						))
+					)
+
+					;else put the generated case action values into the same format as an explanation object
+					(assign (assoc
+						generated_case (assoc "action_values" generated_case)
+					))
+				)
+
+				;derive action features after react
+				(if (size derived_action_features)
+					;append the derived action values to the end of the predicted action_values
+					(accum "generated_case" (list "action_values")
+						(call ComputeFeatureValuesFromCode (assoc
+							derived_features derived_action_features
+							feature_values_map
+								;append generated actions to contexts, clobbering the contexts to prevent duplicates
+								(append
+									(zip context_features context_values)
+									(zip action_features (get generated_case "action_values"))
+								)
+						))
+					)
+				)
+
+				(if (= (null) into_series_store)
+					;return generated case
+					generated_case
+
+					;else reacts should be stored into a series, store it by into_series_store
+					(call AppendCaseToSeriesStoreWithoutEncoding (assoc
+						series into_series_store
+						react_case generated_case
+						action_features action_features
+						context_features context_features
+						context_values
+							;context values were already encoded during the details flow, but need to be encoded if no details were specified
+							(if (!= details (null))
+								context_values
+
+								;else need to encode here so the input is consistent
+								(if hasFeaturesNeedEncodingFromInput
+									(call ConvertFromInput (assoc
+										feature_values context_values
+										features context_features
+									))
+
+									context_values
+								)
+							)
+					))
+				)
+			)
+
+			;else run discriminative react
+			(let
+				(assoc
+					output_case
+						(call ReactDiscriminative (assoc
+							context_features context_features
+							context_values context_values
+							action_features action_features
+							action_values action_values
+							details details
+							extra_audit_features extra_audit_features
+							case_access_count_label case_access_count_label
+							ignore_case ignore_case
+							case_indices case_indices
+							leave_case_out leave_case_out
+							weight_feature weight_feature
+							use_case_weights use_case_weights
+							preserve_feature_values preserve_feature_values
+							new_case_threshold new_case_threshold
+							allow_nulls allow_nulls
+						))
+				)
+
+				(if (size derived_action_features)
+					;append the derived action values to the end of the predicted action_values
+					(accum "output_case" (list "action_values")
+						(call ComputeFeatureValuesFromCode (assoc
+							derived_features derived_action_features
+							feature_values_map
+								;append reacted actions to contexts, clobbering the contexts to prevent duplicates
+								(append
+									(zip context_features context_values)
+									(zip action_features (get output_case "action_values"))
+								)
+						))
+					)
+				)
+
+				(if (= (null) into_series_store)
+					;return output case
+					output_case
+
+					;else store into series and then return output
+					(call AppendCaseToSeriesStoreWithoutEncoding (assoc
+						series into_series_store
+						react_case output_case
+						action_features action_features
+						context_features context_features
+						context_values
+							;may need to encode here so the input is consistent
+							(if hasFeaturesNeedEncodingFromInput
+								(call ConvertFromInput (assoc
+									feature_values context_values
+									features context_features
+								))
+
+								context_values
+							)
+					))
+				)
+			)
+		)
+	)
+
+	;Selects or interpolates a set of reaction cases
+	; If the feature is categorical, then it selects the case according distance.
+	; If the feature is continuous, then the feature value is computed from a weighted average of values of each case
+	;
+	; context_features: list of context features
+	; context_values: list of current values of each context
+	; action_features: list of action features
+	; ignore_null_action_feature: flag, if true the nearest neighbor query will ignore cases where the action_feature is null
+	; match_on_context_features : flag, if true will query only for cases whose context features are not null
+	; ignore_case:case_id, if set will query for K+1 cases and ignore the perfect matching case during the reaction
+	; tie_break_random_seed: the random number seed to use to break ties for equal distances
+	; allow_nulls : flag, if set to true will allow interpolate to return null values if there are nulls in the local model for the action features
+	; force_targetless: flag, if set to true forces use of targetless hyperparameters if available
+	; use_case_weights: flag, if set to true will scale influence weights by each case's .case_weight
+	;
+	;returns: assoc of case (entity) ids -> their distance to react case, and the next_action_chase_case id if there is one
+	#GenerateReaction
+	(let
+		(assoc
+			not_null_features_queries
+				;if context features must not be null, we want only find cases that have the same set of features that are not null
+				(if match_on_context_features
+					(let
+						(assoc
+							not_null_features
+								(filter
+									(lambda
+										(!= (null) (get context_values (target_index)))
+									)
+									context_features
+								)
+						)
+
+						(apply
+							(lambda (append))
+							(map
+								(lambda (query_not_equals (get_value (target_value)) (null)))
+								not_null_features
+							)
+						)
+					)
+
+					;else there are no null case values
+					(list)
+				)
+			dependent_queries_list
+				(if action_feature_is_dependent
+					(call ComputeDependentQueries (assoc
+						action_feature (first action_features)
+						context_features context_features
+						context_values context_values
+					))
+					(list)
+				)
+			k_parameter (get hyperparam_map "k")
+		)
+
+		(declare (assoc
+			candidate_cases_map
+				(compute_on_contained_entities
+					(append
+						not_null_features_queries
+						;if ignoring null action feature, query for cases where action feature is not null
+						(if ignore_null_action_feature
+							(query_not_equals (first action_features) (null))
+							(list)
+						)
+						dependent_queries_list
+						(if ignore_case
+							(if focal_case
+								(query_not_in_entity_list (list ignore_case focal_case))
+								(query_not_in_entity_list (list ignore_case))
+							)
+							(list)
+						)
+						(if custom_extra_filtering_queries
+							custom_extra_filtering_queries
+							(list)
+						)
+						(query_nearest_generalized_distance
+							k_parameter
+							context_features
+							context_values
+							(get hyperparam_map "featureWeights")
+							queryDistanceTypeMap
+							(get hyperparam_map "featureDomainAttributes")
+							(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+							(get hyperparam_map "p")
+							(get hyperparam_map "dt")
+							(if valid_weight_feature weight_feature (null))
+							tie_break_random_seed
+							(null) ;radius
+							numericalPrecision
+						)
+					)
+				)
+		))
+
+		;populate filtering_queries for explanations if necessary
+		(call PopulateFilteringQueriesForExplanation)
+
+		;if there is no context or no closest neighbors and we must have a value for the action feature, calculate the expected value
+		;otherwise just interpolate the result
+		(if (or
+				(= (list) context_features)
+				(and
+					ignore_null_action_feature
+					(= 0 (size candidate_cases_map))
+				)
+			)
+			(call CalculateFeatureExpectedValue (assoc feature (first action_features) allow_nulls (false)))
+
+			;else interpolate the result from the nearest neighbors
+			(seq
+				;increase count access if needed for each of the deciding cases
+				(if case_access_count_label
+					(call IncrementEntityCaseValue (assoc
+						entities (indices candidate_cases_map)
+						label_name case_access_count_label
+					))
+				)
+
+				(call InterpolateActionValues (assoc
+					action_feature (first action_features)
+					neighbor_weights_map candidate_cases_map
+					allow_nulls allow_nulls
+					has_perfect_matches (contains_value candidate_cases_map .infinity)
+				))
+			)
+		)
+	)
+)

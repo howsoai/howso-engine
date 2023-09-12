@@ -1,0 +1,358 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_cyclic_dataset.amlg"))
+
+	(declare (assoc
+		data (list
+			(list 10	4	177)
+			(list 20	4	103)
+			(list 30	2	83)
+			(list 40	4	294)
+			(list 50	2	80)
+			(list 60	6	320)
+			(list 70	4	90)
+			(list 80	5	300)
+			(list 90	7	40)
+			(list 100	7	15)
+			(list 110	2	50)
+			(list 120	3	170)
+			(list 130	3	175)
+			(list 140	3	165)
+			(list 150	6	270)
+			(list 150	6	0)
+			(list 160	5	313)
+			(list 170	5	120)
+			(list 180	6	213)
+		  	(list 190	5	12)
+			(list 200	7	8)
+		)
+	))
+	(declare (assoc
+		features (list "x" "day" "degree")
+	))
+
+	(call_entity "howso" "create_trainee" (assoc trainee "cycle1"))
+
+	(call_entity "howso" "train" (assoc
+		trainee "cycle1"
+		input_cases data
+		features features
+		session "session"
+	))
+	(set_entity_rand_seed "howso" 12345)
+	(set_entity_rand_seed (list "howso" "cycle1") 12345)
+
+
+	(call_entity "howso" "set_internal_parameters" (assoc
+		trainee "cycle1"
+		default_hyperparameter_map (assoc "k" 4 "p" 1 "dt" -1)
+	))
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		trainee "cycle1"
+		features
+			(assoc
+				"x" (assoc "type" "continuous")
+				"day" (assoc "type" "continuous" "cycle_length" 7)
+				"degree" (assoc "type" "continuous" "cycle_length" 360)
+			)
+	))
+
+	(declare (assoc
+		result
+			(get
+				(call_entity "howso" "react" (assoc
+					trainee "cycle1"
+					action_features (list "degree")
+					context_features (list "x")
+					context_values (list 75)
+				))
+				(list "payload" "action_values")
+			)
+	))
+
+	(print "Cyclic interpolation of degrees around 0: ")
+	;90*.375 + 300*.375 + 40*.125 * 320*.125
+	(call assert_approximate (assoc obs result exp (list 11.25) percent 0.00001))
+
+
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "react" (assoc
+					trainee "cycle1"
+					action_features (list "degree")
+					context_features (list "x")
+					context_values (list 150)
+				))
+				(list "payload" "action_values")
+			)
+	))
+
+	(print "Cyclic interpolation of exact matches 270 and 0: ")
+	(call assert_approximate (assoc obs result exp (list 315) percent 0.00001))
+
+	(call exit_if_failures (assoc msg "howso engine cyclic feature interpolation" ))
+
+
+;VERIFY AMALGAM properly finds days around the pivot of the cycle
+	(print "Cyclic feature querying: ")
+	(call_entity "howso" "set_internal_parameters" (assoc
+		trainee "cycle1"
+		default_hyperparameter_map (assoc "k" 6 "p" 1 "dt" -1 "featureDomainAttributes" (assoc day 7 degree 360 x (null)) )
+	))
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "react" (assoc
+					trainee "cycle1"
+					action_features (list "degree")
+					context_features (list "day")
+					context_values (list 1)
+				))
+				(list "payload" "action_values")
+			)
+	))
+	;expected to find the three day2 and the three day7:
+	;sum(83, 80, 50, 40, 15, 8) / 6 = 46
+	(call assert_approximate (assoc obs result exp (list 46) percent 0.00001))
+
+
+
+
+	(call_entity "howso" "set_internal_parameters" (assoc
+		trainee "cycle1"
+		default_hyperparameter_map (assoc "k" 1 "p" 1 "dt" -1 "featureDomainAttributes" (assoc day 7 degree 360 x (null)) )
+	))
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "react" (assoc
+					trainee "cycle1"
+					action_features (list "x")
+					context_features (list "day" "degree")
+					context_values (list 14.7 10)
+				))
+				(list "payload" "action_values")
+			)
+	))
+	(print "Cyclic wrap around: ")
+	(call assert_approximate (assoc obs result exp (list 200) percent 0.00001))
+
+	(call exit_if_failures (assoc msg "Amalgam cyclic feature querying" ))
+
+	;VERIFY FEATURE ATTRIBUTES
+	(assign (assoc
+		result
+			(call_entity "howso" "get_feature_attributes" (assoc trainee "cycle1"))
+	))
+
+	(print "feature attributes without calling set_feature_attributes: ")
+	(call assert_same (assoc
+		obs (get result "payload")
+		exp
+			(assoc
+				"x" (assoc "type" "continuous" )
+				"day"
+					(assoc
+						"cycle_length" 7
+						"type" "continuous"
+					)
+				"degree"
+					(assoc
+						"cycle_length" 360
+						"type" "continuous"
+					 )
+			 )
+	))
+
+	(call exit_if_failures (assoc msg "Feature attributes set correctly" ))
+
+	(declare (assoc
+		unexpected_cyclics
+			(range
+				(lambda
+					(get
+						(call_entity "howso" "react" (assoc
+							trainee "cycle1"
+							action_features (list "day" "degree" "x")
+							feature_bounds_map (assoc "degree" (assoc "min" 270 "max" 460))
+							desired_conviction 1
+						))
+						(list "payload" "action_values" 1)
+					)
+				)
+				1 100 1
+			)
+	))
+
+	;filter out all values, keeping only those between 100 and 270, we expect there to be none
+	(assign (assoc
+		unexpected_cyclics
+			(filter
+				(lambda (and
+					(> (target_value) 100)
+					(< (target_value) 270)
+				))
+				unexpected_cyclics
+			)
+	))
+	(print "generated cyclic degrees between 270 and 460: ")
+	(call assert_same (assoc obs unexpected_cyclics exp (list)))
+
+	(assign (assoc
+		unexpected_cyclics
+			(map
+				(lambda
+					(get
+						(call_entity "howso" "react" (assoc
+							trainee "cycle1"
+							action_features (list "day" "degree" "x")
+							feature_bounds_map (assoc "degree" (assoc "min" 70 "max" 170))
+							desired_conviction 1
+						))
+						(list "payload" "action_values" 1)
+					)
+				)
+				(range 1 100)
+			)
+	))
+
+	;filter out all values, keeping only those less than 70 or more than 170, we expect there to be none
+	(assign (assoc
+		unexpected_cyclics
+			(filter
+				(lambda (or
+					(< (target_value) 70)
+					(> (target_value) 170)
+				))
+				unexpected_cyclics
+			)
+	))
+
+	(print "generated cyclic degrees between 70 and 170: ")
+	(call assert_same (assoc obs unexpected_cyclics exp (list)))
+
+
+	;test exclusionary bounds, allowed <=60 and >=300
+	(assign (assoc
+		unexpected_cyclics
+			(range
+				(lambda
+					(get
+						(call_entity "howso" "react" (assoc
+							trainee "cycle1"
+							action_features (list "day" "degree" "x")
+							feature_bounds_map (assoc "degree" (assoc "min" 300 "max" 60))
+							desired_conviction 1
+						))
+						(list "payload" "action_values" 1)
+					)
+				)
+				1 100 1
+			)
+	))
+
+	;filter out all values, keeping only those more than 60 and less than 300, we expect there to be none
+	(assign (assoc
+		unexpected_cyclics
+			(filter
+				(lambda (and
+					(> (target_value) 60)
+					(< (target_value) 300)
+				))
+				unexpected_cyclics
+			)
+	))
+
+	(print "generated cyclic degrees +/- 60:  ")
+	(call assert_same (assoc obs unexpected_cyclics exp (list)))
+
+
+	;test where min and max bounds are same
+	(assign (assoc
+		result
+			(map
+				(lambda
+					(get
+						(call_entity "howso" "react" (assoc
+							trainee "cycle1"
+							action_features (list "day" "degree" "x")
+							feature_bounds_map (assoc "degree" (assoc "min" 291 "max" 291))
+							desired_conviction 1
+						))
+						(list "payload" "action_values" 1)
+					)
+				)
+				(range 1 100)
+			)
+	))
+
+
+	(print "generated 100 '291's:  ")
+	(call assert_same (assoc
+		obs result
+		exp (range 291 1 100 1)
+	))
+
+	(call exit_if_failures (assoc msg "Generation of cyclics" ))
+
+	(call_entity "howso" "set_internal_parameters" (assoc
+		trainee "cycle1"
+		default_hyperparameter_map (assoc "k" 3 "p" 1 "dt" -1)
+	))
+	(call_entity "howso" "set_feature_attributes" (assoc
+		trainee "cycle1"
+		features
+			(assoc
+				"x" (assoc "type" "continuous" )
+				"day"
+					(assoc
+						"cycle_length" 7
+						"type" "ordinal"
+						"bounds" (assoc "allowed" (list "mon" "tue" "wed" "thu" "fri" "sat" "sun"))
+					)
+				"degree"
+					(assoc
+						"cycle_length" 360
+						"type" "ordinal"
+					)
+			)
+	))
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "react" (assoc
+					trainee "cycle1"
+					action_features (list "day")
+					context_features (list "degree")
+					context_values (list 350)
+					details (assoc "influential_cases" (true))
+				))
+				"payload"
+			)
+	))
+
+	;we set the 'day' feature to be a string ordinal via the set_feature_attributes above,
+	;making  1=mon, 2=tue, 3=wed, 3=thu, 5=fri, 5=sat and 7=sun
+	;the react is to degree value of 350, so the 3 nearest values due to cyclic are the three cases that have degree values o 0, 8 and 12
+	;those three cases (if you look at the dataset at the top) have 'day' values of 6 7 and 5, which are therefore 'sat', 'sun' and 'fri'.
+
+	(print "Cyclic Ordinals:") ; expected day value of 6, because it's degree value is 0
+	(call assert_same (assoc exp "sat" obs (get result (list "action_values" 0))))
+	(print "Cyclic Ordinal Influential Cases: ")
+	(call assert_same (assoc ; closest degree values to 350 are 0 8 and 12, with corresponding day values of 6, 7 and 5
+		exp (list 0 8 12 "sat" "sun" "fri")
+		obs
+			(list
+				(get result (list "influential_cases" 0 "degree"))
+				(get result (list "influential_cases" 1 "degree"))
+				(get result (list "influential_cases" 2 "degree"))
+				(get result (list "influential_cases" 0 "day"))
+				(get result (list "influential_cases" 1 "day"))
+				(get result (list "influential_cases" 2 "day"))
+			)
+	))
+
+	(call exit_if_failures (assoc msg unit_test_name ))
+)

@@ -1,0 +1,201 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_analyze_feature_weights.amlg"))
+
+	(call_entity "howso" "create_trainee" (assoc trainee "bf_test"))
+
+	(declare (assoc
+		model_data (load "unit_test_data/560_bodyfat.csv")
+	))
+	(declare (assoc
+		data (tail model_data)
+		features (first model_data)
+	))
+	(declare (assoc action_features (list (last features))))
+
+	(assign_to_entities "howso" (assoc trainee "bf_test"))
+
+	(call_entity "howso" "train" (assoc
+		input_cases (trunc data 150)
+		features features
+		session "session1"
+	))
+
+	(declare (assoc total 0))
+	(map
+		(lambda (let
+			(assoc
+				output
+					(get
+						(call_entity "howso" "react" (assoc
+							context_features (trunc features)
+							action_features action_features
+							context_values (trunc (target_value 2))
+						))
+						(list "payload" "action_values")
+					)
+			)
+
+			(accum (assoc total (abs (- (first output) (last (target_value 1))))))
+		))
+		(tail data 100)
+	)
+
+	(declare (assoc pre_analyze_error (/ total 100) ))
+	(print "Pre Analyze error: " pre_analyze_error "\n")
+
+
+
+	(print "Analyzing...\n")
+	(declare (assoc start_analyze_time (system_time) ))
+	(call_entity "howso" "analyze" (assoc
+		action_features action_features
+		context_features (trunc features)
+		k_folds 6
+
+	))
+	(print "Analysis time in seconds: " (- (system_time) start_analyze_time) "\n\n")
+
+	;disable the computed feature weights
+	(declare (assoc int_params (get (call_entity "howso" "get_internal_parameters") (list "payload" "hyperparameter_map"))))
+	(declare (assoc target_params (get int_params (list "target" "full" ".none"))))
+	(declare (assoc feature_weights (get target_params "featureWeights")))
+	(accum (assoc target_params (assoc "featureWeights" (null) )))
+	(accum (assoc int_params (assoc "target" (assoc "full" (assoc ".none" target_params )) )))
+	(call_entity "howso" "set_internal_parameters" (assoc hyperparameter_map int_params))
+
+	(assign (assoc total 0))
+	(map
+		(lambda (let
+			(assoc
+				output
+					(get
+						(call_entity "howso" "react" (assoc
+							context_features (trunc features)
+							action_features action_features
+							context_values (trunc (target_value 2))
+						))
+						(list "payload" "action_values")
+					)
+			)
+
+			(accum (assoc total (abs (- (first output) (last (target_value 1))))))
+		))
+		(tail data 100)
+	)
+
+	(declare (assoc post_analyze_error (/ total 100) ))
+	(print "Post Analyze error: " post_analyze_error "\n")
+
+	;enable the computed feature weights
+	(accum (assoc target_params (assoc "featureWeights" feature_weights )))
+	(accum (assoc int_params (assoc "target" (assoc "full" (assoc ".none" target_params )) )))
+	(call_entity "howso" "set_internal_parameters" (assoc hyperparameter_map int_params))
+
+
+	(assign (assoc total 0))
+	(map
+		(lambda (let
+			(assoc
+				output
+					(get
+						(call_entity "howso" "react" (assoc
+							context_features (trunc features)
+							action_features action_features
+							context_values (trunc (target_value 2))
+						))
+						(list "payload" "action_values")
+					)
+			)
+
+			(accum (assoc total (abs (- (first output) (last (target_value 1))))))
+		))
+		(tail data 100)
+	)
+
+	(declare (assoc feature_weights_error (/ total 100) ))
+
+
+	(print "Feature weighted error: " feature_weights_error "\n")
+
+
+	(print "Error decreases: ")
+	;feature weights error should be smaller than the post_analyze error which should be smaller than the pre-analyze error
+	(call assert_true (assoc obs (> pre_analyze_error post_analyze_error feature_weights_error )))
+
+
+	(call_entity "howso" "analyze" (assoc
+		context_features features
+		targeted_model "targetless"
+		p_values (list 0.5 1 2)
+		k_values (list 5 8 13)
+		k_folds 1
+		num_analysis_samples 1000
+		inverse_residuals_as_weights (true)
+	))
+
+	(declare (assoc
+		result
+			(call_entity "howso" "batch_react" (assoc
+				action_features features
+				desired_conviction 2
+				use_regional_model_residuals (false)
+				rand_seed (range 1 10)
+				num_cases_to_generate 10
+			))
+
+	))
+	(print "---\n")
+
+	(declare (assoc
+		result2
+			(call_entity "howso" "batch_react" (assoc
+				action_features features
+				desired_conviction 2
+				use_regional_model_residuals (false)
+				rand_seed (range 1 10)
+				num_cases_to_generate 10
+			))
+
+		mismatches 0
+		total_gen 0
+	))
+
+	(map
+		(lambda
+			(map
+				(lambda
+					(accum (assoc
+						total_gen 1
+						mismatches
+							(if (!= (first (target_value 1)) (last (target_value 1)))
+								1
+								0
+							)
+					))
+				)
+				(get (target_value) (list 0 "action_values"))
+				(get (target_value) (list 1 "action_values"))
+			)
+		)
+		(get result (list "payload" ))
+		(get result2 (list "payload" ))
+	)
+	(print "Mismatches: " mismatches " out of " total_gen "\n")
+	(print "Batch react rand seeds provide consistent results: ")
+	(call assert_true (assoc obs (< (/ mismatches total_gen) 0.50)))
+
+;  TODO: revisit to make sure all match if randomnes during generation is fixed
+;	(assign (assoc
+;		result (apply "append" (map (lambda (get (target_value) "action_values")) result))
+;		result2 (apply "append" (map (lambda (get (target_value) "action_values")) result2))
+;	))
+;
+;	(call assert_approximate (assoc
+;		obs result2
+;		exp result
+;		percent .01
+;	))
+
+	(call exit_if_failures (assoc msg unit_test_name))
+)

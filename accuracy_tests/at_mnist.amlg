@@ -1,0 +1,114 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "../unit_tests/unit_test.amlg")))
+	(call (load "../unit_tests/unit_test_howso.amlg") (assoc name "at_mnist.amlg"))
+
+
+	(declare (assoc data (load "datasets/mnist_10k.csv")))
+
+	(declare (assoc
+		features (first data)
+		training_data (tail data)
+		start (system_time)
+
+		analyze (false) 	; when true will run analyze
+		dataset_size 10000  ; 10000 = full dataset size
+	))
+
+	(declare (assoc
+		all_features_key (apply "concat" (weave (sort features) "."))
+		context_features_key (apply "concat" (weave (sort (trunc features)) "."))
+	))
+
+	(call_entity "howso" "create_trainee" (assoc trainee "mnist"))
+	(call_entity "howso" "set_internal_parameters" (assoc
+		trainee "mnist"
+		hyperparameter_map
+			(assoc
+				".targetless" (assoc all_features_key (assoc "robust" (assoc ".none" (assoc "k" 8 "p" 2 "dt" -1))))
+				"target" (assoc context_features_key (assoc "full" (assoc ".none" (assoc "k" 13 "p" 2 "dt" -1))))
+			)
+	))
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		trainee "mnist"
+		features
+			(append
+				(assoc "target" (assoc "type" "nominal" "data_type" "number"))
+				(map
+					(lambda (assoc "type" "ordinal"))
+					(zip (trunc features))
+				)
+			)
+	))
+
+	(print "loading mnist ...\n")
+	(call_entity "howso" "train" (assoc
+		trainee "mnist"
+		features features
+		input_cases (trunc training_data (* .9 dataset_size))
+	))
+
+	(print "loaded mnist:  " (call_entity "howso" "get_num_training_cases" (assoc trainee "mnist")) "\n")
+
+	(declare (assoc load_time (- (system_time) start) ))
+	(print "load time: " load_time "\n")
+
+	(if analyze
+		(seq
+			(print "analyzing mnist ...\n")
+			(call_entity "howso" "analyze" (assoc
+				trainee "mnist"
+				context_features (trunc features)
+				action_features (list (last features))
+				targeted_mode "single_targeted"
+			))
+			(declare (assoc analyze_time (- (system_time) start) ))
+			(print
+				(call_entity "howso" "get_internal_parameters" (assoc trainee "mnist"))
+			)
+			(print "Analyze time: " analyze_time "\n")
+
+		)
+
+		;else skip analyze, only compute and cache expected values
+		(seq
+			(assign (assoc start (system_time) ))
+			(call_entity (list "howso" "mnist") "CacheExpectedValuesAndProbabilities" (assoc
+				features features
+			))
+			(print "Caching values time: " (- (system_time) start) "\n")
+		)
+	)
+
+	(print "Reacting ...\n")
+	(assign (assoc start (system_time) ))
+	(declare (assoc num_correct 0))
+	||(map
+		(lambda (let
+			(assoc
+				result
+					(call_entity "howso" "react" (assoc
+						trainee "mnist"
+						context_features (trunc features)
+						action_features (list (last features))
+						context_values (trunc (target_value 2))
+					))
+			)
+			; (print (get result (list "payload" "action_values" 0)) " vs " (last (target_value)) "\n")
+			(if (= (get result (list "payload" "action_values" 0)) (last (target_value)))
+				(accum (assoc num_correct 1))
+			)
+		))
+		(tail data (* .1 dataset_size))
+	)
+	(print "React time: " (- (system_time) start) "\n")
+	(declare (assoc correct (/ num_correct (* .1 dataset_size))))
+	(print "Accuracy: " correct "\n")
+
+	;only validate accuracy against default test parameters
+	(if (and (not analyze) (= 10000 dataset_size))
+		(call assert_same (assoc exp 0.969 obs correct))
+	)
+
+	(call exit_if_failures (assoc msg unit_test_name))
+)

@@ -1,0 +1,718 @@
+;Module for trainee_template.
+;Contains helper methods for calculating influences for explanation and audit data.
+(null
+
+	;Helper method to compute and add to output local feature MDA
+	#ComputeFeatureMDA
+	(let
+		(assoc
+			local_model_case_ids
+				(if (!= (null) cached_candidate_cases_map)
+					(indices cached_candidate_cases_map)
+
+					(contained_entities (append
+						filtering_queries
+						(query_nearest_generalized_distance
+							k_parameter
+							context_features
+							context_values
+							feature_weights
+							queryDistanceTypeMap
+							query_feature_attributes_map
+							context_deviations
+							p_parameter
+							dt_parameter
+							(if valid_weight_feature weight_feature (null))
+							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+							"fixed rand seed"
+							(null) ;radius
+							numericalPrecision
+						)
+					))
+				)
+		)
+
+		;for robust computation, increase the number of cases to improve accuracy
+		(if robust_computation
+			(let
+				(assoc
+					;number of robust cases is max(100, K * ( ln(num_features) + 1) )
+					num_robust_cases (max 100 (* k_parameter (+ 1 (log (size (values features (true) )))) ) )
+				)
+				;pick the needed number of cases randomly with replacament from the set of specified case_ids
+				(assign (assoc local_model_case_ids (rand local_model_case_ids num_robust_cases) ))
+			)
+		)
+
+		(accum (assoc
+			output
+				(assoc "feature_mda"
+					(call DecreaseInAccuracy (assoc
+						context_features context_features
+						action_features action_features
+						case_ids local_model_case_ids
+						robust robust_computation
+					))
+				)
+		))
+	)
+
+	;Helper method to compute and add to output local feature ex-post MDA
+	#ComputeFeatureMDAExPost
+	(let
+		(assoc
+			;pull targetless hyperparameters because local model will include the action value and therefore is not targeted
+			targetless_hyperparam_map
+				(call GetHyperparameters (assoc
+				context_features context_features
+					feature ".targetless"
+					mode
+						(if (or force_targetless robust_computation)
+							"robust"
+							"full"
+						)
+					weight_feature weight_feature
+				))
+		)
+
+		(declare (assoc
+			local_model_case_ids
+				(contained_entities (append
+					filtering_queries
+					(query_nearest_generalized_distance
+						(get targetless_hyperparam_map "k")
+						features
+						(append context_values action_values)
+						(get targetless_hyperparam_map "featureWeights")
+						queryDistanceTypeMap
+						(get targetless_hyperparam_map "featureDomainAttributes")
+						(if (get targetless_hyperparam_map "useDeviations") (get targetless_hyperparam_map "featureDeviations") )
+						(get targetless_hyperparam_map "p")
+						(get targetless_hyperparam_map "dt")
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						numericalPrecision
+					)
+				))
+			targetless_k (get targetless_hyperparam_map "k")
+		))
+
+		;for robust computation, increase the number of cases to improve accuracy
+		(if robust_computation
+			(let
+				(assoc
+					;number of robust cases is max(100, K * ( ln(num_features) + 1) )
+					num_robust_cases (max 100 (* targetless_k (+ 1 (size (values features (true) ))) ) )
+				)
+				;pick the needed number of cases randomly with replacament from the set of specified case_ids
+				(assign (assoc local_model_case_ids (rand local_model_case_ids num_robust_cases) ))
+			)
+		)
+
+		(accum (assoc
+			output
+				(assoc "feature_mda_ex_post"
+					(call DecreaseInAccuracy (assoc
+						context_features context_features
+						action_features action_features
+						case_ids local_model_case_ids
+						robust robust_computation
+					))
+				)
+		))
+	)
+
+	;Helper method to compute and add to output local cases MDA
+	#ComputeCaseMDA
+	(let
+		(assoc
+			local_model_cases_tuple
+				(compute_on_contained_entities (append
+					filtering_queries
+					(query_nearest_generalized_distance
+						k_parameter
+						context_features
+						context_values
+						feature_weights
+						queryDistanceTypeMap
+						query_feature_attributes_map
+						context_deviations
+						p_parameter
+						1 ; dt_parameter return actual distance
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						numericalPrecision
+						(first action_features) ;output tuple of ordered lists
+					)
+				))
+
+			action_feature (first action_features)
+			action_is_nominal (contains_index nominalsMap (first action_features))
+			output_categorical_action_probabilities (false)
+			cases_to_expected_values_map (assoc)
+			cases_mdas (list)
+			original_cap_map categorical_action_probabilities_map
+		)
+
+		;can't output mda if no action features specified
+		(if (= (null) action_feature)
+			(conclude (accum (assoc output (assoc "case_mda" (null)) )))
+		)
+
+		(assign (assoc
+			cases_to_expected_values_map (zip (first local_model_cases_tuple) (last local_model_cases_tuple))
+			output_categorical_action_probabilities action_is_nominal
+		))
+
+		(assign (assoc
+			cases_mdas
+				;iterate over each case in the local model, hold it out and compute acccuracy of local model without it. ie, nested accuracy flow
+				(map
+					(lambda (let
+						(assoc
+							mda_case_id (target_value 1)
+							remaining_k_cases_map (remove cases_to_expected_values_map (target_value 1))
+							predictions (list)
+							mda (null)
+							robust_remaining_k_cases_map (null)
+						)
+
+						;for robust residuals ensure at least 30 cases per case are used by duplicating the remaining cases list enough times
+						(if robust_computation
+							(assign (assoc
+								robust_remaining_k_cases_map
+									(if (< (size remaining_k_cases_map) 30)
+										(apply "append" (range remaining_k_cases_map 1 (ceil (/ 30 (size remaining_k_cases_map))) 1 ))
+
+										remaining_k_cases_map
+									)
+							))
+						)
+
+						;predict action feature for all the remaining k cases to compute the mda
+						(assign (assoc
+							predictions
+								;remove any nulls
+								(filter (values
+									(map
+										(lambda (let
+											(assoc
+												react_case (target_index 1)
+												expected_value (target_value 1)
+												reaction (null)
+												ignore_case_list (null)
+												;categorical_action_probabilities_map needs to be cleared before each reaction so that it can be accumulated correctly
+												categorical_action_probabilities_map (assoc)
+												abs_error_with_case 0
+												abs_error_without_case 0
+											)
+
+											(assign (assoc
+												ignore_case_list
+													;remove a random selection of local cases in addition to the react case
+													(if robust_computation
+														(append
+															(list react_case)
+															(filter (lambda (< (rand) .5)) (indices (remove remaining_k_cases_map react_case)) )
+														)
+
+														(list react_case)
+													)
+											))
+
+											(assign (assoc
+												reaction_with_case
+													(call GenerateReaction (assoc
+														custom_extra_filtering_queries (query_not_in_entity_list ignore_case_list)
+														context_values (retrieve_from_entity react_case context_features)
+													))
+											))
+
+											;if nominal, return the caterogorical action probability for the expected class
+											(if action_is_nominal
+												(seq
+													(assign (assoc
+														reaction_with_case
+															(get categorical_action_probabilities_map (list action_feature expected_value) )
+													))
+													;cap needs to be cleared before each reaction so that it can be accumulated correctly
+													(assign (assoc categorical_action_probabilities_map (assoc)))
+												)
+
+												(assign (assoc
+													abs_error_with_case (abs (- expected_value reaction_with_case))
+												))
+											)
+
+											(assign (assoc
+												reaction_without_case
+													(call GenerateReaction (assoc
+														custom_extra_filtering_queries (query_not_in_entity_list (append mda_case_id ignore_case_list))
+														context_values (retrieve_from_entity react_case context_features)
+													))
+											))
+											(if action_is_nominal
+												(assign (assoc
+													reaction_without_case
+														(get categorical_action_probabilities_map (list action_feature expected_value) )
+												))
+
+												(assign (assoc
+													abs_error_without_case (abs (- expected_value reaction_without_case))
+												))
+											)
+
+											;output delta between with case and without case, if both are null output a 0
+											(if (or (= (null) reaction_with_case) (= (null) reaction_without_case))
+												0
+
+												(if action_is_nominal
+													;if removing a case dropped accuracy from .9 to .8, we want a positive value since this case contributed 0.1 to accuracy
+													;but if removing a case improves accuracy, this diff should be negative
+													(- reaction_with_case reaction_without_case)
+
+													;else take the differences in the absolute errors for continuous
+													;if error without case increased, this case contributed positively to accuracy.
+													(- abs_error_without_case abs_error_with_case)
+												)
+											)
+										))
+
+										;iterate over the possibly larger list if robust
+										(if robust_computation
+											robust_remaining_k_cases_map
+
+											remaining_k_cases_map
+										)
+									)
+								))
+						))
+
+						(assign (assoc mda (/ (apply "+" predictions) (size predictions)) ))
+
+						(append
+							(retrieve_from_entity mda_case_id (zip (list internalLabelSession internalLabelSessionTrainingIndex)))
+							(assoc "mda" mda)
+						)
+					))
+					(first local_model_cases_tuple)
+				)
+		))
+		;restore categorical action probabilities map to whatever it was for the original react
+		(assign (assoc categorical_action_probabilities_map original_cap_map))
+
+		(accum (assoc output (assoc "case_mda"  cases_mdas) ))
+	)
+
+	;Helper method to compute and add to output local model case contributions
+	#ComputeCaseContributions
+	(let
+		(assoc
+			extended_local_cases_tuple
+				(compute_on_contained_entities (append
+					filtering_queries
+					(query_nearest_generalized_distance
+						(+ 1 k_parameter)
+						context_features
+						context_values
+						feature_weights
+						queryDistanceTypeMap
+						query_feature_attributes_map
+						context_deviations
+						p_parameter
+						1 ; dt_parameter return actual distance
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						numericalPrecision
+						(true) ;output pair of ordered lists
+					)
+				))
+			original_local_cases (list)
+			extended_cases_map (assoc)
+			action_value (first action_values)
+			action_feature (first action_features)
+			nom_action_prob (null)
+			original_cap_map categorical_action_probabilities_map
+		)
+
+		;can't output contributions if no action features specified
+		(if (= (null) action_feature)
+			(conclude (accum (assoc output (assoc "case_contributions" (null)) )))
+		)
+
+		(assign (assoc
+			original_local_cases (trunc (first extended_local_cases_tuple))
+			extended_cases_map (zip (first extended_local_cases_tuple) (last extended_local_cases_tuple))
+		))
+
+		;for nominals, the delta is computed off the categorical action probability of this action value
+		(if (contains_index nominalsMap action_feature)
+			(assign (assoc
+				nom_action_prob (get categorical_action_probabilities_map (list action_feature action_value))
+			))
+		)
+
+		(declare (assoc
+			case_contributions_map
+				(map
+					(lambda (let
+						(assoc
+							filtered_extended_cases_map (remove extended_cases_map (target_index 1))
+							total_distance 0
+							case_action_value (null)
+							delta_value 0
+						)
+						(assign (assoc total_distance (apply "+" (values filtered_extended_cases_map)) ))
+
+						;convert distances to weights
+						(assign (assoc
+							filtered_extended_cases_map
+								(map
+									(lambda (pow  (/ (target_value) total_distance) dt_parameter) )
+									filtered_extended_cases_map
+								)
+							categorical_action_probabilities_map (assoc)
+						))
+
+						(assign (assoc
+							case_action_value
+								(if (and (not allow_nulls) (= 0 (size filtered_extended_cases_map)))
+									(call CalculateFeatureExpectedValue (assoc feature action_feature allow_nulls (false)))
+
+									(call InterpolateActionValues (assoc
+										action_feature action_feature
+										neighbor_weights_map filtered_extended_cases_map
+										allow_nulls allow_nulls
+										has_perfect_matches (contains_value filtered_extended_cases_map .infinity)
+									))
+								)
+						))
+
+						(assign (assoc
+							delta_value
+								;nominal features return delta in probabilities of selecting this action value
+								(if (contains_index nominalsMap action_feature)
+									(let
+										(assoc case_action_prob (get categorical_action_probabilities_map (list action_feature action_value)) )
+										;if this action value wasn't in the local model, that's same as having a 0 case_action_prob
+										(if (= (null) case_action_prob)
+											(- 0 nom_action_prob)
+
+											(- case_action_prob nom_action_prob)
+										)
+									)
+
+									;else continuous, return the delta
+									(- case_action_value action_value)
+								)
+						))
+
+						;output assoc with session, session index and delta value
+						(append
+							(retrieve_from_entity (target_index ) (zip (list internalLabelSession internalLabelSessionTrainingIndex)))
+							(assoc "action_delta" delta_value)
+						)
+					))
+					(zip original_local_cases)
+				)
+		))
+
+		;restore categorical action probabilities map to whatever it was for the original react
+		(assign (assoc categorical_action_probabilities_map original_cap_map))
+
+		(accum (assoc output (assoc "case_contributions" (unzip case_contributions_map original_local_cases)) ))
+	)
+
+	;Helper method to compute and add to output robust local model case contributions
+	#ComputeCaseContributionsRobust
+	(let
+		(assoc
+			extended_local_cases_tuple
+				(compute_on_contained_entities (append
+					filtering_queries
+					(query_nearest_generalized_distance
+						(* 2 k_parameter)
+						context_features
+						context_values
+						feature_weights
+						queryDistanceTypeMap
+						query_feature_attributes_map
+						context_deviations
+						p_parameter
+						1 ; dt_parameter return actual distance
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						numericalPrecision
+						(true) ;output pair of ordered lists
+					)
+				))
+			original_local_cases (list)
+			local_cases_map (assoc)
+			non_local_cases (list)
+			non_local_cases_map (assoc)
+			action_value (first action_values)
+			action_feature (first action_features)
+			nom_action_prob (null)
+			original_cap_map categorical_action_probabilities_map
+		)
+		(assign (assoc
+			original_local_cases (trunc (first extended_local_cases_tuple) k_parameter)
+			non_local_cases (tail (first extended_local_cases_tuple) k_parameter)
+		))
+		(assign (assoc
+			local_cases_map
+				(zip
+					original_local_cases
+					(trunc (last extended_local_cases_tuple) k_parameter)
+				)
+			non_local_cases_map
+				(zip
+					non_local_cases
+					(tail (last extended_local_cases_tuple) k_parameter)
+				)
+		))
+
+		;for nominals, the delta is computed off the categorical action probability of this action value
+		(if (contains_index nominalsMap action_feature)
+			(assign (assoc
+				nom_action_prob (get categorical_action_probabilities_map (list action_feature action_value))
+			))
+		)
+
+		;iterate for every case in the local model:
+		;hold it out and then 100x hold out random sample of other local cases, replace the holdouts with nearest non local ones and average out the action value
+		(declare (assoc
+			case_contributions_map
+				(map
+					(lambda (let
+						(assoc
+							filtered_local_cases_map (remove local_cases_map (target_index 1))
+							total_distance 0
+							case_action_value (null)
+							robust_deltas (list)
+						)
+
+						;run 100 iterations of holding out random cases, replacing them from the extended model and computing the delta
+						;average out the delta at the end
+						(assign (assoc
+							robust_deltas
+								(range
+									(lambda (let
+										(assoc
+											;randomly hold out random local cases
+											robust_cases_map (filter (lambda (< (rand) .5)) filtered_local_cases_map)
+											num_to_replace 0
+										)
+										(assign (assoc num_to_replace (- k_parameter (size robust_cases_map)) ))
+
+										;fill up the remaining local cases with non local extended model ones
+										(accum (assoc
+											robust_cases_map (keep non_local_cases_map (trunc non_local_cases num_to_replace))
+										))
+
+										(assign (assoc total_distance (apply "+" (values robust_cases_map)) ))
+
+										;convert distances to weights
+										(assign (assoc
+											robust_cases_map
+												(map
+													(lambda (pow  (/ (target_value) total_distance) dt_parameter) )
+													robust_cases_map
+												)
+											categorical_action_probabilities_map (assoc)
+										))
+
+										(assign (assoc
+											case_action_value
+												(if (and (not allow_nulls) (= 0 (size robust_cases_map)))
+													(call CalculateFeatureExpectedValue (assoc feature action_feature allow_nulls (false)))
+
+													(call InterpolateActionValues (assoc
+														action_feature action_feature
+														neighbor_weights_map robust_cases_map
+														allow_nulls allow_nulls
+														has_perfect_matches (contains_value robust_cases_map .infinity)
+													))
+												)
+										))
+
+										;nominal features return delta in probabilities of selecting this action value
+										(if (contains_index nominalsMap action_feature)
+											(let
+												(assoc case_action_prob (get categorical_action_probabilities_map (list action_feature action_value)) )
+												;if this action value wasn't in the local model, that's same as having a 0 case_action_prob
+												(if (= (null) case_action_prob)
+													(- 0 nom_action_prob)
+
+													(- case_action_prob nom_action_prob)
+												)
+											)
+
+											;else continuous, return the delta
+											(- case_action_value action_value)
+										)
+									))
+									1 100 1
+								)
+						))
+
+						;output assoc with session, session index and the average delta value
+						(append
+							(retrieve_from_entity (target_index ) (zip (list internalLabelSession internalLabelSessionTrainingIndex)))
+							(assoc "action_delta" (/ (apply "+" robust_deltas) 100) )
+						)
+					))
+					local_cases_map
+				)
+		))
+
+		;restore categorical action probabilities map to whatever it was for the original react
+		(assign (assoc categorical_action_probabilities_map original_cap_map))
+
+		(accum (assoc output (assoc "case_contributions" (unzip case_contributions_map original_local_cases)) ))
+	)
+
+	;Helper method to compute and output local feature contributions
+	#ComputeFeatureContributions
+	(let
+		(assoc
+			local_model_case_ids
+				(if (!= (null) cached_candidate_cases_map)
+					(indices cached_candidate_cases_map)
+
+					(contained_entities (append
+						filtering_queries
+						(query_nearest_generalized_distance
+							k_parameter
+							context_features
+							context_values
+							feature_weights
+							queryDistanceTypeMap
+							query_feature_attributes_map
+							context_deviations
+							p_parameter
+							dt_parameter
+							(if valid_weight_feature weight_feature (null))
+							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+							"fixed rand seed"
+							(null) ;radius
+							numericalPrecision
+						)
+					))
+				)
+			action_feature (first action_features)
+
+			;use larger amount of robust computes per case for explanations than global
+			; min(2000, 30 * 2^f) to get enough coverage for robust reacts for each case
+			num_robust_influence_samples_per_case
+				(if robust_computation
+					;use specified value if it was provided
+					(if (> (get details "num_robust_influence_samples_per_case") 1)
+						(get details "num_robust_influence_samples_per_case")
+
+						(min 2000 (* 30 (pow 2 (size context_features)) ) )
+					)
+				)
+		)
+
+		(declare (assoc
+			feature_contributions_pair
+				(call CalculateFeatureContributions (assoc
+					context_features context_features
+					action_feature action_feature
+					robust robust_computation
+					case_ids local_model_case_ids
+					num_robust_influence_samples_per_case num_robust_influence_samples_per_case
+					weight_feature weight_feature
+					run_on_local_model (true)
+				))
+		))
+
+		(accum (assoc
+			output
+				(assoc
+					"feature_contributions" (first feature_contributions_pair)
+					"directional_feature_contributions" (last feature_contributions_pair)
+				)
+		))
+	)
+
+	;Helper method to compute and output individual case feature contributions
+	#ComputeCaseFeatureContributions
+	(let
+		(assoc
+			context_set (zip context_features)
+			action_is_nominal (contains_index nominalsMap (first action_features))
+			hyperparam_map
+				(call GetHyperparameters (assoc
+					feature (first action_features)
+					context_features context_features
+					mode "full"
+					weight_feature weight_feature
+				))
+			num_features (size context_features)
+			action_feature (first action_features)
+
+			;use larger amount of robust computes per case for explanations than global
+			; min(2000, 30 * 2^f) to get enough coverage for robust reacts for each case
+			num_robust_influence_samples_per_case
+				(if robust_computation
+					;use specified value if it was provided
+					(if (> (get details "num_robust_influence_samples_per_case") 1)
+						(get details "num_robust_influence_samples_per_case")
+
+						(min 2000 (* 30 (pow 2 (size context_features)) ) )
+					)
+				)
+
+			case_id (if ignore_case ignore_case)
+
+			correct_value (first action_values)
+			case_values_map (zip features (append context_values action_values))
+
+			;populated by !ComputeRobustContributionReactsPerCase
+			local_case_reaction_pairs (list)
+			feature_contributions_pair_map (assoc)
+		)
+
+		;create an assoc of feature -> [feature_contribution, directional_feature_contribution]
+		(assign (assoc
+			feature_contributions_pair_map
+				(if robust_computation
+					(seq
+						;populate local_case_reaction_pairs, then the call below computes the deltas for each feature
+						(call !ComputeRobustContributionReactsPerCase)
+						(zip context_features (call !ComputeRobustWithAndWithoutDeltaPerCase))
+					)
+
+					(map
+						(lambda (let
+							(assoc
+								feature (get_value (target_index 1))
+								filtered_context_features (indices (remove context_set (target_index 1)))
+							)
+							;output a delta value between react with and without the feature
+							(call !ComputeFullContributionForCase)
+						))
+						context_set
+					)
+				)
+		))
+
+		(accum (assoc
+			output
+				(assoc
+					"case_feature_contributions"  (map (lambda (first (target_value))) feature_contributions_pair_map)
+					"case_directional_feature_contributions"  (map (lambda (last (target_value))) feature_contributions_pair_map)
+				)
+		))
+	)
+)

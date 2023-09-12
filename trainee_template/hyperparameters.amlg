@@ -1,0 +1,706 @@
+;Module for trainee_template.
+;Contains helper methods for hyperparameter analysis.
+(null
+
+	; contains, p, k, dt, gridSearchError, etc
+	#BackupAnalyzedHyperparameters
+	(assign (assoc
+		previous_analyzed_hp_map analyzed_hp_map
+		baseline_hyperparameter_map analyzed_hp_map
+	))
+
+	;updates baseline_hyperparameter_map
+	#KeepOrRevertHyperparameters
+	(if (<= (get previous_analyzed_hp_map "gridSearchError") (get analyzed_hp_map "gridSearchError"))
+		(assign (assoc baseline_hyperparameter_map previous_analyzed_hp_map))
+
+		;else update with analyzed
+		(assign (assoc baseline_hyperparameter_map analyzed_hp_map))
+	)
+
+	;updates baseline_hyperparameter_map
+	#UpdateHyperparameters
+	(declare
+		(assoc
+			use_weights (null)
+			feature_weights (null)
+			use_deviations (null)
+			feature_deviations (null)
+			null_deviations (null)
+			ordinal_feature_deviations (null)
+			attribute_map (assoc)
+		)
+
+		(accum (assoc
+			attribute_map
+				(append
+					;if clearing weights, set them to null
+					(if (= (false) use_weights)
+						;if there are inactive features, we have to reset active features to 1s and inactives to 0s
+						(if hasInactiveFeatures
+							(assoc "featureWeights"
+								(append
+									(zip
+										(indices (get baseline_hyperparameter_map "featureWeights"))
+										1
+									)
+									inactiveFeaturesMap
+								)
+							)
+
+							;else null out the weights
+							(assoc "featureWeights" (null))
+						)
+
+						(assoc)
+					)
+					(if feature_weights
+						(assoc "featureWeights" feature_weights)
+						(assoc)
+					)
+					(if use_deviations
+						(assoc "useDeviations" (true))
+						(assoc)
+					)
+					(if feature_deviations
+						(assoc "featureDeviations" feature_deviations)
+						(assoc)
+					)
+					(if (size ordinal_feature_deviations)
+						(assoc "featureOrdinalDeviations" ordinal_feature_deviations)
+						(assoc)
+					)
+
+					(if (size null_deviations)
+						(assoc "featureDomainAttributes" null_deviations)
+						(assoc)
+					)
+				)
+		))
+
+		(accum (assoc baseline_hyperparameter_map attribute_map ))
+	)
+
+	;write baseline_hyperparameter_map out to the model's hyperparameterMetadataMap
+	#SetModelHyperParameters
+	(seq
+		(if derived_auto_analyzed
+			(accum (assoc baseline_hyperparameter_map (assoc "derivedAutoAnalyzed" (true)) ))
+		)
+
+		(if (not (contains_value hyperparameterParamPaths (list action_feature context_features_key robust_mode weight_feature)) )
+			(let
+				(assoc
+					;check if any hyperparameters exist that also match this action_feature robust_mode and weight_feature
+					;if any exist that were derived_auto_analyzed, remove them because that means these new hyperparameters supercede them
+					old_params_key_to_remove
+						(first (filter
+							(lambda (and
+								(get hyperparameterMetadataMap (append (target_value) "derivedAutoAnalyzed"))
+								(= (remove (target_value) 1) (list action_feature robust_mode weight_feature))
+							))
+							hyperparameterParamPaths
+						))
+				)
+
+				(if (size old_params_key_to_remove)
+					(seq
+						(assign_to_entities (assoc
+							hyperparameterParamPaths (filter (lambda (!= old_params_key_to_remove (target_value)) ) hyperparameterParamPaths)
+						))
+
+						;remove the old context features set
+						(accum_to_entities (assoc
+							hyperparameterMetadataMap
+								(associate
+									action_feature
+										(remove (get hyperparameterMetadataMap action_feature) (get old_params_key_to_remove 1))
+								)
+						))
+					)
+				)
+
+				(accum_to_entities (assoc hyperparameterParamPaths (list (list action_feature context_features_key robust_mode weight_feature)) ))
+			)
+		)
+
+		(assign_to_entities (assoc
+			hyperparameterMetadataMap
+				(set hyperparameterMetadataMap (list action_feature context_features_key robust_mode weight_feature) baseline_hyperparameter_map)
+		))
+
+		(declare (assoc deviations (get baseline_hyperparameter_map "featureDeviations") ))
+
+		;if deviations were computed, store them in residualsMap
+		(if deviations
+			(assign_to_entities (assoc
+				residualsMap
+					(set
+						residualsMap
+						(concat robust_mode action_feature robust_mode weight_feature)
+						(append
+							deviations
+							(assoc
+								".robust" (= "robust" robust_mode)
+								".hyperparam_path" (list action_feature context_features_key robust_mode weight_feature)
+							)
+						)
+					)
+			))
+
+			;else compute and cache residuals and featureDomainAttributes if there are features with nulls
+			(let
+				(assoc
+					num_features_with_nulls
+						(size (filter
+							;keep only features that have 2 or more nulls
+							(lambda (> (get (target_value) "num_nulls") 1) )
+							;ignore all inactive features (where all values are nulls)
+							(remove featureNullRatiosMap (indices inactiveFeaturesMap))
+						))
+				)
+
+				(if (> num_features_with_nulls 0)
+					(call CalculateAndStoreFeatureResiduals (assoc
+						features (values (append context_features action_features) (true))
+						robust_residuals (= "robust" robust_mode)
+						hyperparameter_feature action_feature
+						weight_feature weight_feature
+						use_case_weights use_case_weights
+						custom_hyperparam_map baseline_hyperparameter_map
+					))
+
+				)
+			)
+		)
+	)
+
+	;updates baseline_hyperparameter_map
+	;uses provided baseline_hyperparameter_map to compute the model MAE (gridSerachError), if computed error is less than current/y stored error,
+	;updates baseline_hyperparameter_map with the new error value, otherwise reverts it back to previous_analyzed_hp_map
+	#TestAccuracyAndKeepOrRevertHyperparameters
+	(seq
+		;re-set the defined random seed to run gridsearch the same way as it was run above
+		(set_rand_seed sampling_random_seed)
+
+		;run through one pass using feature weights to see if they should be used
+		(assign (assoc
+			model_mae (call ComputeModelResidualForParameters (assoc targetless (= targeted_model "targetless")))
+		))
+
+		;if previous pass did better than this pass, revert baseline_hyperparameter_map
+		(if (>= model_mae (get baseline_hyperparameter_map "gridSearchError"))
+			(assign (assoc baseline_hyperparameter_map previous_analyzed_hp_map))
+
+			;else keep update current hyperparams with new error value and back them up
+			(seq
+				(assign (assoc
+					baseline_hyperparameter_map (set baseline_hyperparameter_map "gridSearchError" model_mae)
+				))
+				(assign (assoc previous_analyzed_hp_map baseline_hyperparameter_map))
+			)
+		)
+	)
+
+	;use rewrite to update all hyperparameters sets with the new featureDomainAttributes
+	#UpdateHyperparametersWithFeatureDomainAttributes
+	(declare
+		(assoc hp_map (assoc) )
+
+		(rewrite
+			;if this is a hp assoc, modify it
+			(lambda
+				(if (and (= (assoc) (get_type (target_value))) (contains_index (target_value) "k") )
+					(seq
+						;hp already have featureDomainAttributes defined, overwrite the counts and bounds
+						(if (!= (null) (get (target_value) "featureDomainAttributes"))
+							(let
+								(assoc previous_hp_null_deviations_map (get (target_value 1) "featureDomainAttributes") )
+
+								;smartly overwrite previous values with the newly computed ones
+								(assign (assoc
+									null_deviations_map
+										(map
+											(lambda (let
+												(assoc
+													previous_value (first (target_value 1))
+													new_value (last (target_value 1))
+												)
+												;if a value is missing from either map, keep whichever isn't null
+												(if (or (= (null) previous_value) (= (null) new_value) )
+													(or previous_value new_value)
+
+													;if previous value is a tuple, overwrite the first value in the tuple since that's the only one that's
+													;been recomputed here, i.e., the number of nominal counts or the max uncertainty for continuous
+													(if (= (list) (get_type previous_value))
+														(set previous_value 0 new_value)
+														;else overwrite the value with the new one
+														new_value
+													)
+												)
+											))
+											previous_hp_null_deviations_map
+											null_deviations_map
+										)
+								))
+							)
+						)
+
+						;append the updated null_deviations_map to this hp map
+						(append (target_value) (assoc "featureDomainAttributes" null_deviations_map) )
+					)
+
+					(target_value)
+				)
+			)
+			hp_map
+		)
+	)
+
+	;update all deviations in hyperparemeters with user specified errors
+	#UpdateHyperparametersWithUserErrors
+	(declare
+		(assoc hp_map (assoc) )
+
+		(rewrite
+			;if this is a hp assoc, modify it
+			(lambda
+				(if (and (= (assoc) (get_type (target_value))) (contains_index (target_value) "k") )
+					;hp already have featureDeviations defined, overwrite where necessary
+					(if (!= (null) (get (target_value) "featureDeviations"))
+						(let
+							(assoc deviations_map (get (target_value 1) "featureDeviations") )
+
+							(map
+								(lambda
+									(assign (assoc
+										deviations_map
+											(set
+												deviations_map
+												(target_index 1)
+												;max of user specified and stored deviation in the map
+												(max (target_value 1) (get deviations_map (target_index 1)) )
+											)
+									))
+								)
+								userSpecifiedFeatureErrorsMap
+							)
+
+							;append the updated deviations_map to this hp map
+							(append (target_value) (assoc "featureDeviations" deviations_map) )
+						)
+
+						(target_value)
+					)
+
+					(target_value)
+				)
+			)
+			hp_map
+		)
+	)
+
+	;update hyperparameter map for newly added feature
+	; hp_map: the hp map to be updated, should be either defaultHyperparameters or hyperparameterMetadataMap
+	#UpdateHyperparametersWithNewFeature
+	(declare
+		(assoc hp_map (assoc) )
+
+		(rewrite
+			(lambda
+				(if (and (= (assoc) (get_type (target_value))) (contains_index (target_value) "k") )
+					(let
+						(assoc
+							feature_weights_map (get (target_value 1) "featureWeights")
+							feature_deviations_map (get (target_value 1) "featureDeviations")
+						)
+
+						(if (!= (null) feature_weights_map)
+							(assign (assoc feature_weights_map (append feature_weights_map (associate feature 1)) ))
+
+							;else no weights, assign all active features weight 1
+							(assign (assoc
+								feature_weights_map
+									(append (zip (append defaultFeatures feature) 1) inactiveFeaturesMap)
+							))
+						)
+
+						(if (!= (null) feature_deviations_map)
+							(assign (assoc feature_deviations_map (set feature_deviations_map feature min_deviation_value) ))
+						)
+
+						(append (target_value) (assoc
+							"allFeatureResidualsCached" (false)
+							"featureWeights" feature_weights_map
+							"featureDeviations" feature_deviations_map
+						))
+					)
+
+					;else return
+					(target_value)
+				)
+			)
+			hp_map
+		)
+	)
+
+
+	#GetHyperparameters
+	(declare
+		(assoc
+			feature (null)
+			context_features defaultFeatures
+			mode "robust"
+			weight_feature ".case_weight"
+		)
+		(if (= 0 (size hyperparameterParamPaths))
+			(seq
+				(accum (assoc
+					warnings
+						(associate (concat
+							"There are no cached hyperparameters in this trainee. This operation was executed using a set of predefined default hyperparameters."
+							"Please run analyze() with your desired parameters."
+						))
+				))
+				;if no params, use defaults
+				(conclude defaultHyperparameters)
+			)
+
+			(= 1 (size hyperparameterParamPaths))
+			;if only one set of analyzed params, return them
+			(conclude (get hyperparameterMetadataMap (first hyperparameterParamPaths)))
+		)
+
+		;there are multiple sets of analyze params, we must determine the best
+		(declare (assoc
+			context_key (call BuildContextFeaturesKey (assoc context_features context_features))
+		))
+
+		(if (and (= feature ".targetless") (= context_features (list)))
+			(assign (assoc context_key defaultFeaturesContextKey))
+		)
+
+		;determine value for feature
+		(if (or (= (null) feature) (not (contains_index hyperparameterMetadataMap feature)))
+			(assign (assoc
+				feature
+					(if (contains_index hyperparameterMetadataMap ".targetless")
+						".targetless"
+
+						;else just use one of the targeted analyzed hyperparam sets
+						(first (indices hyperparameterMetadataMap))
+					)
+			))
+		)
+
+		;if we have completely correct HPs, return them
+		(if (contains_index hyperparameterMetadataMap (list feature context_key mode weight_feature))
+			(conclude (get hyperparameterMetadataMap (list feature context_key mode weight_feature)) )
+
+			(declare (assoc other_mode (if (= mode "robust") "full" "robust") ))
+		)
+
+		;if we have the correct HPs, with the alternate mode, return them
+		(if (contains_index hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
+			(conclude (get hyperparameterMetadataMap (list feature context_key other_mode weight_feature)) )
+		)
+
+		;we don't have the exact HPs, determine best context_key
+		(let
+			(assoc
+				;sort context keys in order of increasing length
+				context_key_options
+					(sort
+						(lambda (> (size (target_value)) (size (target_value 1))))
+						(indices (get hyperparameterMetadataMap feature) )
+					)
+
+				correct_mode (false)
+				correct_weight (false)
+				iterator 0
+			)
+
+			;naively set the context to the longest option
+			(assign (assoc context_key (last context_key_options) ))
+
+
+			(while (< iterator (size context_key_options))
+				(assign (assoc candidate_context_key (get context_key_options iterator) ))
+
+				(if (contains_index hyperparameterMetadataMap (list feature candidate_context_key mode weight_feature))
+					;correct mode and weight
+					(assign (assoc
+						context_key candidate_context_key
+						iterator (size context_key_options)
+						correct_mode (true)
+						correct_weight (true)
+					))
+
+					(contains_index hyperparameterMetadataMap (list feature candidate_context_key other_mode weight_feature))
+					;incorrect mode, correct weight
+					(if (not correct_weight)
+						(assign (assoc
+							context_key candidate_context_key
+							correct_mode (true)
+							correct_weight (false)
+						))
+					)
+
+					(contains_index hyperparameterMetadataMap (list feature candidate_context_key mode ".none"))
+					;correct mode, default weight
+					(if (and (not correct_mode) (not correct_weight))
+						(assign (assoc
+							context_key candidate_context_key
+							correct_mode (true)
+							correct_weight (false)
+						))
+					)
+				)
+
+				(accum (assoc iterator 1 ))
+			)
+		)
+
+		;if we have the correct mode and weight for the action and context, return it
+		(if (contains_index hyperparameterMetadataMap (list feature context_key mode weight_feature))
+			(get hyperparameterMetadataMap (list feature context_key mode weight_feature))
+
+			;if we have the correct weight for the action and context, return it
+			(contains_index hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
+			(get hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
+
+			;only correct mode, no case weight
+			(contains_index hyperparameterMetadataMap (list feature context_key mode ".none"))
+			(get hyperparameterMetadataMap (list feature context_key mode ".none"))
+
+			;in correct mode, no case weight, just feature is right basically
+			(contains_index hyperparameterMetadataMap (list feature context_key other_mode ".none"))
+			(get hyperparameterMetadataMap (list feature context_key other_mode ".none"))
+
+			;else the case_weight and ".none" isn't in the map, return the default params
+			defaultHyperparameters
+		)
+	)
+
+	;builds a string key based on context feature list
+	#BuildContextFeaturesKey
+	(apply "concat" (weave (sort context_features) "."))
+
+
+	;return the full internal parameters map
+	#GetInternalParameters
+	(let
+		(assoc
+			internal_parameters_map
+				(assoc
+					"hyperparameter_map" hyperparameterMetadataMap
+					"default_hyperparameter_map" defaultHyperparameters
+				)
+		)
+
+		(if (!= (null) autoAnalyzeThreshold)
+			(accum (assoc
+				internal_parameters_map
+					(assoc
+						"auto_analyze" autoAnalyzeEnabled
+						"analyze_threshold" autoAnalyzeThreshold
+						"analyze_growth_factor" autoAnalyzeGrowthFactorAmount
+						"auto_analyze_limit_size" autoAnalyzeLimitSize
+					)
+			))
+		)
+
+		internal_parameters_map
+	)
+
+	;sets internal hyperparameters
+	;
+	;parameters:
+	; hyperparameter_map: optional. must have at least an action feature (e.g., .targetless) -> a contexts key -> robust -> k, p and dt provided.
+	;	example:
+	;   {
+	;	  	".targetless" { "featureA.featureB.": { "robust" : { "k" : number, "p" : number, "dt": number }}},
+	;		"featureA" : { "featureB.featureC.": { "full" : { "k" : number, "p" : number, "dt": number }}},
+	;			...
+	;	}
+	; default_hyperparameter_map: optional. an assoc of hyperparameters to use when no others are available must contain k, p, and dt.
+	; auto_analyze_enabled: flag, default is false. when true, returns when it's time for model to be analyzed again.
+	; analyze_threshold: optional, stores the threshold for the number of cases at which the model should be re-analyzed. default of 100.
+	; analyze_growth_factor: the factor by which to increase the analyze threshold everytime the model grows to the current threshold size
+	;						default of two orders of magnitude using the universal scaling factor e
+	; auto_analyze_limit_size: optional, the size of of the model at which to stop doing outo-analysis
+	#SetInternalParameters
+	(declare
+		(assoc
+			hyperparameter_map (null)
+			default_hyperparameter_map (null)
+			auto_analyze_enabled (false)
+			analyze_threshold 100
+			analyze_growth_factor 7.389056
+			auto_analyze_limit_size 100000
+
+			;local var
+			bad_param (false)
+		)
+
+		(if (!= (null) default_hyperparameter_map)
+			(if (or
+					(not (contains_index default_hyperparameter_map "p"))
+					(not (contains_index default_hyperparameter_map "k"))
+					(not (contains_index default_hyperparameter_map "dt"))
+				)
+				(assign (assoc bad_param (true) ))
+
+				(seq
+					(accum (assoc default_hyperparameter_map (assoc "paramPath" (list ".default")) ))
+					(assign_to_entities (assoc defaultHyperparameters default_hyperparameter_map) )
+				)
+			)
+		)
+
+		;the passed in hyperparameters must at least have the basic attributes defined correctly
+		;iterate over action features
+		(if (!= (null) hyperparameter_map)
+			(let
+				(assoc param_paths (list))
+				(map
+					(lambda (if
+						(= 0 (size (target_value)))
+						(assign (assoc bad_param (true)))
+						;else iterate over context feature keys
+						(map
+							(lambda (if
+								(= 0 (size (target_value)))
+								(assign (assoc bad_param (true)))
+								;else iterate over robust / full
+								(map
+									(lambda (if
+										(= 0 (size (target_value)))
+										(assign (assoc bad_param (true)))
+										;else iterate over case weights
+										(map
+											(lambda
+												(if (or
+														(not (contains_index (target_value) "p"))
+														(not (contains_index (target_value) "k"))
+														(not (contains_index (target_value) "dt"))
+													)
+													(assign (assoc bad_param (true)))
+
+													;else this HP assoc is good enough
+													(assign (assoc param_paths (append param_paths (list (list (target_index 6) (target_index 5) (target_index 4) (target_index 3))) ) ))
+												)
+											)
+											(target_value)
+										)
+									))
+									(target_value)
+								)
+							))
+							(target_value)
+						)
+					))
+					hyperparameter_map
+				)
+				(if (not bad_param)
+					(assign_to_entities (assoc
+						hyperparameterMetadataMap hyperparameter_map
+						hyperparameterParamPaths param_paths
+					))
+				)
+			)
+		)
+
+		;return failure, invalid hyperparameter_map passed in
+		(if bad_param (conclude (false)))
+
+		(assign_to_entities (assoc
+			autoAnalyzeEnabled auto_analyze_enabled
+			autoAnalyzeThreshold analyze_threshold
+			autoAnalyzeGrowthFactorAmount analyze_growth_factor
+			autoAnalyzeLimitSize auto_analyze_limit_size
+		))
+
+		(accum_to_entities (assoc revision 1))
+
+		(true)
+	)
+
+	;resets all hyperparameters and thersholds back to original values, while leaving feature definitions alone
+	#ResetParameterDefaults
+	(seq
+		(assign_to_entities (assoc
+			numericalPrecision (null)
+			convictionLowerThreshold  (null)
+			convictionUpperThreshold  (null)
+			defaultNumSamples 100
+			hyperparameterMetadataMap (assoc)
+			defaultHyperparameters
+				(assoc
+					"k" 8
+					"p" 0.1
+					"dt" -1
+					"featureWeights" (null)
+					"useDeviations" (false)
+					"featureDeviations" (null)
+					"allFeatureResidualsCached" (false)
+				)
+		))
+		(accum_to_entities (assoc revision 1))
+	)
+
+	;sets the model to auto-analyze by tracking its size and notifying the clients in train responses when it should be analyzed
+	;parameters:
+	; auto_analyze_enabled: flag, default is false. when true, returns when it's time for model to be analyzed again.
+	; analyze_threshold: optional, stores the threshold for the number of cases at which the model should be re-analyzed. default of 100.
+	; analyze_growth_factor: the factor by which to increase the analyze threshold everytime the model grows to the current threshold size
+	;						default of two orders of magnitude using the universal scaling factor e
+	; auto_analyze_limit_size: the size of of the model at which to stop doing outo-analysis. Value of 0 means no limit.
+	#SetAutoAnalyzeParams
+	(declare
+		(assoc
+			auto_analyze_enabled (false)
+			analyze_threshold 100
+			analyze_growth_factor 7.389056
+			auto_analyze_limit_size 100000
+		)
+
+		;growth factor must be more than 1
+		(if (<= analyze_growth_factor 1)
+			(assign (assoc analyze_growth_factor 2))
+		)
+
+		(if (< auto_analyze_limit_size 0)
+			(assign (assoc auto_analyze_limit_size 0))
+		)
+
+		(declare (assoc num_cases (call GetNumTrainingCases) ))
+
+		;if the model is already larger than the specified analyze_threshold, set the analyze_threshold to a valid value nearest the current
+		;number of cases in the model without going over
+		(if
+			(and
+				(!= (null) analyze_threshold)
+				(> num_cases analyze_threshold)
+			)
+			(seq
+				;keep increasing the analysis_threshold by the growth_factor_amount until it's bigger than the current number of cases
+				;and then decrease it back down so that it's just below
+				(while (> num_cases analyze_threshold)
+					(assign (assoc analyze_threshold (* analyze_threshold analyze_growth_factor)))
+				)
+
+				(assign (assoc analyze_threshold (/ analyze_threshold analyze_growth_factor )))
+			)
+		)
+
+		(accum_to_entities (assoc revision 1))
+
+		(assign_to_entities (assoc
+			autoAnalyzeEnabled auto_analyze_enabled
+			autoAnalyzeThreshold analyze_threshold
+			autoAnalyzeGrowthFactorAmount analyze_growth_factor
+			autoAnalyzeLimitSize auto_analyze_limit_size
+		))
+	)
+)

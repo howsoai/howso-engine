@@ -1,0 +1,747 @@
+;Module for trainee_template.
+;Contains methods for working with custom feature codes.
+(null
+
+	;derive new features using a custom code string and store into model
+	;parameters:
+	; features: list of features the dataset was trained with originally
+	; feature : name of feature to create / derive
+	; raw_code_string : string, code defining how the feature should be derived
+	; series_id_features: list of feature names that specify the series id for which to derive this feature.
+	;		If more than one specified, a unique 'series id' is then the conjuction of the specified ids.
+	;		E.g., if 'sender' and 'reciever' are specified, a 'series id' is then each unique pair of sender-reciever.
+	; series_ordered_by_features : list of features names by which to sort the series.  Multi-sorts by the specified features if several specified.
+	#DeriveCustomFeatureFromCode
+	(declare
+		(assoc
+			features (list)
+			feature ""
+			raw_code_string ""
+			series_id_features (list)
+			series_ordered_by_features (list)
+		)
+
+		(declare (assoc
+			sourced_features (indices (get_all_labels (parse raw_code_string)))
+			;flag will be set to true if nulls should be imputed
+			impute_nulls (= (false) (get featureBoundsMap (list feature "allow_null")))
+			;case ids that need to be imputed for this feature
+			cases_to_impute (list)
+			;map of source feature to the list of their offsets
+			sourced_features_offsets_map (assoc)
+			;set of unique row offsets referenced by this feature's code string, used for boundary checking
+			unique_source_offsets_set (assoc)
+			boundaries_tuple (null)
+			cycle_length (null)
+		))
+
+		;the features being sourced from to derive this feature are referred to as sourced features. sourced features may use different row offets.
+		;continuous features cache a map of all source features and their offsets, to be used later in boundary checking.
+		(if (not (contains_index nominalsMap feature))
+			(seq
+				(assign (assoc
+					boundaries_tuple
+						(call ConstrainBoundariesForFeature (assoc
+							bounds_map (get featureBoundsMap feature)
+							feature feature
+							is_datetime (contains_index featureDateTimeMap feature)
+							cycle_length (get cyclicFeaturesMap feature)
+						))
+					cycle_length (get cyclicFeaturesMap feature)
+				))
+
+				;To collect a mapping of all features and their offsets used to derive this feature, use rewrite to accumulate a list of offsets per feature,
+				;but only bother to collect sourced feature offsets if there are bounds that may need to be checked against
+				(if (or (!= (null) (first boundaries_tuple)) (!= (null) (last boundaries_tuple)) )
+					(seq
+						(rewrite
+							(lambda (let
+								(assoc
+									offset_value (target_value 1)
+									label_name (first (get_labels (target_value 1)))
+								)
+								(if (!= (null) label_name)
+									(accum "sourced_features_offsets_map" (list label_name) (list (get_value offset_value)))
+								)
+							))
+							(parse raw_code_string)
+						)
+						(assign (assoc
+							unique_source_offsets_set
+								(zip
+									(apply "append" (values sourced_features_offsets_map))
+								)
+						))
+					)
+				)
+			)
+		)
+
+		;declare all the features that are necessary that are needed to derive this feature,
+		;where the first features are the ones that need to be sorted on
+		(declare (assoc
+			;append series_ordered_by_features with sourced features and ensure no duplicates
+			necessary_features
+				(append
+					series_ordered_by_features
+
+					;filter out features in sourced_features that already exist in series_ordered_by_features
+					;leaving only the ones that are unique to sourced_features
+					(filter
+						(lambda (not (contains_value series_ordered_by_features (target_value))))
+						sourced_features
+					)
+				)
+			boundary_min (first boundaries_tuple)
+			boundary_max (last boundaries_tuple)
+			ts_series_length_limit (retrieve_from_entity "tsSeriesLimitLength")
+
+			;store whether this is a rate or delta feature and the order, e.g., 'rate' and 2
+			feature_time_series_type (get featureAttributes (list feature "ts_type"))
+			feature_time_series_order (get featureAttributes (list feature "ts_order"))
+		))
+
+		;process each series individually
+		;pull all the values for the necessary_features, sort them, and then derive this feature based on the specified code
+		(map
+			(lambda (let
+				;(target_value) is in the format of (list (query_equals "series_feature_name" value) ... ) for all series_feature_name
+				(assoc
+					series_case_ids
+						(contained_entities
+							(append
+								(if (size case_ids)
+									(query_in_entity_list case_ids)
+									(list)
+								)
+								(target_value 1)
+							)
+						)
+				)
+
+				;now that we know how long each new series is, ensure that ts_series_length_limit is e*(longest series)
+				(if (> (* 2.718281828459 (size series_case_ids)) ts_series_length_limit)
+					(assign (assoc ts_series_length_limit (* 2.718281828459 (size series_case_ids)) ))
+				)
+
+				(declare (assoc
+					;series_data is all the necessary_features's values along with the case_id appended as the last column
+					series_data
+						(map
+							(lambda (append (retrieve_from_entity (target_value) necessary_features) (target_value)))
+							series_case_ids
+						)
+				))
+
+				;sort the series data according to the specified features if ordering has been provided
+				(if (size series_ordered_by_features)
+					(assign (assoc
+						series_data
+							(call MultiSortList (assoc
+								data series_data
+								column_order_indices (range 0 (size series_ordered_by_features))
+							))
+					))
+				)
+
+				;store the case ids in the new sorted order of series_data
+				(assign (assoc
+					series_case_ids
+						(map
+							(lambda (last (target_value)))
+							series_data
+						)
+				))
+
+				;remove the case_id column from series_data
+				(assign (assoc
+					series_data
+						(map
+							(lambda (trunc (target_value)))
+							series_data
+						)
+				))
+
+				;overwrite series data with just the new generated series values
+				(assign (assoc
+					series_data
+						(call AddDerivedCodeFeature (assoc
+							feature feature
+							features necessary_features
+							series_data series_data
+						))
+				))
+
+				;replace .nan with (null).  .nan are possible for initial cases in a series since they don't have any lags
+				(assign (assoc
+					series_data
+						(map
+							(lambda (if (= .nan (target_value)) (null) (target_value)))
+							series_data
+						)
+				))
+
+				;null out rate and delta features for the initial case in a series so it can be imputed below since those derived values
+				;may be quite inaccurate. Run only on the first 'feature_time_series_order' cases in the series (i.e., 2 cases for rate_2)
+				(if (or (= "rate" feature_time_series_type) (= "delta" feature_time_series_type))
+					(assign (assoc
+						series_data
+							(map
+								(lambda (if (< (target_index) feature_time_series_order) (null)  (target_value)) )
+								series_data
+							)
+					))
+				)
+
+				;do nothing if deriving nominals since they are restricted already
+				(if (contains_index nominalsMap feature)
+					(null)
+
+					;else derived continuous values need to be within bounds if bounds exist,
+					;but only bound those values that resulted from imputed values.
+					(or (!= (null) boundary_min) (!= (null) boundary_max) )
+					(let
+						(assoc
+							;at this point series_data is the full list of derived values for this feature in the same order as series_case_ids
+							;and these derived values will be respectively added to each of the cases at the end of this flow.
+							;
+							;iterate over a map of case index - > series_case_id, and since each index corresponds to its derived value,
+							;we pull all the corresponding imputed features for that case.
+							;e.g., if this feature needed feature 'A' with offset of 0 and feature 'B' with offset of 1, we pull the imputed
+							;features for this case and check if 'A' is on that list and then pull the imputed features from the previous
+							;case (offest of 1), and then check whether 'B' is on that list.  If 'B' happens to be on the previous cases's
+							;imputed features list, we will leave the previous cases's index and case id on this bound_check_indices_map
+							bound_check_indices_map
+								(filter
+									(lambda (let
+										(assoc
+											series_case_index (target_index 1)
+											offset_to_derived_imputed_features_map (assoc)
+										)
+
+										;create a map of relative offset -> set of derived imputed features in that case as referenced by that offset
+										(assign (assoc
+											offset_to_derived_imputed_features_map
+												(map
+													(lambda
+														;grab the set of imputed features for the correct series case id
+														;by its index using the current series case index minus the offset
+														(get cases_derive_imputed_map (get series_case_ids (- series_case_index (target_index))))
+													)
+													unique_source_offsets_set
+												)
+										))
+
+										;leave only those source features that are on the imputed features list for their respective offset
+										;e.g., if source feature 'B' uses an offset of 1, and happens to be on the list of imputed features for
+										;the case referenced by that offset, we leave 'B' and filter out the rest as appropriate
+										(size (filter
+											(lambda (let
+												(assoc
+													sourced_feature (target_value 1)
+													offsets (get sourced_features_offsets_map (target_value 1))
+												)
+
+												;keep those source features that were imputed in their respected offset row
+												(size (filter
+													(lambda
+														;leave only those offsets that had source features that were imputed, e.g., if source
+														;feature 'B' was on offset 1's list, leave "1", while filtering out the rest as appropriate
+														(contains_index
+															(get offset_to_derived_imputed_features_map (target_value))
+															sourced_feature
+														)
+													)
+													offsets
+												))
+											))
+											sourced_features
+										))
+									))
+									;iterate over a map of case index -> series case id so that it can be filtered
+									(zip (indices series_case_ids) series_case_ids)
+								)
+						)
+
+						;only do bounds check if there are indices that need checking
+						(if (size bound_check_indices_map)
+							(seq
+								(assign (assoc
+									series_data
+										(map
+											(lambda (let
+												(assoc
+													valid_value
+														(if (contains_index bound_check_indices_map (target_index 1))
+															(if (= (null) (target_value 1))
+																(true)
+
+																(and cycle_length (>= boundary_min boundary_max))
+																;for cyclic, exclusionary bounds mean the value has to be less than max or more than min
+																(or (<= (target_value 1) boundary_max) (>= (target_value 1) boundary_min))
+
+																;normal bounds check, if bound specified, value must be either more than min or less than max, respectively
+																(and
+																	(or (= (null) boundary_min) (>= (target_value 1) boundary_min))
+																	(or (= (null) boundary_max) (<= (target_value 1) boundary_max))
+																)
+															)
+
+															;else this index isn't on the list that needs checking, thus this is a valid value
+															(true)
+														)
+												)
+
+												;leave value as is
+												(if valid_value
+													(target_value)
+
+													;else bound to max value
+													(> (target_value) boundary_max)
+													boundary_max
+
+													;else bound to min value
+													boundary_min
+												)
+											))
+											series_data
+										)
+								))
+
+								;these case values were derived from imputed features, so we add this feature to cases_derive_imputed_map
+								(assign (assoc
+									bound_check_indices_map
+										;iterate over the case ids to create a map of case id -> updated derive_imputed map for just the updated cases
+										(map
+											(lambda
+												(if (contains_index cases_derive_imputed_map (target_index))
+													(append (get cases_derive_imputed_map (target_index)) (associate feature (null)) )
+													;else just store the feature
+													(associate feature (null))
+												)
+											)
+											(zip (values bound_check_indices_map))
+										)
+								))
+								;update cases_derive_imputed_map
+								(accum (assoc cases_derive_imputed_map bound_check_indices_map))
+							)
+						)
+					)
+				)
+
+				;add feature, setting each case's corresponding value
+				(call StoreCaseValues (assoc
+					;map of case id -> value
+					case_values_map (zip series_case_ids series_data)
+					label_name feature
+					overwrite (true)
+				))
+
+				;accumulate case ids for imputation after all series are derived
+				(if (and
+						(contains_value series_data (null))
+						(or
+							impute_nulls
+							(= "rate" feature_time_series_type)
+							(= "delta" feature_time_series_type)
+						)
+						;explicitly do not impute the time feature delta feature because it will always be synthed as non-null during case generation anyway because
+						;its bound's allow_null=false, and the only missing values it has are in the initial series cases, so imputing them here won't make a difference
+						;also not requiring it to be imputed here will prevent unnecessary analyzes during train for datasets that have no need for imputation
+						(not (= feature (concat "." tsTimeFeature "_delta_1")))
+					)
+					(let
+						(assoc
+							case_indices_to_impute
+								(filter
+									(lambda (= (null) (get series_data (target_value))) )
+									;for rate or delta features, only impute as many initial cases at the start of series as the order of this feature
+									;eg, if this is a rate_2 feature, impute the first two rate values, in descending order
+									(if (or (= "rate" feature_time_series_type) (= "delta" feature_time_series_type))
+										(reverse (trunc (indices series_data) feature_time_series_order))
+
+										;else check all cases in the the entire series
+										(indices series_data)
+									)
+								)
+						)
+						(accum (assoc cases_to_impute (unzip series_case_ids case_indices_to_impute) ))
+					)
+				)
+			))
+
+			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
+			(call GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+		)
+
+		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
+		(if (> ts_series_length_limit tsSeriesLimitLength)
+			(assign_to_entities (assoc tsSeriesLimitLength ts_series_length_limit ))
+		)
+
+		;update nominal counts for this newly derived nominal feature
+		(if (contains_index nominalsMap feature)
+			(call UpdateNominalClassCountsForFeature (assoc feature feature))
+		)
+
+		;once all the values have been derived for the entire feature, impute nulls if necessary
+		(if (size cases_to_impute)
+			(seq
+				;if this dataset hasn't been analyzed yet or if it has grown significantly since lass analysis pass
+				;do an analyze pass in order to impute with good hyperparameters
+				#!AnalyzePreDerivationImpute
+				(if (>= (call GetNumTrainingCases) autoAnalyzeThreshold)
+					(let
+						(assoc analyze_features defaultFeatures)
+
+						(if (= 0 autoAnalyzeThreshold)
+							(let
+								;get all currently trained features (labels) from a random case
+								(assoc
+									currently_trained_features_map
+										(get_all_labels
+											(retrieve_entity_root (call SampleCases (assoc num 1)) (true))
+										)
+								)
+
+								;first analyze may not have had all features trained yet, only analyze those that actually exist in the model
+								(assign (assoc
+									analyze_features
+										(filter
+											(lambda (contains_index currently_trained_features_map (target_value)) )
+											defaultFeatures
+										)
+								))
+
+								; first analyze set the initial threshold to be the max of 100 or the currently trained dataset size
+								(assign_to_entities (assoc autoAnalyzeThreshold (max (call GetNumTrainingCases) 100) ))
+
+							)
+						)
+
+						;run basic targetless analysis, will increase the autoAnalyzeThreshold because auto analyze is enabled
+						(call Analyze (assoc
+							targeted_model "targetless"
+							context_features analyze_features
+							weight_feature ".none"
+							use_case_weights (false)
+							inverse_residuals_as_weights (true)
+							k_folds 1
+							derived_auto_analyzed (true)
+						))
+					)
+				)
+
+				;iterate over cases that need to impute this feature and impute it
+				(map
+					(lambda (let
+						(assoc
+							case_id (target_value 1)
+							context_values (retrieve_from_entity (target_value 1) features)
+							react_value (null)
+						)
+
+						(assign (assoc
+							react_value
+								(call ReactDiscriminative (assoc
+									context_features features
+									context_values context_values
+									action_features (list feature)
+									;ignore the case for which we are doing the imputation since its feature value is null
+									ignore_case case_id
+									;don't encode the input because it's being passed in directly from the case
+									skip_encoding (true)
+									;don't decode because the output will be stored as-is right afterwards
+									skip_decoding (true)
+									return_action_values_only (true)
+									allow_nulls (false)
+								))
+						))
+
+						;update null value in the case with the reacted value
+						(call StoreCaseValues (assoc
+							;map of case id -> value
+							case_values_map (associate case_id (first react_value))
+							label_name feature
+							overwrite (true)
+						))
+					))
+					cases_to_impute
+				)
+
+				;add this feature to all these cases_to_impute as an imputed feature
+				(declare (assoc
+					cases_to_impute_imputed_features_map
+						;iterate over the case ids to create a map of case id -> updated derive_imputed map for just the updated cases
+						(map
+							(lambda
+								(if (contains_index cases_derive_imputed_map (target_index))
+									(append (get cases_derive_imputed_map (target_index)) (associate feature (null)) )
+									;else just store the feature
+									(associate feature (null))
+								)
+							)
+							(zip cases_to_impute)
+						)
+				))
+				;update cases_derive_imputed_map
+				(accum (assoc cases_derive_imputed_map cases_to_impute_imputed_features_map))
+			)
+		)
+	)
+
+	;derives the feature value for the specified feature provided the data to derive from
+	;parameters:
+	; feature: name of feature being derived
+	; features: list of feature names to match the series_data
+	; series_data: list of lists, where the inner list is in order of features
+	;  where the code can access the series_data via series_data via index series_row_index and values via series_row_values
+	;returns a list of lists, where the inner list is a single value for this specified derived feature
+	#AddDerivedCodeFeature
+	(declare
+		(assoc
+			feature ""
+			features (list)
+			series_data (list)
+		)
+
+		(declare (assoc
+			feat_index_map (zip features (indices features))
+			new_feature_transform (get featureCustomDerivedMethods (list feature "train"))
+			op_limit (* (size series_data) sandboxedComputeLimit)
+		))
+
+		;process and return the generated series data
+		(map
+			(lambda (let
+				(assoc series_row_index (target_index 1) )
+
+				(get_value
+					(call_sandboxed new_feature_transform (assoc
+						series_data series_data
+						series_row_index series_row_index
+						feat_index_map feat_index_map
+					)  op_limit sandboxedMemoryLimit)
+				)
+			))
+
+			series_data
+		)
+	)
+
+	;derives multiple feature values for the specified derived features provided the data to derive from
+	;parameters:
+	; derived_features: list of features to derived
+	; features: list of feature names to match the series_data in the same order as the columns of series_data
+	; series_data: list of lists, where the inner list is in the order of features
+	;  where the code can access the series_data via series_data via index series_row_index and values via series_row_values
+	;returns a list of lists of data, where the inner list values are the derived features matching derived_features
+	#AddDerivedIndependentCodeFeatures
+	(declare
+		(assoc
+			derived_features (list)
+			features (list)
+			series_data (list)
+		)
+
+		(declare (assoc
+			feat_index_map (zip features (indices features))
+			;assoc of derived feature -> code of function for its derivation
+			new_feature_transform_map
+				(map
+					(lambda (get featureCustomDerivedMethods (list (target_index 1) "train")) )
+					(zip derived_features)
+				)
+			op_limit (* (size series_data) sandboxedComputeLimit)
+		))
+
+		(map
+			(lambda (let
+				(assoc series_row_index (target_index 1) )
+
+				(map
+					(lambda (get_value
+						(call_sandboxed (get new_feature_transform_map (target_value)) (assoc
+							series_data series_data
+							series_row_index series_row_index
+							feat_index_map feat_index_map
+						)  op_limit sandboxedMemoryLimit)
+					))
+					derived_features
+				)
+			))
+			series_data
+		)
+	)
+
+	;constrains code to the specified list of allowed_opcodes
+	; then it finds any node that has a label and replaces it by a copy of label_to_code,
+	; replacing label_value with the value at the label and label_name with the label name
+	#ParseDerivedFeatureCode
+	(declare
+		(assoc
+			code_string (null)
+			label_to_code (null)
+		)
+
+		(declare (assoc code (parse code_string)))
+
+		(rewrite
+			(lambda (let
+				(assoc
+					node (target_value 1)
+					label_name (first (get_labels (target_value 1)))
+				)
+
+				(if
+					;if not a label, just use
+					(not label_name)
+					node
+
+					;else need to rewrite label_to_code
+					(rewrite
+						(lambda (let
+							(assoc to_replace_node (target_value 1))
+							(if
+								;replaces instance of 'label_value' found in the passed in label_to_code with the actual node value (i.e., offset)
+								(= to_replace_node (lambda label_value))
+								(get_value node)
+
+								;replaces instance of 'label_name' found in the passed in label_to_code with the actual name of the label (i.e., feature)
+								(= to_replace_node (lambda label_name))
+								label_name
+
+								to_replace_node
+							)
+							;to_replace_node
+						))
+						label_to_code
+					)
+				)
+			))
+			code
+		)
+	)
+
+	;Derive feature values from the provided features and values using each derived feature's custom code string, output a list of computed values.
+	;
+	;parameters:
+	; derived_features: list of strings, feature name(s) for which values should be derived, in the specified order.
+	; features_values_map: assoc of feature -> values used to compute the resulting value.
+	#ComputeFeatureValuesFromCode
+	(declare
+		(assoc
+			derived_features (list)
+			feature_values_map (assoc)
+
+			;not a parameter
+			has_derived_datetime_features (false)
+		)
+
+		;if there are datetime features, make sure to convert them appropriately
+		(if hasDateTimeFeatures
+			(seq
+				(assign (assoc has_derived_datetime_features (size (intersect (zip derived_features) featureDateTimeMap)) ))
+
+				;if feature_values_map has datetime features, convert them to epoch
+				(if (size (intersect feature_values_map featureDateTimeMap))
+					(assign (assoc
+						feature_values_map
+							(map
+								(lambda
+									(if (contains_index featureDateTimeMap (target_index))
+										;encode datetime by converting string date time into seconds since epoch
+										(if (!= (null) (target_value))
+											(format
+												(target_value)
+												(get featureDateTimeMap (list (target_index 1) "date_time_format"))
+												"number"
+												(assoc "locale" (get featureDateTimeMap (list (target_index 2) "locale")))
+												(null)
+											)
+										)
+
+										;else output original value
+										(target_value)
+									)
+								)
+								feature_values_map
+							)
+					))
+				)
+			)
+		)
+
+		(declare (assoc
+			op_limit (* (size feature_values_map) sandboxedComputeLimit)
+		))
+
+		(declare (assoc
+			derived_values
+				;iterate over the list of derived features and compute each feature value from the provided features and feature_values
+				(map
+					(lambda
+						(if (contains_index (get featureAttributes (target_value)) "derived_feature_code")
+							(let
+								(assoc
+									raw_code_string (get featureAttributes (list (target_value 2) "derived_feature_code"))
+								)
+
+								(declare (assoc
+									new_feature_transform_processed  (get featureCustomDerivedMethods (list (target_value 2) "react"))
+									output_value (null)
+								))
+								(assign (assoc
+									output_value
+										(get_value
+											(call_sandboxed new_feature_transform_processed (assoc feature_values_map feature_values_map) op_limit sandboxedMemoryLimit)
+										)
+								))
+
+								;prevent output of .nan, replace with null if any encountered
+								(if (= .nan output_value)
+									(assign (assoc output_value (null)))
+								)
+
+								;append derived feature and value to the input features and values so that they could be used by the next derived feature
+								(accum (assoc feature_values_map (associate (target_value 2) output_value)))
+
+								output_value
+							)
+						)
+					)
+					derived_features
+				)
+		))
+
+		;if derived_features has datetime features, convert them to strings
+		(if has_derived_datetime_features
+			(map
+				(lambda (let
+					(assoc feature (get derived_features (target_index 1)))
+
+					(if (contains_index featureDateTimeMap feature)
+						;encode datetime by converting seconds since epoch back into a string date
+						(if (!= (null) (target_value))
+							(format
+								(target_value)
+								"number"
+								(get featureDateTimeMap (list feature "date_time_format"))
+								(null)
+								(assoc "locale" (get featureDateTimeMap (list feature "locale")))
+							)
+						)
+
+						;else output original value
+						(target_value)
+					)
+				))
+				derived_values
+			)
+
+			;else just return the values
+			derived_values
+		)
+	)
+)

@@ -1,0 +1,319 @@
+;Module for trainee_template.
+;Contains helper methods interacting with feature bounds for case generation.
+(null
+
+	;given a boundary map for a feature, update the values for cyclic and datetime features
+	;outputs a tuple (list) of [boundary_min, boundary_max]
+	;
+	;parameters:
+	; feature : name of feature
+	; bounds_map : bounds for the feature
+	; is_datetime : flag, set to true if feature is a datetime feature
+	; cycle_length : length of cycle if feature is cyclic
+	#ConstrainBoundariesForFeature
+	(let
+		(assoc
+			boundary_min (get bounds_map "min")
+			boundary_max (get bounds_map "max")
+		)
+
+		;if this is a datetime feature convert the min and max boundaries from date strings into values for comparison
+		(if is_datetime
+			;if bounds_map has epoch continuous values for bounds cached, use those
+			(if (get bounds_map "has_epoch_bounds")
+				(assign (assoc
+					boundary_max (get bounds_map "epoch_max_value")
+					boundary_min (get bounds_map "epoch_min_value")
+				))
+
+				;else, convert the given min and max from string date to epoch seconds
+				(assign (assoc
+					boundary_max
+						(if (!= (null) boundary_max)
+							(if (!= "number" (get_type_string boundary_max))
+								(call ConvertDateToEpoch (assoc date boundary_max feature feature))
+								;else boundary value was provided in epoch number format already, keep it as-is
+								boundary_max
+							)
+						)
+
+					boundary_min
+						(if (!= (null) boundary_min)
+							(if (!= "number" (get_type_string boundary_min))
+								(call ConvertDateToEpoch (assoc date boundary_min feature feature))
+								;else boundary value was provided in epoch number format already, keep it as-is
+								boundary_min
+							)
+						)
+				))
+			)
+		)
+
+		;ensure cyclic boundaries are properly specified if cyclic
+		(if (and
+				cycle_length
+				(or (= (null) boundary_min) (= (null) boundary_max) (< boundary_min boundary_max) )
+			)
+			(assign (assoc
+				boundary_min (max boundary_min 0)
+				;to boundary max for cyclic to the specified max if one was provided, otherwise it's the cycle length
+				boundary_max (or boundary_max (get cyclicFeaturesMap feature))
+			))
+		)
+
+		;explicitly convert non-null boundary values to numbers if they were passed in as strings, else leave them as null
+		(assign (assoc
+			boundary_min (if (!= boundary_min (null)) (+ boundary_min))
+			boundary_max (if (!= boundary_max (null)) (+ boundary_max))
+		))
+
+		(list boundary_min boundary_max)
+	)
+
+	;Helper method for GenerateCase that sets feature_bounds_map by taking the model specified bounds and overwriting them with user passed-in ones as appropriate
+	#!PrepareFeatureBoundsMap
+	(seq
+		;if custom feature bounds map is specified and it has datetime features, ensure that epoch min/max will be calculated for these
+		;custom datetimes by setting those features' has_epoch_bounds flag to false
+		(if feature_bounds_map
+			(assign (assoc
+				feature_bounds_map
+					(map
+						(lambda
+							(if (contains_index featureDateTimeMap (target_index))
+								(append
+									(target_value)
+									(assoc "has_epoch_bounds" (false))
+								)
+
+								(target_value)
+							)
+						)
+						feature_bounds_map
+					)
+			))
+		)
+
+		;overwrite the model featureBoundsMap with the passed in react-specific one
+		(assign (assoc
+			feature_bounds_map
+				(if hasStringOrdinals
+					;overwrite allowed string ordinals if specified for react, else remove the global allowed list since it contains all values
+					(map
+						(lambda
+							;overwrite allowed feature attribute for string ordinals
+							(if (contains_index ordinalStringToOrdinalMap (target_index))
+								;if user specified a custom allowed list for this specific react, encode it and set as the allowed list
+								(if (size (get feature_bounds_map (list (target_index 1) "allowed")))
+									(set
+										(target_value)
+										"allowed"
+										(unzip
+											(get ordinalStringToOrdinalMap (target_index))
+											(get feature_bounds_map (list (target_index 1) "allowed"))
+										)
+									)
+
+									;else using global bounds, clear out the allowed list since it's unnecessary
+									(remove (target_value) "allowed")
+								)
+
+								;else bounds as-is
+								(target_value)
+							)
+						)
+						(append featureBoundsMap feature_bounds_map)
+					)
+
+					;else append the the passed params to the model parameters
+					(append featureBoundsMap feature_bounds_map)
+				)
+		))
+	)
+
+	;Helper method for GenerateCase that may modify the generated value to ensures it stays within feature bounds.
+	;If the generated value is out of bounds, this method will attempt to modify that value up to 5 times by adding
+	;different amounts of noise based on desired_conviction until a valid value is achieved.
+	;If that fails, it'll randomly select a value within the range of feature bounds.
+	#!LimitGeneratedValueToFeatureBounds
+	(let
+		(assoc
+			regenerate 0
+			allow_null (get feature_bounds_map (list feature "allow_null"))
+			boundaries_tuple
+				(call ConstrainBoundariesForFeature (assoc
+					bounds_map (get feature_bounds_map feature)
+					feature feature
+					is_datetime (and hasDateTimeFeatures (contains_index featureDateTimeMap feature))
+					cycle_length cycle_length
+				))
+			out_of_bounds (false)
+		)
+		(declare (assoc
+			boundary_min (first boundaries_tuple)
+			boundary_max (last boundaries_tuple)
+			;halve the desired conviction to double the noise for every retry - https://arxiv.org/pdf/1808.10410
+			retry_desired_conviction (/ desired_conviction 2)
+		))
+
+		;if boundaries are same, set the generated value to the boundary since that is the only allowed value
+		(if (and (!= (null) boundary_min) (= boundary_min boundary_max))
+			(assign (assoc new_feature_value boundary_min))
+
+			;else regenerate the fetaure value up to 5 times
+			(while (< regenerate 6)
+				;for cyclic features, ensure that the value is within cycle_length by setting it to new_feature_value % cycle_length
+				(if (and cycle_length (!= (null) new_feature_value))
+					(assign (assoc
+						new_feature_value
+							(if (< new_feature_value 0)
+								;convert negative values to positive by adding the modulo to the cycle length
+								(+ cycle_length (mod new_feature_value cycle_length))
+								(mod new_feature_value cycle_length)
+							)
+					))
+				)
+
+				(assign (assoc
+					out_of_bounds
+						(if (and cycle_length (>= boundary_min boundary_max))
+							(and (> new_feature_value boundary_max) (< new_feature_value boundary_min))
+
+							(or
+								(and (!= (null) boundary_min ) (< new_feature_value boundary_min))
+								(and (!= (null) boundary_max ) (> new_feature_value boundary_max))
+							)
+						)
+				))
+
+				(if (or out_of_bounds (and (= (null) new_feature_value) (= (false) allow_null)))
+					(seq
+						(if (< regenerate 5)
+							(assign (assoc new_feature_value (call GenerateFeatureValue (assoc desired_conviction retry_desired_conviction))))
+							;else attempted to be generated 5 times, on the 6th just choose a random value in the specified range
+							(assign (assoc
+								new_feature_value
+									(if action_feature_is_dependent_and_continuous
+										(call !GetRandomWithinBoundariesForContinuousDependent)
+
+										;non-dependent features
+										(if (and (!= (null) boundary_max) (!= (null) boundary_min))
+											(if (and cycle_length (< boundary_max boundary_min))
+												;for exclusionary cyclics, generate a value in the allowed range
+												(+ 	boundary_min (rand (+ boundary_max (- cycle_length boundary_min))))
+
+												(+ boundary_min (rand (- boundary_max boundary_min)))
+											)
+
+											;else only one boundary is specified, choose a random value by adding or subtracting the random from
+											;the boundary instead of from the action_value
+											(let
+												(assoc R (- (rand) 0.5))
+												;always ensure the random value is positive by taking an abs
+												(declare (assoc ln_const (abs (log (- 1 (* 2 (abs R)))))))
+
+												(if
+													;only boundary_max was specified, subtract the random value from it
+													(!= (null) boundary_max)
+													(- boundary_max (* feature_residual ln_const (/ 1 desired_conviction)))
+
+													;else only boundary_min was specified, add to it
+													(+ boundary_min (* feature_residual ln_const (/ 1 desired_conviction)))
+												)
+											)
+										)
+									)
+							))
+						)
+						;halve the desired conviction to double the noise for every retry
+						(assign (assoc retry_desired_conviction (/ retry_desired_conviction 2)))
+						(accum (assoc regenerate 1))
+					)
+
+					;else within bounds, stop regenerating values
+					(conclude)
+				)
+			)
+		)
+	)
+
+	;if after failing to generate a valid value and having to pick a random value within a feature range, when
+	;picking for a continuous dependent, select from a limited range by looking up all the possible bounds
+	;given nominal dependent features in the contexts. If there are no nominal contexts, just use the default bounds.
+	#!GetRandomWithinBoundariesForContinuousDependent
+	(let
+		(assoc
+			nominals (get continuousToNominalDependenciesMap feature)
+			boundary_pairs (list)
+			context_map (zip context_features context_values)
+		)
+
+		;iterate over the list of nominal dependents for this continuous feature, pulling all the bound pairs
+		;corresponding to the context values
+		(map
+			(lambda (if (contains_index context_map (target_value))
+				(let
+					(assoc
+						f_index (target_index 1)
+						f_value (get context_map (target_value 1))
+						boundary_combos (list)
+					)
+
+					;leave only those value combinations that have this nominal context value for this nominal feature
+					(assign (assoc
+						boundary_combos
+							(filter
+								(lambda (= f_value (get (target_value) f_index)))
+								(get dependentValuesCombinationsMap feature)
+							)
+					))
+
+					;pull all the defined boundaries for this nominal feature value
+					(accum (assoc
+						boundary_pairs
+							(map
+								(lambda (get dependentsBoundaryMap (append feature (target_value))) )
+								boundary_combos
+							)
+					))
+				)
+			))
+			nominals
+		)
+
+		;boundary_pairs will be a list of all (min, max) continuous values for this continuous feature for all the dependent feature combinations
+		;if there's just the one boundary pair, output it as-is
+		(if (= 1 (size boundary_pairs))
+			(+ (first boundary_pairs) (rand (- (last boundary_pairs) (first boundary_pairs))))
+
+			;else no bounds defined, output default feature boundary random value
+			(= 0 (size boundary_pairs))
+			(+ boundary_min (rand (- boundary_max boundary_min)))
+
+			;else need to output the largest min and the smallest max if min < max of all the boundary pairs
+			(let
+				(assoc
+					min (apply "max" (map (lambda (first (target_value))) boundary_pairs))
+					max (apply "min" (map (lambda (last (target_value))) boundary_pairs))
+				)
+
+				;e.g, heartrate-bpm has boundary_pairs list of (40,170) and (60,220), this will pick a random value between 60 and 170
+				(if (< min max)
+					(+ min (rand (- max min)))
+
+					;else largest min is more than smallest max, output a random value within range of
+					;all bounds for these dependent feature combinations
+					;e.g, heartrate-bpm has boundary_pairs list of (40,80) and (90,180), this will pick a random value between 40 and 180
+					(seq
+						(assign (assoc
+							min (apply "min" (map (lambda (first (target_value))) boundary_pairs))
+							max (apply "max" (map (lambda (last (target_value))) boundary_pairs))
+						))
+						;random value between range of smallest min and largest max
+						(+ min (rand (- max min)))
+					)
+				)
+			)
+		)
+	)
+)

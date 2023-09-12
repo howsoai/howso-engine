@@ -1,0 +1,370 @@
+;Module for trainee_template.
+;Contains methods for the removal of cases.
+(null
+
+	;removes all contained entities that are cases except those that are complete contexts and actions
+	; as those containing all of context_features or action_features
+	;any additional cases to keep should be passed in as keys to the optional parameter cases_to_keep (values don't matter)
+	#RemoveIncompleteCases
+	(declare
+		(assoc
+			context_features (list)
+			action_features (list)
+
+			;keys represent contexts that should be kept (for quick lookup), values are null
+			cases_to_keep_map (assoc)
+		)
+
+		(let
+			(assoc features (append context_features action_features))
+
+			;populate cases_to_keep_map
+			(assign (assoc
+				cases_to_keep_map
+					(zip
+						;cases
+						(contained_entities
+							(map (lambda
+									(query_exists (target_value))
+								)
+								features
+							)
+						)
+					)
+			))
+		)
+
+		(if (!= (size cases_to_keep_map) (call GetNumTrainingCases))
+			;model has changed so clear out these cached value
+			(call ClearCachedCountsAndEntropies)
+		)
+
+		;destroy any cases that aren't in cases_to_keep_map
+		(map
+			;destroy any entities
+			(lambda (destroy_entities (target_value)))
+
+			;that have empty lists of empty replay references
+			(filter
+				(lambda
+					(not (contains_index cases_to_keep_map (target_value)))
+				)
+
+				(call AllCases)
+			)
+		)
+	)
+
+	;goes through every session and removes any cases within the replay that are invalid
+	#RemoveInvalidReplaySteps
+	(map
+		(lambda (assign_to_entities
+			(target_value)
+			(assoc
+				".replay_steps"
+					(filter
+						(lambda (and
+							;case should not be null
+							(!= (null) (target_value))
+							;case should exist
+							(contains_entity (target_value))
+						))
+						(retrieve_from_entity (target_value 1) ".replay_steps")
+					)
+			)
+		))
+
+		(call GetSessionIds)
+	)
+
+	;removes any unused cases from trainee
+	#RemoveCasesWithoutSessionReferences
+	(let
+		(assoc sessions_map (zip (call GetSessionIds)))
+
+		(map
+			;destroy any entities
+			(lambda (destroy_entities (target_value) ))
+
+			;keep only those cases that don't have a session or non-existent sessions
+			(filter
+				(lambda
+					(or
+						(= (retrieve_from_entity (target_value) internalLabelSession) (null))
+						(not (contains_index sessions_map (retrieve_from_entity (target_value) internalLabelSession)))
+					)
+				)
+
+				(call AllCases)
+			)
+		)
+
+		;model has changed so clear out these cached value
+		(call ClearCachedCountsAndEntropies)
+
+		(true)
+	)
+
+	;Remove cases and cleanup session entities replay steps and update all the remaining cases' session indices
+	;parameters:
+	; cases: list of case ids to remove
+	; distribute_weight_feature: name of feature into which to distribute the removed cases' weights to their neighbors.
+	#RemoveCases
+	(declare
+		(assoc
+			cases (list)
+			distribute_weight_feature (null)
+		)
+
+		(if (= 0 (size cases)) (conclude))
+
+		;list of session ids, one per case
+		(declare (assoc
+			sessions (map (lambda (retrieve_from_entity (target_value) internalLabelSession)) cases)
+			train_indices (map (lambda (retrieve_from_entity (target_value) internalLabelSessionTrainingIndex)) cases)
+		))
+
+		(declare (assoc
+			;map of session -> list of removed case ids. If a session only has one case id, it will be by itself and not in a list.
+			sessions_map
+				(zip
+					(lambda (append (target_value 1) (target_value)))
+					;indices are sessions, which when clobbered will append the case id to the growing list of ids for each session
+					sessions
+					cases
+				)
+			;map of session -> list of removed case training indices
+			session_train_indices_map
+				(zip
+					(lambda (append (target_value 1) (target_value)))
+					;indices are sessions, which when clobbered will append the train_index to the growing list of train_indices for each session
+					sessions
+					train_indices
+				)
+		))
+
+		;need to distribute the weight feature values from these removed cases to neighbors
+		(if distribute_weight_feature
+			(seq
+				;CreateCaseWeights will find all cases missing distribute_weight_feature, then initialize
+				;distribute_weight_feature with a value of 1.0 for each
+				(call CreateCaseWeights (assoc
+					feature_name distribute_weight_feature
+				))
+				(call DistributeCaseInfluenceWeights (assoc
+					features defaultFeatures
+					case_ids cases
+					distribute_weight_feature distribute_weight_feature
+				))
+			)
+		)
+
+		(declare (assoc re_derivation_series_case_ids (null) ))
+
+		;check if time series dataset, if so, need to pull all cases from affected series so that their
+		;derived features can be-rederived below after cases are removed
+		(if (and (!= (null) tsTimeFeature) (size derivedFeaturesSet))
+			(let
+				(assoc series_id_features (get tsModelFeaturesMap "series_id_features") )
+
+				;for each case pull the list of series id values for all the series id features
+				(declare (assoc
+					series_id_lists
+						(map
+							(lambda (retrieve_from_entity (target_value) series_id_features))
+							cases
+						)
+				))
+
+				;for each series id feature, create a list of cases that were affected and will need to be re-derived
+				(declare (assoc
+					series_case_ids_per_id_feature
+						(map
+							(lambda (let
+								(assoc
+									feature (target_value 1)
+									feature_index (target_index 1)
+								)
+
+								(apply "append"
+									(map
+										(lambda
+											(contained_entities (list
+												(query_equals feature (target_value 1))
+											))
+										)
+										;all unique ids for this feature
+										(values
+											(map
+												(lambda (get (target_value) feature_index))
+												series_id_lists
+											)
+											(true)
+										)
+									)
+								)
+							))
+							series_id_features
+						)
+				))
+
+				;collapse all lists of cases into one list of unique case ids
+				(assign (assoc
+					re_derivation_series_case_ids (values (apply "append" series_case_ids_per_id_feature) (true) )
+				))
+			)
+		)
+
+		;remove all the cases
+		(apply "destroy_entities" cases)
+
+		;iterate over every session, cleaning up its replay steps and uptating its cases' training indices
+		(map
+			(lambda (let
+				(assoc
+					session (target_index 1)
+					replay_steps (retrieve_from_entity (target_index 1) ".replay_steps")
+					removed_cases_map
+						;if there's only one case for this session, its size will be 0, wrap it in a list prior to zipping
+						(if (= 0 (size (target_value 1)))
+							(zip (list (target_value 2)))
+							(zip (target_value 1))
+						)
+				)
+
+				;filter cases from replay steps, leave only those cases that have not been removed
+				(assign (assoc
+					replay_steps (filter (lambda (not (contains_index removed_cases_map (target_value)))) replay_steps)
+				))
+
+				(assign_to_entities session (assoc
+					".replay_steps" replay_steps
+					".indices_map"
+						;.indices_map is an assoc of train_index->case_id, so we can just simply delete all the removed training_indices with one delete call
+						(remove
+							(retrieve_from_entity session ".indices_map")
+							(get session_train_indices_map session)
+						)
+				))
+			))
+			sessions_map
+		)
+
+		;model has changed so clear out these cached value
+		(call ClearCachedCountsAndEntropies)
+
+		;if there are cases that need to have features re-derived, do it here
+		(if re_derivation_series_case_ids
+			(call DeriveTrainFeatures (assoc
+				features defaultFeatures
+				;keep and derive only those features that are not in the features list
+				derived_features (get tsModelFeaturesMap "ts_derived_features")
+				case_ids re_derivation_series_case_ids
+			))
+		)
+
+		(null)
+	)
+
+	;performs data reduction: removes training cases that have the highest conviction
+	;returns true
+	;parameters:
+	; features: list of the features to search
+	; num_cases_to_remove: the total number of training cases to remove
+	; distribute_weight_feature: name of feature into which to distribute the removed cases' weights to their neighbors.
+	#RemoveLeastInformativeTrainingCases
+	(declare
+		(assoc
+			features (list)
+			num_cases_to_remove 3
+			distribute_weight_feature (null)
+
+			;local variable, not a parameter
+			hyperparam_map
+				(call GetHyperparameters (assoc
+					context_features features
+					feature ".targetless"
+					mode "robust"
+					weight_feature ".none"
+				))
+		)
+
+		(declare (assoc
+			entropies_map
+				(compute_on_contained_entities (list
+					(compute_entity_kl_divergences
+						(get hyperparam_map "k")
+						features
+						(null)
+						(get hyperparam_map "featureWeights")
+						queryDistanceTypeMap
+						(get hyperparam_map "featureDomainAttributes")
+						(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+						(get hyperparam_map "p")
+						(get hyperparam_map "dt")
+						(null) ;don't want to weight cases even if they're weighted
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						numericalPrecision
+					)
+				))
+		))
+
+		;sort by increasing entropy the lowest entropy at the end of the list
+		(declare (assoc
+			cases_by_entropy
+				(sort
+					(lambda
+						(> (get entropies_map (target_value 1)) (get entropies_map (target_value)))
+					)
+					(indices entropies_map)
+				)
+		))
+
+		;delete the lowest entropy cases
+		(call RemoveCases (assoc
+			cases (tail cases_by_entropy num_cases_to_remove)
+			distribute_weight_feature distribute_weight_feature
+		))
+
+		(accum_to_entities (assoc revision 1))
+
+		(true)
+	)
+
+	;performs data reduction: removes training cases that have been accessed the least
+	;parameters:
+	; num_cases_to_remove: the total number of training cases to remove
+	; case_access_count_label: label on which accumulated the number of times each context has been accessed
+	; distribute_weight_feature: name of feature into which to distribute the removed cases' weights to their neighbors.
+	#RemoveLeastUsedTrainingCases
+	(declare
+		(assoc
+			case_access_count_label ""
+			num_cases_to_remove 3
+			entities (call AllCases)
+			distribute_weight_feature (null)
+		)
+
+		;get access count for each entity
+		(declare (assoc
+			access_count
+				(map
+					(lambda (retrieve_from_entity (target_index) case_access_count_label) )
+					(zip entities)
+				)
+		))
+
+		;sort by access count
+		(assign (assoc entities (sort (lambda (< (get access_count (target_value 1)) (get access_count (target_value))) ) entities)))
+
+		;delete those with the lowest access count
+		(call RemoveCases (assoc
+			cases (trunc entities num_cases_to_remove)
+			distribute_weight_feature distribute_weight_feature
+		))
+
+		(accum_to_entities (assoc revision 1))
+	)
+)

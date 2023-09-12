@@ -1,0 +1,169 @@
+(seq
+	;import the unit_test 'library'
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_evaluate.amlg"))
+
+	#howso (null)
+	(direct_assign_to_entities (assoc howso (load "../howso.amlg")))
+	(assign_to_entities (assoc filepath "../"))
+
+	(call create_trainee (assoc trainee "model"))
+	(call set_internal_parameters (assoc
+		trainee "model"
+	))
+
+	(declare (assoc
+		;set to true to see full output
+		verbose (false)
+		;set to null to do full model
+		submodel_size 5000
+	    data (load "../performance_tests/performance_data/bank-full.csv")
+	))
+
+	(declare (assoc
+		features (first data)
+		training_data (tail data)
+		start (system_time)
+	))
+
+	(call set_random_seed (assoc trainee "model" seed "abcdef"))
+
+	(call set_feature_attributes (assoc
+		trainee "model"
+		features
+			(assoc
+				"job" (assoc "type" "nominal"  "id_feature" (true))
+				"marital" (assoc "type" "nominal")
+				"education"  (assoc "type" "nominal")
+				"default" (assoc "type" "nominal")
+				"housing"  (assoc "type" "nominal")
+				"loan" (assoc "type" "nominal")
+				"contact" (assoc "type" "nominal")
+				"month" (assoc "type" "nominal")
+				"poutcome"  (assoc "type" "nominal")
+				"y" (assoc "type" "nominal")
+				"pdays" (assoc "type" "ordinal")
+				"age" (assoc "type" "ordinal")
+				"day" (assoc "type" "ordinal")
+				"campaign" (assoc "type" "ordinal")
+			)
+	))
+
+	(call train (assoc
+		trainee "model"
+		features features
+		input_cases (trunc training_data submodel_size)
+	))
+
+	(declare (assoc
+		load_time (- (system_time) start)
+		num_cases (get (call get_num_training_cases (assoc trainee "model")) (list "payload" "count"))
+	))
+	(print "Loaded Bank: " num_cases "\n")
+	(print "Load time: " load_time "\n")
+
+    (declare (assoc
+        features_to_code_map
+            (assoc
+                "age" "(+ 2 #age 0)"
+                "y" "(concat \"TEST:\" #y 0)"
+            )
+
+        aggregation_code "(apply \"+\" #age 0)"
+        start_time (system_time)
+    ))
+
+    (declare (assoc
+        result
+            (call evaluate (assoc
+                features_to_code_map features_to_code_map
+                aggregation_code aggregation_code
+                trainee "model"
+            ))
+    ))
+
+    (declare (assoc
+        eval_time (- (system_time) start_time)
+        feat_to_idx (zip features (indices features))
+        results (get result (list "payload" "evaluated"))
+		aggregate_result (get result (list "payload" "aggregated"))
+    ))
+
+	(print "Evaluation time: " eval_time "\n")
+
+	; Checking returned values for correctness
+    (map
+		(lambda (let
+			(assoc
+				feature (target_index 1)
+				value_list (target_value 1)
+			)
+
+			(declare (assoc
+				feat_idx (get feat_to_idx feature)
+				custom_code (get features_to_code_map feature)
+			))
+
+			; Retrieving case values for given feature
+			(declare (assoc
+				case_values
+					(map
+						(lambda (get (target_value) feat_idx) )
+						training_data
+					)
+			))
+
+			; Iterating over each evaluated value and original case value
+			(assign (assoc
+				result
+					(range
+						(lambda (let
+							(assoc
+								eval_value (get value_list (target_index 1))
+								original_value (get case_values (target_index 1))
+							)
+
+							(if (= feature "age")
+								(= eval_value (+ 2 original_value))
+
+								(= feature "y")
+								(= eval_value (concat "TEST:" original_value))
+
+								; else
+								(true)
+							)
+
+						))
+						0 (- (size value_list) 1) 1
+					)
+			))
+
+			(print "Checking evaluate results on feature: " feature "\n")
+			(call assert_true (assoc
+				obs (apply "=" (append result (true)))
+			))
+
+			(if verbose
+				(seq
+					(print "Feature:			" feature "\n")
+					(print "Custom Code:		" custom_code "\n")
+					(print "Feature Index:		" feat_idx "\n")
+					(print "Case Values:		" case_values "\n")
+					(print "Evaluated Values:	" value_list "\n")
+				)
+			)
+		))
+		results
+	)
+
+	(print "Checking aggregate result: \n")
+	(call assert_approximate (assoc
+		obs aggregate_result
+		exp (apply "+" (get results "age"))
+		percent 0.00001
+	))
+
+	(destroy_entities "model")
+
+	(call exit_if_failures (assoc msg unit_test_name))
+)

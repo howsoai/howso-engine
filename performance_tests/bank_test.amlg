@@ -1,0 +1,141 @@
+(seq
+	#howso (null)
+	(direct_assign_to_entities (assoc howso (load "../howso.amlg")))
+	(assign_to_entities (assoc filepath "../"))
+
+	(call create_trainee (assoc trainee "model"))
+	(call set_internal_parameters (assoc
+		trainee "model"
+		hyperparameter_map (assoc ".targetless" (assoc "robust" (assoc ".none" (assoc "k" 8 "p" 2 "dt" -1))))
+	))
+
+	(declare (assoc
+		;set to true to see full output
+		verbose (false)
+		;set to null to do full model
+		submodel_size (null) ;10000
+
+		use_case_weights (true)
+
+	    data (load "performance_data/bank-full.csv")
+	))
+
+	(declare (assoc
+		features (first data)
+		training_data (tail data)
+		start (system_time)
+		k 8
+		p 2
+		use_deviations (null)
+	))
+
+	(call set_random_seed (assoc trainee "model" seed "abcdef"))
+
+	(call set_feature_attributes (assoc
+		trainee "model"
+		features
+			(assoc
+				"job" (assoc "type" "nominal"  "id_feature" (true))
+				"marital" (assoc "type" "nominal")
+				"education"  (assoc "type" "nominal")
+				"default" (assoc "type" "nominal")
+				"housing"  (assoc "type" "nominal")
+				"loan" (assoc "type" "nominal")
+				"contact" (assoc "type" "nominal")
+				"month" (assoc "type" "nominal")
+				"poutcome"  (assoc "type" "nominal")
+				"y" (assoc "type" "nominal")
+				"pdays" (assoc "type" "ordinal")
+				"age" (assoc "type" "ordinal")
+				"day" (assoc "type" "ordinal")
+				"campaign" (assoc "type" "ordinal")
+			)
+	))
+
+	(call train (assoc
+		trainee "model"
+		features features
+		input_cases (if submodel_size (trunc training_data submodel_size) training_data)
+	))
+
+	(declare (assoc
+		load_time (- (system_time) start)
+		num_cases (get (call get_num_training_cases (assoc trainee "model")) (list "payload" "count"))
+	))
+	(print "Loaded Bank: " num_cases "\n")
+	(print "Load time: " load_time "\n")
+	(if verbose (print "analyzing Bank ...\n"))
+
+	(assign (assoc start (system_time) ))
+
+	(call analyze (assoc
+		trainee "model"
+		context_features features
+		targeted_model "targetless"
+		p_values (list 0.5 1 2)
+		k_values (list 5 8 13)
+		k_folds 1
+		num_analysis_samples 1000
+		inverse_residuals_as_weights (true)
+		use_case_weights use_case_weights
+		use_deviations use_deviations
+	))
+
+	(declare (assoc analyze_time (- (system_time) start) ))
+	(print "Analyze time: " analyze_time "\n" )
+	(declare (assoc
+		params (get (call get_internal_parameters (assoc trainee "model")) "payload")
+		case_weight_feature (if use_case_weights ".case_weight" ".none")
+	))
+	(if verbose (print "analyzed to: " params))
+
+	(assign (assoc
+		k (get params (list "hyperparameter_map" ".targetless" "robust" case_weight_feature "k"))
+		p (get params (list "hyperparameter_map" ".targetless" "robust" case_weight_feature "p"))
+		deviations (get params (list "hyperparameter_map" ".targetless" "robust" case_weight_feature "useDeviations"))
+	))
+
+	(assign (assoc start (system_time) ))
+
+	(call react_into_trainee (assoc
+		trainee "model"
+		context_features features
+		num_samples 1000
+		residuals_robust (true)
+		use_case_weights use_case_weights
+	))
+
+	(declare (assoc residuals_time (- (system_time) start) ))
+	(print "Residuals time: " residuals_time "\n")
+
+	(assign (assoc start (system_time) ))
+
+	(declare (assoc
+		output_data
+			(append
+				(list features)
+				(get
+					(call batch_react (assoc
+						trainee "model"
+						action_features features
+						desired_conviction 5
+						use_regional_model_residuals (false)
+						use_case_weights use_case_weights
+						generate_new_cases "no"
+						num_cases_to_generate num_cases
+					))
+					(list "payload" "action_values")
+				)
+			)
+
+	))
+	(declare (assoc generate_time (- (system_time) start) ))
+	(if verbose (print "\ntime: " generate_time "\n"))
+
+	(store "bank_gen.csv" output_data)
+
+	(print "Generate time: " generate_time "\n")
+	(print "BANK params (k p deviations): " k " " p " " (unparse deviations) "\n- - - - -\n")
+
+	(destroy_entities "model")
+)

@@ -1,0 +1,188 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_input_validation.amlg"))
+
+	(call_entity "howso" "create_trainee" (assoc trainee "test" ))
+	(assign_to_entities "howso" (assoc trainee "test"))
+
+	(declare (assoc
+		model_data
+			(list
+				(list "A" "B" "C")
+				(list "A" "B" "C")
+				(list "A" "B" "C")
+				(list "A" "B" "C")
+				(list "A" "A" "C")
+				(list "A" "A" "C")
+				(list "B" "B" "C")
+				(list "B" "B" "C")
+				(list "B" "B" "C")
+				(list "B" "B" "C")
+				(list "B" "A" "C")
+				(list "B" "A" "C")
+			)
+
+	))
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		features
+			(assoc
+				"x" (assoc "type" "continuous")
+				"y" (assoc "type" "continuous")
+				".none" (assoc "type" "continuous")
+
+			    ; INVALID FEATURES
+				"#case_weight" (assoc "type" "continuous")
+				"^session" (assoc "type" "continuous")
+			)
+	))
+	(declare (assoc result (call_entity "howso" "get_feature_attributes")))
+
+	(print "Did not store attributes for invalid feature: ")
+	(call assert_same (assoc
+		obs (get result "payload")
+		exp (assoc "y" (assoc "type" "continuous") ".none" (assoc "type" "continuous" ) "x" (assoc "type" "continuous"))
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "train" (assoc
+				input_cases model_data
+				features (list ".none" ".case_weight" ".session")
+				session "session1"
+			))
+	))
+
+	(print "Didn't train: ")
+	(call assert_same (assoc exp "error" obs (get result "status")))
+
+	(print "Three bad features: ")
+	(call assert_same (assoc
+		exp ".none .case_weight .session "
+		; grab the last 28 characters from the string
+		obs (substr (get result (list "errors" 0 "detail")) -28)
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "train" (assoc
+				input_cases model_data
+				features (list "x" "y" ".session_training_index")
+				session "session1"
+			))
+	))
+
+	(print "Didn't train: ")
+	(call assert_same (assoc exp "error" obs (get result "status")))
+
+	(print "One bad feature: ")
+	(call assert_same (assoc
+		exp ".session_training_index "
+		; grab the last 24 characters from the string
+		obs (substr (get result (list "errors" 0 "detail")) -24)
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "train" (assoc
+				input_cases model_data
+				features (list "#x" "!y" "^z")
+				session "session1"
+			))
+	))
+
+	(print "Didn't train: ")
+	(call assert_same (assoc exp "error" obs (get result "status")))
+
+	(print "Three illegal charecter features: ")
+	(call assert_same (assoc
+		exp "#x !y ^z "
+		; grab the last 9 characters from the string
+		obs (substr (get result (list "errors" 0 "detail")) -9)
+	))
+
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		features
+			(assoc
+				"x" (assoc "type" "nominal")
+				"y" (assoc "type" "nominal")
+				"z" (assoc "type" "nominal")
+			)
+	))
+	(assign (assoc
+		result
+			(call_entity "howso" "train" (assoc
+				input_cases model_data
+				features (list "x" "y" "z")
+				session "session1"
+			))
+	))
+	(print "Training worked: " )
+	(call assert_same (assoc exp "ok" obs (get result "status")))
+
+	(call exit_if_failures (assoc msg "Training on invalid (built-in) feature names."))
+
+
+	(assign (assoc
+		result
+			(call_entity "howso" "add_feature" (assoc
+				feature ".targetless"
+			))
+	))
+	(print "Failed to add internal feature: ")
+	(call assert_same (assoc exp "error" obs (get result "status") ))
+
+
+	(call_entity "howso" "analyze" (assoc
+		context_features (list "x" "y" "z")
+		targeted_model "targetless"
+		inverse_residuals_as_weights (true)
+	))
+
+
+	(assign (assoc
+		result
+			(call_entity "howso" "add_feature" (assoc
+				feature "targetless" ;no . therefore it doesn't clash with buil-in feature
+				feature_value 3.1415926
+				session_id "session1"
+			))
+	))
+	(print "Added non-built-in feature: ")
+	(call assert_same (assoc exp "ok" obs (get result "status") ))
+
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "get_cases" (assoc features (list "x" "y" "z" "targetless" )))
+				"payload"
+			)
+	))
+
+	(print "Feature added to dataset: ")
+	(call assert_true (assoc obs (contains_value (get result "features") "targetless")))
+	(print "feature value added to dataset: ")
+	(call assert_same (assoc
+		; check the first case, 4th feature value
+		obs (get result (list "cases" 0 3))
+		exp 3.1415926
+	))
+
+	(call exit_if_failures (assoc msg "Adding feature with invalid and valid feature name."))
+
+
+	(assign (assoc result (get (call_entity "howso" "get_internal_parameters") (list "payload" "hyperparameter_map"))))
+	(print "Hyperparameters updated with new feature:\n")
+	(print "Weights: ")
+	(call assert_not_null (assoc obs (get result (list ".targetless" "x.y.z." "robust" ".none" "featureWeights" "targetless") )))
+	(print "Deviations: ")
+	(call assert_not_null (assoc obs (get result (list ".targetless" "x.y.z." "robust" ".none" "featureDeviations" "targetless") )))
+
+
+	(call exit_if_failures (assoc msg "Hyperparameters updated after feature is added."))
+
+	(call exit_if_failures (assoc msg unit_test_name ))
+)
+
+

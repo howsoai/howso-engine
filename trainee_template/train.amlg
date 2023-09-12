@@ -1,0 +1,1009 @@
+(null
+
+	;records an entire session in one call, does not do any filtering.
+	; parameters:
+	; input_cases : list of cases, ie a list of lists of values.
+	; features : the list of features.
+	; derived_features: optional list of features to derive in the specified order. If this list is not provided, features with
+	;	   the 'auto_derive_on_train' feature attribute set to True will be auto-derived. If provided an empty list, will not derive any features.
+	;	   Any derived_features that are already in the 'features' list will not be derived since their values are being explicitly provided.
+	; session: the session label to record these cases to.  If not specified, refers to this entity's label of same name.
+	; input_is_substituted : flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
+	; ablatement_params: assoc of feature -> threshold_type
+	; 	threshold_type is one of:
+	;		['exact'] - don't train if prediction matches exactly
+	;		['tolerance', MIN, MAX] - don't train if prediction >= (case value - MIN) and prediction <= (case value + MAX)
+	;		['relative', PERCENT] - don't train if abs(prediction - case value) / prediction <= PERCENT
+	;		['residual'] - don't train if if abs(prediction - case value) <= feature residual
+	; series: optional, name of series to pull features and case values from internal series storage.  If specified, trains on all cases that are
+	;		stored in the internal series store for the specified series. The trained feature set is the combined features from storage
+	;		and the passed in features.  If input_cases is of length one, the value(s) of this case are appended to all cases in the series.
+	;		If input_cases is the same length as the series, the value of each case in input_cases is applied in order to each of the cases in the
+	;		series.
+	; allow_training_reserved_features: flag, If true, skips check whether specified feature names start with reserved characters.
+	; accumulate_weight_feature: name of feature into which to accumulate neighbors' influences as weight for ablated cases. If unspecified, will not accumulate weights.
+	; train_weights_only: flag, if set to true, and accmuulate_weight_feature is provided, will not train on the cases, but instead accumulate all of their neighbor weights.
+	#Train
+	(declare
+		(assoc
+			input_cases (list)
+			features (list)
+			derived_features (null)
+			session (null)
+			ablatement_params (null)
+			series (null)
+			input_is_substituted (false)
+			allow_training_reserved_features (false)
+			accumulate_weight_feature (null)
+			train_weights_only (false)
+		)
+
+		;unsure that session is set to some string value
+		(if (= (null) session)
+			(assign (assoc session "none"))
+		)
+
+		;empty ablatement params should just be null
+		(if (= (assoc) ablatement_params)
+			(assign (assoc ablatement_params (null)))
+		)
+
+		;create the training session if it does not already exist
+		(if (not (contains_entity session))
+			;overwrite the session variable in case creating a new session without a name
+			(assign (assoc
+				session
+					(first (create_entities session (lambda
+						(null
+							##.replay_steps (list)
+							##.indices_map (assoc)
+							##.trained_instance_count 0
+							##.metadata (assoc)
+						)
+					)))
+			))
+		)
+
+		;recorded data for the current session
+		(declare (assoc
+			cur_session_data (retrieve_from_entity session ".replay_steps")
+			reserved_feature_names
+				(if allow_training_reserved_features
+					(list)
+					;filter out any normal features, leaving only invalid feature names that start with reserved characters
+					(filter
+						(lambda
+							(contains_index untrainableFeatureCharacterSet (first (target_value)))
+						)
+						features
+					)
+				)
+		))
+
+		;if any features are in the reserved list, can't train, output the error message
+		(if (> (size reserved_feature_names) 0)
+			(conclude
+				(assoc
+					"error"
+						(concat
+							"The following features should not start with characters '.' '^' '!' or '#' : "
+							;change list of features into a space-separated list of feature names
+							(apply "concat"
+								(weave
+									reserved_feature_names
+									(range " " 1 (size reserved_feature_names) 1)
+								)
+							)
+						)
+					"num_trained" 0
+					"ablated_indices" (list)
+					"status" (null)
+				)
+			)
+		)
+
+		(declare (assoc
+			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
+			series_cases (if (!= (null) series) (get seriesStore series))
+			status_output (null)
+			message (null)
+			ablated_indices_list (list)
+			cur_session_case_indices_map (retrieve_from_entity session ".indices_map")
+		))
+
+		(if (!= (null) series)
+			(if (= (size series_cases) 0)
+				(assign (assoc
+					input_cases (null)
+					message "Specified series does not exist"
+				))
+
+				;if input cases don't match the number of cases stored in series
+				(and (> (size input_cases) 1) (!= (size input_cases) (size series_cases)))
+				(assign (assoc
+					input_cases (null)
+					message "input_cases do not match length of specified series"
+				))
+			)
+		)
+
+		;if bad input, ie, size of series does not match the training input_cases, don't train anything
+		(if (= (null) input_cases)
+			(conclude
+				(assoc
+					"error" message
+					"num_trained" 0
+					"ablated_indices" ablated_indices_list
+					"status" status_output
+				)
+			)
+		)
+
+		;get time series derived features list, if applicable
+		(if (and (= (null) derived_features) (!= (null) tsTimeFeature) )
+			(assign (assoc
+				derived_features (get tsModelFeaturesMap "ts_derived_features")
+			))
+		)
+
+		;unsubstitute nominal feature values if necessary
+		(if
+			(and input_is_substituted hasSubstituteFeatureValues)
+			(assign (assoc
+				input_cases
+					(map
+						(lambda
+							(call UnsubstituteFeatureValues (assoc
+								features features
+								feature_values (target_value 1)
+							))
+						)
+						input_cases
+					)
+			))
+		)
+
+		(declare (assoc encode_features_on_train (retrieve_from_entity "hasFeaturesNeedEncodingFromInput") ))
+
+		;encode all cases in bulk if either training on accumulated weights only or training from series
+		;because series trained cases are alredy encoded.
+		(if (and
+				encode_features_on_train
+				(or (size series_cases) (and train_weights_only accumulate_weight_feature) )
+			)
+			(assign (assoc
+				input_cases
+					(map
+						(lambda (let
+							(assoc feature_values (target_value 1))
+							(map
+								(lambda
+									(if (contains_index encodingNeededFeaturesSet (target_value))
+										(if (= (null) (get feature_values (target_index)))
+											(null)
+
+											(if ;stringify all nominal values
+												(contains_index stringNominalFeaturesSet (target_value))
+												(concat (get feature_values (target_index)))
+
+												;if it's a datetime, encode datetime by converting string date time into seconds
+												(contains_index featureDateTimeMap (target_value))
+												(format
+													(get feature_values (target_index))
+													(get featureDateTimeMap (list (target_value 1) "date_time_format"))
+													"number"
+													(assoc "locale" (get featureDateTimeMap (list (target_value 2) "locale")))
+													(null)
+												)
+
+												;else it's a string ordinal, convert from string to ordinal value
+												(contains_index ordinalStringToOrdinalMap (target_value))
+												(get ordinalStringToOrdinalMap (list (target_value 1) (get feature_values (target_index 1))))
+
+												(= "boolean" (get numericNominalFeaturesMap (target_value)))
+												(+ (get feature_values (target_index)))
+
+												(contains_index editDistanceFeatureTypesMap  (target_value))
+												(if
+													(= "json" (get editDistanceFeatureTypesMap  (target_value)))
+													(format (get feature_values (target_index)) "json" "code")
+
+													(= "yaml" (get editDistanceFeatureTypesMap  (target_value)))
+													(format (get feature_values (target_index)) "yaml" "code")
+
+													(= "amalgam" (get editDistanceFeatureTypesMap  (target_value)))
+													(parse (get feature_values (target_index)) )
+
+													(get feature_values (target_index))
+												)
+
+												;else return the value as-is
+												(get feature_values (target_index))
+											)
+										)
+
+										;else return the value as-is
+										(get feature_values (target_index))
+									)
+								)
+								features
+							)
+						))
+						input_cases
+					)
+
+				;set the flag to false since input_cases are already encoded above
+				encode_features_on_train (false)
+			))
+		)
+
+		;don't train the data, only accumulate weights to neighbors
+		(if (and train_weights_only accumulate_weight_feature)
+			(seq
+				(call AccumulateCaseInfluenceWeights (assoc
+					features features
+					accumulate_weight_feature accumulate_weight_feature
+					cases input_cases
+				))
+
+				(accum_to_entities (assoc revision 1))
+
+				(conclude
+					(assoc
+						"num_trained" 0
+						"ablated_indices" (list)
+						"status" status_output
+					)
+				)
+			)
+		)
+
+		;series storage is already encoded, append it as-is to passed in data
+		(if (size series_cases)
+			(let
+				(assoc
+					series_features (get seriesFeatures series)
+					remaining_series_feature_indices (list)
+				)
+
+				;leave only those indices of series_features that will not be clobbered by features
+				(assign (assoc
+					remaining_series_feature_indices
+						(filter
+							(lambda (not (contains_value features (get series_features (target_value)))))
+							(indices series_features)
+						)
+				))
+
+				;set training features to be unique, removing those from the series that are being explicitly trained on
+				(accum (assoc features (unzip series_features remaining_series_feature_indices) ))
+
+				(assign (assoc
+					input_cases
+						;apply the one input case to all the cases in the series
+						(if (= (size input_cases) 1)
+							(let
+								(assoc case_values (get input_cases 0))
+								(map
+									(lambda
+										(append case_values (unzip (target_value) remaining_series_feature_indices) )
+									)
+									series_cases
+								)
+							)
+
+							;else apply each input case to each of the cases in the series
+							(= (size input_cases) (size series_cases))
+							(map
+								(lambda
+									(append (get input_cases (target_index)) (unzip (target_value) remaining_series_feature_indices) )
+								)
+								series_cases
+							)
+						)
+				))
+
+				;clear out stored series
+				(call RemoveSeriesStore (assoc series series))
+			)
+		)
+
+		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
+		(declare (assoc
+			new_case_ids
+				(weave
+					(lambda (let
+						(assoc feature_values (first (target_value 1)))
+
+						(if encode_features_on_train
+							(assign (assoc
+								feature_values
+									(call ConvertFromInput (assoc
+										feature_values feature_values
+										features features
+									))
+							))
+						)
+
+						;do not train on this case if it is null or all case values are null or it's within provided thresholds
+						(if (and
+								(!= (null) feature_values)
+								(not (apply "=" (append feature_values (list (null)))))
+								;no thresholds specified or the case is outside of thresholds
+								(or
+									(= (null) convictionLowerThreshold convictionUpperThreshold ablatement_params)
+									(call CaseOutsideThresholds)
+								)
+							)
+							(seq
+								;create the case and store case id
+								(declare (assoc
+									new_case_id
+										(call CreateCase (assoc
+											features features
+											feature_values feature_values
+											session (get_value session)
+											session_training_index trained_instance_count
+										))
+								))
+								(accum (assoc trained_instance_count 1 ))
+
+								;output the new case id
+								(list new_case_id)
+							)
+
+							;else don't output anything, filtering out any null case ids
+							(seq
+								(accum (assoc ablated_indices_list (target_index 1)))
+								(list)
+							)
+						)
+					))
+					input_cases
+					;use weave as a map-filter by specifying null as the second list
+					(null)
+				)
+		))
+
+		;set values if there were cases that were trained on
+		(if (> (size new_case_ids ) 0)
+			(seq
+				;add action to the existing replay data
+				(assign_to_entities session (assoc
+					".replay_steps" (append cur_session_data new_case_ids)
+					".indices_map"
+						(append
+							cur_session_case_indices_map
+							(zip
+								(range (- trained_instance_count (size new_case_ids)) (- trained_instance_count 1))
+								new_case_ids
+							)
+						)
+					".trained_instance_count" trained_instance_count
+				))
+
+				;removing all defaultFeatures from features should result in an empty assoc, if it's not empty that means
+				;we're training on features that aren't in defaultFeatures yet, append them in their specified order
+				(if (!= (assoc) (remove (zip features) defaultFeatures))
+					(seq
+						(accum_to_entities (assoc
+							defaultFeatures
+								(filter
+									(lambda (not (contains_value defaultFeatures (target_value))) )
+									(append features (indices derivedFeaturesSet))
+								)
+						))
+						(assign_to_entities (assoc defaultFeaturesContextKey (call BuildContextFeaturesKey (assoc context_features defaultFeatures)) ))
+					)
+				)
+
+				;model has changed so clear out these cached value
+				#ClearCachedCountsAndEntropies
+				(assign_to_entities (assoc
+					averageModelCaseEntropyAddition (null)
+					averageModelCaseEntropyRemoval (null)
+					storedCaseConvictionsFeatureAddition (null)
+					averageModelCaseDistanceContribution (null)
+					staleOrdinalValuesCount (true)
+					nominalClassProbabilitiesMap (assoc)
+					expectedValuesMap (assoc)
+					featureMarginalStatsMap (assoc)
+				))
+			)
+		)
+
+		;if derived features wasn't specified, auto-detect them
+		(if (and (= (null) derived_features) (> (size derivedFeaturesSet) 0))
+			(seq
+				(assign (assoc derived_features (list)))
+
+				;check features vs sourceToDerivedFeatureMap and populate derived_features accordingly
+				(map
+					(lambda (let
+						(assoc feature_name (target_value 1))
+						;if this trained feature has derived features, add all of them to the derived_features list
+						(if (contains_index sourceToDerivedFeatureMap feature_name)
+							(accum (assoc derived_features (get sourceToDerivedFeatureMap feature_name)))
+						)
+					))
+					features
+				)
+
+				;clear out possible duplicates out of derived_features
+				(assign (assoc derived_features (values derived_features (true))))
+			)
+		)
+
+		(if (size nominalsMap)
+			(call UpdateNominalClassCounts)
+		)
+		;auto populate derived features if necessary
+		(if (> (size derived_features) 0)
+			(call DeriveTrainFeatures (assoc
+				features features
+				;keep and derive only those features that are not in the features list
+				derived_features (filter (lambda (not (contains_value features (target_value)))) derived_features)
+				case_ids new_case_ids
+			))
+		)
+
+		;if auto analysis is enabled, check whether this model should be re-analyzed
+		;and return the appropriate status to client so that analysis could be started
+		(if (> (size new_case_ids ) 0)
+			(if autoAnalyzeEnabled
+				(let
+					(assoc num_cases (call GetNumTrainingCases))
+					(if
+						(and
+							(>= num_cases autoAnalyzeThreshold)
+							(or (< num_cases autoAnalyzeLimitSize) (<= autoAnalyzeLimitSize 0))
+						)
+						(assign (assoc status_output "analyze"))
+					)
+				)
+			)
+		)
+
+		(if hasDependentFeatures
+			(let
+				(assoc
+					dependents_boundary_map (assoc)
+					dependent_values_combinations_map (assoc)
+					unique_nominals_set (list)
+				)
+
+				(if (size continuousToNominalDependenciesMap)
+					(seq
+						(map
+							(lambda (let
+								(assoc
+									dependent_nominals (target_value 1)
+									continuous_feature (target_index 1)
+									dependents_combinations_map (assoc)
+									dependent_values_combinations (list)
+								)
+
+								(assign (assoc
+									dependents_combinations_map
+										(call ComputeDependentBoundaries (assoc
+											nominals dependent_nominals
+											value_feature continuous_feature
+										))
+								))
+
+								(call AccumulateDependentValuesCombinations (assoc
+									nested_value_combinations_map dependents_combinations_map
+									values_lists (list)
+									value_feature (first dependent_nominals)
+									remaining_dependent_nominals (tail dependent_nominals)
+								))
+
+								(accum (assoc
+									dependents_boundary_map (associate continuous_feature dependents_combinations_map)
+									dependent_values_combinations_map (associate continuous_feature dependent_values_combinations)
+								))
+							))
+							continuousToNominalDependenciesMap
+						)
+
+						(assign_to_entities (assoc
+							dependentsBoundaryMap dependents_boundary_map
+							dependentValuesCombinationsMap dependent_values_combinations_map
+						))
+					)
+				)
+			)
+		)
+
+		;if there are features that have nulls, check if they still have nulls
+		(if hasInactiveFeatures
+			(let
+				(assoc
+					inactive_features_map
+						(filter
+							(lambda (let
+								(assoc feature (target_index 1))
+
+								;only keep those features that have no valid values (0 non-nulls)
+								(=
+									(contained_entities (list
+										(query_exists internalLabelSession)
+										(query_not_equals feature (null))
+										(query_count)
+									))
+									0
+								)
+							))
+							(if (= (assoc) inactiveFeaturesMap)
+								(zip defaultFeatures 0)
+								inactiveFeaturesMap
+							)
+						)
+				)
+
+				;if there are now less inactive features than there were, set the no-longer inactive feature weights to 1
+				(if (< (size inactive_features_map) (size inactiveFeaturesMap))
+					(call SetFeatureWeightsForFeatures (assoc
+						features_weights_map
+							(zip
+								(indices (remove inactiveFeaturesMap (indices inactive_features_map)) )
+								1
+							)
+						overwrite (true)
+					))
+				)
+
+				(if (size inactive_features_map)
+					(assign_to_entities (assoc inactiveFeaturesMap inactive_features_map ))
+
+					;else all features have some values
+					(assign_to_entities (assoc
+						inactiveFeaturesMap (null)
+						hasInactiveFeatures (false)
+					))
+				)
+			)
+		)
+
+		;if there are inactive features and they haven't been set yet, set their weight to 0
+		(if hasInactiveFeatures
+			(call SetFeatureWeightsForFeatures (assoc
+				features_weights_map inactiveFeaturesMap
+				overwrite (false)
+			))
+		)
+
+		(accum_to_entities (assoc revision 1))
+
+		;if accumulate_weight_feature was specified and there are ablated cases, accumulate weights to their neighbors
+		(if (and (size ablated_indices_list) accumulate_weight_feature)
+			(call AccumulateCaseInfluenceWeights (assoc
+				features features
+				accumulate_weight_feature accumulate_weight_feature
+				cases (unzip input_cases ablated_indices_list)
+			))
+		)
+
+		;return response
+		(assoc
+			"num_trained" (size new_case_ids)
+			"ablated_indices" ablated_indices_list
+			"status" status_output
+		)
+	)
+
+	;set specified feature weights in all hyperparameter maps (defaultHyperparameters and hyperparameterMetadataMap)
+	;If weights haven't been defined yet, set them to 0 for invacitves and 1 for actives
+	;If already defined, will overwrite the weight of the specified features in feature_weights_map
+	;
+	;parameters:
+	; features_weights_map: assoc of feature -> weight to overwrite in all hyperparameter sets
+	; overwrite: flag, if set to true will assume that featureWeights already exist and overwrites them.
+	;			 When false, will create featureWeights in the hyperparameter set
+	#SetFeatureWeightsForFeatures
+	(declare 
+		(assoc
+			features_weights_map (assoc)
+			overwrite (false)
+		)
+
+		(declare (assoc
+			updated_hp_maps
+				(map
+					(lambda
+						(rewrite
+							;if this is a hp assoc, modify it
+							(lambda
+								(if (and (= (assoc) (get_type (target_value))) (contains_index (target_value) "k") )
+									;hp already have featureDeviations defined, overwrite where necessary
+									(if overwrite
+										(let
+											;take featureWeights in HP assoc and alter them
+											(assoc weights_map (get (target_value 1) "featureWeights") )
+
+											(map
+												(lambda
+													(assign (assoc
+														weights_map
+															(set
+																weights_map
+																(target_index 1)
+																(target_value 1)
+															)
+													))
+												)
+												features_weights_map
+											)
+
+											;append the updated deviations_map to this hp map
+											(append (target_value) (assoc "featureWeights" weights_map) )
+										)
+
+										(let
+											;create a feature weights assoc
+											(assoc weights_map (append (zip defaultFeatures 1) features_weights_map) )
+
+											(append (target_value) (assoc "featureWeights" weights_map))
+										)
+									)
+
+									;else not the hp assoc, return original
+									(target_value)
+								)
+							)
+							(target_value)
+						)
+					)
+					(list defaultHyperparameters hyperparameterMetadataMap)
+				)
+		))
+
+		(assign_to_entities (assoc
+			defaultHyperparameters (first updated_hp_maps)
+			hyperparameterMetadataMap (last updated_hp_maps)
+		))
+	)
+
+	;Tests the new training case against the provided thresholds and filters out those that are too similar to existing cases in the model
+	;returns: 0 if the case should be filtered out and not trained on because it's too similar to others
+	;		 1 if the case should be trained on because it's sufficiently different
+	; inherited parameters: features, feature_values
+	; ablatement_params: assoc of feature -> threshold_type
+	; 	threshold_type is one of:
+	;		['exact'] - don't train if prediction matches exactly
+	;		['tolerance', MIN, MAX] - don't train if prediction >= (case value - MIN) and prediction <= (case value + MAX)
+	;		['relative', PERCENT] - don't train if abs(prediction - case value) / prediction <= PERCENT
+	;		['residual'] - don't train if if abs(prediction - case value) <= feature residual
+	#CaseOutsideThresholds
+	(let
+		(assoc
+			action_features (indices ablatement_params)
+			feature_value_map (zip features feature_values)
+		)
+		(declare (assoc
+			action_values (unzip feature_value_map action_features)
+			residual_map (assoc)
+		))
+
+		(or ;evaluate in order and return the first true block
+
+			;if the model is too small, skip ablatement, return true to force training
+			(< (call GetNumTrainingCases) minAblatementModelSize)
+
+			;if we have ablatement_params, need to react first
+			(if (!= (null) ablatement_params)
+				;store the reaction to reuse for both
+				(let
+					(assoc
+						reaction_values
+							(map
+								(lambda (let
+									(assoc
+										feature (target_value 1)
+										;flag set if this feature uses residual as its threshold type
+										ablate_by_feature_residuals (= "residual" (get ablatement_params (list (target_value 2) 0)))
+									)
+									(declare (assoc
+										context_features (filter (lambda (!= feature (target_value))) features)
+									))
+
+									;react to each of the action features, using all other features as contexts
+									(declare (assoc
+										reaction
+											(call ReactDiscriminative (assoc
+												return_action_values_only (true)
+												context_features context_features
+												context_values (unzip feature_value_map context_features)
+												action_features (list feature)
+												details
+													(if ablate_by_feature_residuals
+														(assoc "feature_residuals" (true))
+
+														;else
+														(null)
+													)
+												substitute_output (false)
+												skip_encoding (true)
+												skip_decoding (true)
+											))
+									))
+
+									;output the predicted value
+									(if ablate_by_feature_residuals
+										(seq
+											;store the residual min and max tolerance for this feature
+											(accum (assoc
+												residual_map
+													(associate feature (assoc
+														"min" (get reaction (list "feature_residuals" feature))
+														"max" (get reaction (list "feature_residuals" feature))
+													))
+											))
+
+											(first (get reaction "action_values"))
+										)
+
+										(first reaction)
+									)
+
+								))
+								action_features
+							)
+					)
+
+					(or
+						;if we filter out any values outside of the defined thresholds (that should be trained on)
+						;allow training because these values are not being predicted by the system
+						(!=
+							(size action_values)
+							;if an action_value is same as/within threshold of prediction, it will not be filtered out
+							;so if this list is the same size as the original action_values, all action values were predicted correctly
+							;but if it's not the same size, the action values are different enough to be trained on
+							(size (filter
+								(lambda (let
+									(assoc
+										threshold (get ablatement_params (get action_features (target_index 1)))
+										action_value (get action_values (target_index 1))
+									)
+									(declare (assoc threshold_type (first threshold)))
+
+									(if (= threshold_type "exact")
+										(= action_value (target_value))
+
+										;for discrete or residual, set the min and max and check if actual value is outside of those bounds
+										(or (= threshold_type "tolerance" ) (= threshold_type "residual"))
+										(let
+											(assoc
+												min
+													(if (= threshold_type "tolerance")
+														(get threshold 1)
+														(get residual_map (list (get action_features (target_index 1)) "min"))
+													)
+												max
+													(if (= threshold_type "tolerance")
+														(get threshold 2)
+														(get residual_map (list (get action_features (target_index 1)) "max"))
+													)
+											)
+											(and (>= (target_value) (- action_value min)) (<= (target_value) (+ action_value max)))
+										)
+
+										;PERCENT is (last threshold)
+										(= threshold_type "relative")
+										(<= (/ (abs (- (target_value) action_value)) (target_value)) (last threshold))
+
+										;if threshold_type is explicitly undefined, treat it as outside of bounds and filter out the value
+										;thus forcing this case to be trained
+										(= threshold_type (null))
+										(false)
+									)
+								))
+								reaction_values
+							))
+						)
+					)
+				)
+			)
+
+			;conviction thresholds
+			(if
+				(or (!= convictionLowerThreshold (null)) (!= convictionUpperThreshold (null)))
+				(let
+					(assoc
+						conviction_value
+							(get
+								(call ReactGroup (assoc
+									features features
+									new_cases (list feature_values)
+									skip_encoding (true)
+								))
+								"familiarity_conviction_addition"
+							)
+					)
+
+					(or
+						;if both threshold values set, must be within both, otherwise check only the provided one
+						(if (and (!= (null) convictionLowerThreshold) (!= (null) convictionUpperThreshold))
+							(and (< conviction_value convictionUpperThreshold) (> conviction_value convictionLowerThreshold))
+
+							(!= (null) convictionLowerThreshold)
+							(> conviction_value convictionLowerThreshold)
+
+							(< conviction_value convictionUpperThreshold)
+						)
+
+						;if the model is empty, ReactGroup returns 0, force training
+						(= conviction_value 0)
+					)
+				)
+				;else
+				0
+			)
+		)
+	)
+
+	;Helper method to update current nominal class counts for the whole model
+	;no parameters, it iterates over all the known nominals in nominalsMap and for each feature stores the count for each class
+	#UpdateNominalClassCounts
+	(let
+		(assoc
+			;store all the unique classes for each nominal feature
+			nominal_class_values_map
+				(map
+					(lambda
+						(indices
+							(compute_on_contained_entities (list
+								(query_value_masses (target_index 1) (null) (contains_index numericNominalFeaturesMap (target_index 1)))
+							))
+						)
+					)
+					nominalsMap
+				)
+		)
+
+		;only update model if class counts are different
+		(if (!= (map (lambda (size (target_value))) nominal_class_values_map) nominalsMap)
+			(seq
+				(accum_to_entities (assoc
+					nominalsMap
+						(map
+							(lambda
+								;will be the count of classes if the feature is in the map of nominal features
+								(size (get nominal_class_values_map (target_index)))
+							)
+							nominalsMap
+						)
+				))
+
+				;update all existing featureDomainAttributes with updated nominal class counts
+				(assign_to_entities (assoc
+					hyperparameterMetadataMap
+						(rewrite
+							(lambda
+								;if this is the featureDomainAttributes assoc
+								(if (and (= "featureDomainAttributes" (target_index)) (= (assoc) (get_type (target_value))) )
+									(let
+										(assoc previous_hp_null_deviations_map (target_value 1) )
+
+										;smartly overwrite previous values with the newly computed ones
+										(map
+											(lambda (let
+												(assoc
+													previous_value (first (target_value 1))
+													new_value (last (target_value 1))
+												)
+												;not a nominal feature, don't change
+												(if (= (null) new_value)
+													previous_value
+
+													;if previous value is a tuple, overwrite the first value in the tuple since that's the only one that's
+													;been recomputed here, i.e., the number of nominal counts
+													(if (= (list) (get_type previous_value))
+														(set previous_value 0 new_value)
+														;else overwrite the value with the new one
+														new_value
+													)
+												)
+											))
+											previous_hp_null_deviations_map
+											nominalsMap
+										)
+									)
+
+									(target_value)
+								)
+							)
+							(retrieve_from_entity "hyperparameterMetadataMap")
+						)
+					defaultHyperparameters
+						(rewrite
+							(lambda
+								;if this is the featureDomainAttributes assoc
+								(if (and (= "featureDomainAttributes" (target_index)) (= (assoc) (get_type (target_value))) )
+									(let
+										(assoc previous_hp_null_deviations_map (target_value 1) )
+
+										;smartly overwrite previous values with the newly computed ones
+										(map
+											(lambda (let
+												(assoc
+													previous_value (first (target_value 1))
+													new_value (last (target_value 1))
+												)
+												;not a nominal feature, don't change
+												(if (= (null) new_value)
+													previous_value
+
+													;if previous value is a tuple, overwrite the first value in the tuple since that's the only one that's
+													;been recomputed here, i.e., the number of nominal counts
+													(if (= (list) (get_type previous_value))
+														(set previous_value 0 new_value)
+														;else overwrite the value with the new one
+														new_value
+													)
+												)
+											))
+											previous_hp_null_deviations_map
+											nominalsMap
+										)
+									)
+
+									(target_value)
+								)
+							)
+							(retrieve_from_entity "defaultHyperparameters")
+						)
+				))
+			)
+		)
+	)
+
+	;Helper method to update current nominal counts for the specified feature
+	;store the count for each class for the specified feature into nominalsMap
+	;parameters:
+	; feature: nominal feature for which to store class counts
+	#UpdateNominalClassCountsForFeature
+	(let
+		;store all the unique classes for this nominal feature
+		(assoc
+			nominal_class_values
+				(if (contains_index nominalsMap feature)
+					(indices
+						(compute_on_contained_entities (list
+							(query_value_masses feature (null) (contains_index numericNominalFeaturesMap feature))
+						))
+					)
+					;else not nominal, so it's an empty list
+					(list)
+				)
+		)
+
+		;only update model if the class count changed
+		(if (!= (size nominal_class_values) (get nominalsMap feature) )
+			(seq
+				(accum_to_entities (assoc nominalsMap (associate feature (size nominal_class_values) ) ))
+
+				;update all existing featureDomainAttributes with updated nominal class counts for this feature
+				(assign_to_entities (assoc
+					hyperparameterMetadataMap
+						(rewrite
+							(lambda
+								(if (and (= "featureDomainAttributes" (target_index)) (= (assoc) (get_type (target_value))) )
+									(let
+										(assoc hp_null_deviations_map (target_value 1) )
+										(if (= (list) (get_type (get hp_null_deviations_map feature)) )
+											(set hp_null_deviations_map (list feature 0) (get nominalsMap feature))
+											(set hp_null_deviations_map feature (get nominalsMap feature))
+										)
+									)
+
+									(target_value)
+								)
+							)
+							(retrieve_from_entity "hyperparameterMetadataMap")
+						)
+				))
+			)
+		)
+	)
+)

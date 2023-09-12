@@ -1,0 +1,114 @@
+(seq
+	#howso (null)
+	(direct_assign_to_entities (assoc howso (load "../howso.amlg")))
+	(assign_to_entities (assoc filepath "../"))
+
+	(call create_trainee (assoc trainee "model"))
+	(call set_internal_parameters (assoc
+		trainee "model"
+		hyperparameter_map (assoc ".targetless" (assoc "robust" (assoc ".none" (assoc "k" 8 "p" 2 "dt" -1))))
+	))
+
+	(declare (assoc
+				;set to true to see full output
+		verbose (false)
+		;set to null to do full model
+		submodel_size (null)
+
+		data (load "performance_data/range_queries.csv")
+	))
+
+	(declare (assoc
+		features (first data)
+		training_data (tail data)
+		start (system_time)
+		k 8
+		p 2
+		deviations (false)
+	))
+
+	(if verbose (print "Loading range_queries ...\n"))
+	(call train (assoc
+		trainee "model"
+		features features
+		input_cases (if submodel_size (trunc training_data submodel_size) training_data)
+	))
+
+	(print "Loaded range_queries: "
+		(get (call get_num_training_cases (assoc trainee "model")) (list "payload" "count"))
+		"\n"
+	)
+
+	(declare (assoc load_time (- (system_time) start) ))
+	(print "Load time: " load_time "\n")
+
+	(if verbose (print "analyzing range_queries ...\n"))
+
+	(assign (assoc start (system_time) ))
+
+	(call analyze (assoc
+		trainee "model"
+		context_features features
+		targeted_model "targetless"
+		p_values (list 0.5 1 2)
+		k_values (list 5 8 13)
+		k_folds 1
+		num_analysis_samples 1000
+		inverse_residuals_as_weights (true)
+	))
+
+	(declare (assoc analyze_time (- (system_time) start) ))
+	(print "Analyze time: " analyze_time "\n" )
+	(declare (assoc params (get (call get_internal_parameters (assoc trainee "model")) "payload") ))
+	(if verbose (print "analyzed to: " params))
+
+	(assign (assoc
+		k (get params (list "hyperparameter_map" ".targetless" "robust" ".none" "k"))
+		p (get params (list "hyperparameter_map" ".targetless" "robust" ".none" "p"))
+		deviations (get params (list "hyperparameter_map" ".targetless" "robust" ".none" "useDeviations"))
+	))
+
+	(assign (assoc start (system_time) ))
+
+	(if verbose (print "residuals for model ...\n"))
+	(call react_into_trainee (assoc
+		trainee "model"
+		context_features features
+		num_samples 1000
+		residuals_robust (true)
+	))
+
+	(declare (assoc residuals_time (- (system_time) start) ))
+	(print "Residuals time: " residuals_time "\n")
+
+	(assign (assoc start (system_time) ))
+
+	||(range
+		(lambda (seq
+			(call react (assoc
+				trainee "model"
+				action_features features
+				desired_conviction 2
+				use_regional_model_residuals (false)
+			))
+			(if verbose
+				(if (= 0 (mod (target_index) 100))
+					(print (target_index) "\n")
+
+					(= 0 (mod (target_index) 10))
+					(print (target_index) " ")
+				)
+			)
+		))
+
+		1 12000 1
+	)
+
+	(declare (assoc generate_time (- (system_time) start) ))
+	(if verbose (print "test time: " generate_time "\n"))
+
+	(print "Generate time: " generate_time "\n")
+	(print "Range_Queries params (k p deviations): " k " " p " " (unparse deviations) "\n- - - - -\n")
+
+	(destroy_entities "model")
+)

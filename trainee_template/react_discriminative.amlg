@@ -1,0 +1,898 @@
+;Module for trainee_template.
+;Contains helper methods for discriminative reacting.
+(null
+
+	;reacts to the context specified: computes the next action from replays given the current context
+	; context_features: list of context features
+	; context_values: current values of the world state
+	; action_values: values of action features. If specified will bypass react and only do the explanation if details is set
+	; action_features: list of action features for action inputs
+	; case_access_count_label: if specified (not empty), will accumulate the number of times each context has been accessed
+	; details: if set to an assoc with corresponding flags set, then it will modify the return type and return the requested audit info
+	;					 if set to a number (1 - 4) will return corresponding bundle of flags for backwards compatibility
+	; num_features_returned: if return audit data, will return up to this many specified features in the explanation
+	; skip_encoding: if set to true, will forcibly skip encoding and react to passed in values
+	; skip_decoding: if set to true, will forcibly skip decoding and return raw values from the react
+	; extra_audit_features: list of additional features to return with audit data
+	; match_on_context_features : flag, if true will query only for cases whose context features are not null
+	; ignore_case: optional case_id, if set will query for K+1 cases and ignore the perfect matching case during the reaction
+	; focal_case: optional case id of case which to ignore along with ignore_case.
+	; tie_break_random_seed: the random number seed to use to break ties for equal distances.  defaults to a constant value
+	; allow_nulls : flag, if set to true will allow return of null values if there are nulls in the local model for the action features
+	;
+	; case_indices: optional pair (list) of session id and index, where index is the original 0-based session_training_index of the case as it was
+	;			trained into the session. If this case does not exist, outputs null.
+	; preserve_feature_values : optional, list of features that will preserve their values from the case specified by case_indices, appending and
+	;			overwriting the specified context and context features as necessary.
+	; leave_case_out: flag, if set to true and specified along with case_indices, will set ignore_case to the one specified by case_indices
+	;
+	; return_action_values_only: if set to true and details is not specified, output will be just the raw list of action values
+	; force_targetless: flag, if set to true forces use of targetless hyperparameters if available
+	; hyperparam_map: optional assoc of hyperparameters to use (instead of system-determined ones)
+	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
+	; use_case_weights: flag, if set to true will scale influence weights by each case's weight_feature weight
+	; has_dependent_features: flag, defaults to hasDependentFeatures, when false forces react with no dependencies
+	;
+	;returns:
+	; if details is not specified returns the react object { 'action_values': [values of the actions matching action_features] }
+	; otherwise additionally returns the appropriate requested audit data in the react object as well
+	#ReactDiscriminative
+	(declare
+		(assoc
+			context_features (list)
+			context_values (list)
+			action_features (list)
+			action_values (list)
+			details (null)
+			skip_encoding (not hasEncodedFeatures)
+			skip_decoding (not hasEncodedFeatures)
+			num_features_returned (null)
+			extra_audit_features (list)
+			case_access_count_label ""
+			match_on_context_features (false)
+			ignore_case (null)
+			focal_case (null)
+			tie_break_random_seed "fixed rand seed"
+			allow_nulls (false)
+			return_action_values_only (false)
+			force_targetless (false)
+			hyperparam_map (null)
+			weight_feature ".case_weight"
+			use_case_weights (false)
+			case_indices (null)
+			leave_case_out (false)
+			preserve_feature_values (list)
+			new_case_threshold "min"
+			has_dependent_features hasDependentFeatures
+
+			;local variables, should not be passed in as a parameter
+			valid_weight_feature (false)
+		)
+
+		;if user doesn't want to use case weights, change weight_feature to '.none'
+		(if (not use_case_weights)
+			(assign (assoc weight_feature ".none"))
+
+			;else using case weights, weight feature is valid if it's custom (not .case_weight) or hasPopulatedCaseWeight
+			(assign (assoc valid_weight_feature (or hasPopulatedCaseWeight (!= weight_feature ".case_weight"))))
+		)
+
+		;determine the case to ignore based on specified case_indices and use that cases's values by preserve_feature_values
+		(if (and (= (null) ignore_case) (!= (null) case_indices))
+			(seq
+				(assign (assoc
+					ignore_case
+						(call GetCaseId (assoc
+							session (first case_indices)
+							session_training_index (last case_indices)
+						))
+				))
+
+				;return (null) if a session case was specified but not found
+				(if (= (null) ignore_case)
+					(conclude
+						(assoc "action_values" (null) )
+					)
+				)
+
+				;set/overwrite all the feature values directly from the specified case if necessary
+				(if (size preserve_feature_values)
+					(let
+						(assoc
+							preserved_values_map (zip preserve_feature_values (retrieve_from_entity ignore_case preserve_feature_values) )
+							context_values_map (zip context_features context_values)
+						)
+
+						(if (and hasEncodedFeatures (not skip_encoding))
+							(assign (assoc
+								preserved_values_map
+									(zip
+										preserve_feature_values
+										(call ConvertToOutput (assoc
+											features preserve_feature_values
+											feature_values (unzip preserved_values_map preserve_feature_values)
+											;don't round anything until final output
+											has_rounded_features (false)
+											;if there are substituted nominals, don't substitute them since we need their stored values
+											substitute_output (false)
+										))
+									)
+							))
+						)
+
+						(declare (assoc preserved_action_features (indices (intersect preserved_values_map (zip action_features))) ))
+
+						(if (size preserved_action_features)
+							(seq
+								(assign (assoc action_values (unzip preserved_values_map preserved_action_features) ))
+								;remove the action features from preserved_values_map, leaving only contexts
+								(assign (assoc preserved_values_map (remove preserved_values_map preserved_action_features) ))
+							)
+						)
+
+						(if (size context_values_map)
+							(accum (assoc context_values_map preserved_values_map))
+
+							(assign (assoc context_values_map preserved_values_map))
+						)
+
+						;maintain order of context features to be as specified
+						(assign (assoc context_features (union context_features preserve_feature_values) ))
+						(assign (assoc context_values (unzip context_values_map context_features) ))
+					)
+				)
+
+				;if it should not be left out, treat it like it wasn't specified
+				(if (not leave_case_out)
+					(assign (assoc ignore_case (null) ))
+				)
+			)
+		)
+
+		;return (null) context inputs don't match in length
+		(if (!= (size context_features) (size context_values))
+			(conclude
+				(assoc "action_values" (null) )
+			)
+		)
+
+		;output list of reaction values
+		(declare (assoc react_action_values action_values))
+
+		;don't encode values if they don't need encoding
+		(if (and hasFeaturesNeedEncodingFromInput (not skip_encoding))
+			(seq
+				(assign (assoc
+					context_values
+						(call ConvertFromInput (assoc
+							feature_values context_values
+							features context_features
+						))
+				))
+
+				;if action values were specified, encode those into reaction values to be used in explanation
+				(if (> (size action_values) 0)
+					(assign (assoc
+						react_action_values
+							(call ConvertFromInput (assoc
+								feature_values action_values
+								features action_features
+							))
+					))
+				)
+			)
+		)
+
+		(if (= (null) hyperparam_map)
+			(assign (assoc
+				hyperparam_map
+					(call GetHyperparameters (assoc
+						feature (first action_features)
+						context_features context_features
+						mode
+							(if (or force_targetless (> (size action_features) 1))
+								"robust"
+								"full"
+							)
+						weight_feature weight_feature
+					))
+			))
+		)
+
+		;warn if specified weight_feature hasn't been analyzed
+		(if (and use_case_weights (!= weight_feature (get hyperparam_map (list "paramPath" 3))))
+			(accum (assoc
+				warnings
+					(associate (concat
+						"Results may be inaccurate because trainee has not been analyzed with case weights.\n"
+						"Run 'analyze()' with use_case_weights=true, weight_feature='" weight_feature "' "
+						"prior to calling this method."
+					))
+			))
+		)
+
+		(declare (assoc
+			dependent_features_map
+				(if has_dependent_features
+					(retrieve_from_entity "dependentFeatureMap")
+				)
+			action_feature_is_dependent (false)
+		))
+
+		;make a combined features list
+		(declare (assoc
+			features (append action_features context_features)
+
+			;assoc to store categorical action probabilities if requested, when output_categorical_action_probablities is set to true
+			;both of these will be passed to methods inside the react flow implicitly
+			categorical_action_probabilities_map (assoc)
+			output_categorical_action_probabilities
+				(or
+					(get details "categorical_action_probabilities")
+					(get details "case_contributions")
+					(get details "feature_contributions")
+					(get details "case_mda")
+					;feature mda does not need to output C.A.P. because it calls the generic DecreaseInAccuracy method which in turn uses
+					;ReactDiscriminative method with different feature sets, instead of simply calling GenerateReaction or InterpolateActionValues
+				)
+
+			;assoc to store influence weight of each neighbor case
+			;this will be implicitly passed into AccumulateInfluenceWeights to accumulate the weight for each case id
+			influence_weights_map (assoc)
+
+			output_influence_weights
+				(or
+					(and (= (assoc) (get_type details)) (get details "influential_cases"))
+					(and (= (assoc) (get_type details)) (get details "boundary_cases"))
+				)
+
+			;for explanations, caching filtering queries and the local candidate cases map
+			;the list of white and black-list queries to filter down the whole dataset prior to running query_nearest;
+			;such as query_not_in_entity_list on ignore_case when it's specified
+			filtering_queries (list)
+
+			;cached result map of candidate cases -> weights from the reaction, can be re-used by some explanations
+			cached_candidate_cases_map (null)
+		))
+
+		;if there are dependent context features, and the action is dependent, precompute all residuals for dependent continuous features
+		(if dependent_features_map
+			(if (contains_index dependent_features_map (first action_features))
+				(seq
+					(call ComputeAndCacheMinMaxForDependentContinuousContexts (assoc
+						context_features context_features
+						context_values context_values
+						use_regional_model_residuals use_regional_model_residuals
+						hyperparam_map hyperparam_map
+					))
+
+					(assign (assoc action_feature_is_dependent (true)))
+				)
+			)
+		)
+
+		;if reaction_action_values is already set (user provided or from existing case), bypass the GenerateReaction flow, otherwise run it as normal
+		(if (> (size react_action_values) 0)
+			;we don't need not_null nor dependent_queries since this is for explanations only
+			(call PopulateFilteringQueriesForExplanation (assoc
+				not_null_features_queries (list)
+				dependent_queries_list (list)
+				ignore_null_action_feature (= (false) allow_nulls)
+			))
+
+			;else do the GenerateReaction flow here. If only one action feature, just react to that one feature
+			(= 1 (size action_features))
+			(if (contains_value context_features (first action_features))
+				;action feature is also a context feature
+				;simply return the context value for that feature
+				(assign (assoc
+					react_action_values (list (get (zip context_features context_values) (first action_features)))
+				))
+
+				;action feature is not also a context feature
+				;interpolate continuous actions to get values between training cases
+				(let
+					(assoc action_value (call GenerateReaction (assoc allow_nulls allow_nulls)))
+					(if (and (= (null) action_value) (not allow_nulls))
+						;expand neighbor search to acquire a non-null reaction if possible
+						(assign (assoc
+							action_value
+								(call GenerateReaction (assoc
+									allow_nulls (false)
+									ignore_null_action_feature (true)
+								))
+						))
+					)
+					;convert into a list of action values for output
+					(assign (assoc react_action_values (list action_value)))
+				)
+			)
+
+			;else no action features, ensure correct case is ignored if applicable (eg, explaining an existing case)
+			(= 0 (size action_features))
+			(call PopulateFilteringQueriesForExplanation (assoc
+				not_null_features_queries (list)
+				dependent_queries_list (list)
+				ignore_null_action_feature (false)
+			))
+
+			;else there are multiple action features, react to them one at a time
+			(let
+				(assoc
+					i 0
+					context_features_param context_features
+					context_values_param context_values
+					action_value ""
+					;TODO: 1998 research react in order of feature conviction? default to react in order of action_features
+					ordered_action_features (filter (lambda (not (contains_value context_features (target_value)))) action_features)
+					action_feature ""
+				)
+
+				;iterate over the action features in order using a while loop to guarantee order of processing
+				(while (< i (size ordered_action_features))
+					(if (> i 0)
+						(seq
+							;get the hyperparameter map for the next action feature
+							(assign (assoc
+								hyperparam_map
+									(call GetHyperparameters (assoc
+										feature (get ordered_action_features i)
+										context_features context_features_param
+										mode
+											(if (or force_targetless (!= i (- (size action_features) 1)))
+												"robust"
+												"full"
+											)
+										weight_feature weight_feature
+									))
+							))
+							(assign (assoc
+								context_features_param (append context_features_param action_feature)
+								context_values_param (append context_values_param action_value)
+							))
+
+
+							;if there are dependent context features, and this action is dependent, precompute all residuals for dependent continuous features
+							(if dependent_features_map
+								(if (contains_index dependent_features_map (get ordered_action_features i))
+									(seq
+										(call ComputeAndCacheMinMaxForDependentContinuousContexts (assoc
+											context_features context_features_param
+											context_values context_values_param
+											use_regional_model_residuals use_regional_model_residuals
+											hyperparam_map hyperparam_map
+										))
+
+										(assign (assoc action_feature_is_dependent (true) ))
+									)
+
+									;else action feature is not dependent
+									(assign (assoc action_feature_is_dependent (false) ))
+								)
+							)
+						)
+					)
+
+					(assign (assoc
+						action_feature (get ordered_action_features i)
+						action_value
+							(call GenerateReaction (assoc
+								allow_nulls allow_nulls
+								context_features context_features_param
+								context_values context_values_param
+								action_features (list (get ordered_action_features i))
+							))
+					))
+
+					(if (and (= (null) action_value) (not allow_nulls))
+						;expand neighbor search to acquire a non-null reaction if possible
+						(assign (assoc
+							action_value
+								(call GenerateReaction (assoc
+									allow_nulls (false)
+									ignore_null_action_feature (true)
+									context_features context_features_param
+									context_values context_values_param
+									action_features (list action_feature)
+
+								))
+						))
+					)
+
+					;null values by themselves aren't appended to the list, must append nulls in a list
+					(accum (assoc
+						react_action_values
+							(if (= (null) action_value )
+								(list (null))
+
+								action_value
+							)
+					))
+					(accum (assoc i 1))
+				)
+
+				(if (< (size ordered_action_features) (size action_features))
+					;some action features were also in context_features, so they were filtered
+					;we must add the supplied context values to react_action_values in the correct order
+					(let
+						(assoc
+							context_values_map (zip context_features context_values)
+							ordered_action_values_map (zip ordered_action_features react_action_values)
+						)
+
+						(assign (assoc
+							react_action_values
+								(map
+									(lambda
+										(if (contains_index context_values_map (target_value))
+											;context feature that has a context value
+											(get context_values_map (target_value))
+
+											;one of the predicted ordered_action_features
+											(get ordered_action_values_map (target_value))
+										)
+									)
+									action_features
+								)
+						))
+					)
+				)
+			)
+		)
+
+		;return based on whether audit data was requested
+		(if
+			(!= details (null))
+			(call RetrieveAuditData (assoc
+				details details
+				action_values react_action_values
+				context_features context_features
+				context_values context_values
+				action_features action_features
+				num_features_returned num_features_returned
+				extra_audit_features extra_audit_features
+				ignore_case ignore_case
+				force_targetless force_targetless
+				hyperparam_map hyperparam_map
+			))
+
+			;output only the action values
+			return_action_values_only
+			(if (and hasEncodedFeatures (not skip_decoding))
+				;decode nominal features if necessary
+				(call ConvertToOutput (assoc
+					features action_features
+					feature_values react_action_values
+					apply_post_process (true)
+				))
+
+				hasRoundedFeatures
+				(call RoundContinuousFeatures (assoc features action_features feature_values react_action_values ))
+
+				;else just return the values
+				react_action_values
+			)
+
+			;else output action values as part of the react object
+			(assoc
+				"action_values"
+					(if (and hasEncodedFeatures (not skip_decoding))
+						;decode nominal features if necessary
+						(call ConvertToOutput (assoc
+							features action_features
+							feature_values react_action_values
+							apply_post_process (true)
+						))
+
+						hasRoundedFeatures
+						(call RoundContinuousFeatures (assoc features action_features feature_values react_action_values ))
+
+						;else just return the values
+						react_action_values
+					)
+			)
+		)
+	)
+
+	;Selects or interpolates a set of reaction cases
+	;parameters:
+	; neighbor_weights_map : map of neighbor case ids and their respective weights
+	; action_feature: the action feature
+	; allow_nulls : flag, if set to true will allow interpolate to return null values if there are nulls in the local model for the action features
+	; has_perfect_matches: flag, if set to true, there are 0-distance neighbors, will filter out non-0-distance neighbors from neighbor_weights_map
+	#InterpolateActionValues
+	(declare
+		(assoc
+			action_feature (null)
+			neighbor_weights_map (assoc)
+			allow_nulls (false)
+			has_perfect_matches (false)
+		)
+
+		;any weights larger than 1e15 are basically infinite (distance is 0), use 1e15 to account for floating point issues
+		;such that values like 4.000000000000001 are treated same as 4
+		(declare (assoc
+			neighbor_ids_of_zero_dist_values
+				(if has_perfect_matches
+					(filter
+						(lambda (>=  (get neighbor_weights_map (target_value)) 1e15))
+						(indices neighbor_weights_map)
+					)
+
+					;else
+					(null)
+				)
+		))
+
+
+		;get the action values for each index in the neighbor_weights_map
+		(declare (assoc
+			neighbor_id_to_values_map
+				(if allow_nulls
+					(map
+						(lambda (retrieve_from_entity (target_index) action_feature))
+						(if has_perfect_matches
+							(zip neighbor_ids_of_zero_dist_values)
+
+							neighbor_weights_map
+						)
+
+					)
+
+					;filter out all id->null elements from this assoc, remaining assoc is case id -> case value where all values are not null
+					(filter
+						(map
+							(lambda (retrieve_from_entity (target_index) action_feature))
+							(if has_perfect_matches
+								(zip neighbor_ids_of_zero_dist_values)
+
+								neighbor_weights_map
+							)
+						)
+					)
+				)
+		))
+
+		(if (= 0 (size neighbor_id_to_values_map))
+			;if there are some non-perfect matches, just run the normal nearest neighbors flow on those
+			(if (and has_perfect_matches (< (size neighbor_ids_of_zero_dist_values) (size neighbor_weights_map)))
+				(let
+					(assoc
+						;filter out all the perfect match cases that had null values
+						not_null_value_cases_map
+							(filter (lambda (not (contains_index neighbor_id_to_values_map (target_index)))) neighbor_weights_map)
+					)
+
+					;execute the regular flow for the remaining non-perfect match cases
+					(call InterpolateActionValues (assoc
+						action_feature action_feature
+						neighbor_weights_map not_null_value_cases_map
+						allow_nulls allow_nulls
+						has_perfect_matches (false)
+					))
+				)
+
+				;else return null because that means all the neighbors have nulls
+				(null)
+			)
+
+			;else interpolate
+			(declare
+				(assoc
+					neighbor_ids (indices neighbor_id_to_values_map)
+					is_continuous_feature
+						(and
+							(not (contains_index categoricalFeaturesSet action_feature))
+							;interpolate continuous strings as categorical since we don't want to mix them
+							(!= "string" (get editDistanceFeatureTypesMap action_feature))
+						)
+					has_nulls
+						(if allow_nulls
+							;will be set to true if there are any null values among the neighbors
+							(contains_value neighbor_id_to_values_map (null))
+
+							;else is false because all nulls should already have been filtered out if not allowing nulls
+							(false)
+						)
+				)
+
+				(declare (assoc
+					neighbor_weights
+						(if has_perfect_matches
+							(if valid_weight_feature
+								;pull corresponding weights from each case, numerified so a null becomes 0
+								(map (lambda (+ (retrieve_from_entity (target_value) weight_feature))) neighbor_ids)
+
+								;else set all weights to be same value of 1 for perfect matches
+								(map (lambda 1) neighbor_ids)
+							)
+
+							;else get actual corresponding weights for each neighbor case
+							(unzip neighbor_weights_map neighbor_ids)
+						)
+					neighbor_values (unzip neighbor_id_to_values_map neighbor_ids)
+				))
+
+				;sum up the weight of all the cases that have feature values
+				(declare (assoc total_weight (apply "+" neighbor_weights)))
+
+				;if a continuous feature has nulls, check to see if the nulls are >= 50% of the weight, if so just return null
+				;otherwise filter out the nulls and interpolate without them
+				(if (and has_nulls is_continuous_feature)
+					(let
+						(assoc
+							nulls_weight
+								; sum up all the weight of all the null values
+								(apply "+"
+									(filter
+										(lambda (= (null) (get neighbor_values (target_index))))
+										neighbor_weights
+									)
+								)
+							filled_indices
+								; filter out all the null values leaving only indices of filled valued
+								(filter
+									(lambda (!= (null) (get neighbor_values (target_value))))
+									(indices neighbor_values)
+								)
+						)
+
+						;filter out the nulls to interpolate since the weight of the nulls is less then 50% of total weight
+						(if (< (/ nulls_weight total_weight) 0.5)
+							(assign (assoc
+								has_nulls (false)
+								neighbor_values (unzip neighbor_values filled_indices)
+								neighbor_weights  (unzip neighbor_weights filled_indices)
+								;remove weight of nulls from the total weight
+								total_weight (- total_weight nulls_weight)
+							))
+
+							;else the nulls weigh 50% or more, so keep the has_nulls flag set to true
+						)
+					)
+				)
+
+				(if is_continuous_feature
+					(if
+						;if nulls were < 50% of the weight, they would have been filtered out and this flag cleared, so must be null
+						has_nulls
+						(null)
+
+						;else handle cyclic features
+						(contains_index cyclicFeaturesMap action_feature)
+						(let
+							(assoc
+								sum 0
+								cycle_length (get cyclicFeaturesMap action_feature)
+							)
+							(declare (assoc half_cycle_value (/ cycle_length 2)))
+
+							;if outputting influence weights, store them into scaled_neighbor_weights and accumulate
+							(if output_influence_weights
+								(declare
+									(assoc
+										scaled_neighbor_weights
+											(map
+												(lambda (let
+													(assoc value (target_value 1))
+
+													;if sum += (value + length) * weight
+													;else: value >= midpoint: sum += value * weight
+													(if (< value half_cycle_value)
+														(accum (assoc value cycle_length))
+													)
+
+													;increase the sum by the weighted value
+													(accum (assoc
+														sum
+															(/
+																(* value (get neighbor_weights (target_index 1)))
+																total_weight
+															)
+													))
+
+													;output the scaled weight for this neighbor
+													(/ (get neighbor_weights (target_index)) total_weight)
+												))
+
+												neighbor_values
+											)
+									)
+
+									(call AccumulateInfluenceWeights (assoc
+										case_ids neighbor_ids
+										weights scaled_neighbor_weights
+									))
+								)
+
+								;else just calculate the sum of all the cyclic weights
+								(map
+									(lambda (let
+										(assoc value (target_value 1))
+
+										;if sum += (value + length) * weight
+										;else: value >= midpoint: sum += value * weight
+										(if (< value half_cycle_value)
+											(accum (assoc value cycle_length))
+										)
+
+										;increase the sum by the weighted value
+										(accum (assoc
+											sum
+												(/
+													(* value (get neighbor_weights (target_index 1)))
+													total_weight
+												)
+										))
+									))
+
+									neighbor_values
+								)
+							)
+
+							;if sum has gone past the max value, decrease by the length of cycle, i.e., 370 degrees becomes 10
+							(if (> sum cycle_length) (accum (assoc sum (- cycle_length))))
+
+							;if sum has gone past the min value, increase by the length of cycle, i.e., -10 degrees becomes 350
+							(if (< sum 0) (accum (assoc sum cycle_length)))
+
+							;output the weighted sum
+							sum
+						)
+
+						;else: regular continuous, retrieve the value for each neighbor,  multiply it by the weight for that case
+						;then sum the weight-modified features and divide by the sum of the total weight
+						(seq
+							(if output_influence_weights
+								(call AccumulateInfluenceWeights (assoc
+									case_ids neighbor_ids
+									weights (map (lambda (/ (target_value) total_weight)) neighbor_weights)
+								))
+							)
+
+							(if (contains_index editDistanceFeatureTypesMap action_feature)
+								(call CombineCode (assoc
+									sources neighbor_values
+									weights neighbor_weights
+								))
+
+								;divide the dot product by the total weight
+								(/ (dot_product neighbor_values neighbor_weights) total_weight)
+							)
+						)
+					)
+
+					;else it is categorical, pull the categorical value with the highest weight sum from nearby cases
+					(let
+						;an assoc of categorical action feature values -> sum of their weight
+						(assoc
+							categorical_value_weights_map (assoc)
+							output_value (null)
+						)
+
+						(if output_influence_weights
+							(call AccumulateInfluenceWeights  (assoc
+								case_ids neighbor_ids
+								weights neighbor_weights
+							))
+						)
+
+						;iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+						;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight if
+						;it's encountered more than once, and select the categorical value with the highest weight below
+						(assign (assoc
+							categorical_value_weights_map
+								(zip
+									(lambda (+ (target_value 1) (target_value)))
+									neighbor_values
+									neighbor_weights
+								)
+						))
+
+						(if output_categorical_action_probabilities
+							(call AccumulateCategoricalActionProbabilties (assoc
+								action_feature action_feature
+								categorical_value_weights_map categorical_value_weights_map
+							))
+						)
+
+
+						;sort the assoc of discrete values by their weights from high to low
+						;returns the first (highest weighted) categorical value
+						(assign (assoc
+							output_value
+								(first
+									(sort
+										(lambda (> (get categorical_value_weights_map (target_value 1)) (get categorical_value_weights_map (target_value))))
+										(indices categorical_value_weights_map)
+									)
+								)
+						))
+
+						(if has_nulls
+							;parse the categorical neighbor value to handle the situation where the value is the string .nas
+							;and convert it to an actual (null), all other numerical or string literals will remain unchanged
+							(if (= .nas output_value)
+								(null)
+
+								(contains_index numericNominalFeaturesMap action_feature)
+								(+ output_value)
+
+								(contains_index ordinalNumericFeaturesSet action_feature)
+								(+ output_value)
+
+								output_value
+							)
+
+							(contains_index numericNominalFeaturesMap action_feature)
+							(+ output_value)
+
+							(contains_index ordinalNumericFeaturesSet action_feature)
+							(+ output_value)
+
+							output_value
+						)
+					)
+				)
+			)
+		)
+	)
+
+	;combines the code of sources based on weights
+	;parameters:
+	; sources: list of code sources to combine
+	; weights: list of corresponding weights, is assumed to be normalized
+	; similar_mix_chance: represents the probability modulation that values will be mixed
+	;					  0 means neutral, -1 means treat as nominal, 1 means always blend, defaults to 0
+	#CombineCode
+	(declare
+		(assoc
+			sources (list)
+			weights (list)
+			similar_mix_chance 0
+		)
+
+		;compute accumed_weights by adding up the total probability mass seen so far
+		;e.g., weights of [1,2,3] will result in accumed_weights of [1,3,6]
+		(declare (assoc
+			accumed_weights
+				(map
+					(lambda
+						;since index is zero based, the first value probability is returned as-is
+						;but all subsequent values are accumulated to the previous value
+						(if (target_index)
+							(+
+								;get the previous value from the current node by its index and add to the current value
+								(get (target) (- (target_index) 1))
+								(target_value)
+							)
+							;else target_index is zero, return this initial value as-is
+							(target_value)
+						)
+					)
+					weights
+				)
+		))
+
+		(reduce
+			;retrieve the probability mass so far for the reduction to use as the denominator
+			(lambda (let
+				(assoc prob_mass (get accumed_weights (target_index 1)) )
+
+				(declare (assoc
+					;fraction of the first element is the one that is the value being rolled up
+					;the first element will have its probability mass, but every one thereafter will have
+					;the mass of all rolled up so far prior to this element
+					;this is normalized by the probability mass accumulated so far
+					frac_a (/ (get accumed_weights (- (target_index 1) 1)) prob_mass)
+					;fraction of the second element, which is just its probability divided by the
+					;probability mass seen so far
+					frac_b (/ (get weights (target_index 1)) prob_mass)
+				))
+
+				(mix (target_value 1) (target_value) frac_a frac_b similar_mix_chance)
+			))
+			sources
+		)
+	)
+)

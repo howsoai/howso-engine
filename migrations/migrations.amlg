@@ -1,0 +1,319 @@
+;custom code for conversions that need to be done for a specifid core version, assuming the upgrade is from the previous one
+;that way if a trainee has to be upgraded several versions, it will execute all the intermediary conversions in order
+(lambda (assoc
+
+"0.0.0"
+	;all previous trainee labels are accessed via 'import_metadata_map'
+	(seq (print "Version 0.0.0: This code can access and do any operations on contained entity 'trainee'.\n") )
+
+
+"53.0.9"
+	(seq
+		;convert previously stored limits from format of (list min max) to the delta between the two
+		;and compute and store datetime max values for datetime features
+		(assign_to_entities trainee (assoc
+			queryFeatureLimitsMap
+				(map
+					(lambda (let
+						(assoc feature (get_value (target_index 1)))
+						(if (target_value)
+							(if (contains_index (retrieve_from_entity trainee "featureDateTimeMap") feature)
+								(-
+									(get (retrieve_from_entity trainee "featureBoundsMap") (list feature "epoch_max_value"))
+									(get (retrieve_from_entity trainee "featureBoundsMap") (list feature "epoch_min_value"))
+								)
+
+								;else feature limit is: max - min
+								(- (last (target_value)) (first (target_value)))
+							)
+						)
+					))
+					(retrieve_from_entity trainee "queryFeatureLimitsMap")
+				)
+		))
+
+		;move previously stored nominal class counts from nominalClassCountsMap into queryFeatureLimitsMap
+		(accum_to_entities trainee (assoc
+			queryFeatureLimitsMap
+				;keep only those features that have non-zero class counts
+				(filter
+					(lambda (target_value))
+					(get import_metadata_map "nominalClassCountsMap")
+				)
+		))
+
+		;remove unnecesarry (null) values from the limits map
+		(assign_to_entities trainee (assoc
+			queryFeatureLimitsMap (filter (retrieve_from_entity trainee "queryFeatureLimitsMap"))
+		))
+	)
+
+"59.0.0"
+	;rename stored feature attribute "non-sensitive" to "non_sensitive"
+	(assign_to_entities trainee (assoc
+		featureAttributes
+			(map
+				(lambda
+					(if (contains_index (target_value) "non-sensitive")
+						;remove the attribute after setting non_sensitive to the same value
+						(remove
+							(set (target_value) "non_sensitive" (get (target_value) "non-sensitive") )
+							"non-sensitive"
+						)
+
+						;else don't modify
+						(target_value)
+					)
+				)
+				(retrieve_from_entity trainee "featureAttributes")
+			)
+	))
+
+"61.1.2"
+	(assign_to_entities trainee (assoc
+		derivedFeaturesSet (get import_metadata_map "derivedFeaturesMap")
+		uniqueNominalsSet (get import_metadata_map "uniqueNominalsMap")
+	))
+
+"62.3.1"
+	(let
+		(assoc
+			nominal_to_nominal_dependents_map
+				(call_entity trainee "ComposeNominalToNominalDependenciesMap" (assoc
+					nominals_map (get import_metadata_map "nominalsSet")
+					dependents_map (get import_metadata_map "dependentFeatureMap")
+				))
+		)
+
+		;rename continuousDependentsMap -> continuousToNominalDependenciesMap
+		;store the newly created nominalToNominalDependenciesMap
+		(assign_to_entities trainee (assoc
+			continuousToNominalDependenciesMap (get import_metadata_map "continuousDependentsMap")
+			nominalToNominalDependenciesMap nominal_to_nominal_dependents_map
+		))
+	)
+"62.5.3"
+	(let
+		(assoc old_mda_map (get import_metadata_map "mdaMap") )
+
+		;old mda map contained both drop-type and permutation-type mda using compound keys that started with
+		;either "drop" or "permutation"
+		;this code splits up the old map into two respective mda maps and removes that prefix in the keys
+		(if (size old_mda_map)
+			(let
+				(assoc keys (indices old_mda_map) )
+
+				(declare (assoc
+					;only keep keys that start with 'drop' for mda map
+					mda_keys (filter (lambda (= "drop" (substr (target_value) 0 4)) ) keys)
+
+					;keep keys that start with 'permutation' for mda_permutation map
+					mda_permutation_keys (filter (lambda (!= "drop" (substr (target_value) 0 4)) ) keys)
+				))
+
+				;remove the leading "drop" or "permutation" from the key to create new keys
+				(declare (assoc
+					new_mda_keys (map (lambda (tail (target_value) -4)) mda_keys)
+					new_mda_permutation_keys (map (lambda (tail (target_value) -11)) mda_permutation_keys)
+				))
+
+				;create updated maps using new keys with corresponding data from old map based on old key
+				(assign_to_entities trainee (assoc
+					mdaMap
+						(map
+							(lambda (get old_mda_map (target_value)) )
+							;associate new key -> old key
+							(zip new_mda_keys mda_keys)
+						)
+					mdaPermutationMap
+						(map
+							(lambda (get old_mda_map (target_value)) )
+							;associate new key -> old key
+							(zip new_mda_permutation_keys mda_permutation_keys)
+						)
+				))
+			)
+		)
+	)
+"62.6.5"
+	(let
+		(assoc
+			old_nominals_set (get import_metadata_map "nominalsSet")
+			old_feature_limits (get import_metadata_map "queryFeatureLimitsMap")
+		)
+
+		;set nominalsMap to be the old nominalsSet but with values set to be the values from queryFeatureLimitsMap
+		(assign_to_entities trainee (assoc
+			nominalsMap
+				(map
+					(lambda (get old_feature_limits (target_index)))
+					old_nominals_set
+				)
+		))
+
+		(declare (assoc
+			null_deviations_map
+				(filter
+					(call_entity trainee "ComposeFeatureLimitsMap" (assoc
+						features (get import_metadata_map "featureAttributes")
+					))
+				)
+		))
+
+		(declare (assoc
+			updated_hp_map
+				(call_entity trainee "UpdateHyperparametersWithFeatureDomainAttributes" (assoc
+					null_deviations_map null_deviations_map
+					hp_map (retrieve_from_entity trainee "hyperparameterMetadataMap")
+				))
+		))
+
+		(assign_to_entities trainee (assoc hyperparameterMetadataMap updated_hp_map ))
+
+		;in case the cached class counts were out of date or uncounted due to a vely old trainee, update the counts here
+		(call_entity trainee "UpdateNominalClassCounts")
+	)
+"64.0.0"
+	(let
+		(assoc hp_map (retrieve_from_entity trainee "hyperparameterMetadataMap"))
+
+		;rename 'dwe' to 'dt'
+		(assign (assoc
+			hp_map
+				(rewrite
+					(lambda
+						(if (and (= (assoc) (get_type (target_value))) (contains_index (target_value) "dwe") )
+							(let
+								(assoc dt_value (get (target_value 1) "dwe"))
+
+								;remove key 'dwe' and add it back as 'dt'
+								(set
+									(remove (target_value) "dwe")
+									"dt"
+									dt_value
+								)
+							)
+
+							(target_value)
+						)
+					)
+					hp_map
+				)
+		))
+
+		(assign_to_entities trainee (assoc hyperparameterMetadataMap hp_map ))
+	)
+"65.0.11"
+	(let
+		(assoc old_half_gaps (get import_metadata_map "cachedFeatureMinGapMap") )
+		(assign_to_entities trainee (assoc cachedFeatureHalfMinGapMap old_half_gaps))
+	)
+"66.2.0"
+	(let
+
+		(assoc non_string_nominals_map (get import_metadata_map "nonStringNominalFeaturesMap"))
+		(assign_to_entities trainee (assoc numericNominalFeaturesMap non_string_nominals_map))
+
+		(call_entity trainee "UpdateNominalClassCounts")
+	)
+"67.0.0"
+	(let
+		(assoc
+			default_features (retrieve_from_entity trainee "defaultFeatures")
+			hp_map (retrieve_from_entity trainee "hyperparameterMetadataMap")
+			residuals_map (retrieve_from_entity trainee "residualsMap")
+			prediction_stats_map (retrieve_from_entity trainee "featurePredictionStatsMap")
+		)
+
+		(declare (assoc
+			default_features_key (apply "concat" (weave (sort default_features) "."))
+			hp_param_paths (list)
+		))
+
+		;do additional HP nesting
+		(assign (assoc
+			hp_map
+				(map
+					(lambda (associate default_features_key (target_value 1)) )
+					hp_map
+				)
+		))
+
+		;update param path lists
+		(assign (assoc
+			hp_map
+				(rewrite
+					(lambda
+						(if (and (= "list" (get_type_string (target_value))) (= "paramPath" (target_index))  )
+							(list
+								(get (target_value 1) 0)
+								default_features_key
+								(get (target_value 1) 1)
+								(get (target_value 1) 2)
+							)
+
+							;else
+							(target_value)
+						)
+					)
+					hp_map
+				)
+			residuals_map
+				(rewrite
+					(lambda
+						(if (and (= "list" (get_type_string (target_value))) (contains_value ".hyperparam_path" (target_index))  )
+							(list
+								(get (target_value 1) 0)
+								default_features_key
+								(get (target_value 1) 1)
+								(get (target_value 1) 2)
+							)
+
+							;else
+							(target_value)
+						)
+					)
+					residuals_map
+				)
+			prediction_stats_map
+				(rewrite
+					(lambda
+						(if (and (= "list" (get_type_string (target_value))) (contains_value ".hyperparam_path" (target_index))  )
+							(list
+								(get (target_value 1) 0)
+								default_features_key
+								(get (target_value 1) 1)
+								(get (target_value 1) 2)
+							)
+
+							;else
+							(target_value)
+						)
+					)
+					prediction_stats_map
+				)
+		))
+
+		(rewrite
+			(lambda
+				(if (and (= "list" (get_type_string (target_value))) (= "paramPath" (target_index)) )
+					(seq
+						(accum (assoc hp_param_paths (list (target_value 2)) ))
+						(target_value)
+					)
+
+					(target_value)
+				)
+			)
+			hp_map
+		)
+
+		(assign_to_entities trainee (assoc
+			hyperparameterMetadataMap hp_map
+			hyperparameterParamPaths hp_param_paths
+			residualsMap residuals_map
+			featurePredictionStatsMap prediction_stats_map
+			defaultFeaturesContextKey default_features_key
+		))
+	)
+))

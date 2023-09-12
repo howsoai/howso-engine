@@ -1,0 +1,265 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_impute_sparse.amlg"))
+
+	(call_entity "howso" "create_trainee" (assoc trainee "st_model3"))
+	(assign_to_entities "howso" (assoc trainee "st_model3"))
+
+	(call_entity "howso" "set_internal_parameters" (assoc
+		trainee "st_model3"
+		default_hyperparameter_map (assoc "k" 1 "p" 0.4 "dt" -1)
+	))
+
+	(declare (assoc
+		features (list "A" "B" "C" "D")
+		almost_matches_matrix
+			(list
+				(list 5 (null) (null) (null))
+				(list 4.9 (null) (null) (null))
+				(list 5 (null) 3 2)
+				(list 4.9 4 (null) 2.5)
+			)
+	))
+
+	;train
+	(call_entity "howso" "train" (assoc
+		features features
+		input_cases almost_matches_matrix
+		session "almost"
+
+	))
+
+;VERIFY IMPUTE ALMOST MATCH DATA
+	;impute
+	(call_entity "howso" "impute" (assoc features features))
+
+	;output
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc features features indicate_imputed 0 session "almost"))
+	))
+
+	(print "Impute almost matching sparse data: ")
+	(call assert_approximate (assoc
+		obs (get result (list "payload" "cases"))
+		percent .25
+		exp
+			(list
+				(list 5 4 3 2)
+				(list 4.9 4 3 2.5)
+				(list 5 4 3 2)
+				(list 4.9 4 3 2.5)
+			)
+	))
+
+
+
+	(call exit_if_failures (assoc msg "Almost matching sparse data"))
+
+
+;VERIFY ADDING FEATURE OVERWRITES IMPUTED CASE EDIT HISTORY
+	(call_entity "howso" "add_feature" (assoc
+		trainee "st_model3"
+		feature "C"
+		feature_value 12
+		session "ut_add"
+	))
+
+	(assign (assoc result
+		(call_entity "howso" "get_cases" (assoc
+			trainee "st_model3"
+			features (append features ".case_edit_history")
+			indicate_imputed 1
+		))
+	))
+
+
+	(map
+		(lambda (let
+			(assoc
+				history (get (target_value 1) 4) ; index 0-3 are features A,B,C and D, so index 4 is case edit history
+				imputed (get (target_value 1) 5) ; and index 5 is imputed
+			)
+
+			;imputed should not have the C feature since it was manually set above
+			(print "Feature C is not on imputed list: ")
+			(call assert_false (assoc obs (contains_value imputed "C")))
+
+			;case edit history for session id "ut_add" should be that feature C was set to 12
+			(print "Session 'ut_add' edit history: ")
+			(call assert_approximate (assoc
+				obs (get history "ut_add")
+				exp (list
+						(assoc
+							"feature" "C"
+							"type" "set"
+							"value" 12
+							"previous_value" 3
+						 )
+					)
+			))
+		))
+		(get result (list "payload" "cases"))
+	)
+
+
+	(call exit_if_failures (assoc msg "Overwrite imputed and case edit history"))
+
+
+	(declare (assoc
+		perfect_matches_matrix
+			(list
+				(list 5 (null) (null) (null))
+				(list 5 (null) (null) (null))
+				(list 5 (null) 3 2)
+				(list 5 4 (null) 2.5)
+				(list 6 (null) 3 3)
+			)
+	))
+
+
+	(call_entity "howso" "delete" (assoc trainee "st_model3"))
+	(call_entity "howso" "create_trainee" (assoc trainee "st_model3" ))
+	(assign_to_entities "howso" (assoc trainee "st_model3"))
+
+	;train
+	(call_entity "howso" "train" (assoc
+		features features
+		input_cases perfect_matches_matrix
+		session "perfect"
+
+	))
+
+;VERIFY PERFECT MATCH DATA
+	;impute
+	(call_entity "howso" "impute" (assoc features features))
+
+	;output
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc features features indicate_imputed 0 session "perfect"))
+	))
+
+	(print "impute perfect matching sparse: ")
+
+	;since only one value exists for each feature B and C, all cases will be 4 and 3 respectively
+	;the rows with one null will be imputed first, ;then the two rows with all nulls will be imputed
+	;the first of those last two for feature D it'll be average(2, 2.5, null) = 2.25, because the case where A=6 won't be in the closest list
+	;then for the last one it'll average(2, 2.25 , 2.5) = 2.25
+
+	(call assert_approximate (assoc
+		obs (get result (list "payload" "cases"))
+		thresh .25
+		exp
+			(list
+				(list 5 4 3 2.25)
+				(list 5 4 3 2.25)
+				(list 5 4 3 2)
+				(list 5 4 3 2.5)
+				(list 6 4 3 3)
+			)
+	))
+
+	(call exit_if_failures (assoc msg "Almost matching sparse data"))
+
+
+;VERIFY CLEAR IMPUTED SESSION
+	;manually set the value of B to be 6 in the case where their values are 5 4 3 2
+	(call_entity "howso" "add_feature" (assoc feature "B" feature_value 6 condition (assoc "D" 2) session "edit_D"))
+
+
+	(call_entity "howso" "clear_imputed_session" (assoc session "clear_impute" impute_session "none"))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc features features indicate_imputed 0 session "perfect"))
+	))
+
+	(print "clear imputed session data (won't undo set values): ")
+	(call assert_same (assoc
+		obs (get result (list "payload" "cases"))
+		;the original perfect_matches_matrix with a 6 in place of a null in the third case
+		exp
+			(list
+				(list 5 (null) (null) (null))
+				(list 5 (null) (null) (null))
+				(list 5 6 3 2)
+				(list 5 4 (null) 2.5)
+				(list 6 (null) 3 3)
+			)
+	))
+
+
+
+
+;VERIFY FULL SPARSE IMPUTE
+
+
+	(declare (assoc
+		sparse_matrix
+			(list
+				(list 2 		2 		(null) 	3      )
+				(list (null) 	4 		8 		(null) )
+				(list 4 		(null) 	4 		(null) )
+				(list (null) 	(null) 	6 		2      )
+				(list 6		    (null) 	(null) 	1      )
+				(list (null) 	3 		(null) 	(null) )
+			)
+	))
+
+
+	(call_entity "howso" "delete" (assoc trainee "st_model3"))
+	(call_entity "howso" "create_trainee" (assoc trainee "st_model3" ))
+	(assign_to_entities "howso" (assoc trainee "st_model3"))
+	(call_entity "howso" "set_closest_n" (assoc closest_n 3))
+
+	;train
+	(call_entity "howso" "train" (assoc
+		features features
+		input_cases sparse_matrix
+		session "sparse"
+
+	))
+
+
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "react" (assoc
+					context_features (list "A" "C" "D")
+					action_features (list "B")
+					context_values (list 5 5 5)
+				))
+				(list "payload" "action_values")
+			)
+	))
+
+	(print "Verify expected value is average of all values for sparse react: ")
+	;average of all current values for feature B is average(2,3,4) = 3
+	(call assert_approximate (assoc obs result exp (list 3)))
+
+	;impute
+	(call_entity "howso" "impute" (assoc features_to_impute (list "A" "B" "C")))
+
+	;output
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc features features indicate_imputed 0 session "sparse"))
+	))
+
+	(print "impute sparse matrix, without feature D: ")
+	(call assert_approximate  (assoc
+		obs (get result (list "payload" "cases"))
+		exp (list
+				(list 2 2 6 3)
+				(list 3 4 8 (null))
+				(list 4 2 4 (null))
+				(list 4 2 6 2)
+				(list 6 2 6 1)
+				(list 4 3 4 (null))
+			)
+		thresh 4
+	))
+
+	(call exit_if_failures (assoc msg unit_test_name))
+)

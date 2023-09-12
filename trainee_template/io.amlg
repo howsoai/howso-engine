@@ -1,0 +1,519 @@
+;Module for trainee_template.
+;Contains input/output helper methods.
+(null
+
+	;decodes raw enumerated feature values into their nominal values for all nominal features in a list of cases and returns the list of cases with the values
+	;parameters
+	; cases: list of cases (assocs of features->values)
+	#ConvertToOutputFromCaseList
+	(declare
+		;each case is an assoc of feature -> raw feature value
+		(assoc cases (list))
+
+		(declare (assoc
+			has_rounded_features hasRoundedFeatures
+			has_datetime_features hasDateTimeFeatures
+			has_string_ordinals hasStringOrdinals
+		))
+
+		(map
+			(lambda (let
+				(assoc
+					case_features (indices (target_value 1))
+					case_values (values (target_value 1))
+				)
+
+				;output the case with the values decoded
+				(zip
+					case_features
+					(call ConvertToOutput (assoc
+						features case_features
+						feature_values case_values
+						has_rounded_features has_rounded_features
+						has_datetime_features has_datetime_features
+						has_string_ordinals has_string_ordinals
+					))
+				)
+			))
+			cases
+		)
+	)
+
+	;decodes raw enumerated feature values into their nominal values for the provided list of features and values, returns the decoded list of values
+	;parameters
+	; features: list of features
+	; feature_values: corresponding list of values for each features
+	; has_rounded_features: flag, if true will round features that need rounding
+	; has_datetime_features: flag, if true will decode features to the specified format
+	; has_string_ordinals: flag, if true will decode string ordinal features from ordinal value to string
+	; original_context_map: optional, map of original context feature -> original context values, used to output original unencoded nominal values
+	; substitute_output: optional, flag, if set to true will substitute output if there are substitutions available
+	; apply_post_process: flag, if true will apply post_process custom code to features with keys in postProcessMap
+	#ConvertToOutput
+	(declare
+		(assoc
+			features (list)
+			feature_values (list)
+			has_rounded_features hasRoundedFeatures
+			has_datetime_features hasDateTimeFeatures
+			has_string_ordinals hasStringOrdinals
+			original_context_map (assoc)
+			apply_post_process (false)
+		)
+
+		(let
+			(assoc
+				decoded_values
+					(map
+						(lambda
+							(if
+								(and has_rounded_features (contains_index featureRoundingMap (target_value)))
+								(let
+									(assoc rounded_value (get feature_values (target_index 1)))
+
+									;leave nulls as-is to prevent them from becoming .nan
+									(if (= (null) rounded_value)
+										(null)
+
+										(!= "number" (get_type_string rounded_value))
+										rounded_value
+
+										(seq
+											(assign (assoc
+												rounded_value
+													;generate a statement in the format of (round <value> <significant_digits> <decimal_points>)
+													(apply "round" (append rounded_value (get featureRoundingMap (target_value 1))))
+											))
+
+											(if (contains_index cyclicFeaturesMap (target_value))
+												(assign (assoc
+													rounded_value (mod rounded_value (get cyclicFeaturesMap (target_value)))
+												))
+											)
+
+											(if (and has_datetime_features (contains_index featureDateTimeMap (target_value)))
+												;decode datetime from number into readable date of specified locale
+												(if (!= (null) rounded_value)
+													(format
+														rounded_value
+														"number"
+														(get featureDateTimeMap (list (target_value 1) "date_time_format"))
+														(null)
+														(assoc "locale" (get featureDateTimeMap (list (target_value 2) "locale")))
+													)
+
+													(null)
+												)
+
+												rounded_value
+											)
+										)
+									)
+								)
+
+								(and has_datetime_features (contains_index featureDateTimeMap (target_value)))
+								;decode datetime from number into readable date of specified locale
+								(if (!= (null) (get feature_values (target_index)))
+									(format
+										(get feature_values (target_index))
+										"number"
+										(get featureDateTimeMap (list (target_value 1) "date_time_format"))
+										(null)
+										(assoc "locale" (get featureDateTimeMap (list (target_value 2) "locale")))
+									)
+
+									(null)
+								)
+
+								(and has_string_ordinals (contains_index ordinalOrdinalToStringMap (target_value)))
+								(get ordinalOrdinalToStringMap (list (target_value 1) (get feature_values (target_index 1))))
+
+								(contains_index numericNominalFeaturesMap (target_value))
+								(if (!= (null) (get feature_values (target_index)) )
+									(if (= "boolean" (get numericNominalFeaturesMap (target_value)))
+										(= 1 (get feature_values (target_index)))
+
+										(get feature_values (target_index))
+									)
+
+									(null)
+								)
+
+								(contains_index editDistanceFeatureTypesMap  (target_value))
+								(if
+									(= "json" (get editDistanceFeatureTypesMap  (target_value)))
+									(format (get feature_values (target_index)) "code" "json")
+
+									(= "yaml" (get editDistanceFeatureTypesMap  (target_value)))
+									(format (get feature_values (target_index)) "code" "yaml")
+
+									(= "amalgam" (get editDistanceFeatureTypesMap  (target_value)))
+									(format (get feature_values (target_index)) "code" "string")
+
+									(get feature_values (target_index))
+								)
+
+								;else return the original value
+								(get feature_values (target_index))
+							)
+						)
+						features
+					)
+			)
+
+			(if (and hasPostProcessing apply_post_process)
+				(seq
+					(assign (assoc
+						decoded_values
+							(map
+								(lambda (let
+									(assoc
+										original_value (get decoded_values (target_index 1))
+									)
+									(if (contains_index postProcessMap (target_value))
+										(let
+											(assoc
+												feature (target_value 1)
+											)
+											(declare (assoc
+												parsed_code
+													(call ParseDerivedFeatureCode (assoc
+														code_string (get postProcessMap feature)
+														label_to_code
+															(lambda
+																(if (and (= (lambda label_value) 0) (= feature (lambda label_name)))
+																	;pull the feature value
+																	original_value
+
+																	;else
+																	(null)
+																)
+															)
+													))
+											))
+											(call_sandboxed parsed_code (assoc
+												original_value original_value
+												feature feature
+											) sandboxedComputeLimit sandboxedMemoryLimit)
+										)
+
+										;else
+										original_value
+									)
+								))
+								features
+							)
+					))
+
+					; apply rounding once more
+					(if has_rounded_features
+						(assign (assoc
+							decoded_values
+								(map
+									(lambda (let
+										(assoc
+											rounded_value (get decoded_values (target_index 1))
+										)
+
+										(if (= (null) rounded_value)
+											(null)
+
+											(!= "number" (get_type_string rounded_value))
+											rounded_value
+
+											(contains_index featureRoundingMap (target_value))
+											(seq
+												(assign (assoc
+													rounded_value
+														;generate a statement in the format of (round <value> <significant_digits> <decimal_points>)
+														(apply "round" (append rounded_value (get featureRoundingMap (target_value 1))))
+												))
+
+												(if (contains_index cyclicFeaturesMap (target_value))
+													(mod rounded_value (get cyclicFeaturesMap (target_value)))
+
+													rounded_value
+												)
+											)
+
+											;else
+											rounded_value
+										)
+									))
+									features
+								)
+						))
+					)
+				)
+			)
+
+			(if (and hasSubstituteFeatureValues substitute_output)
+				(call SubstituteFeatureValues (assoc
+					features features
+					feature_values decoded_values
+				))
+
+				;else output the decoded values
+				decoded_values
+			)
+		)
+	)
+
+	;encodes nominal features into enumerated values which are what is stored for each case, if a nominal value has no encoding, it's set to -1
+	;returns a list of encoded feature values
+	;
+	;parameters:
+	; features: list of features
+	; feature_values: current values of each feature
+	#ConvertFromInput
+	(declare
+		(assoc
+			features (list)
+			feature_values (list)
+		)
+
+		(assign (assoc
+			feature_values
+				(map
+					(lambda
+						(if (contains_index encodingNeededFeaturesSet (target_value))
+							(if (= (null) (get feature_values (target_index)))
+								(null)
+
+								(if ;stringify all nominal values
+									(contains_index stringNominalFeaturesSet (target_value))
+									(concat (get feature_values (target_index)))
+
+									;if it's a datetime, encode datetime by converting string date time into seconds
+									(contains_index featureDateTimeMap (target_value))
+									(format
+										(get feature_values (target_index))
+										(get featureDateTimeMap (list (target_value 1) "date_time_format"))
+										"number"
+										(assoc "locale" (get featureDateTimeMap (list (target_value 2) "locale")))
+										(null)
+									)
+
+									;else it's a string ordinal, convert from string to ordinal value
+									(contains_index ordinalStringToOrdinalMap (target_value))
+									(get ordinalStringToOrdinalMap (list (target_value 1) (get feature_values (target_index 1))))
+
+									(= "boolean" (get numericNominalFeaturesMap (target_value)))
+									(+ (get feature_values (target_index)))
+
+									(contains_index editDistanceFeatureTypesMap  (target_value))
+									(if
+										(= "json" (get editDistanceFeatureTypesMap  (target_value)))
+										(format (get feature_values (target_index)) "json" "code")
+
+										(= "yaml" (get editDistanceFeatureTypesMap  (target_value)))
+										(format (get feature_values (target_index)) "yaml" "code")
+
+										(= "amalgam" (get editDistanceFeatureTypesMap  (target_value)))
+										(parse (get feature_values (target_index)) )
+
+										(get feature_values (target_index))
+									)
+
+									;else return the value as-is
+									(get feature_values (target_index))
+								)
+							)
+
+							;else return the value as-is
+							(get feature_values (target_index))
+						)
+					)
+
+					features
+				)
+		))
+
+		;return the updated values
+		feature_values
+	)
+
+	;outputs the entire model's data to the console
+	;note: need root entity to call this
+	#PrintFullModel
+	(let
+		(assoc cases (call AllCases))
+		(print (map (lambda (retrieve_entity_root (target_value))) cases))
+	)
+
+	;output the time delta value decoded per feature definition
+	;parameters:
+	; feature: feature for which to decode the time delta
+	; feature_value: input value in seconds
+	#DecodeTimeDelta
+	(declare
+		(assoc
+			feature ""
+			feature_value (null)
+		)
+		(declare (assoc delta_format (get featureDateTimeMap (list feature "time_delta_format"))))
+
+		(if
+			(or (= delta_format(null)) (= delta_format "seconds"))
+			feature_value
+
+			(= delta_format "milliseconds")
+			(* feature_value 1000)
+
+			(= delta_format "minutes")
+			(/ feature_value 60)
+
+			(= delta_format "hours")
+			(/ feature_value 3600)
+
+			(= delta_format "days")
+			(/ feature_value 86400)
+
+			(= delta_format "weeks")
+			(/ feature_value 604800)
+
+			(= delta_format years)
+			(/ feature_value 31556925.445)
+
+			;if provided an invalid input, default is output as seconds
+			feature_value
+		)
+	)
+
+	;rounds datetime features by converting epoch to datetime and back to epoch
+	;parameters
+	; features: list of features
+	; feature_values: corresponding list of values for each features
+	#RoundDatetimeFeatures
+	(declare
+		(assoc
+			features (list)
+			feature_values (list)
+		)
+
+		(map
+			(lambda
+				(if (contains_index featureDateTimeMap (target_value))
+					(if (!= (null) (get feature_values (target_index)))
+						;output "rounded" epoch seconds
+						(format
+							;convert epoch to datetime string
+							(format
+								(get feature_values (target_index))
+								"number"
+								(get featureDateTimeMap (list (target_value 1) "date_time_format"))
+								(null)
+								(assoc "locale" (get featureDateTimeMap (list (target_value 2) "locale")))
+							)
+							(get featureDateTimeMap (list (target_value 1) "date_time_format"))
+							"number"
+							(assoc "locale" (get featureDateTimeMap (list (target_value 2) "locale")))
+							(null)
+						)
+
+						(null)
+					)
+
+					;else not a datetime, keep value as-is
+					(get feature_values (target_index))
+				)
+			)
+			features
+		)
+	)
+
+	;rounds any continuous features per the rounding attributes set in featureRoundingMap
+	;parameters
+	; features: list of features
+	; feature_values: corresponding list of values for each features
+	#RoundContinuousFeatures
+	(declare
+		(assoc
+			features (list)
+			feature_values (list)
+		)
+
+		(map
+			(lambda
+				(if (contains_index featureRoundingMap (target_value))
+					(let
+						(assoc rounded_value (get feature_values (target_index 1)))
+
+						;leave nulls as-is to prevent them from becoming .nan
+						(if (= (null) rounded_value)
+							(null)
+
+							(!= "number" (get_type_string rounded_value))
+							rounded_value
+
+							(seq
+								(assign (assoc
+									rounded_value
+										;generate a statement in the format of (round <value> <significant_digits> <decimal_points>)
+										(apply "round" (append rounded_value (get featureRoundingMap (target_value 1))))
+								))
+
+								(if (contains_index cyclicFeaturesMap (target_value))
+									(mod rounded_value (get cyclicFeaturesMap (target_value)))
+
+									rounded_value
+								)
+							)
+						)
+					)
+
+					(get feature_values (target_index))
+				)
+			)
+			features
+		)
+	)
+
+	;convert string date to epoch
+	;
+	;parameters:
+	; date: date passed in as a string
+	; feature: name of feature corresponding to the datetime format for the date
+	; feature_datetime_map: optional map of feature -> datetime format, if unspecified uses model's featureDateTimeMap
+	#ConvertDateToEpoch
+	(declare
+		(assoc
+			date ""
+			feature ""
+			feature_datetime_map featureDateTimeMap
+		)
+		(format
+			date
+			(get feature_datetime_map (list feature "date_time_format"))
+			"number"
+			(assoc "locale" (get feature_datetime_map (list feature "locale")))
+			(null)
+		)
+	)
+
+	;helper method that returns a full signed 64 bit integer as a string
+	; note that this does not generate the full range; it does not generate the top 6,854,775,807 values due to rounding
+	#GenerateInt64String
+	(let
+		(assoc
+			;give one more digit to the least significant since there's an odd number of decimal digits
+			; this is one greater than the maximum value for int64 because the floor is taken of the rand, so it will not evaluate to the maximum value
+			most_significant (floor (rand 922337204))
+			;double precision can represent this accurately (has been tested)
+			least_significant (floor (rand 10000000000))
+		)
+
+		;zeros to prepend the least significant with
+		(declare (assoc prepend_zeros (- 9 (floor (log least_significant 10))) ))
+
+		(if (= 0 most_significant)
+			least_significant
+
+			;in the off chance that 0s need prepending
+			(if prepend_zeros
+				(apply "concat" (append most_significant (range "0" 1 prepend_zeros 1) least_significant))
+				(concat most_significant least_significant)
+			)
+		)
+	)
+)

@@ -1,0 +1,122 @@
+(seq
+	; amlg is plain text readable Amalgam and is FOR INTERNAL USE ONLY, should not be copied/deployed or used outside of engine dev
+	;
+	; This file needs to be executed after any changes are made to any Howso code in order to generate the binary file version of
+	; Howso, trainee_template and migrations for deployment to Howso - copies the binary files to the deployment folder
+	;
+	;acceptable binary file extensions are:
+	;
+	; caml - compressed Amalgam
+	; baml - bundelded Amalgam, TODO: not yet implemented
+	#extension "caml"
+
+	;set to 1 to automatically copy out the files to the specified folder (OS will be autodetected)
+	#copy_to_deployment_path 1
+
+	#howso_linux_deployment_path "~/.howso/lib/dev/engine/"
+	#howso_windows_deployment_path "%USERPROFILE%\\.howso\\lib\\dev\\engine\\"
+
+	;----------------------------------------------------------------------------------------------;
+
+	(print "Saving Howso as " extension "\n")
+
+	(load_entity "./howso.amlg" "howso")
+	(call_entity "howso" "initialize_for_deployment" (assoc file_extension (get_value extension) ))
+
+	;set the version to whatever is in version.txt and split it on "."
+	(declare (assoc version (get (load "version.json") "version")  ))
+	(declare (assoc version_list (split version "\\.") ))
+
+	(assign_to_entities "howso" (assoc
+		version version
+		major_version (first version_list)
+		minor_version (get version_list 1)
+		point_version (last version_list)
+	))
+
+	;insert local "version" if one wasn't passed in from the server, specifically for deploying on local dev machines
+	;use the user, git branch and timestamp as the major/minor/point version
+	;get user and git branch using platform independent commands
+	(if (= version "0.0.0")
+		(seq
+			;store the user and name of git branch
+			(declare (assoc
+				whoami (last (system "system" "whoami"))
+				git_version (last (system "system" "git rev-parse --abbrev-ref HEAD"))
+			))
+
+			(assign_to_entities "howso" (assoc
+				;truncate the carriage return from two vars that were read in from the temp file
+				major_version (trunc whoami)
+				minor_version (trunc git_version)
+				point_version (format (system_time) "number" "date:%Y-%m-%d-%H.%M.%S")
+			))
+		)
+	)
+
+	;output Howso in the specified extension
+	(store (concat "./howso." extension) (retrieve_entity_root "howso" 1))
+
+	(null
+		#store_as_clean_caml
+			(store
+				(concat filename extension)
+				;remove all the comments by only keeping labels and values (code)
+				(rewrite
+					(lambda
+						(set_labels
+							(set_concurrency
+								(get_value (target_value))
+								(get_concurrency (target_value))
+							)
+							(get_labels (target_value))
+						)
+					)
+					(retrieve_entity_root entity_name 1)
+				)
+			)
+	)
+
+
+	;output trainee template in the specified extension
+	(load_entity "./trainee_template.amlg" "tt" (false) (false))
+	;load modules into tt
+	(call_entity "tt" "LoadModules")
+	;set version on TT
+	(assign_to_entities "tt" (assoc
+		majorVersion (first version_list)
+		minorVersion (get version_list 1)
+		pointVersion (last version_list)
+	))
+
+	(load_entity "./migrations/migrations.amlg" "migrations")
+
+	;write out to camls
+	(call store_as_clean_caml (assoc filename "trainee_template." entity_name "tt"))
+	(call store_as_clean_caml (assoc filename "migrations." entity_name "migrations"))
+
+	(if copy_to_deployment_path
+		(let
+			(assoc
+				copy_cmd "cp"
+				deployment_path howso_linux_deployment_path
+			)
+			(if (= (system "os") "Windows")
+				(assign (assoc
+					copy_cmd "copy"
+					deployment_path
+						(concat
+							"\""
+							(trunc (last (system "system" (concat "echo " howso_windows_deployment_path)) ))
+							"\""
+						)
+				))
+			)
+
+			(print "howso " (last (system "system" (concat copy_cmd " howso." extension " " deployment_path))) )
+			(print "trainee_template " (last (system "system" (concat copy_cmd " trainee_template." extension " " deployment_path))) )
+			(print "migrations " (last (system "system" (concat copy_cmd " migrations." extension " " deployment_path "migrations"))) )
+		)
+	)
+
+)

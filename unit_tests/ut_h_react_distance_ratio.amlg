@@ -1,0 +1,561 @@
+(seq
+
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_react_distance_ratio.amlg"))
+
+	;declare variables that will be used later.
+	(declare (assoc
+		START (system_time)
+		trainee "ut_distance_ratio"
+		session "default"
+		training_data
+			(list
+				(list 2 2 "A")
+				(list 2 2 "A")
+			)
+
+		context_features (list "con_A" "con_B" "nom_A")
+		features
+			(assoc
+				"con_A" (assoc type "continuous")
+				"con_B" (assoc type "continuous")
+				"nom_A" (assoc type "nominal" data_type "string")
+			)
+		default_hyperparameter_map
+			(assoc "k" 4 "p" 1 "dt" -1)
+	))
+
+	;Create, setup, and train a trainee.
+	(call_entity "howso" "create_trainee" (assoc trainee trainee))
+	(call_entity "howso" "set_feature_attributes" (assoc
+		trainee trainee
+		features features
+	))
+	(call_entity "howso" "set_internal_parameters" (assoc
+		trainee trainee
+		default_hyperparameter_map default_hyperparameter_map
+	))
+	(call_entity "howso" "train" (assoc
+		trainee trainee
+		features context_features
+		input_cases training_data
+
+		session "duplicates"
+	))
+
+	;react to an identical case to the only one in the model
+	;normally this would produce a .infinity or .nan but the
+	;ComputeDistanceRatio routine replaces those with 0, so
+	;we check if that is working as expected
+	(let
+		(assoc
+			result
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 2 2 "A")
+
+					details (assoc "distance_ratio" (true) num_most_similar_case_indices 2)
+				))
+		)
+		(print "distance_ratio is 0 at least one case in the model == contexts: ")
+		(call assert_same (assoc
+			obs (get result (list "payload" "distance_ratio"))
+			exp 0
+		))
+	)
+
+	;next we train a non-duplicate case into the model
+
+	;since the distance ratio computation uses entity distance contributions
+	;rather than raw distance, this should mean that the local_model_min_distance
+	;(the denominator of the distance ratio) will not be zero
+	(call_entity "howso" "train" (assoc
+		trainee trainee
+		features context_features
+		input_cases (list (list 1 1 "B"))
+
+		session session
+	))
+	(let
+		(assoc
+			result
+			(call_entity "howso" "react" (assoc
+				trainee trainee
+				context_features context_features
+				context_values (list 1 2 "C")
+				new_case_threshold "min"
+				details (assoc distance_ratio (true) num_most_similar_case_indices 2)
+			))
+		)
+		(print "distance_ratio > 0 when contexts are new and at least one case in local model is non-duplicate: ")
+		(call assert_true (assoc
+			obs (> (get result (list "payload" "distance_ratio")) 0)
+		))
+	)
+	(let
+		(assoc
+			result
+			(call_entity "howso" "react" (assoc
+				trainee trainee
+				context_features context_features
+				context_values (list 1 2 "C")
+				new_case_threshold "most_similar"
+				details (assoc distance_ratio (true) num_most_similar_case_indices 2)
+			))
+		)
+		(print "distance_ratio = 0 when using most_similar, even when adding a non-duplicate if original local model is duplicates ")
+		(call assert_same (assoc
+			obs (get result (list "payload" "distance_ratio"))
+			exp 0
+		))
+	)
+
+	;Remove session containing duplicates so that validating results is simpler.
+	(call_entity "howso" "remove_session" (assoc
+		trainee trainee
+		session "duplicates"
+	))
+	(call_entity "howso" "train" (assoc
+		trainee trainee
+		features context_features
+		input_cases (list (list 2 2 "B"))
+
+		session session
+	))
+
+	;validate the math behind distance ratio contributions by ensuring that
+	;the values produced by react are identical to ones produced by manually
+	;querying the model
+	(declare (assoc
+			local_model_min_distance
+				(first (values
+					(compute_on_contained_entities
+						(list "howso" trainee)
+						(list
+							(compute_entity_distance_contributions
+								1
+								context_features
+								(null)
+								(null)
+								(assoc "nom_A" "nominal" ) ;nominal feature
+								(assoc "nom_A" 2 ) ;nominal counts
+								(null)
+								1
+								1
+								(null)
+								"fixed rand seed"
+								(null)
+								(null)
+								(true)
+							)
+						)
+					)
+				))
+
+			;the first case we test is when we react to a case that is "too close"
+			;which is one that would normally be considered a privacy risk by
+			;Geminai
+			result_too_close
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 2 1.25 "B")
+					new_case_threshold "min"
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			;we also want to ensure the minimum distance reported in the audit data
+			;is the same as the minimum distance found in the model
+			result_too_close_dist_validation
+				(get
+					(call_entity "howso" "react" (assoc
+						trainee trainee
+						context_features context_features
+						context_values (list 2 1.25 "B")
+						new_case_threshold "min"
+
+						;5 is more cases than are in the model to ensure that the entire model
+						;is grabbed
+						details (assoc num_most_similar_cases 5)
+					))
+					(list "payload" "most_similar_cases" 0 ".distance")
+				)
+			;then we test when we react to a case that is "just right"
+			;which is one that would have a distance ratio of 1 exactly
+			result_just_right
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 2 4 "B")
+					new_case_threshold "min"
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			result_just_right_dist_validation
+				(get
+					(call_entity "howso" "react" (assoc
+						trainee trainee
+						context_features context_features
+						context_values (list 2 4 "B")
+						new_case_threshold "min"
+
+						;5 is more cases than are in the model to ensure that the entire model
+						;is grabbed
+						details (assoc num_most_similar_cases 5)
+					))
+					(list "payload" "most_similar_cases" 0 ".distance")
+				)
+			;finally we test when we react to a case that is "very private"
+			;which is one that would have a distance ratio of greater than 1
+			result_very_private
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 4 4 "A")
+					new_case_threshold "min"
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			result_very_private_dist_validation
+				(get
+					(call_entity "howso" "react" (assoc
+						trainee trainee
+						context_features context_features
+						context_values (list 4 4 "A")
+						new_case_threshold "min"
+
+						;5 is more cases than are in the model to ensure that the entire model
+						;is grabbed
+						details (assoc num_most_similar_cases 5)
+					))
+					(list "payload" "most_similar_cases" 0 ".distance")
+				)
+	))
+
+	(let
+		(assoc
+			result_too_close_distance
+				(get result_too_close (list "payload" "most_similar_case_indices" 0 ".distance"))
+			result_just_right_distance
+				(get result_just_right (list "payload" "most_similar_case_indices" 0 ".distance"))
+			result_very_private_distance
+				(get result_very_private (list "payload" "most_similar_case_indices" 0 ".distance"))
+
+			result_too_close_dist_ratio
+				(get result_too_close (list "payload" "distance_ratio"))
+			result_just_right_dist_ratio
+				(get result_just_right (list "payload" "distance_ratio"))
+			result_very_private_dist_ratio
+				(get result_very_private (list "payload" "distance_ratio"))
+		)
+
+		;BEGIN TOO_CLOSE TESTS
+		(print "result_too_close distance audit validation: ")
+		(call assert_same (assoc
+			obs result_too_close_distance
+			exp result_too_close_dist_validation
+		))
+		(print "result_too_close math check: ")
+		(call assert_same (assoc
+			obs result_too_close_dist_ratio
+			exp (/ result_too_close_distance local_model_min_distance)
+		))
+		(print "result_too_close ratio is less than 1: ")
+		(call assert_true (assoc
+			obs (< result_too_close_dist_ratio 1)
+		))
+		;END TOO_CLOSE TESTS
+
+		;BEGIN JUST_RIGHT TESTS
+		(print "result_just_right distance audit validation: ")
+		(call assert_same (assoc
+			obs result_just_right_distance
+			exp result_just_right_dist_validation
+		))
+		(print "result_just_right math check: ")
+		(call assert_same (assoc
+			obs result_just_right_dist_ratio
+			exp (/ result_just_right_distance local_model_min_distance)
+		))
+		(print "result_just_right ratio is equal to 1: ")
+		(call assert_same (assoc
+			obs result_just_right_dist_ratio
+			exp 1
+		))
+		;END JUST_RIGHT TESTS
+
+		;BEGIN VERY_PRIVATE TESTS
+		(print "result_very_private distance audit validation: ")
+		(call assert_same (assoc
+			obs result_very_private_distance
+			exp result_very_private_dist_validation
+		))
+		(print "result_very_private math check: ")
+		(call assert_same (assoc
+			obs result_very_private_dist_ratio
+			exp (/ result_very_private_distance local_model_min_distance))
+		)
+		(print "result_very_private ratio is greater than 1: ")
+		(call assert_true (assoc
+			obs (> result_very_private_dist_ratio 1)
+		))
+		;END VERY_PRIVATE TESTS
+	)
+
+	;We train additional cases to test the new_case_threshold options
+	(call_entity "howso" "train" (assoc
+		trainee trainee
+		features context_features
+		input_cases (list
+			(list 4 4 "B")
+			(list 20 20 "B")
+		)
+
+		session session
+	))
+
+	(declare (assoc
+			;The first case we test is when we react to a case that is "too close"
+			;which is one that would normally be considered a privacy risk by
+			;Geminai.
+			result_too_close_new_case_threshold_min
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 4 5 "B")
+					new_case_threshold "min"
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			result_too_close_new_case_threshold_max
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 10 10 "B")
+					new_case_threshold "max"
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			result_too_close_new_case_threshold_most_similar
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 6 5 "B")
+					new_case_threshold "most_similar"
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			;then we test when we react to a case that is "just right"
+			;which is one that would have a distance ratio of 1 exactly
+			result_just_right_new_case_threshold_min
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 5 5 "B")
+					new_case_threshold "min"
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			result_just_right_new_case_threshold_max
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list -15 -15 "B")
+					new_case_threshold "max"
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			result_just_right_new_case_threshold_most_similar
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 6 6 "B")
+					new_case_threshold "most_similar"
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			;finally we test when we react to a case that is "very private"
+			;which is one that would have a distance ratio of greater than 1
+			result_very_private_new_case_threshold_min
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 6 5 "A")
+					new_case_threshold "min"
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			result_very_private_new_case_threshold_max
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list -17 -17 "A")
+					new_case_threshold "max"
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+			result_very_private_new_case_threshold_most_similar
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 7 6 "A")
+					new_case_threshold "most_similar"
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 1)
+				))
+	))
+
+	(let
+		(assoc
+			result_too_close_dist_ratio_new_case_threshold_min
+				(get result_too_close_new_case_threshold_min (list "payload" "distance_ratio"))
+			result_too_close_dist_ratio_new_case_threshold_max
+				(get result_too_close_new_case_threshold_max (list "payload" "distance_ratio"))
+			result_too_close_dist_ratio_new_case_threshold_most_similar
+				(get result_too_close_new_case_threshold_most_similar (list "payload" "distance_ratio"))
+			result_just_right_dist_ratio_new_case_threshold_min
+				(get result_just_right_new_case_threshold_min (list "payload" "distance_ratio"))
+			result_just_right_dist_ratio_new_case_threshold_max
+				(get result_just_right_new_case_threshold_max (list "payload" "distance_ratio"))
+			result_just_right_dist_ratio_new_case_threshold_most_similar
+				(get result_just_right_new_case_threshold_most_similar (list "payload" "distance_ratio"))
+			result_very_private_dist_ratio_new_case_threshold_min
+				(get result_very_private_new_case_threshold_min (list "payload" "distance_ratio"))
+			result_very_private_dist_ratio_new_case_threshold_max
+				(get result_very_private_new_case_threshold_max (list "payload" "distance_ratio"))
+			result_very_private_dist_ratio_new_case_threshold_most_similar
+				(get result_very_private_new_case_threshold_most_similar (list "payload" "distance_ratio"))
+		)
+
+		;BEGIN TOO_CLOSE TESTS
+		(print "new_case_threshold=min result_too_close ratio is less than 1: ")
+		(call assert_true (assoc
+			obs (< result_too_close_dist_ratio_new_case_threshold_min 1)
+		))
+		(print "new_case_threshold=max result_too_close ratio is less than 1: ")
+		(call assert_true (assoc
+			obs (< result_too_close_dist_ratio_new_case_threshold_max 1)
+		))
+		(print "new_case_threshold=most_similar result_too_close ratio is less than 1: ")
+		(call assert_true (assoc
+			obs (< result_too_close_dist_ratio_new_case_threshold_most_similar 1)
+		))
+		;END TOO_CLOSE TESTS
+
+		;BEGIN JUST_RIGHT TESTS
+		(print "new_case_threshold=min result_just_right ratio is equal to 1: ")
+		(call assert_same (assoc
+			obs result_just_right_dist_ratio_new_case_threshold_min
+			exp 1
+		))
+		(print "new_case_threshold=max result_just_right ratio is equal to 1: ")
+		(call assert_same (assoc
+			obs result_just_right_dist_ratio_new_case_threshold_max
+			exp 1
+		))
+		(print "new_case_threshold=most_similar result_just_right ratio is equal to 1: ")
+		(call assert_same (assoc
+			obs result_just_right_dist_ratio_new_case_threshold_most_similar
+			exp 1
+		))
+		;END JUST_RIGHT TESTS
+
+		;BEGIN VERY_PRIVATE TESTS
+		(print "new_case_threshold=min result_very_private ratio is greater than 1: ")
+		(call assert_true (assoc
+			obs (> result_very_private_dist_ratio_new_case_threshold_min 1)
+		))
+		(print "new_case_threshold=max result_very_private ratio is greater than 1: ")
+		(call assert_true (assoc
+			obs (> result_very_private_dist_ratio_new_case_threshold_max 1)
+		))
+		(print "new_case_threshold=most_similar result_very_private ratio is greater than 1: ")
+		(call assert_true (assoc
+			obs (> result_very_private_dist_ratio_new_case_threshold_most_similar 1)
+		))
+		;END VERY_PRIVATE TESTS
+	)
+
+	(call_entity "howso" "train" (assoc
+		trainee trainee
+		features context_features
+		input_cases
+			(list
+				(list 1 2 "A")
+				(list 2 3 "B")
+				(list 4 5 "C")
+			)
+	))
+
+	(let
+		(assoc
+			result
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 1 2 "A")
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 2)
+				))
+		)
+		(print "request for 2 most_similar_case_indices returns 2 indices: ")
+		(call assert_same (assoc
+			obs (size (get result (list "payload" "most_similar_case_indices")))
+			exp 2
+		))
+	)
+
+	(let
+		(assoc
+			result
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 1 2 "A")
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 3)
+				))
+		)
+		(print "request for 3 most_similar_case_indices returns 3 indices: ")
+		(call assert_same (assoc
+			obs (size (get result (list "payload" "most_similar_case_indices")))
+			exp 3
+		))
+	)
+
+	(let
+		(assoc
+			result
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 1 2 "A")
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 4)
+				))
+		)
+		(print "request for 4 most_similar_case_indices returns 4 indices: ")
+		(call assert_same (assoc
+			obs (size (get result (list "payload" "most_similar_case_indices")))
+			exp 4
+		))
+	)
+
+	(let
+		(assoc
+			result
+				(call_entity "howso" "react" (assoc
+					trainee trainee
+					context_features context_features
+					context_values (list 1 2 "A")
+
+					details (assoc distance_ratio (true) num_most_similar_case_indices 0)
+				))
+		)
+		(print "request for 0 most_similar_case_indices returns 0 indices: ")
+		(call assert_same (assoc
+			obs (size (get result (list "payload" "most_similar_case_indices")))
+			exp 0
+		))
+	)
+
+	(print "TIME TO EXECUTE DISTANCE RATIO TEST: " (- (system_time) START) "\n")
+	(call exit_if_failures (assoc msg unit_test_name))
+)

@@ -1,0 +1,385 @@
+;Module for trainee_template.
+;Contains helper methods for validation for case generation.
+(null
+
+	;Helper method for GenerateCase that enforces new case generation by testing whether the generated case is unique enough,
+	;and will attempt to generate a new case up to 2 times if generated cases are too similar to an existing one in the model.
+	;Uniqueness test is: given a generated case, find its closest neighbor case, compare all feature values and verify that at
+	;least floor(1 + log(num_features)) features have deltas larger than their respective feature residuals and the distance to
+	;the closest case is larger than the minimum case distance contribution among all neighbors in the generated case's local space.
+	;Outputs the generated case if it's unique enough, otherwise outputs null.
+	#!VerifyUniqueCaseGeneration
+	(let
+		(assoc
+			;flag, will be set to true if there are duplicates of this generated case, false if there aren't
+			has_dupes (true)
+			;counter of times the case has been generated
+			generate_attempt 0
+			context_numeric_values (list)
+			hyperparam_map
+				(call GetHyperparameters (assoc
+					feature ".targetless"
+					context_features context_features
+					mode "robust"
+					weight_feature weight_feature
+				))
+
+			threshold_feature_residuals_map (null)
+			closest_case (null)
+			p_parameter 0.1
+
+			local_model_cases_map (assoc)
+			local_model_cases_tuple (list)
+			threshold_distance 0
+			closest_case_values (list)
+			ignore_case (if leave_case_out preserve_case_id)
+			num_diff_features 0
+			min_diff_num_features (floor (log (+ 1 (size context_features))))
+			null_count_fraction 1
+		)
+
+		(assign (assoc
+			;amount a null<->case is worth toward count of different features = min_diff_num_features / (floor (ln(num_features)^2+1))
+			null_count_fraction (/ min_diff_num_features (floor (+ 1 (pow (log (size context_features)) 2)) ) )
+			feature_weights (get hyperparam_map "featureWeights")
+			feature_deviations (if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+			p_parameter (get hyperparam_map "p")
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+
+			;override global residuals with calculated residuals per feature
+			threshold_feature_residuals_map
+				(append (get hyperparam_map "featureDeviations") (zip rand_ordered_features threshold_feature_residuals))
+		))
+
+		;check if an exact duplicate already exists in the model and if so re-try up to 2 times to re-generate a novel case
+		(while (< generate_attempt 3)
+			;increase the generate counter
+			(accum (assoc generate_attempt 1))
+
+			#!FindClosestCasesForUniquenessCheck
+			(seq
+				(assign (assoc
+					context_numeric_values
+						;output of generative retries are decoded, non-substituted string nominals
+						;so encode them here
+						(if (and hasFeaturesNeedEncodingFromInput (> generate_attempt 1))
+							(call ConvertFromInput (assoc
+								feature_values context_values
+								features context_features
+							))
+
+							;else just use original encoded values
+							context_values
+						)
+				))
+
+				;post_process feature attributes must be applied before rounding and uniqueness check
+				(if hasPostProcessing
+					(assign (assoc
+						;map over context values and apply any post_process that may exist
+						context_numeric_values
+							(map
+								(lambda (let
+									(assoc
+										feature (get context_features (target_index 1))
+										original_value (target_value 1)
+									)
+									(if (contains_index postProcessMap feature)
+										(let
+											(assoc
+												parsed_code
+													(call ParseDerivedFeatureCode (assoc
+														code_string (get postProcessMap feature)
+														label_to_code
+															(lambda
+																(if (and (= (lambda label_value) 0) (= feature (lambda label_name)))
+																	;pull the feature value
+																	original_value
+
+																	;else
+																	(null)
+																)
+															)
+													))
+											)
+											(call_sandboxed parsed_code (assoc
+												feature feature
+												original_value original_value
+											) sandboxedComputeLimit sandboxedMemoryLimit)
+										)
+
+										;else return original value
+										original_value
+									)
+								))
+								context_numeric_values
+							)
+					))
+				)
+
+				;do rounding prior to checking for uniqueness so the values being compared are the 'actual' generated values
+				(if hasRoundedFeatures
+					(assign (assoc
+						context_numeric_values
+							(call RoundContinuousFeatures (assoc
+								features context_features
+								feature_values context_numeric_values
+							))
+					))
+				)
+
+				;datetime features need to be converted to datetime and back to numeric for proper rounding
+				;e.g., drop the hours/min/seconds if it's only a date prior to the uniqueness check
+				(if hasDateTimeFeatures
+					(assign (assoc
+						context_numeric_values
+							(call RoundDatetimeFeatures (assoc
+								features context_features
+								feature_values context_numeric_values
+							))
+					))
+				)
+
+				;find the closest case
+				(assign (assoc
+					local_model_cases_tuple
+						(compute_on_contained_entities (append
+							(if ignore_case
+								(query_not_in_entity_list (list ignore_case))
+								(list)
+							)
+							(query_nearest_generalized_distance
+								;limit the number of considered nearby neighbors by limiting the bandwidth of local minimum distance
+								;comparison for density-based anonymity preservation, for performance reasons.
+								;May be more accuraty to remove the limit of 15 in the future.
+								(min 15 (get hyperparam_map "k"))
+								context_features
+								context_numeric_values
+								feature_weights
+								queryDistanceTypeMap
+								query_feature_attributes_map
+								;Feature deviations are not used in order to ensure that privacy is maximally preserved.
+								;If feature deviations are used, duplicate cases may be deemed private.
+								(null) ;feature_deviations
+								p_parameter
+								1 ;dt = 1 means return computed distance to each case
+								(null) ;weight
+								(rand)
+								(null) ;radius
+								"precise"
+								(true) ;output sorted list
+							)
+						))
+				))
+			)
+
+			;set closest case to be the one with the smallest distance
+			(assign (assoc
+				closest_case (first (first local_model_cases_tuple))
+				dist_to_closest_case (first (last local_model_cases_tuple))
+			))
+
+			;only test for uniqueness if the generated case is not a perfect match because has_dupes begins with true,
+			;skipping this block will indicate that the case is a duplicate
+			(if (!= dist_to_closest_case 0)
+				(seq
+					(assign (assoc
+						closest_case_values (retrieve_from_entity closest_case context_features)
+						num_diff_features 0
+					))
+
+					;loop over all the features and compare the generated value vs the value of the closest case
+					;and if any generated feature value is larger than the local feature residual, the generated case is not a duplicate
+					(map
+						(lambda (let
+							(assoc
+								generated_value (get context_numeric_values (target_index 1))
+								case_value (get closest_case_values (target_index 1))
+							)
+							(if (!= generated_value case_value)
+								(if (contains_index nominalsMap (target_value))
+									(assign (assoc
+										has_dupes (false)
+										num_diff_features
+											(+
+												num_diff_features
+												;if either of the values is a null, it counts only the amount of its null_count_fraction
+												(if (or (= (null) case_value) (= (null) generated_value))
+													null_count_fraction
+													1
+												)
+											)
+									))
+
+									;else continuous, check if the difference is more than the residual
+									(let
+										(assoc diff (abs (- case_value generated_value)) )
+										(if (> diff (get threshold_feature_residuals_map (target_value)) )
+											(assign (assoc
+												has_dupes (false)
+												num_diff_features (+ num_diff_features 1)
+											))
+
+											;else if either of the values is a null, it counts only the amount of its null_count_fraction
+											(= .nan diff)
+											(assign (assoc
+												has_dupes (false)
+												num_diff_features (+ num_diff_features null_count_fraction)
+											))
+
+											;else diff isn't bigger than residual, thus still a dupe but does increase different feature count
+											(accum (assoc num_diff_features 1))
+										)
+									)
+								)
+							)
+						))
+						context_features
+					)
+
+					;if there aren't enough different features in the similar case, it can be considered a dupe
+					(if (< num_diff_features min_diff_num_features)
+						(assign (assoc has_dupes (true)))
+					)
+
+					;if found one feature different enough, verify that the case itself is as far as any closest case in the local model
+					(if (not has_dupes)
+						;generated case fails unique test if dist to closest case is less than the
+						;minimum entity distance contribution between neighbors.
+						(if
+							(<
+								dist_to_closest_case
+								(call QueryLocalModelMinDistanceContribution (assoc
+									feature_labels context_features
+									entity_ids_to_compute (first local_model_cases_tuple)
+									use_feature_deviations (false)
+								))
+							)
+							(assign (assoc has_dupes (true)))
+						)
+					)
+				)
+			)
+
+			(if (not has_dupes)
+				;if nominals should be encoded, they should be decoded prior to output as well
+				(if hasEncodedFeatures
+					(assign (assoc
+						context_values
+							(call ConvertToOutput (assoc
+								features context_features
+								feature_values context_numeric_values
+								substitute_output original_substitute_output
+								original_context_map context_values_map
+								;values were post processed before the uniqueness check, so no need to post process them again
+								apply_post_process (false)
+							))
+					))
+
+					;else if needs rounding
+					hasRoundedFeatures
+					(assign (assoc
+						context_values
+							(call RoundContinuousFeatures (assoc
+								features context_features
+								feature_values context_values
+							))
+					))
+				)
+			)
+
+			(if (not has_dupes)
+				;no dupes, return the output by breaking out of the loop
+				(conclude
+					(unzip (zip context_features context_values) action_features)
+				)
+			)
+
+			(if (< generate_attempt 3)
+				;try to generate a case, explicitly ignoring if it's novel since this block of code checks for
+				;already-existing dupes, prevents being stuck in an infinite recursive loop
+				(assign (assoc
+					context_values
+						;since generated case values are ordered by action_features, we unzip them in the order of context_features
+						(unzip
+							(append
+								context_values_map
+								(zip
+									action_features
+									(call GenerateCase (assoc
+										context_features (indices context_values_map)
+										context_values (values context_values_map)
+										action_features action_features
+										use_regional_model_residuals use_regional_model_residuals
+										desired_conviction desired_conviction
+										feature_bounds_map feature_bounds_map
+										generate_novel_case (false)
+										substitute_output (false)
+										original_substitute_output substitute_output
+										weight_feature weight_feature
+										use_case_weights use_case_weights
+										case_indices case_indices
+										leave_case_out leave_case_out
+										preserve_feature_values preserve_feature_values
+										new_case_threshold new_case_threshold
+									))
+								)
+							)
+							context_features
+						)
+				))
+
+				;else failed to generated a novel case after 5 times
+				(null)
+			)
+		)
+	)
+
+	;Helper method to check test if series case is unique, runs the same validation as generate cases
+	;output true if duplicate
+	;output false if case is unique
+	#!CheckIsDuplicateSeries
+	(let
+		(assoc
+			hyperparam_map
+				(call GetHyperparameters (assoc
+					feature ".targetless"
+					mode "robust"
+					weight_feature weight_feature
+				))
+			local_model_cases_tuple (null)
+		)
+		(declare (assoc
+			feature_weights (get hyperparam_map "featureWeights")
+			feature_deviations (if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+			p_parameter (get hyperparam_map "p")
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+		))
+
+		;find the closest cases using the same code as generate case, set generate_attempt to 2 so that it
+		;converts datetimes to numeric and rounds appropriately before finding closest cases
+		(call !FindClosestCasesForUniquenessCheck (assoc generate_attempt 2))
+
+		;set closest case to be the one with the smallest distance
+		(declare (assoc dist_to_closest_case (first (last local_model_cases_tuple)) ))
+
+		;return true because this case is a duplicate
+		(if (= 0 dist_to_closest_case) (conclude (true)) )
+
+		;the specified case fails unique test if dist to closest case is less than the
+		;minimum entity distance contribution between neighbors.
+		(if (<
+				dist_to_closest_case
+				(call QueryLocalModelMinDistanceContribution (assoc
+					feature_labels context_features
+					entity_ids_to_compute (first local_model_cases_tuple)
+					use_feature_deviations (false)
+				))
+			)
+			(conclude (true))
+		)
+
+		;return false - not a duplicate
+		(false)
+	)
+)
