@@ -39,7 +39,7 @@ To install and use the Howso Engine, clone this repository locally and use an Am
 Basic usage of the Howso Engine in an Amalgam script looks like:
 
 ``` amalgam
-  (seq
+(seq
     (load_entity "./howso.amlg" "howso")
     (assign_to_entities "howso" (assoc filepath "./"))
     (set_entity_root_permission "howso" 1)
@@ -47,34 +47,37 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
     (call_entity "howso" "create_trainee" (assoc trainee "iris_trainee"))
 
     (call_entity "howso" "set_feature_attributes" (assoc
-      trainee "iris_trainee"
-      features (assoc "species" (assoc "type" "nominal"))
+        trainee "iris_trainee"
+        features (assoc "species" (assoc "type" "nominal"))
     ))
 
     (call_entity "howso" "train" (assoc
-      features (list "sepal_length" "sepal_width" "petal_length" "petal_width" "species")
-      input_cases
-        (list
-          (list 6.4 2.8 5.6 2.2 "virginica")
-          (list 5.0 2.3 3.3 1.0 "versicolor")
-          (list 4.9 3.1 1.5 0.1 "setosa")
-          ...
-        )
-      session "iris_session"
+        features (list "sepal_length" "sepal_width" "petal_length" "petal_width" "species")
+        input_cases
+            (list
+                (list 6.4 2.8 5.6 2.2 "virginica")
+                (list 5.0 2.3 3.3 1.0 "versicolor")
+                (list 4.9 3.1 1.5 0.1 "setosa")
+                (list 5.9 3.0 4.2 1.5 "versicolor")
+                (list 6.9 3.1 5.4 2.1 "virginica")
+                (list 5.1 3.3 1.7 0.5 "setosa")
+                ;... as many cases as appropriate
+            )
+        session "iris_session"
     ))
 
     (declare (assoc
-      reaction
-        (call_entity "howso" "react" (assoc
-          trainee "iris_trainee"
-          context_values (list 5.3 2.5 4.1 1.3)
-          context_features (list "sepal_length" "sepal_width" "petal_length" "petal_width")
-          action_features (list "species)
-        ))
+        reaction
+            (call_entity "howso" "react" (assoc
+                trainee "iris_trainee"
+                context_features (list "sepal_length" "sepal_width" "petal_length" "petal_width")
+                context_values (list 5.3 2.5 4.1 1.3)
+                action_features (list "species)
+            ))
     ))
 
     (print reaction)
-  )
+)
 ```
 
 ## Related Repos
