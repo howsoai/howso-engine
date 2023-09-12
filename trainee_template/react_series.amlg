@@ -106,6 +106,7 @@
                                 series_context_values react_series_context_values
                                 output_new_series_ids output_new_series_ids
                                 output_features output_features
+								continue_existing_series continue_existing_series
 
                                 initial_features initial_features
                                 context_features context_features
@@ -193,8 +194,7 @@
 			react_output (null)
 			;0-based index of last row in series_data, start with -1 because it's accumulated at the start of the loop
 			last_series_index -1
-			;0-based index of current row in series_data
-			current_series_index 0
+			first_generated_row (true)
 			;map of id feature index -> value to replace at end of series generation
 			replacement_id_values_map (assoc)
 			;flag if there are unique non-id features
@@ -278,6 +278,8 @@
 			;track progress length of series being generated if it's a stop condition in the series_stop_map
 			track_progress (contains_index series_stop_map ".series_progress")
 			total_progress 0
+			initial_existing_progress 0
+			num_existing_series_rows 0
 			original_derived_context_features derived_context_features
 			original_action_features action_features
 			;find and store the largest referenced lag value among derived_context_features
@@ -325,6 +327,136 @@
 			)
 		)
 
+		;to continue an existing series, pull the necessary last few cases from the series to account for largest lag amount
+		(if continue_existing_series
+			(let
+				(assoc
+					series_id_features (get tsModelFeaturesMap "series_id_features")
+					id_values_map (assoc)
+					existing_series_cases (list)
+				)
+
+				;populate an assoc of id feature -> value, if conditioned on a series, otherwise select a random series
+				(assign (assoc
+					id_values_map
+						;if initial_features_map has series id features, use them
+						(if (size (filter (unzip initial_features_map series_id_features)))
+							;get ID feature values from initial map
+							(keep initial_features_map series_id_features)
+
+							;else randomly pick IDs by selecting a case at random and using its series ids
+							(zip
+								series_id_features
+								(retrieve_from_entity
+									;pick a case at random
+									(first
+										(contained_entities (list
+											(query_exists internalLabelSession)
+											(query_sample 1)
+										))
+									)
+									pull the random case's ID features
+									series_id_features
+								)
+							)
+						)
+				))
+
+				;pull the necessary number of cases from the series
+				(assign (assoc
+					existing_series_cases
+						(contained_entities (append
+							(map
+								(lambda (query_equals (target_value) (get id_values_map (target_value))))
+								series_id_features
+							)
+							;if an initial time value is provided, limit existing series cases to those before the specified initial time
+							(if (contains_index initial_features_map tsTimeFeature)
+								(query_less_or_equal_to
+									tsTimeFeature
+									;subtract an epsilon of 1e-6 from the time value so that the query logic
+									;will actually function as a 'query_less_than' instead of 'query_less_or_equal_to'
+									(-
+										(if (contains_index featureDateTimeMap tsTimeFeature)
+											(call ConvertDateToEpoch (assoc
+												date (get initial_features_map tsTimeFeature)
+												feature tsTimeFeature
+											))
+
+											(get initial_features_map tsTimeFeature)
+										)
+										1e-6
+									)
+								)
+								(list)
+							)
+							;select the necessary count of previous cases to reference lags
+							(query_max tsTimeFeature largest_max_row_lag)
+						))
+				))
+
+				;set initial series_data to all the feature values from existing series cases
+				(assign (assoc
+					series_data
+						(map
+							(lambda
+								(call ConvertToOutput (assoc
+									features features
+									feature_values (retrieve_from_entity (target_value 1) features)
+								))
+							)
+							existing_series_cases
+						)
+					;update last_series_index to the index of the last row in the series
+					last_series_index (- (size existing_series_cases) 1)
+					num_existing_series_rows (size existing_series_cases)
+				))
+
+				;if end condition is not specified, generate progress based on where series is continuing from
+				(if (not (contains_index series_stop_map tsTimeFeature))
+					;if there are previous cases to continue from, generate a progress value given the values from the last case
+					(if (size (last series_data))
+						(seq
+							(assign (assoc
+								initial_existing_progress
+									(first (get
+										(call React (assoc
+											context_features derived_action_features
+											context_values (unzip (zip features (last series_data)) derived_action_features)
+											action_features (list ".series_progress")
+											;do not derive anything during this react
+											derived_action_features (list)
+											derived_context_features (list)
+											;no explanation
+											details (null)
+											case_access_count_label case_access_count_label
+											ignore_case ignore_case
+											substitute_output substitute_output
+											input_is_substituted input_is_substituted
+											use_case_weights use_case_weights
+											weight_feature weight_feature
+											rand_seed rand_seed
+											leave_case_out leave_case_out
+
+											desired_conviction desired_conviction
+											use_regional_model_residuals use_regional_model_residuals
+											new_case_threshold new_case_threshold
+											feature_bounds_map feature_bounds_map
+											generate_new_cases "no"
+										))
+										"action_values"
+									))
+							))
+							(assign (assoc
+								total_progress initial_existing_progress
+								track_progress (true)
+							))
+						)
+					)
+				)
+			)
+		)
+
 		;loop until series stopping condition is met
 		(while (not done)
 
@@ -335,7 +467,7 @@
 			))
 
 			;if initial conditions were provided, use them as contexts for the first case
-			(if (and (= -1 last_series_index) (> (size initial_features_map) 0))
+			(if (and first_generated_row (> (size initial_features_map) 0))
 				(assign (assoc
 					use_initial_context_features (true)
 					;update initial map to be the stationary context overwritten by the provided initial values
@@ -368,7 +500,7 @@
 							(unzip
 								(append
 									original_context_map
-									(zip series_context_features (get series_context_values current_series_index))
+									(zip series_context_features (get series_context_values (+ 1 last_series_index)) )
 								)
 								features
 							)
@@ -378,10 +510,7 @@
 						(list original_context_values)
 					)
 			))
-			(accum (assoc
-				last_series_index 1
-				current_series_index 1
-			))
+			(accum (assoc last_series_index 1 ))
 
 			(if (size original_derived_context_features)
 				(seq
@@ -486,7 +615,7 @@
 			)
 
 			;if this is the first row of the series, assign values for the replacement series ids here, now that the initial value is available
-			(if (= 0 last_series_index)
+			(if first_generated_row
 				(assign (assoc
 					replacement_id_values_map
 						(map
@@ -501,6 +630,7 @@
 							)
 							replacement_id_values_map
 						)
+						first_generated_row (false)
 				))
 			)
 
@@ -508,7 +638,7 @@
 			(if series_has_terminators
 				(let
 					(assoc
-						stop_react_context_features (indices (filter (remove current_case_map ".series_progress")))
+						series_end_context_features (indices (filter (remove current_case_map ".series_progress")))
 					)
 
 						;generative react .series_progress given the current case
@@ -516,8 +646,8 @@
 						series_progress
 							(first (get
 								(call React (assoc
-									context_features stop_react_context_features
-									context_values (unzip current_case_map stop_react_context_features)
+									context_features series_end_context_features
+									context_values (unzip current_case_map series_end_context_features)
 									action_features (list ".series_progress")
 									;do not derive anything during this react
 									derived_action_features (list)
@@ -601,7 +731,7 @@
 						(get tsModelFeaturesMap "series_id_features")
 					)
 				)
-			))
+		))
 
 		;if need to update/replace id values, for each id, update all the rows and set updated value for each id feature
 		(if (size replacement_id_values_map)
@@ -708,7 +838,11 @@
 				;iterate over all the series data and return only the columns corresponding to action_features
 				(map
 					(lambda (unzip (target_value) action_feature_indices))
-					series_data
+					;if there were existing series rows, do not include them in the output
+					(if num_existing_series_rows
+						(tail series_data (- num_existing_series_rows))
+						series_data
+					)
 				)
 		)
 	)
@@ -840,13 +974,26 @@
 
 											;else reset series_data and initial features and progress and index, to regenerate the series from the start
 											(seq
-												(assign (assoc
-													total_progress 0
-													series_data (list)
-													last_series_index -1
-													current_case_map (assoc)
-												))
 												(call !InitializeInitialSeriesFeatures)
+
+												;if there were existing rows, reset to just those existing rows
+												(if num_existing_series_rows
+													(assign (assoc
+														total_progress initial_existing_progress
+														series_data (trunc series_data num_existing_series_rows)
+														last_series_index (- num_existing_series_rows 1)
+														first_generated_row (true)
+														current_case_map (assoc)
+													))
+
+													(assign (assoc
+														total_progress 0
+														series_data (list)
+														last_series_index -1
+														first_generated_row (true)
+														current_case_map (assoc)
+													))
+												)
 											)
 										)
 									)
