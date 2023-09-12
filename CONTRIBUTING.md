@@ -60,9 +60,9 @@ your test to `ut_trainee_template.amlg`. Please read these files to see how to a
 ## Style Guide
 
 The styling of code written in the Howso Engine inherits the styling of the Amalgam language with additions
-that help reading the code of the Engine a bit easier. These additions are mostly the use of different
-naming conventions for labels of different types of code.
-
+that help reading the code easier. These additions are mostly the use of different naming conventions for
+labels of different types of code. See the [Amalgam](https://github.com/howsoai/amalgam) project for more
+information on how to style Amalgam code.
 ### Trainee Methods
 
 Trainee methods that are called from endpoints are defined in modules
@@ -88,11 +88,11 @@ For example: `#featureAttributes`
 
 I got an empty response from an endpoint, what happened?
 
-- The Engine likely made a computation that contained a NaN, which are not allowed to be emitted
+- The Engine likely made a computation that contained one or more NaN, which are not allowed to be emitted
 in JSON format. The best course is to find a set of reproduction steps and debug up to just before the response is
-emitted, there you will be able to verify the presence of a NaN and work backwards towards its source.
+emitted; there, you will be able to verify the presence of a NaN and work backwards towards its source.
 
 The engine crashed with a segmentation fault, did I do something wrong?
 
 - The Howso Engine is written in Amalgam which is designed to never have segmentation faults. This indicates that
-there is an issue within Amalgam. See the Amalgam documentation in order to learn how to debug your issue.
+there is an issue within Amalgam. See the [Amalgam documentation](https://github.com/howsoai/amalgam) in order to learn how to debug your issue.

@@ -18,7 +18,7 @@ Furthermore, Trainees are auditable, debuggable, and editable.
 - **Editable**: Specific cases of training data can be removed, edited, and emphasized (through case weighting) without the need to retrain.
 
 ## Resources
-- [Documenation](https://docs.howso.com)
+- [Documentation](https://docs.howso.com)
 - [Howso Engine Recipes (sample notebooks)](https://github.com/howsoai/howso-engine-recipes)
 - [Howso Playground](https://playground.howso.com)
 
@@ -82,10 +82,11 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
 
 ## Related Repos
 - [Amalgam](https://github.com/howsoai/amalgam)
-- [howso-engine-py](https://github.com/howsoai/howso-engine-py)
-- [Howso Engine Recipes (sample jupyter notebooks)](https://github.com/howsoai/howso-engine-recipes)
 - [Amalgam extension for VSCode](https://github.com/howsoai/amalgam-ide-support-vscode)
 - [amalgam-lang-py](https://github.com/howsoai/amalgam-lang-py)
+- [howso-engine-py](https://github.com/howsoai/howso-engine-py)
+- [Howso Engine Recipes (sample jupyter notebooks)](https://github.com/howsoai/howso-engine-recipes)
+
 
 ## Contributing
 To learn about contributing, view `CONTRIBUTING.md`
