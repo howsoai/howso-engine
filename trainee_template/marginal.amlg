@@ -542,23 +542,59 @@
 	;
 	;parameters:
 	; weight_feature: optional, name of case weight feature
+	; condition: assoc of feature->value(s)
+	;		no value = must have feature
+	;   	- for continuous or numeric ordinal features:
+	;			one value = must equal exactly the value or be close to it for fuzzy match
+	;			two values = inclusive between
+	;   	- for nominal or string ordinal features:
+	;			n values = must match any of these values exactly
+	; precision: optional string,  default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
+	; num_cases: optional, limit on the number of cases to use in calculating conditional prediction stats; If set to zero there will be no limit.
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
 	#GetFeatureMarginalStats
 		(declare
-			(assoc weight_feature (null))
+			(assoc
+				weight_feature (null)
+				condition (null)
+				precision "exact"
+				num_cases (null)
+			)
 
 			(if (= (null) weight_feature)
 				(assign (assoc weight_feature ".none"))
 			)
 
-			;if marginal stats haven't been computed yet, compute them here
-			(if (not (contains_index featureMarginalStatsMap weight_feature))
-				(call CalculateMarginalStats (assoc
-					weight_feature (if (!= ".none" weight_feature) weight_feature)
-				))
-			)
+			(if (= (null) condition)
+				(seq
+					;if marginal stats haven't been computed yet, compute them here
+					(if (not (contains_index featureMarginalStatsMap weight_feature))
+						(call CalculateMarginalStats (assoc
+							weight_feature (if (!= ".none" weight_feature) weight_feature)
+						))
+					)
 
-			;get the stats for the specified weight_feature
-			(get featureMarginalStatsMap weight_feature)
+					;get the stats for the specified weight_feature
+					(get featureMarginalStatsMap weight_feature)
+				)
+
+				;else we have a condition
+				(declare
+					(assoc
+						case_ids
+							(call GetCasesByCondition (assoc
+								condition condition
+								num_cases num_cases
+								prevision precision
+							))
+					)
+
+					(call CalculateMarginalStats (assoc
+						weight_feature weight_feature
+						filtering_queries (list (query_in_entity_list case_ids))
+					))
+				)
+			)
 		)
 
 
@@ -569,7 +605,10 @@
 	; weight_feature: optional, name of case weight feature
 	#CalculateMarginalStats
 		(declare
-			(assoc weight_feature (null))
+			(assoc
+				weight_feature (null)
+				filtering_queries (list)
+			)
 
 			(declare (assoc
 				stats
@@ -607,39 +646,39 @@
 										min
 											(retrieve_from_entity
 												(first (contained_entities
-													(list (query_min feature 1))
+													(append filtering_queries (query_min feature 1))
 												))
 												feature
 											)
 										max
 											(retrieve_from_entity
 												(first (contained_entities
-													(list (query_max feature 1))
+													(append filtering_queries (query_max feature 1))
 												))
 												feature
 											)
 										mean
-											(compute_on_contained_entities (list
+											(compute_on_contained_entities (append filtering_queries
 												(query_not_equals feature (null))
 												;calculate arithmetic average
 												(query_generalized_mean feature 1 weight_feature)
 											))
 										median
-											(compute_on_contained_entities (list (query_quantile feature 0.5 weight_feature)))
+											(compute_on_contained_entities (append filtering_queries (query_quantile feature 0.5 weight_feature)))
 										percentile_25
-											(compute_on_contained_entities (list (query_quantile feature 0.25 weight_feature)))
+											(compute_on_contained_entities (append filtering_queries (query_quantile feature 0.25 weight_feature)))
 										percentile_75
-											(compute_on_contained_entities (list (query_quantile feature 0.75 weight_feature)))
+											(compute_on_contained_entities (append filtering_queries (query_quantile feature 0.75 weight_feature)))
 									))
 
 									(assign (assoc
 										mean_absdev
-											(compute_on_contained_entities (list
+											(compute_on_contained_entities (append filtering_queries
 												(query_not_equals feature (null))
 												(query_generalized_mean feature 1 weight_feature mean (true) (true))
 											))
 										variance
-											(compute_on_contained_entities (list
+											(compute_on_contained_entities (append filtering_queries
 												(query_not_equals feature (null))
 												(query_generalized_mean feature 2 weight_feature mean (true))
 											))
@@ -649,7 +688,7 @@
 										stddev (sqrt variance)
 										skew
 											(/
-												(compute_on_contained_entities (list
+												(compute_on_contained_entities (append filtering_queries
 													(query_not_equals feature (null))
 													(query_generalized_mean feature 3 weight_feature mean (true))
 												))
@@ -658,7 +697,7 @@
 										kurtosis
 											(-
 												(/
-													(compute_on_contained_entities (list
+													(compute_on_contained_entities (append filtering_queries
 														(query_not_equals feature (null))
 														(query_generalized_mean feature 4 weight_feature mean (true))
 													))
@@ -672,17 +711,17 @@
 
 							(assign (assoc
 								mode
-									(compute_on_contained_entities (list
+									(compute_on_contained_entities (append filtering_queries
 										(query_mode feature weight_feature feature_is_numeric)
 									))
 								count
-									(compute_on_contained_entities (list
+									(compute_on_contained_entities (append filtering_queries
 										(query_not_equals feature (null))
 										(query_count)
 									))
 								uniques
 									(size
-										(compute_on_contained_entities (list
+										(compute_on_contained_entities (append filtering_queries
 											(query_value_masses feature (null) feature_is_numeric)
 										))
 									)
@@ -694,7 +733,7 @@
 										(let
 											(assoc
 												class_counts_map
-													(compute_on_contained_entities (list
+													(compute_on_contained_entities (append filtering_queries
 														(query_value_masses feature weight_feature feature_is_numeric)
 													))
 												total 0
@@ -734,8 +773,13 @@
 				(assign (assoc weight_feature ".none"))
 			)
 
-			(accum_to_entities (assoc
-				featureMarginalStatsMap (associate weight_feature stats)
-			))
+			(if (= (list) filtering_queries)
+				(accum_to_entities (assoc
+					featureMarginalStatsMap (associate weight_feature stats)
+				))
+
+				;else this was conditioned, return the marginal stats
+				stats
+			)
 		)
 )
