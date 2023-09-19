@@ -61,14 +61,17 @@ build() {
 }
 
 test() {
+  engine_version=${1:-'0.0.0'}
+  echo "Testing Howso Engine version ${engine_version}..."
+
   update_version_file ${engine_version}
   cd ${src_dir}/unit_tests
   check_amalgam_exe
   echo "Running howso-engine unit tests on amalgam version ${amlg_version}"
   ${amlg_exe} ./ut_comprehensive_unit_test.amlg | tee /tmp/ut_results
   reset_version_file
-  local ut_res=$(cat /tmp/ut_results | grep FAILED | wc -l)
-  if [ $ut_res \> 1 ]; then
+  local ut_res=$(cat /tmp/ut_results | grep "PASSED : Total comprehensive test execution time" | wc -l)
+  if [ $ut_res \< 1 ]; then
     cat /tmp/ut_results
     exit 81
   fi
