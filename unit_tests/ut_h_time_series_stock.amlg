@@ -65,10 +65,6 @@
 						"type" "nominal"
 						"id_feature" (true)
 						"time_series"
-							(assoc
-								"series_has_terminators" (true)
-								"stop_on_terminator" (true)
-							)
 					)
 
 				"time"
@@ -79,8 +75,8 @@
 						"bounds"
 							(assoc
 								"allow_null" (false)
-								"min" "1"
-								"max" "30"
+								"min" 1
+								"max" 30
 							)
 					)
 				"value"
@@ -200,13 +196,6 @@
 			)
 	))
 
-	(print "Continued average series length is notably shorter: ")
-	(call assert_approximate (assoc
-		obs (/ (apply "+" series_lengths) (size series_lengths))
-		exp 5.5
-		thresh 2
-	))
-
 	(print "Continue series initial time steps correct: ")
 	(call assert_same (assoc
 		exp (range (true) 1 30 1)
@@ -222,6 +211,14 @@
 				))
 				series_list
 			)
+	))
+
+	;TODO: avg_len * - ln(rand() ) - expontial based on avg length instead?
+	(print "Continued average series length is notably shorter: ")
+	(call assert_approximate (assoc
+		obs (/ (apply "+" series_lengths) (size series_lengths))
+		exp 2
+		thresh 1
 	))
 
 	(call exit_if_failures (assoc msg "Unconditioned continue series."))
@@ -253,14 +250,6 @@
 			)
 	))
 
-	(print "Continued average series length from middle is shorter: ")
-	(call assert_approximate (assoc
-		obs (/ (apply "+" series_lengths) (size series_lengths))
-		exp 9.5
-		thresh 2.5
-	))
-
-
 	(print "Continue series initial time steps correct: ")
 	(call assert_same (assoc
 		exp (range (true) 1 30 1)
@@ -275,6 +264,13 @@
 				))
 				series_list
 			)
+	))
+
+	(print "Continued average series length from middle is shorter: ")
+	(call assert_approximate (assoc
+		obs (/ (apply "+" series_lengths) (size series_lengths))
+		exp 7.0
+		thresh 1.5
 	))
 
 	(call exit_if_failures (assoc msg "Conditioned start continue series."))
@@ -305,14 +301,6 @@
 				(lambda (size (target_value)))
 				series_list
 			)
-	))
-
-	(print "Continued average series length from start to end: ")
-	;should all be ~8
-	(call assert_approximate (assoc
-		obs (/ (apply "+" series_lengths) (size series_lengths))
-		exp 8
-		thresh 1
 	))
 
 	;validate that each series stats with 10, and that the first two cases both have the correct previous 2-lag values
@@ -354,7 +342,159 @@
 			)
 	))
 
+	(print "Continued average series length from start to end: ")
+	;should all be ~8
+	(call assert_approximate (assoc
+		obs (/ (apply "+" series_lengths) (size series_lengths))
+		exp 8
+		thresh 1
+	))
+
 	(call exit_if_failures (assoc msg "Continue series initial and final time with two lags."))
+
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "batch_react_series" (assoc
+					trainee "temp"
+					num_series_to_generate 5
+					action_features (list "stock" "time" "value" ".value_lag_2")
+					desired_conviction 5
+					use_regional_model_residuals (false)
+					continue_existing_series (true)
+					init_time_steps (list 10)
+					output_new_series_ids (false)
+					initial_features (list "stock")
+					initial_values (list "stk_A" "stk_A" "stkB" "stkB" "stoC")
+				))
+				"payload"
+			)
+	))
+
+	(assign (assoc series_list (get result "series") ))
+
+	(print "Continue for specific IDs and start times: ")
+	(call assert_true (assoc
+		obs
+			(and
+				;first and second series, first and second cases, first feature is stock id
+				;there should always be at least two cases because of two lags
+				(=
+					"stk_A"
+					(get series_list (list 0 0 0))
+					(get series_list (list 0 1 0))
+					(get series_list (list 1 0 0))
+					(get series_list (list 1 1 0))
+				)
+				(=
+					"stkB"
+					(get series_list (list 2 0 0))
+					(get series_list (list 2 1 0))
+					(get series_list (list 3 0 0))
+					(get series_list (list 3 1 0))
+				)
+				(=
+					"stoC"
+					(get series_list (list 4 0 0))
+					(get series_list (list 4 1 0))
+				)
+			)
+	))
+
+	(call exit_if_failures (assoc msg "Continue conditioned on IDs and start time."))
+
+	;set attributes to verify that continue doesn't work on terminated series
+	(call_entity "howso" "set_feature_attributes" (assoc
+		trainee "temp"
+		features
+			(assoc
+				"stock"
+					(assoc
+						"type" "nominal"
+						"id_feature" (true)
+						"time_series"
+							(assoc
+								"series_has_terminators" (true)
+								"stop_on_terminator" (true)
+							)
+					)
+
+				"time"
+					(assoc
+						"type" "continuous"
+						"decimal_places" 0
+						"time_series" (assoc "time_feature" (true) "type" "delta")
+						"bounds" (assoc "allow_null" (false) "min" 1 "max" 30)
+					)
+				"value"
+					(assoc
+						"type" "continuous"
+						"decimal_places" 0
+						"time_series" (assoc "type" "delta" "num_lags" 2)
+						"bounds" (assoc "allow_null" (true) "min" 80 "max" 125)
+					)
+			)
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "batch_react_series" (assoc
+				trainee "temp"
+				num_series_to_generate 3
+				action_features (list "stock" "time" "value")
+				desired_conviction 5
+				use_regional_model_residuals (false)
+				continue_existing_series (true)
+			))
+	))
+
+	(print "Batch react series failed to continue series with a warning: ")
+	(call assert_same (assoc
+		obs result
+		exp
+			(assoc
+				errors (null)
+				payload
+					(assoc
+						action_features (list "stock" "time" "value")
+						;3 nulls, one for each series
+						series (list (null) (null) (null))
+					)
+				status "ok"
+				;only one warning
+				warnings (list (assoc detail "Can't continue terminated series.") )
+			)
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "react_series" (assoc
+				trainee "temp"
+				action_features (list "stock" "time" "value")
+				desired_conviction 5
+				use_regional_model_residuals (false)
+				continue_existing_series (true)
+			))
+	))
+
+	(print "Single react series failed to continue series with a warning: ")
+	(call assert_same (assoc
+		obs result
+		exp
+			(assoc
+				errors (null)
+				payload
+					(assoc
+						action_features (list "stock" "time" "value")
+						series (null)
+					)
+				status "ok"
+				warnings (list (assoc detail "Can't continue terminated series.") )
+			)
+	))
+
+
+	(call exit_if_failures (assoc msg "Don't continue terminated series."))
 
 	(call exit_if_failures (assoc msg unit_test_name))
 )
