@@ -23,7 +23,7 @@
 				(list "stkB"	12	108)
 				(list "stkB"	13	109)
 				(list "stkB"	14	108)
-				(list "stkB"	15	107)
+				(list "stkB"	15	106)
 				(list "stoC"	5	94)
 				(list "stoC"	6	96)
 				(list "stoC"	7	95)
@@ -65,10 +65,6 @@
 						"type" "nominal"
 						"id_feature" (true)
 						"time_series"
-							(assoc
-								"series_has_terminators" (true)
-								"stop_on_terminator" (true)
-							)
 					)
 
 				"time"
@@ -79,15 +75,15 @@
 						"bounds"
 							(assoc
 								"allow_null" (false)
-								"min" "1"
-								"max" "30"
+								"min" 1
+								"max" 30
 							)
 					)
 				"value"
 					(assoc
 						"type" "continuous"
 						"decimal_places" 0
-						"time_series" (assoc "type" "delta")
+						"time_series" (assoc "type" "delta" "num_lags" 2)
 						"bounds"
 							(assoc
 								"allow_null" (true)
@@ -172,6 +168,332 @@
 		exp 12.5
 		thresh 3.5
 	))
+
+	(call exit_if_failures (assoc msg "Expected series length synthesised."))
+
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "batch_react_series" (assoc
+					trainee "temp"
+					num_series_to_generate 30
+					action_features (list "stock" "time" "value")
+					desired_conviction 5
+					use_regional_model_residuals (false)
+					continue_series (true)
+				))
+				"payload"
+			)
+	))
+
+	(assign (assoc series_list (get result "series") ))
+
+	(assign (assoc
+		series_lengths
+			(map
+				(lambda (size (target_value)))
+				series_list
+			)
+	))
+
+	(print "Continue series initial time steps correct: ")
+	(call assert_same (assoc
+		exp (range (true) 1 30 1)
+		obs
+			;should results in a list of 30 (true) statemenents
+			(map
+				(lambda (let
+					(assoc first_series_case (first (target_value 1)) )
+					;the time step of the first case in each synthed series is one of the next
+					;3 possible timesteps for each of the 3 originally trained series
+					;where each case is a list of [id, time, value]
+					(contains_value (list 16 19 23) (get first_series_case 1))
+				))
+				series_list
+			)
+	))
+
+	(print "Continued average series length is notably shorter: ")
+	(call assert_approximate (assoc
+		obs (/ (apply "+" series_lengths) (size series_lengths))
+		exp 3.5
+		thresh 1
+	))
+
+	(call exit_if_failures (assoc msg "Unconditioned continue series."))
+
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "batch_react_series" (assoc
+					trainee "temp"
+					num_series_to_generate 30
+					action_features (list "stock" "time" "value")
+					desired_conviction 5
+					use_regional_model_residuals (false)
+					continue_series (true)
+					init_time_steps (list 13)
+
+				))
+				"payload"
+			)
+	))
+
+	(assign (assoc series_list (get result "series") ))
+
+	(assign (assoc
+		series_lengths
+			(map
+				(lambda (size (target_value)))
+				series_list
+			)
+	))
+
+	(print "Continue series initial time steps correct: ")
+	(call assert_same (assoc
+		exp (range (true) 1 30 1)
+		obs
+			;should results in a list of 30 (true) statemenents
+			(map
+				(lambda (let
+					(assoc first_series_case (first (target_value 1)) )
+					;the time step of the first case in each synthed series is 14
+					;where each case is a list of [id, time, value]
+					(= 13 (get first_series_case 1))
+				))
+				series_list
+			)
+	))
+
+	(print "Continued average series length from middle is medium length: ")
+	(call assert_approximate (assoc
+		obs (/ (apply "+" series_lengths) (size series_lengths))
+		exp 7.5
+		thresh 2
+	))
+
+	(call exit_if_failures (assoc msg "Conditioned start continue series."))
+
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "batch_react_series" (assoc
+					trainee "temp"
+					num_series_to_generate 30
+					action_features (list "stock" "time" "value" ".value_lag_2")
+					desired_conviction 5
+					use_regional_model_residuals (false)
+					continue_series (true)
+					init_time_steps (list 10)
+					final_time_steps (list 17)
+
+				))
+				"payload"
+			)
+	))
+
+	(assign (assoc series_list (get result "series") ))
+
+	(assign (assoc
+		series_lengths
+			(map
+				(lambda (size (target_value)))
+				series_list
+			)
+	))
+
+	;validate that each series stats with 10, and that the first two cases both have the correct previous 2-lag values
+	(print "Continue series initial time and two lags are correct: ")
+	(call assert_same (assoc
+		exp (range (true) 1 30 1)
+		obs
+			(map
+				(lambda (let
+					(assoc
+						first_series_case (first (target_value 1))
+						second_series_case (get (target_value 1) 1)
+					)
+					;
+					(if (!= 10 (get first_series_case 1))
+						(false)
+
+						(or
+							;two .value_lag_2 values for stk_A
+							(and
+								(= 100 (last first_series_case))
+								(= 101 (last second_series_case))
+							)
+
+							;two .value_lag_2 values for stkB
+							(and
+								(= 110 (last first_series_case))
+								(= 109 (last second_series_case))
+							)
+							;two .value_lag_2 values stoC
+							(and
+								(= 93 (last first_series_case))
+								(= 95 (last second_series_case))
+							)
+						)
+					)
+				))
+				series_list
+			)
+	))
+
+	(print "Continued average series length from start to end: ")
+	;should all be ~8
+	(call assert_approximate (assoc
+		obs (/ (apply "+" series_lengths) (size series_lengths))
+		exp 8
+		thresh 1
+	))
+
+	(call exit_if_failures (assoc msg "Continue series initial and final time with two lags."))
+
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "batch_react_series" (assoc
+					trainee "temp"
+					num_series_to_generate 5
+					action_features (list "stock" "time" "value" ".value_lag_2")
+					desired_conviction 5
+					use_regional_model_residuals (false)
+					continue_series (true)
+					init_time_steps (list 10)
+					output_new_series_ids (false)
+					initial_features (list "stock")
+					initial_values (list (list "stk_A") (list "stk_A") (list "stkB") (list "stkB") (list "stoC"))
+				))
+				"payload"
+			)
+	))
+
+	(assign (assoc series_list (get result "series") ))
+
+	(print "Continue for specific IDs and start times: ")
+	(call assert_true (assoc
+		obs
+			(and
+				;first and second series, first and second cases, first feature is stock id
+				;there should always be at least two cases because of two lags
+				(=
+					"stk_A"
+					(get series_list (list 0 0 0))
+					(get series_list (list 0 1 0))
+					(get series_list (list 1 0 0))
+					(get series_list (list 1 1 0))
+				)
+				(=
+					"stkB"
+					(get series_list (list 2 0 0))
+					(get series_list (list 2 1 0))
+					(get series_list (list 3 0 0))
+					(get series_list (list 3 1 0))
+				)
+				(=
+					"stoC"
+					(get series_list (list 4 0 0))
+					(get series_list (list 4 1 0))
+				)
+			)
+	))
+
+	(call exit_if_failures (assoc msg "Continue conditioned on IDs and start time."))
+
+	;set attributes to verify that continue doesn't work on terminated series
+	(call_entity "howso" "set_feature_attributes" (assoc
+		trainee "temp"
+		features
+			(assoc
+				"stock"
+					(assoc
+						"type" "nominal"
+						"id_feature" (true)
+						"time_series"
+							(assoc
+								"series_has_terminators" (true)
+								"stop_on_terminator" (true)
+							)
+					)
+
+				"time"
+					(assoc
+						"type" "continuous"
+						"decimal_places" 0
+						"time_series" (assoc "time_feature" (true) "type" "delta")
+						"bounds" (assoc "allow_null" (false) "min" 1 "max" 30)
+					)
+				"value"
+					(assoc
+						"type" "continuous"
+						"decimal_places" 0
+						"time_series" (assoc "type" "delta" "num_lags" 2)
+						"bounds" (assoc "allow_null" (true) "min" 80 "max" 125)
+					)
+			)
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "batch_react_series" (assoc
+				trainee "temp"
+				num_series_to_generate 3
+				action_features (list "stock" "time" "value")
+				desired_conviction 5
+				use_regional_model_residuals (false)
+				continue_series (true)
+			))
+	))
+
+	(print "Batch react series failed to continue series with a warning: ")
+	(call assert_same (assoc
+		obs result
+		exp
+			(assoc
+				errors (null)
+				payload
+					(assoc
+						action_features (list "stock" "time" "value")
+						;3 nulls, one for each series
+						series (list (null) (null) (null))
+					)
+				status "ok"
+				;only one warning
+				warnings (list (assoc detail "Can't continue terminated series.") )
+			)
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "react_series" (assoc
+				trainee "temp"
+				action_features (list "stock" "time" "value")
+				desired_conviction 5
+				use_regional_model_residuals (false)
+				continue_series (true)
+			))
+	))
+
+	(print "Single react series failed to continue series with a warning: ")
+	(call assert_same (assoc
+		obs result
+		exp
+			(assoc
+				errors (null)
+				payload
+					(assoc
+						action_features (list "stock" "time" "value")
+						series (null)
+					)
+				status "ok"
+				warnings (list (assoc detail "Can't continue terminated series.") )
+			)
+	))
+
+
+	(call exit_if_failures (assoc msg "Don't continue terminated series."))
 
 	(call exit_if_failures (assoc msg unit_test_name))
 )
