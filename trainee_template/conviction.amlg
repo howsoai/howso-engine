@@ -59,7 +59,7 @@
 			(assign (assoc similarity_conviction "similarity_conviction"))
 		)
 
-		(if (and 
+		(if (and
 				(!= (null) similarity_conviction)
 				(or (= (null) distance_contribution) (= (false) distance_contribution))
 				(= (null) case_ids)
@@ -623,7 +623,7 @@
 						(get hyperparam_map "featureWeights")
 						queryDistanceTypeMap
 						(get hyperparam_map "featureDomainAttributes")
-						(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations")) 
+						(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations"))
 						(get hyperparam_map "p")
 						(get hyperparam_map "dt")
 						(if use_case_weights weight_feature (null))
@@ -695,8 +695,8 @@
 		;then dividing by the sum of the weights to get the weighted average
 		(declare (assoc
 			local_expected_distance_contribution
-				(/ 
-					(dot_product (unzip local_distance_contributions_map local_model_idxs) (unzip local_model_case_distance_map local_model_idxs)) 
+				(/
+					(dot_product (unzip local_distance_contributions_map local_model_idxs) (unzip local_model_case_distance_map local_model_idxs))
 					(apply "+" (values local_model_case_distance_map))
 				)
 		))
@@ -704,245 +704,6 @@
 		;output similarity conviction as ratio of expected / calculated distance contribution
 		(/ local_expected_distance_contribution new_case_dc)
 	)
-
-	;Compute and output residual conviction for a prediction (a set of action_features)
-	;
-	;parameters:
-	; context_features: list of context features
-	; context_values: list of corresponding context values
-	; action_features: list of action features for which the prediction was made
-	; action_values: list of predicted action values
-	; filtering_queries: (optional) list of filtering queries (such as ignoring a specific case) during computation
-	#PredictionResidualConviction
-	(declare
-		(assoc
-			context_features (list)
-			action_features (list)
-			context_values (null)
-			action_values (null)
-			filtering_queries (list)
-			use_case_weights (false)
-			weight_feature ".case_weight"
-		)
-
-		;can't have a prediction conviction when there's no feature to predict
-		(if (= 0 (size action_features))
-			(conclude (null))
-		)
-
-		(declare (assoc
-			hyperparam_map
-				(call GetHyperparameters (assoc
-					feature (last action_features)
-					mode "full"
-					context_features context_features
-					weight_feature weight_feature
-				))
-		))
-
-		(declare (assoc
-			feature_weights (get hyperparam_map "featureWeights")
-			feature_deviations (if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
-			valid_weight_feature (false)
-			features (append context_features action_features)
-		))
-
-		;if user doesn't want to use case weights, change weight_feature to '.none'
-		(if (not use_case_weights)
-			(assign (assoc weight_feature ".none"))
-
-			;else using case weights, weight feature is valid if it's custom (not .case_weight) or hasPopulatedCaseWeight
-			(assign (assoc valid_weight_feature (or hasPopulatedCaseWeight (!= weight_feature ".case_weight"))))
-		)
-
-		;get the local model around the prediction
-		(declare (assoc
-			local_model_cases_map
-				(compute_on_contained_entities (append
-					filtering_queries
-					(query_nearest_generalized_distance
-						(get hyperparam_map "k")
-						features
-						(append context_values action_values)
-						feature_weights
-						queryDistanceTypeMap
-						(get hyperparam_map "featureDomainAttributes")
-						feature_deviations
-						(get hyperparam_map "p")
-						(get hyperparam_map "dt")
-						(if valid_weight_feature weight_feature (null))
-						(rand)
-						(null) ;radius
-						numericalPrecision
-					)
-				))
-		))
-
-		(if (= 0 (size cachedFeatureMinResidualMap))
-			(call !CacheFeatureMinGapAndResidual (assoc
-				num_training_cases (call GetNumTrainingCases)
-			))
-		)
-
-		(declare (assoc
-			expected_residual_vector_magnitude (get residualVectorMagnitudeMap (concat features action_features))
-		))
-		(if (= (null) expected_residual_vector_magnitude)
-			(assign (assoc expected_residual_vector_magnitude (call !ComputeExpectedResidualVectorMagnitude) ))
-		)
-
-		;get the action_features' residuals for this local model
-		(declare (assoc
-			local_residuals_map
-				(get
-					(call ExpandResidualValuesToUncertainty  (assoc
-						feature_residuals_map
-							(call CalculateFeatureResiduals (assoc
-								features features
-								target_residual_feature (first action_features)
-								cases_map local_model_cases_map
-								use_case_weights use_case_weights
-								weight_feature weight_feature
-								custom_hyperparam_map hyperparam_map
-
-								;to compute the residual vector magnitude for a prediction that isn't in the model, we need to compute residuals
-								;around this prediction.  When computing residuals for a case that is in the model, we specify it here
-								;as the focal_case so it'll be ignored during residual calculations without having to temporarily remove it from the model
-								focal_case case_id
-							))
-					))
-					"residual_map"
-				)
-		))
-
-		(declare (assoc case_action_residuals (unzip local_residuals_map action_features) ))
-
-		;if there are several action features, take the generilized norm to calculate the magnitude
-		;otherwise just use the cached value since it's a 1-d vector
-		(declare (assoc
-			prediction_residual_vector_magnitude
-				(if (> (size action_features) 1)
-					(generalized_distance
-						;weights are null for all action features
-						(null)
-						;null types and limits so that all the feature residual values are treated as continuous
-						(null)
-						(null)
-						(if (get hyperparam_map "useDeviations") (unzip feature_deviations action_features) )
-						(get hyperparam_map "p")
-						case_action_residuals
-						(null) ;null point
-						(null)
-						action_features
-					)
-					;else
-					(first case_action_residuals)
-				)
-		))
-
-		;output residual_conviction as ratio of expected / predicted residual
-		(/ expected_residual_vector_magnitude prediction_residual_vector_magnitude)
-	)
-
-	;helper method for PredictionResidualConviction to compute, cache and output the expected global residual vector magnitude
-	#!ComputeExpectedResidualVectorMagnitude
-	(seq
-		(declare (assoc
-			k_parameter (get hyperparam_map "k")
-			p_parameter (get hyperparam_map "p")
-			dt_parameter (get hyperparam_map "dt")
-			feature_deviations (if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations"))
-			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
-		))
-
-		(declare (assoc
-			model_predicted_case_residuals
-				;iterate over all cases and compute each cases's predicted residuals for action_features
-				(map
-					(lambda (let
-						(assoc
-							case_id (target_value 1)
-							individual_case_residuals_map (assoc)
-							local_cases_map (assoc)
-						)
-						(assign (assoc
-							local_cases_map
-								(compute_on_contained_entities (list
-									(query_not_in_entity_list (list case_id))
-									(query_nearest_generalized_distance
-										k_parameter
-										features
-										(retrieve_from_entity case_id features)
-										feature_weights
-										queryDistanceTypeMap
-										query_feature_attributes_map
-										feature_deviations
-										p_parameter
-										dt_parameter
-										(if valid_weight_feature weight_feature (null))
-										(rand)
-										(null) ;radius
-										numericalPrecision
-									)
-								))
-						))
-
-						(assign (assoc
-							individual_case_residuals_map
-								(get
-									(call ExpandResidualValuesToUncertainty  (assoc
-										feature_residuals_map
-											(call CalculateFeatureResiduals (assoc
-												features features
-												target_residual_feature (first action_features)
-												cases_map local_cases_map
-												use_case_weights use_case_weights
-												weight_feature weight_feature
-												custom_hyperparam_map hyperparam_map
-												focal_case case_id
-											))
-									))
-									"residual_map"
-								)
-						))
-						(declare (assoc action_residuals (unzip individual_case_residuals_map action_features)))
-
-						(if (> (size action_features) 1)
-							(generalized_distance
-								;weights are null for all action features
-								(null)
-								;null types and limits so that all the feature residual values are treated as continuous
-								(null)
-								(null)
-								(unzip feature_deviations action_features)
-								p_parameter
-								action_residuals
-								(null) ;null point
-								(null)
-								action_features
-							)
-							;else
-							(first action_residuals)
-						)
-					))
-					(call AllCases)
-				)
-		))
-
-		(declare (assoc
-			expected_residual_vector_magnitude (/ (apply "+" model_predicted_case_residuals) (size model_predicted_case_residuals))
-		))
-
-		;store into residualVectorMagnitudeMap
-		(assign_to_entities (assoc
-			residualVectorMagnitudeMap
-				(associate (concat features action_features) expected_residual_vector_magnitude)
-		))
-
-		;output the value
-		expected_residual_vector_magnitude
-	)
-
 
 	;compute distance contribution for the specified feature values of a hypothetical candidate case
 	;returns the distance contribution value
