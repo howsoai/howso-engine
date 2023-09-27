@@ -3,9 +3,9 @@
   <img src="https://howso.com/assets/images/Howso_Readme.svg">
 </div>
 
-The Howso Engine&trade; is a natively and fully explainable ML engine, serving as an alternative to black box AI neural networks. Its core features give users data exploration and machine learning capabilities through the creation and use of Trainees that help users store, explore, and analyze the relationships in their data. Howso leverages an instance-based learning approach with strong ties to the [k-nearest neighbors algorithm](https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm) and [information theory](https://en.wikipedia.org/wiki/Information_theory) to scale for real world applications.
+The Howso Engine&trade; is a natively and fully explainable ML engine, serving as an alternative to black box AI neural networks. Its core functionality gives users data exploration and machine learning capabilities through the creation and use of Trainees that help users store, explore, and analyze the relationships in their data, as well as make understandable, debuggable predictions. Howso leverages an instance-based learning approach with strong ties to the [k-nearest neighbors algorithm](https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm) and [information theory](https://en.wikipedia.org/wiki/Information_theory) to scale for real world applications.
 
-At the core of Howso is the concept of a Trainee, a collection of cases that comprise knowledge. In traditional ML, this is typically referred to as a model, but a Trainee may additionally include metadata, parameters, details of feature attributes, with data lineage and provenance. Unlike traditional ML, Trainees are designed to be versatile, a single model that after training a dataset can do the following without the need to retrain:
+At the core of Howso is the concept of a Trainee, a collection of data elements that comprise knowledge. In traditional ML, this is typically referred to as a model, but a Trainee is original training data coupled with metadata, parameters, details of feature attributes, with data lineage and provenance. Unlike traditional ML, Trainees are designed to be versatile, a single model that after training a dataset can do the following without the need to retrain:
 - Perform **classification** on any target feature using any set of input features
 - Perform **regression** on any target feature using any set of input features
 - Perform **anomaly detection** based on any set of features
@@ -23,8 +23,7 @@ Furthermore, Trainees are auditable, debuggable, and editable.
 - [Howso Playground](https://playground.howso.com)
 
 ## General Overview
-This repository holds the Howso Engine, a project written in [Amalgam](https://github.com/howsoai/amalgam) that defines all of the functionality of Trainees and their management. This project is used by [howso-engine-py](https://github.com/howsoai/howso-engine-py) to expose the functionality of the Howso Engine
-through a Python API.
+This repository holds the Howso Engine, a project written in [Amalgam](https://github.com/howsoai/amalgam) that defines all of the functionality of Trainees and their management. This project is used by [howso-engine-py](https://github.com/howsoai/howso-engine-py) to expose the functionality of the Howso Engine through a Python API, and is the recommended interface for most data science applications.
 
 To use the Howso Engine without the Python client, it is recommended that you first introduce yourself to the [Amalgam](https://github.com/howsoai/amalgam)
 language. This way you can learn how to write scripts that will allow you to use the Howso Engine.
@@ -52,6 +51,7 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
     ))
 
     (call_entity "howso" "train" (assoc
+        trainee "iris_trainee"
         features (list "sepal_length" "sepal_width" "petal_length" "petal_width" "species")
         input_cases
             (list
@@ -66,13 +66,15 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
         session "iris_session"
     ))
 
+    (call_entity "howso" "analyze" (assoc trainee "iris_trainee"))
+
     (declare (assoc
         reaction
             (call_entity "howso" "react" (assoc
                 trainee "iris_trainee"
                 context_features (list "sepal_length" "sepal_width" "petal_length" "petal_width")
                 context_values (list 5.3 2.5 4.1 1.3)
-                action_features (list "species)
+                action_features (list "species")
             ))
     ))
 
@@ -94,4 +96,3 @@ To learn about contributing, view `CONTRIBUTING.md`
 ## License
 
 [License](LICENSE.txt)
-
