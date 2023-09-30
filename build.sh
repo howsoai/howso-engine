@@ -18,7 +18,7 @@ src_dir=$( cd "$(dirname "${BASH_SOURCE[0]}")"/; pwd -P )
 # root directory for build artifacts.
 out_dir=${src_dir}/target
 pkg_dir=${out_dir}/package
-amlg_exe=${src_dir}/target/bin/amalgam
+amlg_exe=${src_dir}/target/bin/amalgam-mt
 
 # root directory for release artifacts.
 rel_dir=${src_dir}/release
