@@ -9,7 +9,6 @@
 	(declare
 		(assoc
 			features (null)
-			cases_map (null)
 			case_ids (null)
 			focal_case (null)
 			num_samples (null)
@@ -90,7 +89,6 @@
 			output_map
 				(call CalculateFeatureResiduals (assoc
 					features features
-					cases_map cases_map
 					case_ids case_ids
 					focal_case focal_case
 					num_samples num_samples
@@ -200,11 +198,9 @@
 	;parameters:
 	; features: optional list of all features used during computation. If not specified will use defaultFeatures.
 	; target_residual_feature: optional feature for which to calculate the (MAE) residual. If not specified, will compute for all features.
-	; cases_map: optional assoc of case ids -> distance from a hypothetical case  for which to use in the calculation as a local model,
-	;			 if not specified will use num_samples from AllCases to calculate feature residuals. If specified ignores 'case_ids'.
-	; case_ids: optional list of case ids to compute residuals. If 'cases_map' is specified, will ignore this parameter.
-	; focal_case: optional case id of case for which to compute residuals from the specified cases_map and is to be ignored during computation
-	; num_samples : optional case sample size to use in calculation, will be ignored if the cases_map parameter is specified
+	; case_ids: optional list of case ids to compute residuals.
+	; focal_case: optional case id of case for which to compute residuals for  is to be ignored during computation
+	; num_samples : optional case sample size to use in calculation, will be ignored if the case_ids parameter is specified
 	; robust_residuals: flag, default to false. when true calculates residuals robust with respect to the set of contexts used (across the power set of contexts)
 	; hyperparameter_feature: optional  default '.targetless'.  feature whose hyperparameters to use
 	; use_case_weights: flag, if set to true will scale influence weights by each case's weight_feature weight
@@ -217,7 +213,7 @@
 		(assoc
 			features (null)
 			target_residual_feature (null)
-			cases_map (null)
+			regional_model_only (false)
 			case_ids (list)
 			focal_case (null)
 			num_samples (null)
@@ -236,9 +232,7 @@
 			p_parameter (null)
 			dt_parameter (null)
 			query_feature_attributes_map (null)
-			case_weights (null)
 			case_features (null)
-			scale_by_local_influence (false)
 			num_context_features 0
 			ordinal_features_map (zip ordinalFeatures)
 			hyperparam_map (assoc)
@@ -250,7 +244,6 @@
 			;list, length of features, each item will be a list of residuals, one per case
 			feature_residuals_lists (list)
 
-			local_case_influence_sums (null)
 			num_training_cases (call GetNumTrainingCases)
 			valid_weight_feature (false)
 
@@ -310,15 +303,15 @@
 		; )
 		;
 		;where each react is a list of either:
-		; [diff, case_weight, actual_value, categorical_probabilities] for nominals or
-		; [diff, ordinal_diff, case_weight, actual_value, predicted_value] for continuous (ordinal_diff is not there for non-ordinal features)
+		; [diff, actual_value, categorical_probabilities] for nominals or
+		; [diff, ordinal_diff, actual_value, predicted_value] for continuous (ordinal_diff is not there for non-ordinal features)
 
 		(assign (assoc
 			continuous_indices (unzip feature_indices_map continuous_features)
 			nominal_indices (unzip feature_indices_map nominal_features)
 			has_ordinals (> (size ordinal_features_map) 0)
 			;default index offset of where the actual case value is in each output react
-			actual_offset 2
+			actual_offset 1
 		))
 
 		;if some of the features are edit distance types, r2 and spearman coefficient don't apply since there's no mean or relative sorting
@@ -340,10 +333,10 @@
 
 		(if has_ordinals
 			(assign (assoc
-				;for continuous features, each react output is stored as [diff, case_weight, actual_value, predicted_value]
-				;but if there are ordinals, it's stored as [diff, ordinal_diff, case_weight, actual_value, predicted_value]
-				;if there are ardinals, the index offest for actual_value is 3 instead of 2
-				actual_offset 3
+				;for continuous features, each react output is stored as [diff, actual_value, predicted_value]
+				;but if there are ordinals, it's stored as [diff, ordinal_diff, actual_value, predicted_value]
+				;if there are ardinals, the index offest for actual_value is 2 instead of 1
+				actual_offset 2
 
 				ordinal_residuals_map
 					(filter (zip
@@ -355,11 +348,8 @@
 										;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
 										(/
 											(apply "+" (map (lambda (get (target_value) 1)) (target_value)) )
-											;scale by total local influence for this feature if appropriate, else compute average by dividing by the number of values
-											(if scale_by_local_influence
-												(get local_case_influence_sums (get continuous_indices (target_index)))
-												(size (target_value))
-											)
+											;compute average by dividing by the number of values
+											(size (target_value))
 										)
 
 										;else if there were no values for this feature, return global feature residual
@@ -385,11 +375,8 @@
 							(size (target_value))
 							(/
 								(apply "+" (map (lambda (first (target_value))) (target_value)) )
-								;scale by total local influence for this feature if appropriate, else compute average by dividing by the number of values
-								(if scale_by_local_influence
-									(get local_case_influence_sums (get continuous_indices (target_index)))
-									(size (target_value))
-								)
+								;compute average by dividing by the number of values
+								(size (target_value))
 							)
 
 							;else if there were no values for this feature, return global feature residual
@@ -408,11 +395,8 @@
 							(size (target_value))
 							(sqrt (/
 								(apply "+" (map (lambda (pow (first (target_value)) 2)) (target_value)) )
-								;scale by total local influence for this feature if appropriate, else compute average by dividing by the number of values
-								(if scale_by_local_influence
-									(get local_case_influence_sums (get continuous_indices (target_index)))
-									(size (target_value))
-								)
+								;compute average by dividing by the number of values
+								(size (target_value))
 							))
 						))
 						(unzip feature_residuals_lists continuous_indices)
@@ -454,7 +438,7 @@
 												(target_value)
 											)
 										)
-										;TODO: figure out how to apply local_case_influence_sums
+
 										(- (pow (size (target_value)) 3) (size (target_value)))
 									))
 								)
@@ -516,11 +500,8 @@
 							(size (target_value))
 							(/
 								(apply "+" (map (lambda (first (target_value))) (target_value)) )
-								;scale by total local influence for this feature if appropriate, else compute average by dividing by the number of values
-								(if scale_by_local_influence
-									(get local_case_influence_sums (get nominal_indices (target_index)))
-									(size (target_value))
-								)
+								;compute average by dividing by the number of values
+								(size (target_value))
 							)
 
 							;else if there were no values for this feature, return global feature residual
@@ -561,11 +542,11 @@
 											(lambda
 												(append (target_value 1) (list (target_value 1)))
 											)
-											;(get (target_value) 2) refers to the actual case value in each react tuple
-											(map (lambda (get (target_value) 2)) (target_value 1))
-											;and (get (target_value) 3) refers to the interpolated/predicted case value in
+											;(get (target_value) 1) refers to the actual case value in each react tuple
+											(map (lambda (get (target_value) 1)) (target_value 1))
+											;and (get (target_value) 2) refers to the interpolated/predicted case value in
 											; each react tuple
-											(map (lambda (get (target_value) 3)) (target_value 1))
+											(map (lambda (get (target_value) 2)) (target_value 1))
 										)
 								))
 
@@ -768,21 +749,15 @@
 										;create a list of diffs by pulling diff from each tuple
 										(/
 											(apply "+" (map (lambda (first (target_value))) (target_value)) )
-											;scale by total local influence for this feature if appropriate, else compute average by dividing by the number of values
-											(if scale_by_local_influence
-												(get local_case_influence_sums (target_index))
-												(size (target_value))
-											)
+											;compute average by dividing by the number of values
+											(size (target_value))
 										)
 
 										;else simply compute avg of all diffs
 										(/
 											(apply "+" (target_value))
-											;scale by total local influence for this feature if appropriate, else compute average by dividing by the number of values
-											(if scale_by_local_influence
-												(get local_case_influence_sums (target_index))
-												(size (target_value))
-											)
+											;compute average by dividing by the number of values
+											(size (target_value))
 										)
 									)
 
@@ -803,11 +778,8 @@
 											;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
 											(/
 												(apply "+" (map (lambda (last (target_value))) (target_value)) )
-												;scale by total local influence for this feature if appropriate, else compute average by dividing by the number of values
-												(if scale_by_local_influence
-													(get local_case_influence_sums (target_index))
-													(size (target_value))
-												)
+												;compute average by dividing by the number of values
+												(size (target_value))
 											)
 
 											;else if there were no values for this feature, return global feature residual
@@ -829,14 +801,8 @@
 						(map
 							(lambda (if
 								(size (target_value))
-								(/
-									(apply "+" (target_value))
-									;scale by total local influence for this feature if appropriate, else compute average by dividing by the number of values
-									(if scale_by_local_influence
-										(get local_case_influence_sums (target_index))
-										(size (target_value))
-									)
-								)
+								;compute average by dividing by the number of values
+								(/ (apply "+" (target_value)) (size (target_value)) )
 
 								;else if there were no values for this feature, return global feature residual
 								(get hyperparam_map (list "featureDeviations" (get features (target_index 1))))
