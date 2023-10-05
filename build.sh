@@ -27,7 +27,6 @@ rel_dir=${src_dir}/release
 timestamp=$(date +%x_%H:%M)
 
 # Get the Platform we are running the build on.
-# This will be used to pick compiler options for 'linux' or 'darwin'
 plat=$(uname | tr '[:upper:]' '[:lower:]')
 if [[ "$plat" = 'darwin' ]]; then amlg_exe="${src_dir}/target/bin/amalgam-mt-noavx"; fi
 
@@ -63,6 +62,11 @@ build() {
 test() {
   engine_version=${1:-'0.0.0'}
   echo "Testing Howso Engine version ${engine_version}..."
+
+  arm_ver=${2:-''}
+  if [[ "$arm_ver" == "arm64_8a" ]]; then
+    amlg_exe=${src_dir}/target/bin/amalgam-st
+  fi
 
   update_version_file ${engine_version}
   cd ${src_dir}/unit_tests
