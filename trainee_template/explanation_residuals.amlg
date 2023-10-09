@@ -87,90 +87,88 @@
 			)
 		)
 
+		(declare (assoc context_map (zip features case_values)))
+
 		(declare (assoc
 			case_residuals
 				(if robust_computation
-					(let
-						(assoc context_map (zip features case_values))
-						;for each feature, do 30 reacts with randomly selected contexts
-						(map
-							(lambda (let
-								(assoc
-									expected_case_value (get case_values (target_index 1))
-									action_feature (target_value 1)
-									action_is_nominal (contains_index nominalsMap (target_value 1))
-									action_feature (target_value 1)
-									contexts_only_map (remove context_map (target_value 1))
-									robust_predictions (list)
-								)
+					;for each feature, do 30 reacts with randomly selected contexts
+					(map
+						(lambda (let
+							(assoc
+								expected_case_value (get case_values (target_index 1))
+								action_feature (target_value 1)
+								action_is_nominal (contains_index nominalsMap (target_value 1))
+								action_feature (target_value 1)
+								contexts_only_map (remove context_map (target_value 1))
+								robust_predictions (list)
+							)
 
-								;if the case value is null, but nulls aren't allowed, return null as residual so it can be computed below
-								(if (and (= (null) expected_case_value) (not allow_nulls))
-									(null)
+							;if the case value is null, but nulls aren't allowed, return null as residual so it can be computed below
+							(if (and (= (null) expected_case_value) (not allow_nulls))
+								(null)
 
-									(seq
-										(assign (assoc
-											robust_predictions
-												(range
-													(lambda (let
-														(assoc
-															;randomly remove features from the context map
-															filtered_context_map (filter (lambda (< (rand) .5)) contexts_only_map)
-														)
-														(declare (assoc
-															reaction
-																(call ReactDiscriminative (assoc
-																	return_action_values_only (true)
-																	context_features (indices filtered_context_map)
-																	context_values (values filtered_context_map)
-																	action_features (list action_feature)
-																	ignore_case ignore_case
-																	;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
-																	skip_encoding 1
-																	;bypass decoding since computing distances to each reaction uses encoded numeric values
-																	skip_decoding 1
-																	force_targetless force_targetless
-																	substitute_output (false)
-																	details (if action_is_nominal (assoc "categorical_action_probabilities" (true)))
-																))
-														))
+								(seq
+									(assign (assoc
+										robust_predictions
+											(range
+												(lambda (let
+													(assoc
+														;randomly remove features from the context map
+														filtered_context_map (filter (lambda (< (rand) .5)) contexts_only_map)
+													)
+													(declare (assoc
+														reaction
+															(call ReactDiscriminative (assoc
+																return_action_values_only (true)
+																context_features (indices filtered_context_map)
+																context_values (values filtered_context_map)
+																action_features (list action_feature)
+																ignore_case ignore_case
+																;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
+																skip_encoding 1
+																;bypass decoding since computing distances to each reaction uses encoded numeric values
+																skip_decoding 1
+																force_targetless force_targetless
+																substitute_output (false)
+																details (if action_is_nominal (assoc "categorical_action_probabilities" (true)))
+															))
+													))
 
-														;if feature is nominal get the categorical action probability for expected value, if it's null then set it to 0
-														;else it's: 1 - probability
-														(if action_is_nominal
-															(let
-																(assoc
-																	predicted_probability
-																		(or (get reaction (list "categorical_action_probabilities" action_feature expected_case_value)) 0)
-																)
-
-																(- 1 predicted_probability)
+													;if feature is nominal get the categorical action probability for expected value, if it's null then set it to 0
+													;else it's: 1 - probability
+													(if action_is_nominal
+														(let
+															(assoc
+																predicted_probability
+																	(or (get reaction (list "categorical_action_probabilities" action_feature expected_case_value)) 0)
 															)
 
-															;else this is a continuous feature, return the absolute difference between the expected and the actual
-															(abs (- expected_case_value (get reaction 0)))
+															(- 1 predicted_probability)
 														)
-													))
-													1 30 1
-												)
-										))
 
-										;return average of all the probust predictions for each feature
-										(/ (apply "+" robust_predictions) 30)
-									)
+														;else this is a continuous feature, return the absolute difference between the expected and the actual
+														(abs (- expected_case_value (get reaction 0)))
+													)
+												))
+												1 30 1
+											)
+									))
+
+									;return average of all the probust predictions for each feature
+									(/ (apply "+" robust_predictions) 30)
 								)
-							))
-							features
-						)
+							)
+						))
+						features
 					)
 
 					;else standard computation, do leave-one-out for each feature and predict it once
 					(map
 						(lambda (let
 							(assoc
-								filtered_context_features (remove features (target_index 1))
-								filtered_case_values (remove case_values (target_index 1))
-								expected_case_value (get case_values (target_index 1))
+								filtered_context_features (filter (lambda (!= (target_value 2) (target_value))) features)
+								expected_case_value (get context_map (target_value 1))
 								action_feature (target_value 1)
 								action_is_nominal (contains_index nominalsMap (target_value 1))
 							)
@@ -185,7 +183,7 @@
 											(call ReactDiscriminative (assoc
 												return_action_values_only (true)
 												context_features filtered_context_features
-												context_values filtered_case_values
+												context_values (unzip context_map filtered_context_features)
 												action_features (list action_feature)
 												ignore_case ignore_case
 												;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
@@ -216,13 +214,18 @@
 								)
 							)
 						))
-						features
+						(or details_features features)
 					)
 				)
 		))
 
 		(declare (assoc
-			case_residuals_map (zip features case_residuals)
+			case_residuals_map
+				(if (and details_features (not robust_computation))
+					(zip details_features case_residuals)
+
+					(zip features case_residuals)
+				)
 			local_model_null_features_convictions (assoc)
 			global_null_conviction_ratios_map (null)
 			local_null_conviction_ratios_map (null)
@@ -353,6 +356,10 @@
 						)
 				))
 			)
+		)
+
+		(if (and robust_computation details_features)
+			(assign (assoc case_residuals_map (keep case_residuals_map details_features)))
 		)
 
 		;add case_feature_residuals to output if requested
