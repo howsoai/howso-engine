@@ -188,7 +188,8 @@
 		(call CalculateFeatureResiduals (assoc
 			features features
 			target_residual_feature target_residual_feature
-			cases_map regional_model_cases_map
+			case_ids (indices regional_model_cases_map)
+			regional_model_only (true)
 			use_case_weights use_case_weights
 			weight_feature weight_feature
 			focal_case ignore_case
@@ -255,105 +256,46 @@
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
 		))
 
-		;if focal case is specified, ensure that it's not in the provided cases_map since its influence should be ignored
-		(if (!= (null) focal_case)
-			(assign (assoc cases_map (remove cases_map focal_case)))
+		;if case_ids weren't specified either, use a random num_samples sampling of cases from the whole model
+		(if (= 0 (size case_ids))
+			(assign (assoc
+				case_ids
+					;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
+					(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
+						(if robust_residuals
+							(call SampleCases (assoc
+								num num_samples
+								rand_seed (rand)
+								case_weight_feature (if valid_weight_feature weight_feature)
+							))
+							;grab samples from the model
+							(call AllCases (assoc num num_samples rand_seed (rand)))
+						)
+
+						;else the model is small, use the smaller of num_samples or (num_cases * 2^f) because that's the amount of all possible combinations
+						(if robust_residuals
+							(call SampleCases (assoc
+								num (min num_samples (* num_training_cases (pow 2 (size features))))
+								case_weight_feature (if valid_weight_feature weight_feature)
+							))
+							;else just use all the case ids because the model size is <= num_samples or the model is small
+							(call AllCases)
+						)
+					)
+			))
 		)
 
-		;if cases_map (assoc of case -> weight) was not specified, select case_ids for computation here
-		(if (= 0 (size cases_map) )
-			(seq
-				;if case_ids weren't specified either, use a random num_samples sampling of cases from the whole model
-				(if (= 0 (size case_ids))
-					(assign (assoc
-						case_ids
-							;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
-							(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
-								(if robust_residuals
-									(call SampleCases (assoc
-										num num_samples
-										rand_seed (rand)
-										case_weight_feature (if valid_weight_feature weight_feature)
-									))
-									;grab samples from the model
-									(call AllCases (assoc num num_samples rand_seed (rand)))
-								)
-
-								;else the model is small, use the smaller of num_samples or (num_cases * 2^f) because that's the amount of all possible combinations
-								(if robust_residuals
-									(call SampleCases (assoc
-										num (min num_samples (* num_training_cases (pow 2 (size features))))
-										case_weight_feature (if valid_weight_feature weight_feature)
-									))
-									;else just use all the case ids because the model size is <= num_samples or the model is small
-									(call AllCases)
-								)
-							)
-					))
-				)
-
-				;when calculating residuals for the entire model, cache the heuristic residual values if they haven't been cached yet
-				(if	(!=
-						(list)
-						;filter out all the features that are already in cachedFeatureMinResidualMap. if any remain,
-						;that means we need to cache values, may as well recalculate them all since something in the model probalby changed
-						(filter
-							(lambda (not (contains_index cachedFeatureMinResidualMap (target_value))))
-							features
-						)
-					)
-					(call !CacheFeatureMinGapAndResidual)
+		;when calculating residuals for the entire model, cache the heuristic residual values if they haven't been cached yet
+		(if	(!=
+				(list)
+				;filter out all the features that are already in cachedFeatureMinResidualMap. if any remain,
+				;that means we need to cache values, may as well recalculate them all since something in the model probalby changed
+				(filter
+					(lambda (not (contains_index cachedFeatureMinResidualMap (target_value))))
+					features
 				)
 			)
-
-			;else cases were specified via cases_map, calculate the corresponding weights
-			(seq
-				;ensure there's no sub model size since explicit cases have been provided
-				(assign (assoc
-					sub_model_size (null)
-					case_ids (indices cases_map)
-				))
-
-				;if there are exact matches, filter out the cases to just those that are exact matches
-				(if (contains_value cases_map .infinity)
-					;and no need to set case_weights since these are all exact matches, they are weighed evenly
-					(assign (assoc
-						case_ids (filter (lambda (= .infinity (get cases_map (target_value)))) case_ids)
-					))
-
-					;else calculate the corresponding weights for each case
-					(let
-						(assoc
-							;total case weight is the sum of the inverse (distance weight exponent) of the distances for each case
-							total_case_weight (apply (lambda (+)) (values cases_map) )
-						)
-
-						(assign (assoc
-							scale_by_local_influence (!= 0 total_case_weight)
-							case_weights
-								(if (!= 0 total_case_weight)
-									(map
-										(lambda (/ (get cases_map (target_value)) total_case_weight) )
-										case_ids
-									)
-								)
-						))
-					)
-				)
-
-				(declare (assoc
-					;if there is only one target residual, local model can stay its original size else should be increased to at least 100
-					min_sample_size (if target_residual_feature (size cases_map) 100)
-				))
-
-				;for small robust local models, duplicate the sample cases since on average half the features won't have computations
-				;to ensure that every feature has some coverage
-				(if (and robust_residuals (< (size case_ids) min_sample_size) )
-					(assign (assoc
-						case_ids  (apply "append" (map case_ids (range 1 (ceil (/ min_sample_size (size case_ids) )))) )
-					))
-				)
-			)
+			(call !CacheFeatureMinGapAndResidual)
 		)
 
 		;since residuals cannot be computed, return the max uncertainty for each feature
@@ -374,36 +316,6 @@
 								)
 						))
 				)
-			)
-		)
-
-		;if case weights were specified but the amount of case_ids is more than corresponding weights,
-		;we need to expand the case_weights list to match the number of case_ids
-		(if (and scale_by_local_influence (!= (size case_weights) (size case_ids)))
-			(let
-				(assoc
-					case_weights_map (zip case_ids case_weights)
-					total_weight 0
-				)
-
-				(assign (assoc
-					case_weights
-						(map
-							(lambda (get case_weights_map (target_value)))
-							case_ids
-						)
-				))
-
-				;since total weight now != 1, we need to re-normalize the weights so they add up to 1
-				(assign (assoc total_weight (apply "+" case_weights)) )
-
-				(assign (assoc
-					case_weights
-						(map
-							(lambda (/ (target_value) total_weight))
-							case_weights
-						)
-				))
 			)
 		)
 
@@ -473,7 +385,6 @@
 							case_id (target_value 1)
 							;map of feature -> value for all the case values
 							case_values_map (zip case_features (retrieve_from_entity (target_value 1) case_features) )
-							case_weight (if scale_by_local_influence (get case_weights (target_index 1)) )
 						)
 
 						;for robust computation we randomly (50/50) decide whether to remove a feature from the context
@@ -567,38 +478,6 @@
 			(assign (assoc features (list target_residual_feature) ))
 		)
 
-		;if there are case weights, residuals have already been scaled by case influences, thus the total weight adds up to 1.0
-		;for each feature, if any results are removed we need to also remove the corresponding case weights and store the summed up remaining weight.
-		;e.g., if the summed weight is now 0.75, we'll scale the summed residuals by diving by this scaled value below
-		(if scale_by_local_influence
-			(assign (assoc
-				local_case_influence_sums
-					(map
-						(lambda (let
-							(assoc
-								feature_index (target_index 1)
-								valid_weights (list)
-							)
-
-							;keep weights of cases for this feature that have valid values
-							(assign (assoc
-								valid_weights
-									(filter
-										(lambda
-											(!= (null) (get case_residuals_lists (list (target_index 1) feature_index)))
-										)
-										case_weights
-									)
-							))
-
-							;sum up the weight of the remaining cases with valid values
-							(apply "+" valid_weights)
-						))
-						features
-					)
-			))
-		)
-
 		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
 		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
 		(assign (assoc
@@ -620,8 +499,8 @@
 		))
 
 		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
-		;applicable only to global models (i.e. no cases_map)
-		(if (= (null) cases_map)
+		;applicable only to global models (i.e. not regional_model_only)
+		(if (not regional_model_only)
 			(let
 				(assoc
 					num_valid_values_per_feature_map
@@ -705,7 +584,6 @@
 									case_feature_value (null)
 									case_id (target_value 1)
 									case_values_map (zip features (retrieve_from_entity (target_value 1) features))
-									case_weight (if scale_by_local_influence (get case_weights (target_index 1)) )
 
 									interpolated_value 0
 									diff 0
@@ -765,36 +643,6 @@
 			(assign (assoc features details_features))
 		)
 
-		;if there are case weights, residuals have already been scaled by case influences, thus the total weight adds up to 1.0
-		;for each feature, if any results are removed we need to also remove the corresponding case weights and store the summed up remaining weight.
-		;e.g., if the summed weight is now 0.75, we'll scale the summed residuals by diving by this scaled value below
-		(if scale_by_local_influence
-			(assign (assoc
-				local_case_influence_sums
-					(map
-						(lambda (let
-							(assoc
-								residual_values (target_value 1)
-								valid_weights (list)
-							)
-
-							;keep weights of cases for this feature that have valid values
-							(assign (assoc
-								valid_weights
-									(filter
-										(lambda (!= (null) (get residual_values (target_index))) )
-										case_weights
-									)
-							))
-
-							;sum up the weight of the remaining cases with valid values
-							(apply "+" valid_weights)
-						))
-						feature_residuals_lists
-					)
-			))
-		)
-
 		;filter out nulls
 		(assign (assoc
 			feature_residuals_lists (map (lambda (filter (target_value)) ) feature_residuals_lists )
@@ -836,10 +684,9 @@
 
 			compute_all_statistics
 			(if feature_is_nominal
-				;output [diff, case_weight, actual, predicted, categorical_probabilities] for computing MAE, accuracy, precision, recall
+				;output [diff, actual, predicted, categorical_probabilities] for computing MAE, accuracy, precision, recall
 				(list
 					(call !ComputeFeatureMAEDiff)
-					case_weight
 					case_feature_value
 					interpolated_value
 					(if (= 0 (size local_cases_map))
@@ -850,7 +697,7 @@
 					)
 				)
 
-				;else continuous, output [diff, ordinal_diff, case_weight, actual, predicted] for computing MAE, RSME, R^2
+				;else continuous, output [diff, ordinal_diff, actual, predicted] for computing MAE, RSME, R^2
 				(and
 					(= .nan (- case_feature_value interpolated_value))
 					(not feature_is_edit_distance)
@@ -859,9 +706,9 @@
 
 				;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
 				(if feature_is_non_string_edit_distance
-					(append (call !ComputeFeatureMAEDiff) case_weight (list case_feature_value) (list interpolated_value))
+					(append (call !ComputeFeatureMAEDiff) (list case_feature_value) (list interpolated_value))
 
-					(append (call !ComputeFeatureMAEDiff) case_weight case_feature_value interpolated_value)
+					(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
 				)
 			)
 
@@ -899,11 +746,9 @@
 
 				;output the residual. if it's .nan, output null for non-nominals, and 1 (or case weight) for nominals
 				(if (= .nan diff)
-					(if feature_is_nominal
-						(if (!= (null) case_weight) case_weight 1)
-					)
+					(if feature_is_nominal 1)
 
-					;else output tuple [diff, ordinal_diff] for ordinals, and case_weighted diff for continuous if applicable
+					;else output tuple [diff, ordinal_diff] for ordinals, and diff for continuous if applicable
 					(contains_index ordinal_features_map feature)
 					(let
 						(assoc
@@ -916,19 +761,9 @@
 								)
 						)
 
-						(if (!= (null) case_weight)
-							(assign (assoc
-								ordinal_diff (if (!= (null) ordinal_diff) (* ordinal_diff case_weight))
-								diff (* diff case_weight)
-							))
-						)
 						;output the tuple
 						(list diff ordinal_diff)
 					)
-
-					;else for continuous, if case weights are specified, modify by the corresponding weight for the case
-					(!= (null) case_weight)
-					(* diff case_weight)
 
 					;else output it as-is
 					diff
