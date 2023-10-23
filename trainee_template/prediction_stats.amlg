@@ -211,6 +211,10 @@
 	; robust_hyperparameters: flag, optional. if true, will attempt to return residuals that were computed using hyperparameters with the
 	;						  specified robust or non-robust type.
 	; weight_feature: string, optional. if specified, will attempt to return residuals that were computed using this weight_feature.
+	; case_indices: optional, list of pair (list) of session id and index, where index is the original 0-based session_training_index of the case as
+	; 		it was trained. If specified, ignores condition and condition_session
+	; leave_cases_out: flag, optional. If true, the cases specified by case_indices or the condition will be held out while making predictions. Only
+	;		used when either condition or case_indices is specified.
 	; condition: assoc of feature->value(s)
 	;		no value = must have feature
 	;   	- for continuous or numeric ordinal features:
@@ -231,13 +235,25 @@
 			action_feature (null)
 			robust_hyperparameters (null)
 			weight_feature (null)
+			case_indices (list)
+			leave_cases_out (false)
 			condition (null)
 			precision "exact"
 			num_cases (null)
 			num_robust_influence_samples_per_case (null)
 		)
 
-		(if (= num_cases (null))
+		(declare (assoc
+			hyperparam_map
+				(call GetHyperparameters (assoc
+					feature action_feature
+					context_features context_features
+					mode (if (= robust_hyperparameters (true)) "robust" "full")
+					weight_feature (if (= weight_feature (null)) ".none" weight_feature)
+				))
+		))
+
+		(if (and (!= condition (null)) (= num_cases (null)) )
 			(if (= precision "similar")
 				(assign (assoc
 					num_cases (get hyperparam_map "k")
@@ -254,25 +270,30 @@
 			output_map (assoc)
 			warnings (assoc)
 			case_ids
-				(call_entity trainee "GetCasesByCondition" (assoc
-					condition condition
-					condition_session (null)
-					precision precision
-					num_cases num_cases
-				))
+				(if (> (size case_indices) 0)
+					(call GetCaseIds)
+
+					(call GetCasesByCondition (assoc
+						condition condition
+						condition_session (null)
+						precision precision
+						num_cases num_cases
+					))
+				)
 			context_features (filter (lambda (!= action_feature (target_value))) defaultFeatures)
 			use_case_weights (!= (null) weight_feature)
 		))
 
-		(declare (assoc
-			hyperparam_map
-				(call GetHyperparameters (assoc
-					feature action_feature
-					context_features context_features
-					mode (if (= robust_hyperparameters (true)) "robust" "full")
-					weight_feature (if (= weight_feature (null)) ".none" weight_feature)
-				))
-		))
+		(if (= (size case_ids) 0)
+			(conclude
+				;output payload and warnings
+					(assoc
+						"payload" (null)
+						"warnings" (list "There are no cases in the Trainee that match the given 'condition' or 'case_indices'.")
+					)
+			)
+		)
+
 
 		;if no stats were specified, return all of them by default
 		(if (= 0 (size stats))
@@ -349,9 +370,14 @@
 									case_ids case_ids
 									weight_feature weight_feature
 									custom_hyperparam_map hyperparam_map
-									run_on_local_model (false)
+									run_on_local_model (true)
 									store_values (false)
 									num_robust_influence_samples_per_case num_robust_influence_samples_per_case
+									custom_extra_filtering_queries
+										(if leave_cases_out
+											(query_not_in_entity_list case_ids)
+											(list)
+										)
 								))
 						)
 						(accum (assoc
@@ -378,7 +404,7 @@
 								output_map
 									(assoc
 										"mda"
-											(call_entity trainee "CalculateMDA" (assoc
+											(call CalculateMDA (assoc
 												context_features context_features
 												action_feature action_feature
 												sensitivity_to_randomization (false)
@@ -388,6 +414,11 @@
 												weight_feature weight_feature
 												custom_hyperparam_map hyperparam_map
 												store_values (false)
+												custom_extra_filtering_queries
+													(if leave_cases_out
+														(query_not_in_entity_list case_ids)
+														(list)
+													)
 											))
 									)
 							))
@@ -397,7 +428,7 @@
 								output_map
 									(assoc
 										"mda_permutation"
-											(call_entity trainee "CalculateMDA" (assoc
+											(call CalculateMDA (assoc
 												context_features context_features
 												action_feature action_feature
 												sensitivity_to_randomization (true)
@@ -407,6 +438,11 @@
 												weight_feature weight_feature
 												custom_hyperparam_map hyperparam_map
 												store_values (false)
+												custom_extra_filtering_queries
+													(if leave_cases_out
+														(query_not_in_entity_list case_ids)
+														(list)
+													)
 										))
 									)
 							))
