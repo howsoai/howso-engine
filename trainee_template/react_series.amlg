@@ -60,7 +60,10 @@
             )
         )
 
-		(declare (assoc warnings (assoc) ))
+		(declare (assoc
+			warnings (assoc)
+			output_influential_cases (get details "influential_cases")
+		))
 
 		(declare (assoc
 			series_output
@@ -135,7 +138,7 @@
 								preserve_feature_values preserve_feature_values
 								new_case_threshold new_case_threshold
 							))
-							(list "payload" "series")
+							(list "payload")
 						)
 					))
 					0 (- num_reacts 1) 1
@@ -144,10 +147,16 @@
 
 		(assoc
 			"payload"
-				(assoc
-					;output features are all the combined action features
-					"action_features" output_features
-					"series" series_output
+				(append
+					(assoc
+						;output features are all the combined action features
+						"action_features" output_features
+						"series" (map (lambda (get (current_value) "series")) series_output)
+					)
+					(if output_influential_cases
+						(assoc "influential_cases" (map (lambda (get (current_value) "influential_cases")) series_output))
+						(assoc)
+					)
 				)
 			"warnings" (if (size warnings) (indices warnings))
 		)
@@ -304,6 +313,9 @@
 						derived_context_features
 					)
 				))
+			output_influential_cases (get details "influential_cases")
+			influential_cases (list)
+			all_influential_cases (list)
 		))
 
 		(let
@@ -575,27 +587,32 @@
 			)
 
 			;add each new row to series data with all initial context values
-			(accum (assoc
+			(assign (assoc
 				series_data
-					(if use_initial_context_features
-						(list
-							(unzip (append original_context_map initial_features_map) features)
-						)
+					(append
+						;first iteration appends original series_data since there is no previous_result
+						(if (> (current_index 1) 0) (previous_result 1) series_data)
 
-						;overwrite the values in the original_context_map with those from the current series_index in the provided series_context_values
-						has_series_context_values
-						(list
-							(unzip
-								(append
-									original_context_map
-									(zip series_context_features (get series_context_values (+ 1 last_series_index)) )
-								)
-								features
+						(if use_initial_context_features
+							(list
+								(unzip (append original_context_map initial_features_map) features)
 							)
-						)
 
-						;else every row begins as the original context values
-						(list original_context_values)
+							;overwrite the values in the original_context_map with those from the current series_index in the provided series_context_values
+							has_series_context_values
+							(list
+								(unzip
+									(append
+										original_context_map
+										(zip series_context_features (get series_context_values (+ 1 last_series_index)) )
+									)
+									features
+								)
+							)
+
+							;else every row begins as the original context values
+							(list original_context_values)
+						)
 					)
 			))
 			(accum (assoc last_series_index 1 ))
@@ -810,6 +827,14 @@
 					series_stop_map
 				)
 			)
+
+			(if output_influential_cases
+				;wrap the influential cases in a list so it's accumulated as a list of lists of assocs (a list per row)
+				(accum (assoc all_influential_cases (list influential_cases) ))
+			)
+
+			;return series_data so it's stored as previous_result for accumulation in the next iteration of the while loop
+			series_data
 		) ;while loop
 
 		;grab the list of column indices corresponding to all the output_features
@@ -928,19 +953,25 @@
 		;output the series data
 		(assoc
 			"payload"
-				(assoc
-					"series"
-						;iterate over all the series data and return only the columns corresponding to action_features
-						(map
-							(lambda (unzip (current_value) action_feature_indices))
-							;if there were existing series rows, do not include them in the output
-							(if num_existing_series_rows
-								(tail series_data (- num_existing_series_rows))
-								series_data
+				(append
+					(assoc
+						"series"
+							;iterate over all the series data and return only the columns corresponding to action_features
+							(map
+								(lambda (unzip (current_value) action_feature_indices))
+								;if there were existing series rows, do not include them in the output
+								(if num_existing_series_rows
+									(tail series_data (- num_existing_series_rows))
+									series_data
+								)
 							)
-						)
-					;ensure features are output in the payload
-					"action_features" output_features
+						;ensure features are output in the payload
+						"action_features" output_features
+					)
+					(if output_influential_cases
+						(assoc "influential_cases" all_influential_cases)
+						(assoc)
+					)
 				)
 			"warnings" (if (size warnings) (indices warnings))
 		)
@@ -961,7 +992,7 @@
 					derived_action_features (list)
 					derived_context_features (list)
 					;no explanation
-					details (null)
+					details (if output_influential_cases details)
 					extra_audit_features extra_audit_features
 					case_access_count_label case_access_count_label
 					ignore_case ignore_case
@@ -989,6 +1020,10 @@
 
 		;overwrite the last row in series data with the values from the updated current case
 		(assign "series_data" (list last_series_index) (unzip current_case_map features))
+
+		(if output_influential_cases
+			(assign (assoc influential_cases (get react_output "influential_cases") ))
+		)
 
 		(if (size derived_action_features)
 			(let
@@ -1069,6 +1104,7 @@
 											(assign (assoc
 												done (true)
 												series_data (trunc series_data)
+												influential_cases (list)
 											))
 
 											;else reset series_data and initial features and progress and index, to regenerate the series from the start
@@ -1083,6 +1119,7 @@
 														last_series_index (- num_existing_series_rows 1)
 														first_generated_row (true)
 														current_case_map (assoc)
+														influential_cases (list)
 													))
 
 													(assign (assoc
@@ -1091,6 +1128,7 @@
 														last_series_index -1
 														first_generated_row (true)
 														current_case_map (assoc)
+														influential_cases (list)
 													))
 												)
 											)
