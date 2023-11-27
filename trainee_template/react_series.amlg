@@ -29,6 +29,7 @@
             single_initial (= 1 (size initial_values))
             single_stop_map (= 1 (size series_stop_maps))
             single_max_length (= 1 (size max_series_lengths))
+			single_continue_series (= 1 (size continue_series_values))
             num_reacts 1
 
             has_series_context_values (false)
@@ -78,6 +79,7 @@
 							action_index (if single_action 0 (current_index 1))
 							session_index (if single_session 0 (current_index 1))
 							react_rand_seed (if rand_seed (get rand_seed (current_index 1)))
+							continue_index (if single_continue_series 0 (current_index 1))
 							react_session (null)
 							react_session_training_index (null)
 							react_series_context_values (if has_series_context_values (get series_context_values (current_index 1)) (list))
@@ -89,6 +91,7 @@
 							react_action_values (if action_values (get action_values action_index) (list))
 							react_initial_values (if initial_values (get initial_values initial_index) (list))
 							react_series_stop_map (if series_stop_maps (get series_stop_maps stop_map_index) (assoc))
+							react_continue_values (if continue_series_values (get continue_series_values continue_index) (null))
 
 							;max series is allowed to be null
 							react_max_series_length (get max_series_lengths max_length_index)
@@ -114,6 +117,8 @@
 								output_new_series_ids output_new_series_ids
 								output_features output_features
 								continue_series continue_series
+								continue_series_features continue_series_features
+								continue_series_values react_continue_values
 
 								initial_features initial_features
 								context_features context_features
@@ -405,116 +410,145 @@
 					)
 				)
 
-				;TODO:
 				(if (size continue_series_values)
+					(let
+						(assoc continue_feature_indices_map (zip continue_series_features (indices continue_series_features)) )
+						(declare (assoc
+							feature_order (unzip continue_feature_indices_map features)
+						))
 
-				)
+						;TODO: re-impute values that need imputing
+						;
 
-				;populate an assoc of id feature -> value, if conditioned on a series, otherwise select a random series
-				(assign (assoc
-					id_values_map
-						;if initial_features_map has series id features, use them
-						(if (size (filter (unzip initial_features_map series_id_features)))
-							;get ID feature values from initial map
-							(keep initial_features_map series_id_features)
+						;set series_data
+						(assign (assoc
+							series_data
+								(map
+									(lambda (unzip (current_value) feature_order))
+									continue_series_values
+								)
+						))
 
-							;else randomly pick IDs by selecting a case at random and using its series ids
-							(zip
-								series_id_features
-								(retrieve_from_entity
-									;pick a case at random
-									(first
-										(contained_entities (list
-											(query_exists internalLabelSession)
-											(query_sample 1)
+						;TODO: pre-pend nulls if user hasn't provided enough lags
+						;
+
+						(assign (assoc
+							;update last_series_index to the index of the last row in the series
+							last_series_index (- (size series_data) 1)
+							num_existing_series_rows (size series_data)
+						))
+					)
+
+					;else user has not specified existing cases, pull them from the trainee
+					(seq
+						;populate an assoc of id feature -> value, if conditioned on a series, otherwise select a random series
+						(assign (assoc
+							id_values_map
+								;if initial_features_map has series id features, use them
+								(if (size (filter (unzip initial_features_map series_id_features)))
+									;get ID feature values from initial map
+									(keep initial_features_map series_id_features)
+
+									;else randomly pick IDs by selecting a case at random and using its series ids
+									(zip
+										series_id_features
+										(retrieve_from_entity
+											;pick a case at random
+											(first
+												(contained_entities (list
+													(query_exists internalLabelSession)
+													(query_sample 1)
+												))
+											)
+											;pull the random case's ID features
+											series_id_features
+										)
+									)
+								)
+						))
+
+						;pull the necessary number of cases from the series
+						(assign (assoc
+							existing_series_cases
+								(contained_entities (append
+									(map
+										(lambda (query_equals (current_value) (get id_values_map (current_value))))
+										series_id_features
+									)
+									;if an initial time value is provided, limit existing series cases to those before the specified initial time
+									(if (contains_index initial_features_map tsTimeFeature)
+										(list
+											;using both query_less_or_equal_to and query_not_equals is same effect as 'query less than'
+											(query_less_or_equal_to
+												tsTimeFeature
+												(if (contains_index featureDateTimeMap tsTimeFeature)
+													(call ConvertDateToEpoch (assoc
+														date (get initial_features_map tsTimeFeature)
+														feature tsTimeFeature
+													))
+
+													(get initial_features_map tsTimeFeature)
+												)
+											)
+											(query_not_equals
+												tsTimeFeature
+												(if (contains_index featureDateTimeMap tsTimeFeature)
+													(call ConvertDateToEpoch (assoc
+														date (get initial_features_map tsTimeFeature)
+														feature tsTimeFeature
+													))
+
+													(get initial_features_map tsTimeFeature)
+												)
+											)
+										)
+										(list)
+									)
+									;select the necessary count of previous cases to reference lags
+									(query_max tsTimeFeature largest_max_row_lag)
+								))
+						))
+
+						(if (= (size existing_series_cases) 0)
+							(accum (assoc
+								warnings
+									(associate (concat
+										"There is no series trained with the set of IDs:\n"
+										(apply "concat" (map (lambda (concat ": "  (current_value) "\n")) id_values_map))
+									))
+							))
+						)
+
+						;if there is more than one existing series case, we'll need to sort them by the time feature to ensure ascending order
+						(if (> largest_max_row_lag 1)
+							(assign (assoc
+								existing_series_cases
+									(sort
+										(lambda (> (retrieve_from_entity (current_value) tsTimeFeature) (retrieve_from_entity (current_value 1) tsTimeFeature)) )
+										existing_series_cases
+									)
+							))
+						)
+
+						;set initial series_data to all the feature values from existing series cases
+						(assign (assoc
+							series_data
+								(map
+									(lambda
+										(call ConvertToOutput (assoc
+											features features
+											feature_values (retrieve_from_entity (current_value 1) features)
 										))
 									)
-									;pull the random case's ID features
-									series_id_features
+									existing_series_cases
 								)
-							)
-						)
-				))
-
-				;pull the necessary number of cases from the series
-				(assign (assoc
-					existing_series_cases
-						(contained_entities (append
-							(map
-								(lambda (query_equals (current_value) (get id_values_map (current_value))))
-								series_id_features
-							)
-							;if an initial time value is provided, limit existing series cases to those before the specified initial time
-							(if (contains_index initial_features_map tsTimeFeature)
-								(list
-									;using both query_less_or_equal_to and query_not_equals is same effect as 'query less than'
-									(query_less_or_equal_to
-										tsTimeFeature
-										(if (contains_index featureDateTimeMap tsTimeFeature)
-											(call ConvertDateToEpoch (assoc
-												date (get initial_features_map tsTimeFeature)
-												feature tsTimeFeature
-											))
-
-											(get initial_features_map tsTimeFeature)
-										)
-									)
-									(query_not_equals
-										tsTimeFeature
-										(if (contains_index featureDateTimeMap tsTimeFeature)
-											(call ConvertDateToEpoch (assoc
-												date (get initial_features_map tsTimeFeature)
-												feature tsTimeFeature
-											))
-
-											(get initial_features_map tsTimeFeature)
-										)
-									)
-								)
-								(list)
-							)
-							;select the necessary count of previous cases to reference lags
-							(query_max tsTimeFeature largest_max_row_lag)
+							;update last_series_index to the index of the last row in the series
+							last_series_index (- (size existing_series_cases) 1)
+							num_existing_series_rows (size existing_series_cases)
 						))
-				))
 
-				(if (= (size existing_series_cases) 0)
-					(accum (assoc
-						warnings
-							(associate (concat
-								"There is no series trained with the set of IDs:\n"
-								(apply "concat" (map (lambda (concat ": "  (current_value) "\n")) id_values_map))
-							))
-					))
+					)
 				)
-
-				;if there is more than one existing series case, we'll need to sort them by the time feature to ensure ascending order
-				(if (> largest_max_row_lag 1)
-					(assign (assoc
-						existing_series_cases
-							(sort
-								(lambda (> (retrieve_from_entity (current_value) tsTimeFeature) (retrieve_from_entity (current_value 1) tsTimeFeature)) )
-								existing_series_cases
-							)
-					))
-				)
-
-				;set initial series_data to all the feature values from existing series cases
-				(assign (assoc
-					series_data
-						(map
-							(lambda
-								(call ConvertToOutput (assoc
-									features features
-									feature_values (retrieve_from_entity (current_value 1) features)
-								))
-							)
-							existing_series_cases
-						)
-					;update last_series_index to the index of the last row in the series
-					last_series_index (- (size existing_series_cases) 1)
-					num_existing_series_rows (size existing_series_cases)
-				))
 
 				;if end condition is not specified, generate progress based on where series is continuing from
 				(if (not (contains_index series_stop_map tsTimeFeature))
