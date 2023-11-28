@@ -378,296 +378,8 @@
 			)
 		)
 
-		;to continue an existing series, pull the necessary last few cases from the series to account for largest lag amount
 		(if continue_series
-			(let
-				(assoc
-					series_id_features (get tsModelFeaturesMap "series_id_features")
-					id_values_map (assoc)
-					existing_series_cases (list)
-				)
-
-				;if all series end on terminators and this react is not conditioned to start at a specific time step,
-				;stop this react series since it can't continue terminated series
-				(if
-					(and
-						stop_on_terminator
-						series_has_terminators
-						(not (contains_index initial_features_map tsTimeFeature))
-						;don't terminate a provided untrained continuing series
-						(= 0 (size continue_series_values))
-					)
-					(seq
-						(accum (assoc warnings (assoc "Can't continue terminated series.") ))
-						;immediately stop this series since it's terminated
-						(conclude (conclude
-							(assoc
-								"payload"
-									(assoc
-										"series" (null)
-										"action_features" output_features
-									)
-								"warnings" (if (size warnings) (indices warnings))
-							)
-						))
-					)
-				)
-
-				(if (size continue_series_values)
-					(let
-						(assoc continue_feature_indices_map (zip continue_series_features (indices continue_series_features)) )
-						(declare (assoc
-							feature_order (unzip continue_feature_indices_map features)
-						))
-
-						;reimpute values using this entire dataset since they were originally imputed
-						;only using the provided continue_series_values and are likely not as accurate as they could be
-						(assign (assoc
-							continue_series_values
-								(map
-									(lambda (let
-										(assoc imputed_features (last (current_value 1)))
-										(if (size imputed_features)
-											(let
-												(assoc row_values_map (zip continue_series_features (current_value 1)) )
-
-												(declare (assoc
-													imputed_values
-														(map
-															(lambda (let
-																(assoc impute_feature (current_value 1) )
-																(declare (assoc
-																	impute_context_features (indices (remove feature_index_map impute_feature))
-																))
-																(first
-																	(call ReactDiscriminative (assoc
-																		context_features impute_context_features
-																		context_values (unzip row_values_map impute_context_features)
-																		action_features (list impute_feature)
-																		ignore_case (null)
-																		return_action_values_only (true)
-																		allow_nulls (false)
-																	))
-																)
-															))
-															imputed_features
-														)
-												))
-
-												;overwrite originally imputed row values with the newly imputed row values
-												(unzip
-													(append row_values_map (zip imputed_features imputed_values))
-													continue_series_features
-												)
-											)
-
-											;else leave values as-is
-											(current_value)
-										)
-									))
-									continue_series_values
-								)
-						))
-
-						;set series_data
-						(assign (assoc
-							series_data
-								(map
-									(lambda (unzip (current_value) feature_order))
-									continue_series_values
-								)
-						))
-
-						;prepend nulls if user hasn't provided enough previous rows to account for necessary lags
-						(if (> largest_max_row_lag (size series_data))
-							(assign (assoc
-								series_data
-									(append
-										(map
-											(lambda (range (lambda (null)) 1 (size features) 1) )
-											(range 1 (- largest_max_row_lag (size series_data)))
-										)
-										series_data
-									)
-							))
-						)
-
-						(assign (assoc
-							;update last_series_index to the index of the last row in the series
-							last_series_index (- (size series_data) 1)
-							num_existing_series_rows (size series_data)
-						))
-					)
-
-					;else user has not specified existing cases, pull them from the trainee
-					(seq
-						;populate an assoc of id feature -> value, if conditioned on a series, otherwise select a random series
-						(assign (assoc
-							id_values_map
-								;if initial_features_map has series id features, use them
-								(if (size (filter (unzip initial_features_map series_id_features)))
-									;get ID feature values from initial map
-									(keep initial_features_map series_id_features)
-
-									;else randomly pick IDs by selecting a case at random and using its series ids
-									(zip
-										series_id_features
-										(retrieve_from_entity
-											;pick a case at random
-											(first
-												(contained_entities (list
-													(query_exists internalLabelSession)
-													(query_sample 1)
-												))
-											)
-											;pull the random case's ID features
-											series_id_features
-										)
-									)
-								)
-						))
-
-						;pull the necessary number of cases from the series
-						(assign (assoc
-							existing_series_cases
-								(contained_entities (append
-									(map
-										(lambda (query_equals (current_value) (get id_values_map (current_value))))
-										series_id_features
-									)
-									;if an initial time value is provided, limit existing series cases to those before the specified initial time
-									(if (contains_index initial_features_map tsTimeFeature)
-										(list
-											;using both query_less_or_equal_to and query_not_equals is same effect as 'query less than'
-											(query_less_or_equal_to
-												tsTimeFeature
-												(if (contains_index featureDateTimeMap tsTimeFeature)
-													(call ConvertDateToEpoch (assoc
-														date (get initial_features_map tsTimeFeature)
-														feature tsTimeFeature
-													))
-
-													(get initial_features_map tsTimeFeature)
-												)
-											)
-											(query_not_equals
-												tsTimeFeature
-												(if (contains_index featureDateTimeMap tsTimeFeature)
-													(call ConvertDateToEpoch (assoc
-														date (get initial_features_map tsTimeFeature)
-														feature tsTimeFeature
-													))
-
-													(get initial_features_map tsTimeFeature)
-												)
-											)
-										)
-										(list)
-									)
-									;select the necessary count of previous cases to reference lags
-									(query_max tsTimeFeature largest_max_row_lag)
-								))
-						))
-
-						(if (= (size existing_series_cases) 0)
-							(accum (assoc
-								warnings
-									(associate (concat
-										"There is no series trained with the set of IDs:\n"
-										(apply "concat" (map (lambda (concat ": "  (current_value) "\n")) id_values_map))
-									))
-							))
-						)
-
-						;if there is more than one existing series case, we'll need to sort them by the time feature to ensure ascending order
-						(if (> largest_max_row_lag 1)
-							(assign (assoc
-								existing_series_cases
-									(sort
-										(lambda (> (retrieve_from_entity (current_value) tsTimeFeature) (retrieve_from_entity (current_value 1) tsTimeFeature)) )
-										existing_series_cases
-									)
-							))
-						)
-
-						;set initial series_data to all the feature values from existing series cases
-						(assign (assoc
-							series_data
-								(map
-									(lambda
-										(call ConvertToOutput (assoc
-											features features
-											feature_values (retrieve_from_entity (current_value 1) features)
-										))
-									)
-									existing_series_cases
-								)
-							;update last_series_index to the index of the last row in the series
-							last_series_index (- (size existing_series_cases) 1)
-							num_existing_series_rows (size existing_series_cases)
-						))
-
-					)
-				)
-
-				;if end condition is not specified, generate progress based on where series is continuing from
-				(if (not (contains_index series_stop_map tsTimeFeature))
-					;if there are previous cases to continue from, generate a progress value given the values from the last case
-					(if (size (last series_data))
-						(let
-							(assoc
-								initial_progress_context_features
-									(let
-										(assoc time_delta_feature_name (concat "." tsTimeFeature "_delta_1") )
-										(append
-											;use all value, delta, and rate features to determine initial series progress
-											;exclude time feature (and delta)
-											(filter (lambda (!= tsTimeFeature (current_value))) derived_action_features)
-											(filter (lambda (!= time_delta_feature_name (current_value))) (get tsModelFeaturesMap "delta_features"))
-											(get tsModelFeaturesMap "rate_features")
-										)
-									)
-							)
-
-							(assign (assoc
-								initial_existing_progress
-									(first (get
-										(call React (assoc
-											context_features initial_progress_context_features
-											context_values (unzip (zip features (last series_data)) initial_progress_context_features )
-											action_features (list ".series_progress")
-											;do not derive anything during this react
-											derived_action_features (list)
-											derived_context_features (list)
-											;no explanation
-											details (null)
-											case_access_count_label case_access_count_label
-											;prevent overvaluing the progress of case from the original sourced series by ignoring it
-											ignore_case (last existing_series_cases)
-											substitute_output substitute_output
-											input_is_substituted input_is_substituted
-											use_case_weights use_case_weights
-											weight_feature weight_feature
-											rand_seed rand_seed
-											leave_case_out leave_case_out
-
-											desired_conviction desired_conviction
-											use_regional_model_residuals use_regional_model_residuals
-											new_case_threshold new_case_threshold
-											feature_bounds_map feature_bounds_map
-											generate_new_cases "no"
-										))
-										"action_values"
-									))
-							))
-							(assign (assoc
-								total_progress initial_existing_progress
-								track_progress (true)
-							))
-						)
-					)
-				)
-			)
+			(call !PrepContinueReactSeries)
 		)
 
 		;loop until series stopping condition is met
@@ -1174,6 +886,298 @@
 					)
 				)
 			"warnings" (if (size warnings) (indices warnings))
+		)
+	)
+
+	;Helper method from ReactSeries to prepare and properly populate series_data when continuing a series
+	#!PrepContinueReactSeries
+	(let
+		(assoc
+			series_id_features (get tsModelFeaturesMap "series_id_features")
+			id_values_map (assoc)
+			existing_series_cases (list)
+		)
+
+		;if all series end on terminators and this react is not conditioned to start at a specific time step,
+		;stop this react series since it can't continue terminated series
+		(if
+			(and
+				stop_on_terminator
+				series_has_terminators
+				(not (contains_index initial_features_map tsTimeFeature))
+				;don't terminate a provided untrained continuing series
+				(= 0 (size continue_series_values))
+			)
+			(seq
+				(accum (assoc warnings (assoc "Can't continue terminated series.") ))
+				;immediately stop this series since it's terminated
+				(conclude (conclude
+					(assoc
+						"payload"
+							(assoc
+								"series" (null)
+								"action_features" output_features
+							)
+						"warnings" (if (size warnings) (indices warnings))
+					)
+				))
+			)
+		)
+
+		;if user has provided series data to continue, populate series_data with the provided values
+		(if (size continue_series_values)
+			(let
+				(assoc continue_feature_indices_map (zip continue_series_features (indices continue_series_features)) )
+				(declare (assoc
+					feature_order (unzip continue_feature_indices_map features)
+				))
+
+				;reimpute values using this entire dataset since they were originally imputed
+				;only using the provided continue_series_values and are likely not as accurate as they could be
+				(assign (assoc
+					continue_series_values
+						(map
+							(lambda (let
+								(assoc imputed_features (last (current_value 1)))
+								(if (size imputed_features)
+									(let
+										(assoc row_values_map (zip continue_series_features (current_value 1)) )
+
+										(declare (assoc
+											imputed_values
+												(map
+													(lambda (let
+														(assoc impute_feature (current_value 1) )
+														(declare (assoc
+															impute_context_features (indices (remove feature_index_map impute_feature))
+														))
+														(first
+															(call ReactDiscriminative (assoc
+																context_features impute_context_features
+																context_values (unzip row_values_map impute_context_features)
+																action_features (list impute_feature)
+																ignore_case (null)
+																return_action_values_only (true)
+																allow_nulls (false)
+															))
+														)
+													))
+													imputed_features
+												)
+										))
+
+										;overwrite originally imputed row values with the newly imputed row values
+										(unzip
+											(append row_values_map (zip imputed_features imputed_values))
+											continue_series_features
+										)
+									)
+
+									;else leave values as-is
+									(current_value)
+								)
+							))
+							continue_series_values
+						)
+				))
+
+				;set series_data
+				(assign (assoc
+					series_data
+						(map
+							(lambda (unzip (current_value) feature_order))
+							continue_series_values
+						)
+				))
+
+				;prepend nulls if user hasn't provided enough previous rows to account for necessary lags
+				(if (> largest_max_row_lag (size series_data))
+					(assign (assoc
+						series_data
+							(append
+								(map
+									(lambda (range (lambda (null)) 1 (size features) 1) )
+									(range 1 (- largest_max_row_lag (size series_data)))
+								)
+								series_data
+							)
+					))
+				)
+
+				(assign (assoc
+					;update last_series_index to the index of the last row in the series
+					last_series_index (- (size series_data) 1)
+					num_existing_series_rows (size series_data)
+				))
+			)
+
+			;else user has not specified existing cases, pull the necessary last few cases from the series to account for largest lag amount
+			(seq
+				;populate an assoc of id feature -> value, if conditioned on a series, otherwise select a random series
+				(assign (assoc
+					id_values_map
+						;if initial_features_map has series id features, use them
+						(if (size (filter (unzip initial_features_map series_id_features)))
+							;get ID feature values from initial map
+							(keep initial_features_map series_id_features)
+
+							;else randomly pick IDs by selecting a case at random and using its series ids
+							(zip
+								series_id_features
+								(retrieve_from_entity
+									;pick a case at random
+									(first
+										(contained_entities (list
+											(query_exists internalLabelSession)
+											(query_sample 1)
+										))
+									)
+									;pull the random case's ID features
+									series_id_features
+								)
+							)
+						)
+				))
+
+				;pull the necessary number of cases from the series
+				(assign (assoc
+					existing_series_cases
+						(contained_entities (append
+							(map
+								(lambda (query_equals (current_value) (get id_values_map (current_value))))
+								series_id_features
+							)
+							;if an initial time value is provided, limit existing series cases to those before the specified initial time
+							(if (contains_index initial_features_map tsTimeFeature)
+								(list
+									;using both query_less_or_equal_to and query_not_equals is same effect as 'query less than'
+									(query_less_or_equal_to
+										tsTimeFeature
+										(if (contains_index featureDateTimeMap tsTimeFeature)
+											(call ConvertDateToEpoch (assoc
+												date (get initial_features_map tsTimeFeature)
+												feature tsTimeFeature
+											))
+
+											(get initial_features_map tsTimeFeature)
+										)
+									)
+									(query_not_equals
+										tsTimeFeature
+										(if (contains_index featureDateTimeMap tsTimeFeature)
+											(call ConvertDateToEpoch (assoc
+												date (get initial_features_map tsTimeFeature)
+												feature tsTimeFeature
+											))
+
+											(get initial_features_map tsTimeFeature)
+										)
+									)
+								)
+								(list)
+							)
+							;select the necessary count of previous cases to reference lags
+							(query_max tsTimeFeature largest_max_row_lag)
+						))
+				))
+
+				(if (= (size existing_series_cases) 0)
+					(accum (assoc
+						warnings
+							(associate (concat
+								"There is no series trained with the set of IDs:\n"
+								(apply "concat" (map (lambda (concat ": "  (current_value) "\n")) id_values_map))
+							))
+					))
+				)
+
+				;if there is more than one existing series case, we'll need to sort them by the time feature to ensure ascending order
+				(if (> largest_max_row_lag 1)
+					(assign (assoc
+						existing_series_cases
+							(sort
+								(lambda (> (retrieve_from_entity (current_value) tsTimeFeature) (retrieve_from_entity (current_value 1) tsTimeFeature)) )
+								existing_series_cases
+							)
+					))
+				)
+
+				;set initial series_data to all the feature values from existing series cases
+				(assign (assoc
+					series_data
+						(map
+							(lambda
+								(call ConvertToOutput (assoc
+									features features
+									feature_values (retrieve_from_entity (current_value 1) features)
+								))
+							)
+							existing_series_cases
+						)
+					;update last_series_index to the index of the last row in the series
+					last_series_index (- (size existing_series_cases) 1)
+					num_existing_series_rows (size existing_series_cases)
+				))
+
+			)
+		)
+
+		;if end condition is not specified, generate progress based on where series is continuing from
+		(if (not (contains_index series_stop_map tsTimeFeature))
+			;if there are previous cases to continue from, generate a progress value given the values from the last case
+			(if (size (last series_data))
+				(let
+					(assoc
+						initial_progress_context_features
+							(let
+								(assoc time_delta_feature_name (concat "." tsTimeFeature "_delta_1") )
+								(append
+									;use all value, delta, and rate features to determine initial series progress
+									;exclude time feature (and delta)
+									(filter (lambda (!= tsTimeFeature (current_value))) derived_action_features)
+									(filter (lambda (!= time_delta_feature_name (current_value))) (get tsModelFeaturesMap "delta_features"))
+									(get tsModelFeaturesMap "rate_features")
+								)
+							)
+					)
+
+					(assign (assoc
+						initial_existing_progress
+							(first (get
+								(call React (assoc
+									context_features initial_progress_context_features
+									context_values (unzip (zip features (last series_data)) initial_progress_context_features )
+									action_features (list ".series_progress")
+									;do not derive anything during this react
+									derived_action_features (list)
+									derived_context_features (list)
+									;no explanation
+									details (null)
+									case_access_count_label case_access_count_label
+									;prevent overvaluing the progress of case from the original sourced series by ignoring it
+									ignore_case (last existing_series_cases)
+									substitute_output substitute_output
+									input_is_substituted input_is_substituted
+									use_case_weights use_case_weights
+									weight_feature weight_feature
+									rand_seed rand_seed
+									leave_case_out leave_case_out
+
+									desired_conviction desired_conviction
+									use_regional_model_residuals use_regional_model_residuals
+									new_case_threshold new_case_threshold
+									feature_bounds_map feature_bounds_map
+									generate_new_cases "no"
+								))
+								"action_values"
+							))
+					))
+					(assign (assoc
+						total_progress initial_existing_progress
+						track_progress (true)
+					))
+				)
+			)
 		)
 	)
 
