@@ -1098,7 +1098,7 @@
 	; initial_features : optional list of features to condition just the first case in a series, overwrites context_features and
 	;		derived_context_features for that first case. All specified initial features must be in one of: context_features, action_features,
 	;		derived_context_features or derived_action_features. If provided a value that isn't in one of those lists, it will be ignored.
-	; initial_values : optional list of values corresponding to the initial_features, used to conidition just the first case in a series.
+	; initial_values : optional list of values corresponding to the initial_features, used to condition just the first case in a series.
 	; series_stop_map: assoc of feature -> stop conditions:
 	;		for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
 	;		for nominal features:  { feature:  { "values" : ['val1', 'val2' ]} }  - stops series when feature value matches any of the values listed
@@ -1205,7 +1205,7 @@
 							;wrap initial_values and series_stop_maps in lists since that's the format PrepTimeSeriesFeatures expects
 							initial_values (if (size initial_values) (list initial_values) (list) )
 							series_stop_maps (if (size series_stop_map) (list series_stop_map) )
-							continue_series_values (if (size continue_series_values) (list continue_series_values) )
+							continue_series_values (if (and continue_series (size continue_series_values)) (list continue_series_values) )
 							continue_series_features continue_series_features
 							;singular series
 							n_samples 1
@@ -1233,11 +1233,10 @@
 				(conclude (call !return (assoc errors (list time_series_prep_map))) )
 			)
 
-
-			(if (size continue_series_values)
-				(let
-					(assoc trainee_clone (concat trainee (rand)) )
-
+			;if user passed in a series for continuing, create a temporary trainee to derive all the necessary values (lags, deltas, etc.)
+			;and then overwrite the passed continue_series_values with the additonal derived feature values
+			(if (and continue_series (size continue_series_values))
+				(seq
 					(if (= 0 (size continue_series_features))
 						(conclude (conclude
 							(call !return (assoc
@@ -1246,7 +1245,7 @@
 						))
 					)
 
-					(create_entities trainee_clone (null))
+					(declare (assoc trainee_clone (first (create_entities (null))) ))
 
 					;create a shollow copy (no contained entities, just the trainee data)
 					(assign_entity_roots trainee_clone (retrieve_entity_root trainee) )
@@ -1259,8 +1258,10 @@
 						input_is_substituted input_is_substituted
 					))
 
+					;include imputed features at the end
 					(assign (assoc
-						continue_series_features (append (retrieve_from_entity trainee_clone "defaultFeatures") ".imputed")
+						continue_series_features
+							(append (retrieve_from_entity trainee_clone "defaultFeatures") (retrieve_from_entity trainee_clone "internalLabelImputed"))
 					))
 
 					(assign (assoc
@@ -1466,7 +1467,7 @@
 							output_new_series_ids output_new_series_ids
 							series_id_tracking series_id_tracking
 							continue_series_features continue_series_features
-							continue_series_values continue_series_values
+							continue_series_values (if continue_series continue_series_values)
 						))
 					)
 				output_features action_features
@@ -1483,9 +1484,14 @@
 				(conclude (call !return (assoc errors (list time_series_prep_map))) )
 			)
 
+			;if user passed in a series for continuing, create a temporary trainee to derive all the necessary values (lags, deltas, etc.)
+			;and then overwrite the passed continue_series_values with the additonal derived feature values
 			(if (size continue_series_values)
 				(let
-					(assoc original_continue_series_features continue_series_features)
+					(assoc
+						original_continue_series_features continue_series_features
+						imputed_list_feature (retrieve_from_entity trainee "internalLabelImputed")
+					)
 
 					(if (= 0 (size continue_series_features))
 						(conclude (conclude
@@ -1499,13 +1505,10 @@
 						continue_series_values
 							(map
 								(lambda (let
-									(assoc
-										continue_values (current_value 1)
-										trainee_clone (concat trainee (rand))
-									)
-									(create_entities trainee_clone (null))
+									(assoc continue_values (current_value 1) )
+									(declare (assoc trainee_clone (first (create_entities (null))) ))
 
-									;create a shollow copy (no contained entities, just the trainee data)
+									;create a shallow copy (no contained entities, just the trainee data)
 									(assign_entity_roots trainee_clone (retrieve_entity_root trainee) )
 
 									;train and derive all the lags and other features as necessary
@@ -1517,7 +1520,8 @@
 									))
 
 									(assign (assoc
-										continue_series_features (append (retrieve_from_entity trainee_clone "defaultFeatures") ".imputed")
+										continue_series_features
+											(append (retrieve_from_entity trainee_clone "defaultFeatures") imputed_list_feature)
 									))
 
 									(assign (assoc
