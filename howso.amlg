@@ -1098,7 +1098,7 @@
 	; initial_features : optional list of features to condition just the first case in a series, overwrites context_features and
 	;		derived_context_features for that first case. All specified initial features must be in one of: context_features, action_features,
 	;		derived_context_features or derived_action_features. If provided a value that isn't in one of those lists, it will be ignored.
-	; initial_values : optional list of values corresponding to the initial_features, used to conidition just the first case in a series.
+	; initial_values : optional list of values corresponding to the initial_features, used to condition just the first case in a series.
 	; series_stop_map: assoc of feature -> stop conditions:
 	;		for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
 	;		for nominal features:  { feature:  { "values" : ['val1', 'val2' ]} }  - stops series when feature value matches any of the values listed
@@ -1124,6 +1124,10 @@
 	; continue_series: optional, flag. Default is false.  When true will attempt to continue existing series instead of starting new series.
 	;		If initial_values provide series IDs, it will continue those explicitly specified IDs, otherwise it will randomly select series to continue.
 	;		Note: terminated series with terminators cannot be continued and will result in null output.
+	; continue_series_values: optional, list of lists of values, when specified will continue this specific untrained series as defined by these values.
+	; 		This value is ignored if continue_series is not true.
+	; continue_series_features: optional, list of features corresponding to the values in each row of continue_series_values.
+	; 		This value is ignored if continue_series is not true.
 	#react_series
 		(declare
 			(assoc
@@ -1133,6 +1137,8 @@
 				output_new_series_ids (true)
 				series_id_tracking "fixed"
 				continue_series (false)
+				continue_series_features (null)
+				continue_series_values (null)
 
 				context_features (list)
 				context_values (list)
@@ -1197,15 +1203,10 @@
 							init_time_steps init_time_steps
 							final_time_steps final_time_steps
 							;wrap initial_values and series_stop_maps in lists since that's the format PrepTimeSeriesFeatures expects
-							initial_values
-								(if (size initial_values)
-									(list initial_values)
-									(list)
-								)
-							series_stop_maps
-								(if (size series_stop_map)
-									(list series_stop_map)
-								)
+							initial_values (if (size initial_values) (list initial_values) (list) )
+							series_stop_maps (if (size series_stop_map) (list series_stop_map) )
+							continue_series_values (if (and continue_series (size continue_series_values)) (list continue_series_values) )
+							continue_series_features continue_series_features
 							;singular series
 							n_samples 1
 							context_features context_features
@@ -1232,15 +1233,80 @@
 				(conclude (call !return (assoc errors (list time_series_prep_map))) )
 			)
 
+			;if user passed in a series for continuing, create a temporary trainee to derive all the necessary values (lags, deltas, etc.)
+			;and then overwrite the passed continue_series_values with the additonal derived feature values
+			(if (and continue_series (size continue_series_values))
+				(seq
+					(if (= 0 (size continue_series_features))
+						(conclude (conclude
+							(call !return (assoc
+								errors (list "continue_series_values is provided without continue_series_features, please specify continue_series_features")
+							))
+						))
+					)
+
+					(declare (assoc trainee_clone (first (create_entities (null))) ))
+
+					;create a shollow copy (no contained entities, just the trainee data)
+					(assign_entity_roots trainee_clone (retrieve_entity_root trainee) )
+
+					;train and derive all the lags and other features as necessary
+					(call_entity trainee_clone "Train" (assoc
+						input_cases continue_series_values
+						features continue_series_features
+						session "temp"
+						input_is_substituted input_is_substituted
+					))
+
+					;include imputed features at the end
+					(assign (assoc
+						continue_series_features
+							(append (retrieve_from_entity trainee_clone "defaultFeatures") (retrieve_from_entity trainee_clone "internalLabelImputed"))
+					))
+
+					(assign (assoc
+						continue_series_values
+							(get
+								(call_entity trainee_clone "RetrieveAllCases" (assoc
+									features continue_series_features
+									session "temp"
+								))
+								"cases"
+							)
+					))
+
+					(declare (assoc
+						time_feature_index
+							(get
+								(zip continue_series_features (indices continue_series_features))
+								(retrieve_from_entity trainee "tsTimeFeature")
+							)
+					))
+
+					;sort the passed in data by the time feature to ensure its order
+					(assign (assoc
+						continue_series_values
+							(call_entity trainee_clone "MultiSortList" (assoc
+								data continue_series_values
+								column_order_indices (list time_feature_index)
+							))
+					))
+
+					(destroy_entities trainee_clone)
+				)
+			)
+
 			(call !return
 				(call_entity trainee "ReactSeries" (assoc
 					initial_features initial_features
 					initial_values initial_values
-					series_stop_map series_stop_map
+					series_stop_map series_stop_maps
 					max_series_length max_series_length
 					output_new_series_ids output_new_series_ids
 					output_features output_features
 					continue_series continue_series
+					continue_series_features continue_series_features
+					continue_series_values continue_series_values
 
 					context_features context_features
 					context_values context_values
@@ -1291,6 +1357,7 @@
 	; series_stop_maps - list of assocs. see #react_series for description.
 	; max_series_lengths - list of values. see #react_series for description.
 	; action_values - list of lists.  see #react for description.
+	; continue_series_values - list of lists. see #react_series for description.
 	#batch_react_series
 		(declare
 			(assoc
@@ -1301,6 +1368,8 @@
 				output_new_series_ids (true)
 				series_id_tracking "fixed"
 				continue_series (false)
+				continue_series_features (null)
+				continue_series_values (null)
 
 				context_features (list)
 				action_features (list)
@@ -1414,6 +1483,8 @@
 							derived_action_features derived_action_features
 							output_new_series_ids output_new_series_ids
 							series_id_tracking series_id_tracking
+							continue_series_features continue_series_features
+							continue_series_values (if continue_series continue_series_values)
 						))
 					)
 				output_features action_features
@@ -1430,6 +1501,83 @@
 				(conclude (call !return (assoc errors (list time_series_prep_map))) )
 			)
 
+			;if user passed in a series for continuing, create a temporary trainee to derive all the necessary values (lags, deltas, etc.)
+			;and then overwrite the passed continue_series_values with the additonal derived feature values
+			(if (size continue_series_values)
+				(let
+					(assoc
+						original_continue_series_features continue_series_features
+						imputed_list_feature (retrieve_from_entity trainee "internalLabelImputed")
+						time_feature_index 0
+						time_feature (retrieve_from_entity trainee "tsTimeFeature")
+					)
+
+					(if (= 0 (size continue_series_features))
+						(conclude (conclude
+							(call !return (assoc
+								errors (list "continue_series_values is provided without continue_series_features, please specify continue_series_features")
+							))
+						))
+					)
+
+					(assign (assoc
+						continue_series_values
+							(map
+								(lambda (let
+									(assoc continue_values (current_value 1) )
+									(declare (assoc trainee_clone (first (create_entities (null))) ))
+
+									;create a shallow copy (no contained entities, just the trainee data)
+									(assign_entity_roots trainee_clone (retrieve_entity_root trainee) )
+
+									;train and derive all the lags and other features as necessary
+									(call_entity trainee_clone "Train" (assoc
+										input_cases continue_values
+										features original_continue_series_features
+										session "temp"
+										input_is_substituted input_is_substituted
+									))
+
+									(assign (assoc
+										continue_series_features
+											(append (retrieve_from_entity trainee_clone "defaultFeatures") imputed_list_feature)
+									))
+
+									(assign (assoc
+										continue_values
+											(get
+												(call_entity trainee_clone "RetrieveAllCases" (assoc
+													features continue_series_features
+													session "temp"
+												))
+												"cases"
+											)
+										time_feature_index
+											(get
+												(zip continue_series_features (indices continue_series_features))
+												time_feature
+											)
+									))
+
+									;sort the passed in data by the time feature to ensure its order
+									(assign (assoc
+										continue_values
+											(call_entity trainee_clone "MultiSortList" (assoc
+												data continue_values
+												column_order_indices (list time_feature_index)
+											))
+									))
+
+									(destroy_entities trainee_clone)
+
+									continue_values
+								))
+								continue_series_values
+							)
+					))
+				)
+			)
+
 			(call !return
 				(call_entity trainee "BatchReactSeries" (assoc
 					initial_features initial_features
@@ -1440,6 +1588,8 @@
 					series_id_tracking series_id_tracking
 					output_features output_features
 					continue_series continue_series
+					continue_series_features continue_series_features
+					continue_series_values continue_series_values
 
 					context_features context_features
 					context_values context_values
