@@ -290,22 +290,10 @@
 				))
 
 				;action feature is not also a context feature
-				;interpolate continuous actions to get values between training cases
-				(let
-					(assoc action_value (call GenerateReaction (assoc allow_nulls allow_nulls)))
-					(if (and (= (null) action_value) (not allow_nulls))
-						;expand neighbor search to acquire a non-null reaction if possible
-						(assign (assoc
-							action_value
-								(call GenerateReaction (assoc
-									allow_nulls (false)
-									ignore_null_action_feature (true)
-								))
-						))
-					)
-					;convert into a list of action values for output
-					(assign (assoc react_action_values (list action_value)))
-				)
+				;output as a list
+				(assign (assoc
+					react_action_values (list (call GenerateReaction (assoc allow_nulls allow_nulls)) )
+				))
 			)
 
 			;else no action features, ensure correct case is ignored if applicable (eg, explaining an existing case)
@@ -382,21 +370,6 @@
 								action_features (list (get ordered_action_features (current_index 3)))
 							))
 					))
-
-					(if (and (= (null) action_value) (not allow_nulls))
-						;expand neighbor search to acquire a non-null reaction if possible
-						(assign (assoc
-							action_value
-								(call GenerateReaction (assoc
-									allow_nulls (false)
-									ignore_null_action_feature (true)
-									context_features context_features_param
-									context_values context_values_param
-									action_features (list action_feature)
-
-								))
-						))
-					)
 
 					;null values by themselves aren't appended to the list, must append nulls in a list
 					(accum (assoc
@@ -494,315 +467,238 @@
 
 	;Selects or interpolates a set of reaction cases
 	;parameters:
-	; neighbor_weights_map : map of neighbor case ids and their respective weights
+	; candidate_cases_lists : a triple of lists containing a list of ids, list of weights and list of values to interpolate
 	; action_feature: the action feature
 	; allow_nulls : flag, if set to true will allow interpolate to return null values if there are nulls in the local model for the action features
-	; has_perfect_matches: flag, if set to true, there are 0-distance neighbors, will filter out non-0-distance neighbors from neighbor_weights_map
 	#InterpolateActionValues
 	(declare
 		(assoc
 			action_feature (null)
-			neighbor_weights_map (assoc)
+			candidate_cases_lists (list)
 			allow_nulls (false)
-			has_perfect_matches (false)
 		)
 
-		;any weights larger than 1e15 are basically infinite (distance is 0), use 1e15 to account for floating point issues
-		;such that values like 4.000000000000001 are treated same as 4
-		(declare (assoc
-			neighbor_ids_of_zero_dist_values
-				(if has_perfect_matches
-					(filter
-						(lambda (>=  (get neighbor_weights_map (current_value)) 1e15))
-						(indices neighbor_weights_map)
-					)
-
-					;else
-					(null)
-				)
-		))
-
-
-		;get the action values for each index in the neighbor_weights_map
-		(declare (assoc
-			neighbor_id_to_values_map
+		;return null if unable to find any neighbors
+		(if (= 0 (size (first candidate_cases_lists)))
+			(conclude
 				(if allow_nulls
-					(map
-						(lambda (retrieve_from_entity (current_index) action_feature))
-						(if has_perfect_matches
-							(zip neighbor_ids_of_zero_dist_values)
+					(null)
 
-							neighbor_weights_map
+					;else output expected feature value
+					(call CalculateFeatureExpectedValue (assoc feature (first action_features) allow_nulls (false)))
+				)
+			)
+		)
+
+		(declare (assoc total_weight (apply "+" (get candidate_cases_lists 1)) ))
+
+		;if has perfect matches (i.e., zero distance neighbors) interpolate only among those
+		(if (= .infinity total_weight)
+			(let
+				(assoc
+					perfect_match_indices
+						(filter
+							(lambda (>= (get candidate_cases_lists (list 1 (current_value 1))) 1e15) )
+							(indices (last candidate_cases_lists))
 						)
+				)
 
-					)
+				(assign (assoc
+					candidate_cases_lists
+						(list
+							(keep (first candidate_cases_lists) perfect_match_indices)
+							(if valid_weight_feature
+								;pull corresponding weights from each case, numerified so a null becomes 0
+								(map
+									(lambda (+ (retrieve_from_entity (current_value) weight_feature)))
+									(keep (first candidate_cases_lists) perfect_match_indices)
+								)
 
-					;filter out all id->null elements from this assoc, remaining assoc is case id -> case value where all values are not null
-					(filter
-						(map
-							(lambda (retrieve_from_entity (current_index) action_feature))
-							(if has_perfect_matches
-								(zip neighbor_ids_of_zero_dist_values)
-
-								neighbor_weights_map
+								;else set weights to be 1 for each remaining perfect match
+								(range (lambda 1) 1 (size perfect_match_indices) 1)
 							)
+							(keep (last candidate_cases_lists) perfect_match_indices)
+						)
+					total_weight (size perfect_match_indices)
+				))
+			)
+		)
+
+		;if continuous feature
+		(if (and
+				(not (contains_index categoricalFeaturesSet action_feature))
+				;interpolate continuous strings as categorical since we don't want to mix them
+				(!= "string" (get editDistanceFeatureTypesMap action_feature))
+			)
+			(seq
+				(if allow_nulls
+					(if (contains_value (last candidate_cases_lists) (null))
+						(let
+							(assoc
+								null_indices
+									(filter
+										(lambda (= (null) (get candidate_cases_lists (list 2 (current_value 1))) ) )
+										(indices (last candidate_cases_lists))
+									)
+							)
+							; sum up all the weight of all the null values
+							(declare (assoc nulls_weight (apply "+" (unzip (get candidate_cases_lists 1) null_indices)) ))
+
+							;nulls are >= 50% of the total weight, output a null
+							(if (>= (/ nulls_weight total_weight) 0.5)
+								(conclude (null))
+							)
+
+							(declare (assoc has_value_indices (remove (indices (last candidate_cases_lists)) null_indices) ))
+							;keep only the non-null values for interpolation
+							(assign (assoc
+								candidate_cases_lists
+									(list
+										(keep (first candidate_cases_lists) has_value_indices)
+										(keep (get candidate_cases_lists 1) has_value_indices)
+										(keep (last candidate_cases_lists) has_value_indices)
+									)
+								total_weight (- total_weight nulls_weight)
+							))
 						)
 					)
 				)
-		))
 
-		(if (= 0 (size neighbor_id_to_values_map))
-			;if there are some non-perfect matches, just run the normal nearest neighbors flow on those
-			(if (and has_perfect_matches (< (size neighbor_ids_of_zero_dist_values) (size neighbor_weights_map)))
-				(let
-					(assoc
-						;filter out all the perfect match cases that had null values
-						not_null_value_cases_map
-							(filter (lambda (not (contains_index neighbor_id_to_values_map (current_index)))) neighbor_weights_map)
+				(if (contains_index cyclicFeaturesMap action_feature)
+					(let
+						(assoc
+							sum 0
+							cycle_length (get cyclicFeaturesMap action_feature)
+						)
+						(declare (assoc half_cycle_value (/ cycle_length 2)))
+
+						(if output_influence_weights
+							(call AccumulateInfluenceWeights (assoc
+								case_ids (first candidate_cases_lists)
+								;scaled weights for each neighbor
+								weights (map (lambda (/ (current_value) total_weight)) (get candidate_cases_lists 1))
+							))
+						)
+
+						;calculate the sum of all the cyclic weights
+						(declare (assoc
+							weighted_neighbor_values
+								(map
+									(lambda (let
+										(assoc value (current_value 1))
+
+										;output weighted value
+										(/
+											(*
+												;if value is < midpoint, output (value + length) * weight
+												;else: value >= midpoint, output value * weight
+												(if (< value half_cycle_value)
+													(+ value cycle_length)
+													value
+												)
+												(get candidate_cases_lists (list 1 (current_index 1)) )
+											)
+											total_weight
+										)
+									))
+									(last candidate_cases_lists)
+								)
+						))
+
+						(assign (assoc sum (apply "+" weighted_neighbor_values) ))
+
+						;if sum has gone past the max value, decrease by the length of cycle, i.e., 370 degrees becomes 10
+						(if (> sum cycle_length) (accum (assoc sum (- cycle_length))))
+
+						;if sum has gone past the min value, increase by the length of cycle, i.e., -10 degrees becomes 350
+						(if (< sum 0) (accum (assoc sum cycle_length)))
+
+						;output the weighted sum
+						sum
 					)
 
-					;execute the regular flow for the remaining non-perfect match cases
-					(call InterpolateActionValues (assoc
-						action_feature action_feature
-						neighbor_weights_map not_null_value_cases_map
-						allow_nulls allow_nulls
-						has_perfect_matches (false)
+					;else: regular continuous, retrieve the value for each neighbor,  multiply it by the weight for that case
+					;then sum the weight-modified features and divide by the sum of the total weight
+					(seq
+						(if output_influence_weights
+							(call AccumulateInfluenceWeights (assoc
+								case_ids (first candidate_cases_lists)
+								weights (map (lambda (/ (current_value) total_weight)) (get candidate_cases_lists 1))
+							))
+						)
+
+						(if (contains_index editDistanceFeatureTypesMap action_feature)
+							(call CombineCode (assoc
+								sources (last candidate_cases_lists)
+								weights (get candidate_cases_lists 1)
+							))
+
+							;divide the dot product by the total weight
+							(/ (dot_product (last candidate_cases_lists) (get candidate_cases_lists 1)) total_weight)
+						)
+					)
+				)
+			)
+
+			;else it is categorical feature, pull the categorical value with the highest weight sum from nearby cases
+			(let
+				;an assoc of categorical action feature values -> sum of their weight
+				(assoc
+					categorical_value_weights_map (assoc)
+					output_value (null)
+				)
+
+				(if output_influence_weights
+					(call AccumulateInfluenceWeights  (assoc
+						case_ids (first candidate_cases_lists)
+						weights (get candidate_cases_lists 1)
 					))
 				)
 
-				;else return null because that means all the neighbors have nulls
-				(null)
-			)
-
-			;else interpolate
-			(declare
-				(assoc
-					neighbor_ids (indices neighbor_id_to_values_map)
-					is_continuous_feature
-						(and
-							(not (contains_index categoricalFeaturesSet action_feature))
-							;interpolate continuous strings as categorical since we don't want to mix them
-							(!= "string" (get editDistanceFeatureTypesMap action_feature))
+				;iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+				;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight if
+				;it's encountered more than once, and select the categorical value with the highest weight below
+				(assign (assoc
+					categorical_value_weights_map
+						(zip
+							(lambda (+ (current_value 1) (current_value)))
+							(last candidate_cases_lists)
+							(get candidate_cases_lists 1)
 						)
-					has_nulls
-						(if allow_nulls
-							;will be set to true if there are any null values among the neighbors
-							(contains_value neighbor_id_to_values_map (null))
-
-							;else is false because all nulls should already have been filtered out if not allowing nulls
-							(false)
-						)
-				)
-
-				(declare (assoc
-					neighbor_weights
-						(if has_perfect_matches
-							(if valid_weight_feature
-								;pull corresponding weights from each case, numerified so a null becomes 0
-								(map (lambda (+ (retrieve_from_entity (current_value) weight_feature))) neighbor_ids)
-
-								;else set all weights to be same value of 1 for perfect matches
-								(map (lambda 1) neighbor_ids)
-							)
-
-							;else get actual corresponding weights for each neighbor case
-							(unzip neighbor_weights_map neighbor_ids)
-						)
-					neighbor_values (unzip neighbor_id_to_values_map neighbor_ids)
 				))
 
-				;sum up the weight of all the cases that have feature values
-				(declare (assoc total_weight (apply "+" neighbor_weights)))
-
-				;if a continuous feature has nulls, check to see if the nulls are >= 50% of the weight, if so just return null
-				;otherwise filter out the nulls and interpolate without them
-				(if (and has_nulls is_continuous_feature)
-					(let
-						(assoc
-							nulls_weight
-								; sum up all the weight of all the null values
-								(apply "+"
-									(filter
-										(lambda (= (null) (get neighbor_values (current_index))))
-										neighbor_weights
-									)
-								)
-							filled_indices
-								; filter out all the null values leaving only indices of filled valued
-								(filter
-									(lambda (!= (null) (get neighbor_values (current_value))))
-									(indices neighbor_values)
-								)
-						)
-
-						;filter out the nulls to interpolate since the weight of the nulls is less then 50% of total weight
-						(if (< (/ nulls_weight total_weight) 0.5)
-							(assign (assoc
-								has_nulls (false)
-								neighbor_values (unzip neighbor_values filled_indices)
-								neighbor_weights  (unzip neighbor_weights filled_indices)
-								;remove weight of nulls from the total weight
-								total_weight (- total_weight nulls_weight)
-							))
-
-							;else the nulls weigh 50% or more, so keep the has_nulls flag set to true
-						)
-					)
+				(if output_categorical_action_probabilities
+					(call AccumulateCategoricalActionProbabilties (assoc
+						action_feature action_feature
+						categorical_value_weights_map categorical_value_weights_map
+					))
 				)
 
-				(if is_continuous_feature
-					(if
-						;if nulls were < 50% of the weight, they would have been filtered out and this flag cleared, so must be null
-						has_nulls
-						(null)
 
-						;else handle cyclic features
-						(contains_index cyclicFeaturesMap action_feature)
-						(let
-							(assoc
-								sum 0
-								cycle_length (get cyclicFeaturesMap action_feature)
-							)
-							(declare (assoc half_cycle_value (/ cycle_length 2)))
-
-							(if output_influence_weights
-								(call AccumulateInfluenceWeights (assoc
-									case_ids neighbor_ids
-									;scaled weights for each neighbor
-									weights (map (lambda (/ (current_value) total_weight)) neighbor_weights)
-								))
-							)
-
-							;calculate the sum of all the cyclic weights
-							(declare (assoc
-								weighted_neighbor_values
-									(map
-										(lambda (let
-											(assoc value (current_value 1))
-
-											;output weighted value
-											(/
-												(*
-													;if value is < midpoint, output (value + length) * weight
-													;else: value >= midpoint, output value * weight
-													(if (< value half_cycle_value)
-														(+ value cycle_length)
-														value
-													)
-													(get neighbor_weights (current_index))
-												)
-												total_weight
-											)
-										))
-										neighbor_values
-									)
-							))
-
-							(assign (assoc sum (apply "+" weighted_neighbor_values) ))
-
-							;if sum has gone past the max value, decrease by the length of cycle, i.e., 370 degrees becomes 10
-							(if (> sum cycle_length) (accum (assoc sum (- cycle_length))))
-
-							;if sum has gone past the min value, increase by the length of cycle, i.e., -10 degrees becomes 350
-							(if (< sum 0) (accum (assoc sum cycle_length)))
-
-							;output the weighted sum
-							sum
-						)
-
-						;else: regular continuous, retrieve the value for each neighbor,  multiply it by the weight for that case
-						;then sum the weight-modified features and divide by the sum of the total weight
-						(seq
-							(if output_influence_weights
-								(call AccumulateInfluenceWeights (assoc
-									case_ids neighbor_ids
-									weights (map (lambda (/ (current_value) total_weight)) neighbor_weights)
-								))
-							)
-
-							(if (contains_index editDistanceFeatureTypesMap action_feature)
-								(call CombineCode (assoc
-									sources neighbor_values
-									weights neighbor_weights
-								))
-
-								;divide the dot product by the total weight
-								(/ (dot_product neighbor_values neighbor_weights) total_weight)
+				;sort the assoc of discrete values by their weights from high to low
+				;returns the first (highest weighted) categorical value
+				(assign (assoc
+					output_value
+						(first
+							(sort
+								(lambda (> (get categorical_value_weights_map (current_value 1)) (get categorical_value_weights_map (current_value))))
+								(indices categorical_value_weights_map)
 							)
 						)
-					)
+				))
 
-					;else it is categorical, pull the categorical value with the highest weight sum from nearby cases
-					(let
-						;an assoc of categorical action feature values -> sum of their weight
-						(assoc
-							categorical_value_weights_map (assoc)
-							output_value (null)
-						)
+				;parse the categorical neighbor value to handle the situation where the value is the string .nas
+				;and convert it to an actual (null), all other numerical or string literals will remain unchanged
+				(if (= .nas output_value)
+					(null)
 
-						(if output_influence_weights
-							(call AccumulateInfluenceWeights  (assoc
-								case_ids neighbor_ids
-								weights neighbor_weights
-							))
-						)
+					(contains_index numericNominalFeaturesMap action_feature)
+					(+ output_value)
 
-						;iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
-						;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight if
-						;it's encountered more than once, and select the categorical value with the highest weight below
-						(assign (assoc
-							categorical_value_weights_map
-								(zip
-									(lambda (+ (current_value 1) (current_value)))
-									neighbor_values
-									neighbor_weights
-								)
-						))
+					(contains_index ordinalNumericFeaturesSet action_feature)
+					(+ output_value)
 
-						(if output_categorical_action_probabilities
-							(call AccumulateCategoricalActionProbabilties (assoc
-								action_feature action_feature
-								categorical_value_weights_map categorical_value_weights_map
-							))
-						)
-
-
-						;sort the assoc of discrete values by their weights from high to low
-						;returns the first (highest weighted) categorical value
-						(assign (assoc
-							output_value
-								(first
-									(sort
-										(lambda (> (get categorical_value_weights_map (current_value 1)) (get categorical_value_weights_map (current_value))))
-										(indices categorical_value_weights_map)
-									)
-								)
-						))
-
-						(if has_nulls
-							;parse the categorical neighbor value to handle the situation where the value is the string .nas
-							;and convert it to an actual (null), all other numerical or string literals will remain unchanged
-							(if (= .nas output_value)
-								(null)
-
-								(contains_index numericNominalFeaturesMap action_feature)
-								(+ output_value)
-
-								(contains_index ordinalNumericFeaturesSet action_feature)
-								(+ output_value)
-
-								output_value
-							)
-
-							(contains_index numericNominalFeaturesMap action_feature)
-							(+ output_value)
-
-							(contains_index ordinalNumericFeaturesSet action_feature)
-							(+ output_value)
-
-							output_value
-						)
-					)
+					output_value
 				)
 			)
 		)
