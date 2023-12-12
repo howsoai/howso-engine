@@ -467,19 +467,23 @@
 
 	;Selects or interpolates a set of reaction cases
 	;parameters:
-	; candidate_cases_lists : a triple of lists containing a list of ids, list of weights and list of values to interpolate
+	; candidate_case_ids : a list of case ids for each of the candidate cases
+	; candidate_case_weights : a list of weights for each of the candidate cases
+	; candidate_case_values : a list of action feature values for each of the candidate cases
 	; action_feature: the action feature
 	; allow_nulls : flag, if set to true will allow interpolate to return null values if there are nulls in the local model for the action features
 	#InterpolateActionValues
 	(declare
 		(assoc
 			action_feature (null)
-			candidate_cases_lists (list)
+			candidate_case_ids (list)
+			candidate_case_weights (list)
+			candidate_case_values (list)
 			allow_nulls (false)
 		)
 
 		;return null if unable to find any neighbors
-		(if (= 0 (size (first candidate_cases_lists)))
+		(if (= 0 (size candidate_case_ids))
 			(conclude
 				(if allow_nulls
 					(null)
@@ -490,7 +494,7 @@
 			)
 		)
 
-		(declare (assoc total_weight (apply "+" (get candidate_cases_lists 1)) ))
+		(declare (assoc total_weight (apply "+" candidate_case_weights) ))
 
 		;if has perfect matches (i.e., zero distance neighbors) interpolate only among those
 		(if (= .infinity total_weight)
@@ -498,27 +502,25 @@
 				(assoc
 					perfect_match_indices
 						(filter
-							(lambda (>= (get candidate_cases_lists (list 1 (current_value 1))) 1e15) )
-							(indices (last candidate_cases_lists))
+							(lambda (>= (get candidate_case_weights (current_value)) 1e15) )
+							(indices candidate_case_values)
 						)
 				)
 
 				(assign (assoc
-					candidate_cases_lists
-						(list
-							(keep (first candidate_cases_lists) perfect_match_indices)
+					candidate_case_ids (keep candidate_case_ids perfect_match_indices)
+					candidate_case_weights
 							(if valid_weight_feature
 								;pull corresponding weights from each case, numerified so a null becomes 0
 								(map
 									(lambda (+ (retrieve_from_entity (current_value) weight_feature)))
-									(keep (first candidate_cases_lists) perfect_match_indices)
+									(keep candidate_case_ids perfect_match_indices)
 								)
 
 								;else set weights to be 1 for each remaining perfect match
 								(range (lambda 1) 1 (size perfect_match_indices) 1)
 							)
-							(keep (last candidate_cases_lists) perfect_match_indices)
-						)
+					candidate_case_values (keep candidate_case_values perfect_match_indices)
 					total_weight (size perfect_match_indices)
 				))
 			)
@@ -532,32 +534,29 @@
 			)
 			(seq
 				(if allow_nulls
-					(if (contains_value (last candidate_cases_lists) (null))
+					(if (contains_value candidate_case_values (null))
 						(let
 							(assoc
 								null_indices
 									(filter
-										(lambda (= (null) (get candidate_cases_lists (list 2 (current_value 1))) ) )
-										(indices (last candidate_cases_lists))
+										(lambda (= (null) (get candidate_case_values (current_value)) ) )
+										(indices candidate_case_values)
 									)
 							)
 							; sum up all the weight of all the null values
-							(declare (assoc nulls_weight (apply "+" (unzip (get candidate_cases_lists 1) null_indices)) ))
+							(declare (assoc nulls_weight (apply "+" (unzip candidate_case_weights null_indices)) ))
 
 							;nulls are >= 50% of the total weight, output a null
 							(if (>= (/ nulls_weight total_weight) 0.5)
 								(conclude (conclude (null)))
 							)
 
-							(declare (assoc has_value_indices (remove (indices (last candidate_cases_lists)) null_indices) ))
+							(declare (assoc has_value_indices (remove (indices candidate_case_values) null_indices) ))
 							;keep only the non-null values for interpolation
 							(assign (assoc
-								candidate_cases_lists
-									(list
-										(keep (first candidate_cases_lists) has_value_indices)
-										(keep (get candidate_cases_lists 1) has_value_indices)
-										(keep (last candidate_cases_lists) has_value_indices)
-									)
+								candidate_case_ids (keep candidate_case_ids has_value_indices)
+								candidate_case_weights (keep candidate_case_weights has_value_indices)
+								candidate_case_values (keep candidate_case_values has_value_indices)
 								total_weight (- total_weight nulls_weight)
 							))
 						)
@@ -574,9 +573,9 @@
 
 						(if output_influence_weights
 							(call AccumulateInfluenceWeights (assoc
-								case_ids (first candidate_cases_lists)
+								case_ids candidate_case_ids
 								;scaled weights for each neighbor
-								weights (map (lambda (/ (current_value) total_weight)) (get candidate_cases_lists 1))
+								weights (map (lambda (/ (current_value) total_weight)) candidate_case_weights)
 							))
 						)
 
@@ -596,12 +595,12 @@
 													(+ value cycle_length)
 													value
 												)
-												(get candidate_cases_lists (list 1 (current_index 1)) )
+												(get candidate_case_weights (current_index))
 											)
 											total_weight
 										)
 									))
-									(last candidate_cases_lists)
+									candidate_case_values
 								)
 						))
 
@@ -622,19 +621,19 @@
 					(seq
 						(if output_influence_weights
 							(call AccumulateInfluenceWeights (assoc
-								case_ids (first candidate_cases_lists)
-								weights (map (lambda (/ (current_value) total_weight)) (get candidate_cases_lists 1))
+								case_ids candidate_case_ids
+								weights (map (lambda (/ (current_value) total_weight)) candidate_case_weights)
 							))
 						)
 
 						(if (contains_index editDistanceFeatureTypesMap action_feature)
 							(call CombineCode (assoc
-								sources (last candidate_cases_lists)
-								weights (get candidate_cases_lists 1)
+								sources candidate_case_values
+								weights candidate_case_weights
 							))
 
 							;divide the dot product by the total weight
-							(/ (dot_product (last candidate_cases_lists) (get candidate_cases_lists 1)) total_weight)
+							(/ (dot_product candidate_case_values candidate_case_weights) total_weight)
 						)
 					)
 				)
@@ -650,8 +649,8 @@
 
 				(if output_influence_weights
 					(call AccumulateInfluenceWeights  (assoc
-						case_ids (first candidate_cases_lists)
-						weights (get candidate_cases_lists 1)
+						case_ids candidate_case_ids
+						weights candidate_case_weights
 					))
 				)
 
@@ -662,8 +661,8 @@
 					categorical_value_weights_map
 						(zip
 							(lambda (+ (current_value 1) (current_value)))
-							(last candidate_cases_lists)
-							(get candidate_cases_lists 1)
+							candidate_case_values
+							candidate_case_weights
 						)
 				))
 
