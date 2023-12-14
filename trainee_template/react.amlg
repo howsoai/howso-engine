@@ -88,7 +88,7 @@
 							(assign (assoc react_case_index (get case_indices session_index) ))
 						)
 
-						(call React (assoc
+						(call !SingleReact (assoc
 							context_values react_context_values
 							action_values react_action_values
 							case_indices react_case_index
@@ -175,11 +175,94 @@
 		)
 	)
 
-	;wrapper method for #React that auto generated uniques if necessary for generative react flows
-	; parameters:
-	;	see comment block for #react in howso.amlg for details
-	#SingleReact
+	;React to a provided context. If desired_conviction is provided, it does a generative react.
+	;
+	;Output:
+	; Default output of this method is a react object in the format of
+	; { 'action_values' : [ all_action_values ], 'action_features' : [ all_action_features ] }, where all_action_values is a list of all action
+	; values, reacted/generated and derived, in the same order as all_action_features, e.g., [2, "a", .75384] to match ['width','name','height']
+	; If details is specified, the react object will contain appropriate additonal explanation properties and values,
+	; 	Explanation example: { 'action_values': [2, "a", .75384], 'action_features' : ['width','name','height'], 'residual_conviction': 1.3,
+	;		'influential_cases' : etc... }
+	;	See API docs for documentation of all output properties
+	;
+	;Parameters:
+	; desired_conviction : default is None, will run a Discriminative react. If specified does Generative-React.
+	;					For Generative React, value of desired avg conviction of generated cases, in the range of (0,infinity] with 1 as standard
+	;					larger values will increase the variance (or creativity) of the generated case from the existing model
+	;					smaller values will decrease the variance (or creativity) of the generated case from the existing model
+	; details: if set to an assoc with corresponding flags set, then it will modify the return type and return the requested audit info
+	; context_features: list of context features. For generative react, features used to condition the generated case
+	; context_values: list of context values, For generative react, values used to condition the generated case
+	; action_features: full list of features to output values for the case
+	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
+	; use_case_weights: optional, flag, if set to true will scale influence weights by each case's weight_feature weight.
+	;				   If a weight is missing, uses 1 as the weight.
+	; rand_seed: optional, the random seed to use for the react.
+	; derived_context_features: list of context features whose values should be computed from the provided contexts in the specified order.
+	;					Must be different than context_features.
+	; derived_action_features: list of action features whose values should be computed from the resulting action prior to output, in the specified
+	;					order. Must be a subset of action_features.
+	;					Note: both of these derived feature lists rely on the features' "derived_feature_code" attribute to compute the values.
+	;					If 'derived_feature_code' attribute is undefined or references non-0 feature indices, the derived value will be null.
+	; case_indices: optional pair (list) of session id and index, where index is the original 0-based session_training_index of the case as it was
+	;			trained into the session. If this case does not exist, discriminative react outputs null, generative react ignores it.
+	; preserve_feature_values : optional, list of features that will preserve their values from the case specified by case_indices, appending and
+	;			overwriting the specified context and context features as necessary.  For generative reacts, if case_indices isn't specified,
+	;			will preserve feature values of a random case.
+	; leave_case_out: flag, if set to true and specified along with case_indices, will set ignore_case to the one specified by case_indices.
+	; input_is_substituted : flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
+	; substitute_output : flag, default is true, only applicable if a substitution value map has been set. If set to false, will not substitute categorical feature values.
+	; into_series_store: optional series id, if specified will store an internal record of all reacts for that series
+	;
+	;Discriminative-React-specific Parameters:
+	; action_values: values of action features. If specified will bypass react and only do the explanation if details is set
+	; case_access_count_label: if specified (not empty), will accumulate the number of times each context has been accessed
+	; extra_audit_features: list of additional features to return with audit data
+	; ignore_case: case_id, if set will query for K+1 cases and ignore the perfect matching case during the reaction
+	; allow_nulls : flag, if set to true will allow return of null values if there are nulls in the local model for the action features. Applicable
+	;			only to discriminative reacts.
+	;
+	;Generative-React-specific Parameters:
+	; use_regional_model_residuals: flag, if false uses model feature residuals, if true recalculates regional model residuals. Default is true.
+	; feature_bounds_map: optional assoc of :
+	;				{ feature : { "min": a, "max": b, "allow_null": false/true } }
+	;				to ensure that specified features' generated values stay in bounds
+	;				for nominal features instead of min/max it's a set of allowed values, ie:
+	;				{ feature: { "allowed" : [ "value1", "value2" ... ] }, "allow_null": false/true }
+	;			   allow_null - default is true, if true nulls may be generated per their distribution in the data
+	; generate_new_cases : optional,  acceptable values are:
+	;				null or 'no' : output any generated case
+	;				'always' : only output original cases, outputs null for all feature values if unable to generate a new case
+	;				'attempt' : output any generated case only if generation fails all initial attempts to output original cases
+	; exclude_novel_nominals_from_uniqueness_check: optional, default false. If true will exclude sensitive features whose values will be
+	;			replaced after synthesis from uniqueness check.
+	; ordered_by_specified_features : flag, if true order of generated feature values will match the order of features
+	; new_case_threshold : optional, distance to determine privacy cutoff. Used to query the local minimum distance used in the distance ratio
+	; 		accepted values:
+	; 			'max': the maximum local distance
+	; 			'min': the minimum local distance
+	; 	    	'most_similar': the closest distance of the most similar case
+	; 			null: the minimum local distance
+	#react
 	(seq
+		;if both action_features and derived_action_features are specified,
+		;ensure that derived_action_features are a subset of action_features, then separate the two into distinct lists
+		#!ValidateDerivedActionFeaturesIsSubset
+		(if (and (size action_features) (size derived_action_features))
+			;if derived_action_features isn't a subset of action_features, error out
+			(if (> (size (remove (zip derived_action_features) action_features)) 0)
+				(conclude
+					(call !Return (assoc errors (list "Specified 'derived_action_features' must be a subset of 'action_features'.") ))
+				)
+
+				;else separate  derived_action_features from action_features
+				(assign (assoc
+					action_features (filter (lambda (not (contains_value derived_action_features (current_value)))) action_features)
+				))
+			)
+		)
+
 		;assoc of feature -> unique value, pre-populated if there are unique features that need to be synthed
 		(declare (assoc
 			pre_generated_uniques_map
@@ -202,7 +285,7 @@
 
 		(declare (assoc
 			react_response
-				(call React (assoc
+				(call !SingleReact (assoc
 					context_features context_features
 					context_values context_values
 					action_features action_features
@@ -262,10 +345,10 @@
 			))
 		)
 
-		(assoc
-			"payload" react_response
-			"warnings" (if (size warnings) (indices warnings))
-		)
+		(call !Return (assoc
+			payload react_response
+			warnings (if (size warnings) (indices warnings))
+		))
 	)
 
 	;Wrapper method for ReactDiscriminative and GenerateCase
@@ -275,7 +358,7 @@
 	;
 	;  for generative flows only, new parameter:
 	;  pre_generated_uniques_map: optional, map of feature -> value for all unique features whose output value has been pre-generated for output
-	#React
+	#!SingleReact
 	(declare
 		(assoc
 			context_features (list)

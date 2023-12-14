@@ -2,6 +2,41 @@
 ;Contains methods for adding, editing and removal of cases and session data.
 (null
 
+	;Cleans up trainee data, removing unused sessions, cases or actions missing data, etc. given the following optional parameters.  If a parameter is not specified, it will look to this entity's own label of the same name.  See label for parameter details.
+	;parameters:
+	; trainee: trainee instance
+	; context_features: list of context features
+	; action_features: list of action features
+	; remove_duplicates: optional flag, if set to true will remove duplicate cases (cases with identical values)
+	#clean_data
+	(seq
+		;removes entities that aren't cases or sessions
+		(call RemoveIrrelevantEntities)
+
+		;removes any cases that don't have both the specified context and action features
+		(call RemoveIncompleteCases (assoc context_features context_features action_features action_features))
+
+		;removes any replay steps that are non-existent cases
+		(call RemoveInvalidReplaySteps)
+
+		;removes duplicate (identical) cases
+		(if remove_duplicates
+			(call MergeDuplicateCases (assoc features (append context_features action_features)))
+		)
+
+		;removes cases with null or invalid sessions
+		(call RemoveCasesWithoutSessionReferences)
+
+		;removes empty sessions
+		(call RemoveUnreferencedSessions)
+
+		(accum_to_entities trainee (assoc revision 1))
+
+		;return true that completed
+		(call !Return)
+	)
+
+
 	;removes any entities that are not a fully valid case, or replay (e.g., partially merged / broken entities)
 	#RemoveIrrelevantEntities
 	(let
@@ -62,10 +97,12 @@
 		(call GetSessionIds)
 	)
 
-	;removes replay specified by session and any references within cases
-	;parameters:
+	;removes replay specified by session and any supporting data
+	;
+	; parameters:
+	; trainee: trainee from which to remove the session
 	; session: session to remove
-	#RemoveReplaySession
+	#remove_session
 	(seq
 		(destroy_entities session)
 
@@ -76,7 +113,6 @@
 					(assign_to_entities (current_value) (associate internalLabelSession (null)))
 				)
 			)
-
 			(call AllCases)
 		)
 
@@ -85,7 +121,7 @@
 
 		(accum_to_entities (assoc revision 1))
 
-		(null)
+		(call !Return)
 	)
 
 	;removes the specified feature on all cases for a trainee that match the specified condition
@@ -102,7 +138,7 @@
 	;	  n values = must match any of these values exactly
 	; session: the session id when this call is being made
 	; condition_session: optional, if specified ignores condition and operates on cases for the specified session id
-	#RemoveFeature
+	#remove_feature
 	(declare
 		(assoc
 			condition (null)
@@ -291,7 +327,7 @@
 		(accum_to_entities (assoc revision 1))
 
 		;return completion
-		(true)
+		(call !Return)
 	)
 
 	;creates a new case given a list of features and their values in feature_values
@@ -339,7 +375,7 @@
 	; entities: list of case ids to operate on. if specified, conditions will be ignored
 	; internal_feature: flag, if set to true, will not update hyperparameter metadata map
 	; feature_attributes: optional, dict of feature specific attributes for this feature. If unspecified and conditions are not specified, will assume feature type as 'continuous'.
-	#AddFeature
+	#add_feature
 	(declare
 		(assoc
 			feature ""
@@ -354,11 +390,15 @@
 		)
 
 		(if (contains_index untrainableFeatureCharacterSet (first feature))
-			(conclude "Failed to add feature: ensure it does not start with an invalid character.")
+			(conclude
+				(call !Return (assoc errors (list "Failed to add feature: ensure it does not start with an invalid character.")))
+			)
 		)
 
 		(if (and feature_attributes (contains_index featureAttributes feature))
-			(conclude "Feature already defined, either call add_feature without specifying feature_attributes or call set_feature_attributes to update existing feature attributes.")
+			(conclude
+				(call !Return (assoc errors (list "Feature already defined, either call add_feature without specifying feature_attributes or call set_feature_attributes to update existing feature attributes.")))
+			)
 		)
 
 		;add feature to model if no conditions are specified
@@ -401,7 +441,7 @@
 		(if add_feature_to_model
 			(let
 				(assoc
-					min_deviation_value (/ 1 (call GetNumTrainingCases))
+					min_deviation_value (/ 1 (call !GetNumTrainingCases))
 					null_feature (= (null) feature_value)
 				)
 
@@ -530,7 +570,7 @@
 		(accum_to_entities (assoc revision 1))
 
 		;return completion
-		(true)
+		(call !Return)
 	)
 
 	;stores the associated value with each entity id (the keys of case_values_map) to the respective entity
