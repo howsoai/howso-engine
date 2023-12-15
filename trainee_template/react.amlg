@@ -8,6 +8,7 @@
 	;  num_reacts: number of reacts to do in a batch.
 	;  context_values - list of lists.  see #react for description. if specified must be either length of 1 or num_reacts.
 	;  action_values - list of lists.  see #react for description. if specified must be either length of 1 or num_reacts.
+	;  post_process_values - list of lists. see #react for description. if specified must be either lenght of 1 or num_reacts.
 	;  case_indices - list of lists.  see #react for description. if specified must be either length of 1 or num_reacts.
 	;  rand_seed - optional, see #react for description.  if specified must be length of num_reacts.
 	#BatchReact
@@ -17,6 +18,7 @@
 			single_context (= 1 (size context_values))
 			single_action (= 1 (size action_values))
 			single_session (= 1 (size case_indices))
+			single_post_process (= 1 (size post_process_values))
 			num_reacts 1
 		)
 
@@ -58,6 +60,7 @@
 							context_index (if single_context 0 (current_index 1))
 							action_index (if single_action 0 (current_index 1))
 							session_index (if single_session 0 (current_index 1))
+							post_process_index (if single_post_process 0 (current_index 1))
 							react_rand_seed (if rand_seed (get rand_seed (current_index 1)))
 							react_session (null)
 							react_session_training_index (null)
@@ -81,6 +84,7 @@
 						(declare (assoc
 							react_context_values (if context_values (get context_values context_index) (list))
 							react_action_values (if action_values (get action_values action_index) (list))
+							react_post_process_values (if post_process_values (get post_process_values post_process_index) (list))
 						))
 
 						;if one of these is provided, both of them must be
@@ -92,12 +96,14 @@
 							context_values react_context_values
 							action_values react_action_values
 							case_indices react_case_index
+							post_process_values react_post_process_values
 							rand_seed react_rand_seed
 
 							context_features context_features
 							action_features action_features
 							derived_action_features derived_action_features
 							derived_context_features derived_context_features
+							post_process_features post_process_features
 							details details
 							extra_audit_features extra_audit_features
 							case_access_count_label case_access_count_label
@@ -293,6 +299,8 @@
 
 			derived_context_features (list)
 			derived_action_features (list)
+			post_process_features (list)
+			post_process_values (list)
 
 			leave_case_out (false)
 			case_indices (null)
@@ -472,8 +480,8 @@
 					)
 				)
 
-				;output generated case with explanation of the case if needed
-				(if (!= details (null))
+				;output generated case with explanation of the case if the case is not null and details are requested
+				(if (and (!= details (null)) (!= (null) generated_case) )
 					(seq
 						;if user doesn't want to use case weights, change weight_feature to '.none'
 						(if (not use_case_weights)
@@ -612,11 +620,10 @@
 	; context_features: list of context features
 	; context_values: list of current values of each context
 	; action_features: list of action features
-	; ignore_null_action_feature: flag, if true the nearest neighbor query will ignore cases where the action_feature is null
-	; match_on_context_features : flag, if true will query only for cases whose context features are not null
-	; ignore_case:case_id, if set will query for K+1 cases and ignore the perfect matching case during the reaction
+	; match_on_context_features: flag, if true will query only for cases whose context features are not null
+	; ignore_case: case_id, if set will query for K+1 cases and ignore the perfect matching case during the reaction
 	; tie_break_random_seed: the random number seed to use to break ties for equal distances
-	; allow_nulls : flag, if set to true will allow interpolate to return null values if there are nulls in the local model for the action features
+	; allow_nulls: flag, if set to true will allow interpolate to return null values if there are nulls in the local model for the action features
 	; force_targetless: flag, if set to true forces use of targetless hyperparameters if available
 	; use_case_weights: flag, if set to true will scale influence weights by each case's .case_weight
 	;
@@ -660,10 +667,23 @@
 					(list)
 				)
 			k_parameter (get hyperparam_map "k")
+
+			;check if action_feature has nulls, if not, the no need to filter them out since they don't exist
+			;else action_feature does have nulls, filter them out
+			ignore_null_action_feature
+				(if (not allow_nulls)
+					(if (= 0 (get featureNullRatiosMap (list (first action_features) "num_nulls")) )
+						(false)
+						(true)
+					)
+
+					;else nulls are allowed
+					(false)
+				)
 		)
 
 		(declare (assoc
-			candidate_cases_map
+			candidate_cases_lists
 				(compute_on_contained_entities
 					(append
 						not_null_features_queries
@@ -698,6 +718,7 @@
 							tie_break_random_seed
 							(null) ;radius
 							numericalPrecision
+							(first action_features)
 						)
 					)
 				)
@@ -706,15 +727,8 @@
 		;populate filtering_queries for explanations if necessary
 		(call PopulateFilteringQueriesForExplanation)
 
-		;if there is no context or no closest neighbors and we must have a value for the action feature, calculate the expected value
-		;otherwise just interpolate the result
-		(if (or
-				(= (list) context_features)
-				(and
-					ignore_null_action_feature
-					(= 0 (size candidate_cases_map))
-				)
-			)
+		;if there is no context, calculate the expected value
+		(if (= (list) context_features)
 			(call CalculateFeatureExpectedValue (assoc feature (first action_features) allow_nulls (false)))
 
 			;else interpolate the result from the nearest neighbors
@@ -722,16 +736,17 @@
 				;increase count access if needed for each of the deciding cases
 				(if case_access_count_label
 					(call IncrementEntityCaseValue (assoc
-						entities (indices candidate_cases_map)
+						entities (first candidate_cases_lists)
 						label_name case_access_count_label
 					))
 				)
 
 				(call InterpolateActionValues (assoc
 					action_feature (first action_features)
-					neighbor_weights_map candidate_cases_map
+					candidate_case_ids (first candidate_cases_lists)
+					candidate_case_weights (get candidate_cases_lists 1)
+					candidate_case_values (last candidate_cases_lists)
 					allow_nulls allow_nulls
-					has_perfect_matches (contains_value candidate_cases_map .infinity)
 				))
 			)
 		)

@@ -3,53 +3,111 @@
 (null
 
 	#Analyze
-	(if (!= "omni_targeted" targeted_model)
-		(if (or (= "targetless" targeted_model) (= 1 (size action_features)))
-			(call AnalyzeHyperparameters (assoc
-				targeted_model targeted_model
-				context_features context_features
-				action_feature (if (= "targetless" targeted_model) ".targetless" (first action_features))
-				robust_mode (if (= "targetless" targeted_model) "robust" "full")
-			))
+	(let
+		(assoc
+			;assoc of case id -> (assoc ".imputed" (list of imputed features))
+			imputed_cases_map (compute_on_contained_entities (list (query_exists internalLabelImputed)))
+		)
 
-			;else single_targeted but with multiple action features, all feature analyze iterations should be 'robust' until the last one which is 'full'
+		(if (!= "omni_targeted" targeted_model)
+			(if (or (= "targetless" targeted_model) (= 1 (size action_features)))
+				(call AnalyzeHyperparameters (assoc
+					targeted_model targeted_model
+					context_features context_features
+					action_feature (if (= "targetless" targeted_model) ".targetless" (first action_features))
+					robust_mode (if (= "targetless" targeted_model) "robust" "full")
+				))
+
+				;else single_targeted but with multiple action features, all feature analyze iterations should be 'robust' until the last one which is 'full'
+				(map
+					(lambda (let
+						(assoc
+							accumulated_context_features context_features
+							action_feature (current_value 1)
+						)
+
+						(call AnalyzeHyperparameters (assoc
+							targeted_model "single_targeted"
+							context_features accumulated_context_features
+							action_feature action_feature
+							robust_mode (if (= action_feature (last action_features)) "full" "robust")
+						))
+
+						;accumulate the action feature to the contexts for the next iteration
+						(accum (assoc accumulated_context_features action_feature))
+					))
+					action_features
+				)
+			)
+
+			;else for omni-targeted, loop over every action feature and analyze each one as 'single_targeted', 'full'
 			(map
 				(lambda (let
 					(assoc
-						accumulated_context_features context_features
+						filtered_context_features (filter (lambda (!= (current_value) (current_value 2))) context_features)
 						action_feature (current_value 1)
 					)
 
 					(call AnalyzeHyperparameters (assoc
 						targeted_model "single_targeted"
-						context_features accumulated_context_features
+						context_features filtered_context_features
 						action_feature action_feature
-						robust_mode (if (= action_feature (last action_features)) "full" "robust")
+						robust_mode "full"
 					))
-
-					;accumulate the action feature to the contexts for the next iteration
-					(accum (assoc accumulated_context_features action_feature))
 				))
 				action_features
 			)
 		)
 
-		;else for omni-targeted, loop over every action feature and analyze each one as 'single_targeted', 'full'
-		(map
-			(lambda (let
+		;reimpute features after analysis and overwrite the values with the newly imputed ones
+		(if (size imputed_cases_map)
+			(let
 				(assoc
-					filtered_context_features (filter (lambda (!= (current_value) (current_value 2))) context_features)
-					action_feature (current_value 1)
+					;use all the unique context and action features for imputation, or defaultFeatures if none were provided
+					analyze_features
+						(values
+							(append (if (= 0 (size context_features)) defaultFeatures context_features) action_features)
+							(true)
+						)
 				)
+				(map
+					(lambda (let
+						(assoc
+							impute_case_id (current_index 1)
+							imputed_features (get (current_value 1) internalLabelImputed)
+							;assoc of all the feature values for this case
+							case_feature_value_map (zip analyze_features (retrieve_from_entity (current_index 1) analyze_features) )
+						)
+						(declare (assoc
+							imputed_values
+								(map
+									(lambda (let
+										(assoc impute_feature (current_value 1))
+										;don't use the imputed feature in the context for this react, use all others
+										(declare (assoc
+											impute_context_features (indices (remove case_feature_value_map impute_feature))
+										))
+										(first
+											(call ReactDiscriminative (assoc
+												context_features impute_context_features
+												context_values (unzip case_feature_value_map impute_context_features)
+												action_features (list impute_feature)
+												ignore_case impute_case_id
+												return_action_values_only (true)
+												allow_nulls (false)
+											))
+										)
+									))
+									imputed_features
+								)
+						))
 
-				(call AnalyzeHyperparameters (assoc
-					targeted_model "single_targeted"
-					context_features filtered_context_features
-					action_feature action_feature
-					robust_mode "full"
-				))
-			))
-			action_features
+						;overwrite the feature values in this case with the new imputed_values
+						(assign_to_entities impute_case_id (zip imputed_features imputed_values))
+					))
+					imputed_cases_map
+				)
+			)
 		)
 	)
 

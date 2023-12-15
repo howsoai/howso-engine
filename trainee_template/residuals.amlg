@@ -367,6 +367,21 @@
 			))
 		)
 
+		;create a map of feature -> flag, set to true if the feature has any null values
+		;that way there's no need to explicitly filter nulls out when querying for a feature that no nulls
+		(declare (assoc
+			feature_may_have_nulls_map
+				(map
+					(lambda (!= 0 (get featureNullRatiosMap (list (current_index 1) "num_nulls")) ) )
+					(zip
+						(if target_residual_feature
+							(list target_residual_feature)
+							features
+						)
+					)
+				)
+		))
+
 		;iterate over each case and accumulate residuals for all the feature(s)
 		#!AccumulateFeatureResiduals
 		(assign (assoc
@@ -450,6 +465,42 @@
 											diff 0
 											output_categorical_action_probabilities (true)
 											categorical_action_probabilities_map (assoc)
+										)
+
+										;create the feature-specific candidate_cases_lists tuple for intepolation
+										(declare (assoc
+											candidate_cases_lists
+												(if (!= (null) local_cases_map)
+													(list
+														(indices local_cases_map)
+														(values local_cases_map)
+														(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
+													)
+												)
+										))
+										(if (get feature_may_have_nulls_map feature)
+											(let
+												(assoc
+													null_indices
+														(filter
+															(lambda (= (null) (get candidate_cases_lists (list 2 (current_value 1))) ) )
+															(indices (last candidate_cases_lists))
+														)
+												)
+												(if (size null_indices)
+													(assign (assoc
+														candidate_cases_lists
+															;only remove cases with null values if there are going to be some remaining
+															(if (< (size null_indices) (size (first candidate_cases_lists)))
+																(list
+																	(remove (first candidate_cases_lists) null_indices)
+																	(remove (get candidate_cases_lists 1) null_indices)
+																	(remove (last candidate_cases_lists) null_indices)
+																)
+															)
+													))
+												)
+											)
 										)
 
 										(call !InterpolateAndComputeDiffToCase)
@@ -577,6 +628,15 @@
 							(assign (assoc feature_is_non_string_edit_distance (true)))
 						)
 
+						;if fetaure has no nulls, no need to ignore it, otherwise it needs to be explicitly ignored in the query
+						(declare (assoc
+							ignore_null_action_feature
+								(if (= 0 (get featureNullRatiosMap (list feature "num_nulls")) )
+									(false)
+									(true)
+								)
+						))
+
 						(map
 							(lambda (let
 								(assoc
@@ -592,11 +652,15 @@
 								)
 
 								(assign (assoc
-									local_cases_map
+									candidate_cases_lists
 										(compute_on_contained_entities (append
 											(if focal_case
 												(query_not_in_entity_list (list case_id focal_case))
 												(query_not_in_entity_list (list case_id))
+											)
+											(if ignore_null_action_feature
+												(query_not_equals feature (null))
+												(list)
 											)
 											(query_nearest_generalized_distance
 												k_parameter
@@ -612,6 +676,7 @@
 												tie_break_random_seed
 												(null) ;radius
 												numericalPrecision
+												feature
 											)
 										))
 									case_feature_value (get case_values_map feature)
@@ -656,8 +721,8 @@
 	(seq
 		(assign (assoc
 			interpolated_value
-				;no local_cases_map means we use expected feature value
-				(if (= 0 (size local_cases_map))
+				;no candidate cases means we use expected feature value
+				(if (= 0 (size (first candidate_cases_lists)))
 					;global nominal probabilities will pulled below
 					(if feature_is_nominal
 						(null)
@@ -671,9 +736,10 @@
 					;else interpolate the feature value from the local model
 					(call InterpolateActionValues (assoc
 						action_feature feature
-						neighbor_weights_map local_cases_map
+						candidate_case_ids (first candidate_cases_lists)
+						candidate_case_weights (get candidate_cases_lists 1)
+						candidate_case_values (last candidate_cases_lists)
 						allow_nulls (false)
-						has_perfect_matches (contains_value local_cases_map .infinity)
 						output_influence_weights (false)
 					))
 				)
@@ -689,7 +755,7 @@
 					(call !ComputeFeatureMAEDiff)
 					case_feature_value
 					interpolated_value
-					(if (= 0 (size local_cases_map))
+					(if (= 0 (size (first candidate_cases_lists)))
 						;use global, else use local
 						(call ComputeModelNominalClassProbabilities (assoc feature feature))
 						;store empty assoc instead of null if there are no probabilities
@@ -719,13 +785,14 @@
 					diff
 						(if feature_is_nominal
 							(- 1
-								(if (= (null) local_cases_map)
+								(if (size (first candidate_cases_lists))
+									(get categorical_action_probabilities_map (list feature case_feature_value))
+
+									;else return expected value
 									(get
 										(call ComputeModelNominalClassProbabilities (assoc feature feature))
 										case_feature_value
 									)
-									;else get interpolated categorical probability
-									(get categorical_action_probabilities_map (list feature case_feature_value))
 								)
 							)
 
@@ -834,7 +901,6 @@
 						(map
 							(lambda (let
 								(assoc
-									local_cases_map (assoc)
 									case_id (current_value 1)
 									case_values_map (zip features (retrieve_from_entity (current_value 1) features))
 									interpolated_value 0
@@ -845,8 +911,8 @@
 									(assign (assoc react_context_features (filter (lambda (< (rand) 0.5)) all_react_context_features) ))
 								)
 
-								(assign (assoc
-									local_cases_map
+								(declare (assoc
+									candidate_cases_lists
 										(compute_on_contained_entities (append
 											(if focal_case
 												(query_not_in_entity_list (list case_id focal_case))
@@ -866,6 +932,7 @@
 												tie_break_random_seed
 												(null) ;radius
 												numericalPrecision
+												feature
 											)
 										))
 								))
@@ -873,7 +940,17 @@
 								(assign (assoc
 									interpolated_value
 										;no local_cases_map means we use expected feature value
-										(if (= 0 (size local_cases_map))
+										(if (size (first candidate_cases_lists))
+											(call InterpolateActionValues (assoc
+												action_feature feature
+												candidate_case_ids (first candidate_cases_lists)
+												candidate_case_weights (get candidate_cases_lists 1)
+												candidate_case_values (last candidate_cases_lists)
+												allow_nulls (true)
+												output_influence_weights (false)
+											))
+
+											;else there's no local model, return expected values
 											(if feature_is_nominal
 												;pull global probability for feature
 												(get (call ComputeModelNominalClassProbabilities (assoc feature feature)) feature)
@@ -881,15 +958,6 @@
 												;else get continuous expected value
 												(call CalculateFeatureExpectedValue (assoc feature feature allow_nulls (true) ))
 											)
-
-											;else interpolate the feature value from the local model
-											(call InterpolateActionValues (assoc
-												action_feature feature
-												neighbor_weights_map local_cases_map
-												allow_nulls (true)
-												has_perfect_matches (contains_value local_cases_map .infinity)
-												output_influence_weights (false)
-											))
 										)
 								))
 
