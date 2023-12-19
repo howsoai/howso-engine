@@ -1,106 +1,152 @@
 (null
 
-    #QueryInfluenceWeights
+    #ComputeInfluenceWeightEntropyUsingContext
     (declare
         (assoc
             context_values (list)
             context_features (list)
-            case_indices (list)
-            weight_feature ".ablation_case_weight" ;we need to decide what this will be called by default.
-
-            hyperparam_map (null)
-            use_case_indices (false)
+            use_case_weights (true)
+            weight_feature ".case_weight"
         )
 
-        (assign (assoc
-            hyperparam_map
-                (call GetHyperparameters (assoc
-                    feature ".targetless"
+        ;compute the entropy of the influence weights as retrieved by react.
+        (entropy (map
+            (lambda (get (current_value) ".influence_weight"))
+
+            (get
+                (call React (assoc
+                    context_features context_features
+                    context_values context_values
+                    details (assoc
+                        influential_cases (true)
+                    )
+                    use_case_weights use_case_weights
                     weight_feature weight_feature
+
                 ))
-            use_case_indices (if (size case_indices))
+                "influential_cases"
+            )
+        ))
+    )
+
+    #ComputeInfluenceWeightEntropyUsingCaseID
+    (declare
+        (assoc
+            case_id (null)
+            context_features (list)
+            use_case_weights (true)
+            weight_feature ".case_weight"
+
+            case_session_training_index (null)
+        )
+
+        ;retrieve the sesssion training index from the case and use it as input to a react.
+        (assign (assoc
+            case_session_training_index
+                (retrieve_from_entity case_id (list ".session" ".session_training_index"))
         ))
 
-        ; ; iterate over the input_cases and do these reacts in parallel
-        ||(map
-            (lambda (let
-                (assoc
-                    reaction
-                        (if 
-                            use_case_indices
-                            (call React (assoc
-                                context_features context_features
-                                case_indices (current_value 2)
-                                preserve_feature_values context_features
-                                leave_case_out (true)
-                                details (assoc
-                                    influential_cases (true)
-                                )
-                                use_case_weights (true)
-                                weight_feature weight_feature
-                            ))
-                            (call React (assoc
-                                context_features context_features
-                                context_values (current_value 2)
-                                details (assoc
-                                    influential_cases (true)
-                                )
-                                use_case_weights (true)
-                                weight_feature weight_feature
-                            ))
-                        )
-                )
-                (entropy (map
-                    (lambda (get (current_value) ".influence_weight"))
-                    (get reaction "influential_cases")
+        ;compute the entropy of the influence weights as retrieved by react.
+        (entropy (map
+            (lambda (get (current_value) ".influence_weight"))
+
+            (get
+                (call React (assoc
+                    context_features context_features
+                    case_indices case_session_training_index
+                    preserve_feature_values context_features
+                    leave_case_out (true)
+                    details (assoc
+                        influential_cases (true)
+                    )
+                    use_case_weights use_case_weights
+                    weight_feature weight_feature
+
                 ))
-            ))
-            (if
-                use_case_indices
-                case_indices
-                context_values
+                "influential_cases"
+            )
+        ))
+    )
+
+    #ComputeAndStoreInfluenceWeightEntropies
+    (let 
+        (assoc
+            influence_weight_entropy_map
+                ||(map
+                    (lambda
+                        (call ComputeInfluenceWeightEntropyUsingCaseID (assoc
+                            case_id (current_index 1)
+                            context_features context_features
+                        ))
+                    )
+                    (zip (call AllCases))
+                )
+            influence_weight_entropy_label ".influence_weight_entropy"
+        )
+
+        (call StoreCaseValues (assoc
+            case_values_map influence_weight_entropy_map
+            label_name influence_weight_entropy_label
+        ))
+
+        (assign_to_entities (assoc hasInfluenceWeightEntropies (true)))
+    )
+
+    #InitializeAutoAblate
+    (declare
+        (assoc
+            weight_feature ".case_weight"
+        )
+
+        (if (not hasPopulatedCaseWeight)
+            (seq
+                (assign_to_entities (assoc hasPopulatedCaseWeight (true)))
+                (call StoreCaseValues (assoc
+                    case_values_map (zip (call AllCases) 1)
+                    label_name weight_feature
+                ))
             )
         )
     )
 
-    #DetermineCasesToAblate
+    #DetermineNewCasesForAblation
     (declare
         (assoc
-            context_values (list)
             context_features (list)
-            case_indices (list)
-            weight_feature ".ablation_case_weight"
+            context_values (list)
 
-            case_influence_weights (list)
+            max_influence_weight_entropy_to_keep .infinity
+            new_case_influence_case_entropies (list)
         )
 
         (assign (assoc
-            case_influence_weights
-                (sort (call QueryInfluenceWeights (assoc
-                    context_values context_values
-                    context_features context_features
-                    case_indices case_indices
-                    weight_feature weight_feature
-                    hyperparam_map hyperparam_map
-                )))
+            max_influence_weight_entropy_to_keep
+                (compute_on_contained_entities (list
+                    (query_exists ".influence_weight_entropy")
+                    (query_quantile ".influence_weight_entropy" autoAblateEntropyThresholdQuantile ".case_weight")
+                ))
+            new_case_influence_case_entropies
+                ||(map
+                    (lambda
+                        (call ComputeInfluenceWeightEntropyUsingContext (assoc
+                            context_values (current_value 1)
+                            context_features context_features
+                        ))
+                    )
+                    context_values
+                )
         ))
 
-        (list
-            (filter 
-                (lambda (<= 
-                    (get case_influence_weights (current_value))
-                    (get (retrieve_from_entity "influenceWeightEntropyQuantiles") 5)
-                ))
-                (indices case_influence_weights)
-            )
-            (filter 
-                (lambda (>
-                    (get case_influence_weights (current_value))
-                    (get (retrieve_from_entity "influenceWeightEntropyQuantiles") 5)
-                ))
-                (indices case_influence_weights)
-            )
+        (map
+            (lambda (if
+                (<=
+                    (get new_case_influence_entropies (current_value))
+                    max_influence_weight_entropy_to_keep
+                )
+                (true)
+                (false)
+            ))
+            (indices context_values)
         )
-
     )
 )
