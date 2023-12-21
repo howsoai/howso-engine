@@ -28,7 +28,6 @@ timestamp=$(date +%x_%H:%M)
 
 # Get the Platform we are running the build on.
 plat=$(uname | tr '[:upper:]' '[:lower:]')
-if [[ "$plat" = 'darwin' ]]; then amlg_exe="${src_dir}/target/bin/amalgam-mt-noavx"; fi
 
 # Get the Platform chipset architecture. 'amd64' or 'arm64'
 arch=${ARCH:-$(uname -m | tr '[:upper:]' '[:lower:]')}
