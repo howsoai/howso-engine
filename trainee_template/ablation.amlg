@@ -125,7 +125,7 @@
         (if
             (or 
                 (not (and hasInfluenceWeightEntropies))
-                (< (call GetNumTrainingCases) autoAblateThreshold )
+                (< (call GetNumTrainingCases) autoAblateMinModelSize )
             )
             (conclude 1)
         )
@@ -134,7 +134,7 @@
             max_influence_weight_entropy_to_keep
                 (compute_on_contained_entities (list
                     (query_exists internalLabelInfluenceWeightEntropy)
-                    (query_quantile internalLabelInfluenceWeightEntropy autoAblateEntropyThresholdQuantile ".case_weight")
+                    (query_quantile internalLabelInfluenceWeightEntropy autoAblateInfluenceWeightEntropyThreshold ".case_weight")
                 ))
         ))
 
@@ -153,4 +153,195 @@
             )
         )
     )
+
+    #CaseOutsideThresholds
+	(let
+		(assoc
+			action_features
+                (union
+                    (indices autoAblateExactPredictionThresholdMap)
+                    (indices autoAblateTolerancePredictionThresholdMap)
+                    (indices autoAblateRelativePredictionThresholdMap)
+                    autoAblateResidualPredictionFeatures
+                )
+			feature_value_map (zip features feature_values)
+		)
+		(declare (assoc
+			action_values (unzip feature_value_map action_features)
+			residual_map (assoc)
+		))
+
+		(or ;evaluate in order and return the first true block
+
+			;if the model is too small, skip ablatement, return true to force training
+			(< (call GetNumTrainingCases) autoAblateMinModelSize)
+
+			;if we have action_features, need to react first
+			(if (!= (list) action_features)
+				;store the reaction to reuse for both
+				(let
+					(assoc
+						reaction_values
+							(map
+								(lambda (let
+									(assoc
+										feature (current_index 1)
+										;flag set if this feature uses residual as its threshold type
+										ablate_by_feature_residuals
+                                            (contains_index (zip autoAblateResidualPredictionFeatures) (current_index 1))
+									)
+									(declare (assoc
+										context_features (filter (lambda (!= feature (current_value))) features)
+									))
+
+									;react to each of the action features, using all other features as contexts
+									(declare (assoc
+										reaction
+											(call ReactDiscriminative (assoc
+												return_action_values_only (true)
+												context_features context_features
+												context_values (unzip feature_value_map context_features)
+												action_features (list feature)
+												details
+													(if ablate_by_feature_residuals
+														(assoc "feature_residuals" (true))
+
+														;else
+														(null)
+													)
+												substitute_output (false)
+												skip_encoding (true)
+												skip_decoding (true)
+											))
+									))
+
+									;output the predicted value
+									(if ablate_by_feature_residuals
+										(seq
+											;store the residual min and max tolerance for this feature
+											(accum (assoc
+												residual_map
+													(associate feature (assoc
+														"min" (get reaction (list "feature_residuals" feature))
+														"max" (get reaction (list "feature_residuals" feature))
+													))
+											))
+
+											(first (get reaction "action_values"))
+										)
+
+										(first reaction)
+									)
+
+								))
+								(zip action_features)
+							)
+					)
+
+					(or
+						;if we filter out any values outside of the defined thresholds (that should be trained on)
+						;allow training because these values are not being predicted by the system
+						(!=
+							(size action_values)
+							;if an action_value is same as/within threshold of prediction, it will not be filtered out
+							;so if this list is the same size as the original action_values, all action values were predicted correctly
+							;but if it's not the same size, the action values are different enough to be trained on
+							(size (filter
+								(lambda (let
+									(assoc
+                                        action_feature (current_index 1)
+										action_value (get feature_value_map (current_index 1))
+									)
+									(declare (assoc
+                                        threshold_type
+                                            (if
+                                                (contains_index autoAblateExactPredictionThresholdMap action_feature)
+                                                "exact"
+                                                (contains_index autoAblateTolerancePredictionThresholdMap action_feature)
+                                                "tolerance"
+                                                (contains_index (zip autoAblateResidualPredictionFeatures) action_feature)
+                                                "residual"
+                                                (contains_index autoAblateRelativePredictionThresholdMap action_feature)
+                                                "relative"
+                                                (null)
+                                            )
+                                    ))
+
+									(if (= threshold_type "exact")
+										(= action_value (current_value))
+
+										;for discrete or residual, set the min and max and check if actual value is outside of those bounds
+										(or (= threshold_type "tolerance") (= threshold_type "residual") )
+										(let
+											(assoc
+												min
+													(if (= threshold_type "tolerance")
+														(get autoAblateTolerancePredictionThresholdMap (list action_feature 0))
+														(get residual_map (list (get action_features (current_index 1)) "min"))
+													)
+												max
+													(if (= threshold_type "tolerance")
+														(get autoAblateTolerancePredictionThresholdMap (list action_feature 1))
+														(get residual_map (list (get action_features (current_index 1)) "max"))
+													)
+											)
+											(and (>= (current_value) (- action_value min)) (<= (current_value) (+ action_value max)))
+										)
+
+										;PERCENT is (last threshold)
+										(= threshold_type "relative")
+										(<=
+                                            (/ (abs (- (current_value) action_value)) (current_value))
+                                            (get autoAblateRelativePredictionThresholdMap action_feature)
+                                        )
+
+										;if threshold_type is explicitly undefined, treat it as outside of bounds and filter out the value
+										;thus forcing this case to be trained
+										(= threshold_type (null))
+										(false)
+									)
+								))
+								reaction_values
+							))
+						)
+					)
+				)
+			)
+
+			;conviction thresholds
+			(if
+				(or (!= convictionLowerThreshold (null)) (!= convictionUpperThreshold (null)))
+				(let
+					(assoc
+						conviction_value
+							(get
+								(call ReactGroup (assoc
+									features features
+									new_cases (list feature_values)
+									skip_encoding (true)
+								))
+								"familiarity_conviction_addition"
+							)
+					)
+
+					(or
+						;if both threshold values set, must be within both, otherwise check only the provided one
+						(if (and (!= (null) convictionLowerThreshold) (!= (null) convictionUpperThreshold))
+							(and (< conviction_value convictionUpperThreshold) (> conviction_value convictionLowerThreshold))
+
+							(!= (null) convictionLowerThreshold)
+							(> conviction_value convictionLowerThreshold)
+
+							(< conviction_value convictionUpperThreshold)
+						)
+
+						;if the model is empty, ReactGroup returns 0, force training
+						(= conviction_value 0)
+					)
+				)
+				;else
+				0
+			)
+		)
+	)
 )
