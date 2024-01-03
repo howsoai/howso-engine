@@ -470,8 +470,13 @@
 	(call exit_if_failures (assoc msg "Accuracy with high K"))
 
 
-
+	(print "Testing with entropy-based model reduction\n")
 	(print "Model size: " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	(call_entity "irismodel" "RemoveLeastInformativeTrainingCases" (assoc
+		features (append context_labels action_labels)
+		num_cases_to_remove 50
+	))
+	(print "New Model size: " (call_entity "irismodel" "GetNumTrainingCases") "\n")
 
 	(assign_to_entities "irismodel" (assoc
 		defaultHyperparameters (assoc "k" 1 "p" 2.4 "dt" -1)
@@ -509,6 +514,10 @@
 
 
 ;VERIFY ANALYZE METHOD
+	(call_entity "irismodel" "RemoveLeastInformativeTrainingCases" (assoc
+		features (append context_labels action_labels)
+		num_cases_to_remove 70
+	))
 	(map (lambda
 			(call_entity "irismodel" "Train" (assoc
 				features (append context_labels action_labels)
@@ -539,6 +548,17 @@
 
 	(print "time to tune " (- (system_time) tune_start)  "\n")
 	(print "analyzed parameters for iris\n")
+
+	(declare (assoc
+		hp_map (retrieve_from_entity "irismodel" "hyperparameterMetadataMap" )
+	))
+
+	;k should be 13
+	(print "closestN >= 8: " (get hp_map (list "species" context_key "full" ".none" "k")) " ")
+	(call assert_true (assoc obs (>= (get hp_map (list "species" context_key "full" ".none" "k")) 8)))
+	;p should be 2 or 3
+	(print "lpSpaceParameter >= 1: " (get hp_map (list "species" context_key "full" ".none" "p")) " ")
+	(call assert_true (assoc obs (>= (get hp_map (list "species" context_key "full" ".none" "p")) 1) ))
 
 	(call exit_if_failures (assoc msg "Analyzed parameters"))
 
@@ -625,6 +645,13 @@
 
 
 ;VERIFY TARGETFULL ANALYZATION
+	(call_entity "irismodel" "RemoveLeastInformativeTrainingCases" (assoc
+		features (append context_labels action_labels)
+		num_cases_to_remove 70
+	))
+
+	(print "slimmed  model size (49): " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+
 	(declare (assoc features (append context_labels action_labels)))
 	;run an "omni_targeted" loop here to analyze each feature
 	(map
@@ -738,8 +765,9 @@
 	(print "\n")
 
 	;clear out the model completely
-	(call_entity "irismodel" "RemoveCases" (assoc
-		cases (call_entity "irismodel" "AllCases")
+	(call_entity "irismodel" "RemoveLeastInformativeTrainingCases" (assoc
+		features (append context_labels action_labels)
+		num_cases_to_remove 50
 	))
 
 	;retrain on the first 40 cases
@@ -779,26 +807,42 @@
 		" expected value: " expected_value "\n"
 	)
 
+	(call_entity "howso" "set_auto_ablate_params" (assoc
+		auto_ablate_enabled (true)
+		minimum_model_size 100
+		residual_prediction_features (list "sepal_length")
+	))
 	;should not be trained on, within low residual, model size remains at 40
 	(call_entity "irismodel" "Train" (assoc
 		features (list "sepal_width" "petal_length" "petal_width" "species" "sepal_length")
 		input_cases (list (list 2.2 1.5 0.1 "setosa" expected_value))
-		ablatement_params (assoc "sepal_length" (list "residual"))
 	))
 	(print "size " (call_entity "irismodel" "GetNumTrainingCases") "\n")
 	;should not be trained on, within high residual, model size remains at 40
 	(call_entity "irismodel" "Train" (assoc
 		features (list "sepal_width" "petal_length" "petal_width" "species" "sepal_length")
 		input_cases (list (list 2.2 1.5 0.1 "setosa" (+ expected_value .01)))
-		ablatement_params (assoc "sepal_length" (list "residual"))
 	))
 	(print "size " (call_entity "irismodel" "GetNumTrainingCases") "\n")
 	;should train both of these since one is above the high residual and the other is below the low
 	(call_entity "irismodel" "Train" (assoc
 		features (list "sepal_width" "petal_length" "petal_width" "species" "sepal_length")
-		input_cases (list (list 2.2 1.5 0.1 "setosa" (+ expected_value 0.8)))
-		ablatement_params (assoc "sepal_length" (list "residual"))
+		input_cases (list (list 2.2 1.5 0.1 "setosa" (+ expected_value 0.3)))
 	))
+	(print "size " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	(call_entity "irismodel" "Train" (assoc
+		features (list "sepal_width" "petal_length" "petal_width" "species" "sepal_length")
+		input_cases (list (list 2.2 1.5 0.1 "setosa" (- expected_value 0.3)))
+	))
+	(print "size " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	;expected model size should now be 42
+	(print "Model size after ablation training: " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	(call assert_same (assoc obs (call_entity "irismodel" "GetNumTrainingCases") exp 42))
+
+	(call_entity "howso" "set_auto_ablate_params" (assoc
+		auto_ablate_enabled (false)
+	))
+
 
 	(print "TIME TO EXECUTE IRIS TEST: " (- (system_time) START) "\n")
 	(call exit_if_failures (assoc msg unit_test_name))
