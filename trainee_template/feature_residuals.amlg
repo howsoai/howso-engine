@@ -301,6 +301,10 @@
 
 		(if robust_residuals
 			(call !RunRobustResiduals)
+
+			; local_data
+			; (call !RunAccurateResiduals)
+
 			;else
 			(call !RunFullResiduals)
 		)
@@ -891,6 +895,150 @@
 					"hyperparam_map"
 					(list "featureOrdinalDeviations")
 					ordinal_residuals_map
+				)
+			)
+		)
+	)
+
+	;helper method for CalculateFeatureResiduals to calculate 'superfull' accurate residuals
+	#!RunAccurateResiduals
+	(seq
+		;keep a copy of all originally specified features
+		(assign (assoc case_features features))
+
+		;if we only collected residuals for this one feature, set the residuals features list to have only target_residual_feature
+		(if target_residual_feature
+			(assign (assoc features (list target_residual_feature) ))
+		)
+
+		;iterate over each case and accumulate residuals for all the feature(s)
+		#!AccumulateAccurateFeatureResiduals
+		(assign (assoc
+			case_residuals_lists
+				||(map
+					(lambda (let
+						(assoc
+							;assoc of all features to their residual values
+							feature_residual_map (assoc)
+							local_cases_map (assoc)
+							case_id (current_value 1)
+							;map of feature -> value for all the case values
+							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+						)
+
+						(assign (assoc
+							local_cases_map
+								(compute_on_contained_entities (append
+									(if focal_case
+										(query_not_in_entity_list (list case_id focal_case))
+										(query_not_in_entity_list (list case_id))
+									)
+									(query_nearest_generalized_distance
+										k_parameter
+										case_features
+										(unzip case_values_map case_features)
+										(get hyperparam_map "featureWeights")
+										queryDistanceTypeMap
+										query_feature_attributes_map
+										(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+										p_parameter
+										dt_parameter
+										(if valid_weight_feature weight_feature (null))
+										tie_break_random_seed
+										(null) ;radius
+										numericalPrecision
+									)
+								))
+						))
+
+						;create a map of feature -> residual value for each feature
+						(assign (assoc
+							feature_residual_map
+								(map
+									(lambda (let
+										(assoc
+											feature (get_value (current_index 1))
+											case_feature_value (get case_values_map (current_index 1))
+											feature_is_nominal (contains_index nominalsMap (current_index 1))
+											interpolated_value 0
+											diff 0
+											output_categorical_action_probabilities (true)
+											categorical_action_probabilities_map (assoc)
+										)
+
+										(call !InterpolateAndComputeDiffToCase)
+									))
+									(zip features)
+								)
+						))
+
+						;return the computed values as a list
+						(unzip feature_residual_map features)
+					))
+					case_ids
+				)
+		))
+
+
+		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
+		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
+		(assign (assoc
+			feature_residuals_lists (call !TransposeResidualLists)
+			;need to have at least 2.5% (that's a value of 50 using default sample of 2000) non-null values for a feature
+			min_value_count (ceil (* 0.025 (size case_ids)))
+		))
+
+		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
+		;applicable only to global models
+		(if (!= (true) regional_model_only)
+			(let
+				(assoc
+					num_valid_values_per_feature_map
+						(filter
+							(lambda (< (current_value) min_value_count) )
+							(zip
+								features
+								(map (lambda (size (current_value))) feature_residuals_lists)
+							)
+						)
+				)
+
+				;some features did not have 50 values, accrue case_ids, then call the main method agan
+				(if (size num_valid_values_per_feature_map)
+					(seq
+						;create the resampled case_ids list that contains cases with enough necessary non-null feature values
+						(assign  (assoc
+							case_ids
+								;append all the lists of cases ids for each feature into one list
+								(apply "append"
+									;for each (current_index) feature, need to find 50 - (current_value) cases to have enough values for those features
+									(values (map
+										(lambda (contained_entities
+											(query_not_equals (current_index) (null))
+
+											(if valid_weight_feature
+												(query_weighted_sample weight_feature (- min_value_count (current_value)) (rand))
+												(query_sample (- min_value_count (current_value)) (rand))
+											)
+										))
+										num_valid_values_per_feature_map
+									))
+								)
+						))
+
+						;re-compute residuals on these case_ids, store into case_residuals_lists
+						(call !AccumulateAccurateFeatureResiduals)
+
+						;transpose case_residuals_lists into a list the length of features and append the results into feature_residuals_lists
+						(assign (assoc
+							feature_residuals_lists
+								(map
+									(lambda (append (first (current_value)) (last (current_value))))
+									feature_residuals_lists
+									(call !TransposeResidualLists)
+								)
+						))
+					)
 				)
 			)
 		)
