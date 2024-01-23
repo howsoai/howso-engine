@@ -319,7 +319,7 @@
 			)
 		)
 
-		;compute featureDomainAttributes during analysis (when specifying custom hp) or when computing and caching all residuals
+		;compute null deviations during analysis (when specifying custom hp) or when computing and caching all residuals
 		(if (or compute_all_statistics (and (!= (null) custom_hyperparam_map) (= (null) target_residual_feature) ))
 			(seq
 				;list of features that have 2 or more nulls (can't predict a single null value)
@@ -400,6 +400,7 @@
 							case_id (current_value 1)
 							;map of feature -> value for all the case values
 							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+							time_series_filter_query (list)
 						)
 
 						;for robust computation we randomly (50/50) decide whether to remove a feature from the context
@@ -421,6 +422,15 @@
 								)
 						))
 
+						(if tsTimeFeature
+							(let
+								(assoc context_map (zip react_context_features (unzip case_values_map react_context_features)) )
+								(if (contains_index context_map tsTimeFeature)
+									(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
+								)
+							)
+						)
+
 						(assign (assoc
 							local_cases_map
 								;if empty context set, use global expected values for all features, set local_cases_map to null
@@ -433,6 +443,7 @@
 											(query_not_in_entity_list (list case_id focal_case))
 											(query_not_in_entity_list (list case_id))
 										)
+										time_series_filter_query
 										(query_nearest_generalized_distance
 											k_parameter
 											react_context_features
@@ -440,7 +451,7 @@
 											(get hyperparam_map "featureWeights")
 											queryDistanceTypeMap
 											query_feature_attributes_map
-											(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+											(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties") )
 											p_parameter
 											dt_parameter
 											(if valid_weight_feature weight_feature (null))
@@ -635,6 +646,8 @@
 									(false)
 									(true)
 								)
+							has_time_series_filter_query (and tsTimeFeature (contains_value react_context_features tsTimeFeature) )
+							time_series_filter_query (list)
 						))
 
 						(map
@@ -651,6 +664,16 @@
 									categorical_action_probabilities_map (assoc)
 								)
 
+								;set the filter query if has_time_series_filter already checked that time feature is in context features
+								(if has_time_series_filter_query
+									(assign (assoc
+										time_series_filter_query
+											(call !ComputeTimeSeriesFilterQuery (assoc
+												context_map (zip react_context_features (unzip case_values_map react_context_features))
+											))
+									))
+								)
+
 								(assign (assoc
 									candidate_cases_lists
 										(compute_on_contained_entities (append
@@ -662,6 +685,7 @@
 												(query_not_equals feature (null))
 												(list)
 											)
+											time_series_filter_query
 											(query_nearest_generalized_distance
 												k_parameter
 												react_context_features
@@ -669,7 +693,7 @@
 												(get hyperparam_map "featureWeights")
 												queryDistanceTypeMap
 												query_feature_attributes_map
-												(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+												(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties") )
 												p_parameter
 												dt_parameter
 												(if valid_weight_feature weight_feature (null))
@@ -904,11 +928,21 @@
 									case_id (current_value 1)
 									case_values_map (zip features (retrieve_from_entity (current_value 1) features))
 									interpolated_value 0
+									time_series_filter_query (list)
 								)
 
 								;grab a random set of context features when computing robust residuals
 								(if robust_residuals
 									(assign (assoc react_context_features (filter (lambda (< (rand) 0.5)) all_react_context_features) ))
+								)
+
+								(if tsTimeFeature
+									(let
+										(assoc context_map (zip react_context_features (unzip case_values_map react_context_features)) )
+										(if (contains_index context_map tsTimeFeature)
+											(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
+										)
+									)
 								)
 
 								(declare (assoc
@@ -918,6 +952,7 @@
 												(query_not_in_entity_list (list case_id focal_case))
 												(query_not_in_entity_list (list case_id))
 											)
+											time_series_filter_query
 											(query_nearest_generalized_distance
 												k_parameter
 												react_context_features
@@ -925,7 +960,7 @@
 												(get hyperparam_map "featureWeights")
 												queryDistanceTypeMap
 												query_feature_attributes_map
-												(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") )
+												(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties") )
 												p_parameter
 												dt_parameter
 												(if valid_weight_feature weight_feature (null))
@@ -984,6 +1019,20 @@
 				)
 		))
 
+		(accum_to_entities (assoc
+			featureNullAccuracyMap
+				(associate
+					(apply "concat" (append (if robust_residuals "robust" "full") (remove (get hyperparam_map "paramPath") 1) ))
+					(append
+						null_prediction_map
+						(assoc
+							".robust" robust_residuals
+							".hyperparam_path" (get hyperparam_map "paramPath")
+						)
+					)
+				)
+		))
+
 		;compute and cache all min-max values for all features
 		(if (= 0 (size featureMarginalStatsMap))
 			(call CalculateMarginalStats (assoc
@@ -991,7 +1040,7 @@
 			))
 		)
 
-		;create the map of feature -> uncertainty tuple
+		;assoc of feature -> null uncertainty pair of [known-null distance, null-null distance]
 		(assign (assoc
 			null_prediction_map
 				(map
@@ -1003,12 +1052,11 @@
 							null_prediction_deviation (- 1 (current_value 1))
 						)
 						(if (contains_index nominalsMap feature)
-							;for nominals output a list of: num classes, null_mismatch, null_prediction_deviation
-							(list (get nominalsMap feature) 1.0 null_prediction_deviation)
+							;for nominals output a list of: null_mismatch, null_prediction_deviation
+							(list 1.0 null_prediction_deviation)
 
 							(contains_index cyclicFeaturesMap feature)
 							(list
-								(get cyclicFeaturesMap feature)
 								(get cyclicFeaturesMap feature)
 								(* (get cyclicFeaturesMap feature) null_prediction_deviation)
 							)
@@ -1017,20 +1065,15 @@
 							(let
 								(assoc
 									max_uncertainty
-										;use the uncertainty from nominalsMap if it's already been computed
-										(if (contains_index nominalsMap feature)
-											(get nominalsMap feature)
-
-											;else compute it from the existing feature max-min value or bounds if provided
-											(max
-												(-
-													(get featureMarginalStatsMap (list weight_feature feature "max"))
-													(get featureMarginalStatsMap (list weight_feature feature "min"))
-												)
-												(-
-													(get featureBoundsMap (list feature "max"))
-													(get featureBoundsMap (list feature "min"))
-												)
+										;compute from the existing feature max-min value or bounds if provided
+										(max
+											(-
+												(get featureMarginalStatsMap (list weight_feature feature "max"))
+												(get featureMarginalStatsMap (list weight_feature feature "min"))
+											)
+											(-
+												(get featureBoundsMap (list feature "max"))
+												(get featureBoundsMap (list feature "min"))
 											)
 										)
 								)
@@ -1045,15 +1088,10 @@
 				)
 		))
 
-		(declare (assoc
-			previous_domain_attributes (or (get hyperparam_map "featureDomainAttributes") (assoc))
-		))
-
-		;accumulate newly computed domain attributes to existing ones
 		(assign
 			"hyperparam_map"
-			(list "featureDomainAttributes")
-			(append previous_domain_attributes nominalsMap null_prediction_map)
+			(list "nullUncertaintyMap")
+			null_prediction_map
 		)
 	)
 )
