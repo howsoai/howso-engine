@@ -1190,27 +1190,172 @@
 
 	;set the minimum size of the model before ablatement kicks in, value must be above 0
 	#set_min_ablatement_model_size
-		(if (> min_ablatement_model_size 0)
-			(seq
-				(assign_to_entities (assoc minAblatementModelSize min_ablatement_model_size))
-				(accum_to_entities (assoc revision 1))
-				(call !Return)
-			)
-
-			(call !Return (assoc errors (list "Failed to set min ablatement size: invalid min_ablatement_model_size specified.")))
+	(if (> min_ablatement_model_size 0)
+		(seq
+			(assign_to_entities (assoc minAblatementModelSize min_ablatement_model_size))
+			(accum_to_entities (assoc revision 1))
+			(call !Return)
 		)
+
+		(call !Return (assoc errors (list "Failed to set min ablatement size: invalid min_ablatement_model_size specified.")))
+	)
 
 
 	;set the influence weight threshold for outputting only the K neighbors whose inflence weight is <= to this threshold
 	;default value is 0.99
 	#set_influence_weight_threshold
-		(seq
-			(assign_to_entities (assoc influenceWeightThreshold influenceWeightThreshold))
-			(accum_to_entities (assoc revision 1))
-			(call !Return)
+	(seq
+		(assign_to_entities (assoc influenceWeightThreshold influenceWeightThreshold))
+		(accum_to_entities (assoc revision 1))
+		(call !Return)
+	)
+
+
+	;moves all cases that match the specified conditions from trainee to the target trainee
+	;removes all cases that match the specified conditions if target trainee is not specified
+	;parameters:
+	; source_trainee : optional, subtrainee to move cases from. if not specified, moves from this trainee
+	; target_trainee : the trainee to move cases to. if not specified will remove cases
+	; case_indices : a list of session id and training index tuples that specify which cases are to be moved
+	; precision: flag, whether to query for 'exact' matches; if set to 'similar' will move num_cases with the most similar values. Ignored if case_indices is specified.
+	; condition: assoc of feature->value(s) (no value = must have feature, one value = must equal exactly the value, two values = inclusive between). Ignored if case_indices is specified.
+	; condition_session: optional, if specified, ignores condition and instead operates on all cases that were trained with this session id. Ignored if case_indices is specified.
+	; num_cases: optional, limit on the number of cases to move; If set to zero there will be no limit. Ignored if case_indices is specified.
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
+	; preserve_session_data: if true will just remove cases, otherwise will do session cleanup
+	; session: the session id when this call is being made. Applicable  only when target_trainee is specified,
+	; 	used for training the cases into the target_trainee
+	; distribute_weight_feature: name of feature into which to distribute the removed cases' weights to their neighbors.
+	;  	Applicable only if specified and removing cases (target_trainee is not specified).
+	#move_cases
+	(declare
+		(assoc
+			case_indices (null)
+			condition (assoc)
+			precision "exact"
+			num_cases (null)
+			preserve_session_data (false)
+			session "none"
+			distribute_weight_feature (null)
 		)
 
+		;if moving cases, make sure target trainee entity exists, otherwise return 0
+		(if (and
+				(!= target_trainee (null))
+				(not (contains_entity (list traineeContainer target_trainee)))
+			)
+			(conclude
+				(call !Return (assoc
+					errors (list (concat "Failed to move cases: target trainee " target_trainee " does not exist."))
+				))
+			)
 
+			(and
+				(!= source_trainee (null))
+				(not (contains_entity (list traineeContainer source_trainee)))
+			)
+			(conclude
+				(call !Return (assoc
+					errors (list (concat "Failed to move cases: source trainee " target_trainee " does not exist."))
+				))
+			)
+		)
+
+		(if source_trainee
+			(assign (assoc source_trainee (list traineeContainer source_trainee) ))
+		)
+
+		(if target_trainee
+			(assign (assoc target_trainee (list traineeContainer target_trainee) ))
+		)
+
+		;build list of case ids that match criteria
+		(declare (assoc
+			cases_to_move
+				(if (= (null) case_indices)
+					;compute the cases to re/move
+					(call_entity source_trainee "GetCasesByCondition" (assoc
+						condition condition
+						condition_session condition_session
+						precision precision
+						num_cases num_cases
+					))
+
+					;else use case_indices
+					(call_entity source_trainee "GetCaseIds" (assoc case_indices case_indices))
+				)
+		))
+
+		;move or remove cases matching the criteria
+		(if (!= target_trainee (null))
+			;iterate over each case and move it from the trainee into target_trainee
+			(if preserve_session_data
+				;just move the cases without editing session data
+				(map
+					(lambda
+						;if target already has an entity with this exact id, move it into the target without maintaining original id
+						(if (contains_entity target_trainee (current_value))
+							(if source_trainee
+								(move_entities (append source_trainee (current_value)) target_trainee)
+								(move_entities (current_value) target_trainee)
+							)
+
+							;else move the entity to the target maintaining its id
+							(if source_trainee
+								(move_entities (append source_trainee (current_value)) (append target_trainee (current_value)) )
+								(move_entities (current_value) (append target_trainee (current_value)) )
+							)
+						)
+						)
+					cases_to_move
+				)
+
+				;else move the cases by retraining them in the target trainee and clearing out session data from trainee
+				(map
+					(lambda (let
+						(assoc
+							;grab all the case data as an assoc
+							case_map
+								(if source_trainee
+									(get_all_labels (retrieve_entity_root (append source_trainee (current_value 1)) 1 ) )
+									(get_all_labels (retrieve_entity_root (current_value 1) 1) )
+								)
+						)
+						(declare (assoc
+							;keep all features from the case except for 'sessions' since that'll have to be recomputed
+							case_features
+								(filter
+									(lambda (!= (current_value) ".session"))
+									(indices case_map)
+								)
+						))
+						(call_entity target_trainee "Train" (assoc
+							features case_features
+							input_cases (list (unzip case_map case_features))
+							session session
+							;allow training on reserved features to preserve all case data
+							allow_training_reserved_features (true)
+						))
+					))
+					cases_to_move
+				)
+			)
+		)
+
+		;remove cases and do session cleanup
+		(if (or (not preserve_session_data) (= (null) target_trainee))
+			(call_entity source_trainee "RemoveCases" (assoc
+				cases cases_to_move
+				distribute_weight_feature distribute_weight_feature
+			))
+		)
+
+		(accum_to_entities source_trainee (assoc revision 1))
+		(if target_trainee (accum_to_entities target_trainee (assoc revision 1)) )
+
+		;return the number of cases moved
+		(call !Return (assoc payload (assoc "count" (size cases_to_move)) ))
+	)
 
 
 
