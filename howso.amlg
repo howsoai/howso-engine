@@ -89,6 +89,32 @@
 			(retrieve_from_entity trainee "pointVersion")
 		)
 
+	#!determine_child_trainee_path
+	(if child_trainee
+		(seq
+			(if (not (contains_entity trainee))
+				(conclude "Specified invalid trainee.")
+			)
+
+			(if parent_trainee
+				(let
+					(assoc
+						parent_trainee_path (call_entity trainee "GetTraineePath" (assoc trainee parent_trainee))
+					)
+					(if (= (null) parent_trainee_path)
+						(conclude "Specified invalid parent_trainee.")
+					)
+
+					;set path to the child through whatever the path is to its parent
+					(append trainee parent_trainee_path ".trainee_container" child_trainee)
+				)
+
+				;else it's a direct child of this trainee
+				(list trainee ".trainee_container" child_trainee)
+			)
+		)
+	)
+
 	;creates a new instance of a trainee as specified by the entity label "trainee"
 	;parameters:
 	; filepath: path to the file (optional)
@@ -98,34 +124,10 @@
 	;	If specified assumes the parent is subtrainee of this trainee, applicable only if child_trainee is specified.
 	#create_trainee
 		(seq
-			(declare (assoc child_trainee_path (null) ))
-
-			(if child_trainee
-				(seq
-					(if (not (contains_entity trainee))
-						(conclude (call !return (assoc errors (list "Specified invalid trainee."))))
-					)
-
-					(if parent_trainee
-						(let
-							(assoc
-								parent_trainee_path (call_entity trainee "GetTraineePath" (assoc trainee parent_trainee))
-							)
-							(if (= (null) parent_trainee_path)
-								(conclude (conclude
-									(call !return (assoc errors (list "Specified invalid parent_trainee.")))
-								))
-							)
-
-							;set path to the child through whatever the path is to its parent
-							(assign (assoc
-								child_trainee_path (append trainee parent_trainee_path ".trainee_container" child_trainee)
-							))
-						)
-
-						;else it's a direct child of this trainee
-						(assign (assoc child_trainee_path (list trainee ".trainee_container" child_trainee) ))
-					)
+			(declare (assoc child_trainee_path (call !determine_child_trainee_path) ))
+			(if (= "string" (get_type_string child_trainee_path))
+				(conclude
+					(call !return (assoc errors (list child_trainee_path)))
 				)
 			)
 
@@ -141,7 +143,7 @@
 				(if child_trainee_path
 					(seq
 						(call_entity child_trainee_path "Initialize")
-						(call_entity trainee "UpdateChildTraineePaths" (assoc
+						(call_entity trainee "AddChildTraineePaths" (assoc
 							child_trainee child_trainee
 							;remove this trainee from child_trainee_path before storing
 							child_trainee_path (tail child_trainee_path)
@@ -187,10 +189,20 @@
 	;parameters:
 	; filepath: base path to load from
 	; filename: name to load (without extension)
-	; trainee: name to refer to this instance by
+	; trainee: name of this trainee
 	; separate_files: flag, default to false. if set to true will load each case from its individual file
+	; child_trainee: optional, name of child trainee to load as a subtrainee of this trainee.
+	; parent_trainee: optional, name of parent trainee if loading a child subtrainee.  If unspecified, this trainee is the parent.
+	;	If specified assumes the parent is subtrainee of this trainee, applicable only if child_trainee is specified.
 	#load
 		(seq
+			(declare (assoc child_trainee_path (call !determine_child_trainee_path) ))
+			(if (= "string" (get_type_string child_trainee_path))
+				(conclude
+					(call !return (assoc errors (list child_trainee_path)))
+				)
+			)
+
 			(declare (assoc
 				loaded_trainee
 					(if (and separate_files (= "amlg" !file_extension))
@@ -199,13 +211,26 @@
 							(load_entity (concat filepath filename "." !file_extension) temptrainee (true))
 							;if the trainee was loaded
 							(if (contains_entity temptrainee)
-								(seq
-									;destroy the previously existing trainee
-									(destroy_entities trainee)
-									;move the trainee under the temporary label to the trainee label;
-									(move_entities temptrainee trainee)
-									;return the name of the trainee to indicate a successful load attempt
-									trainee
+								(if child_trainee_path
+									(seq
+										(destroy_entities child_trainee_path)
+										(move_entities temptrainee child_trainee_path)
+										(call_entity trainee "AddChildTraineePaths" (assoc
+											child_trainee child_trainee
+											;remove this trainee from child_trainee_path before storing
+											child_trainee_path (tail child_trainee_path)
+										))
+										child_trainee
+									)
+
+									(seq
+										;destroy the previously existing trainee
+										(destroy_entities trainee)
+										;move the trainee under the temporary label to the trainee label;
+										(move_entities temptrainee trainee)
+										;return the name of the trainee to indicate a successful load attempt
+										trainee
+									)
 								)
 								;else return null
 								(null)
@@ -217,15 +242,26 @@
 							(assoc temptrainee (call (load (concat filepath filename "." !file_extension))) )
 
 							(if (and (!= (null) temptrainee) (contains_entity temptrainee))
-								(seq
-									;destroy the previously existing trainee
-									(destroy_entities trainee)
+								(if child_trainee_path
+									(seq
+										(destroy_entities child_trainee_path)
+										(move_entities temptrainee child_trainee_path)
+										(call_entity trainee "AddChildTraineePaths" (assoc
+											child_trainee child_trainee
+											;remove this trainee from child_trainee_path before storing
+											child_trainee_path (tail child_trainee_path)
+										))
+										child_trainee
+									)
 
-									;move the trainee under the temporary label to the trainee label;
-									(move_entities temptrainee trainee)
-
-									;return the name of the trainee to indicate a successful load attempt
-									trainee
+									(seq
+										;destroy the previously existing trainee
+										(destroy_entities trainee)
+										;move the trainee under the temporary label to the trainee label;
+										(move_entities temptrainee trainee)
+										;return the name of the trainee to indicate a successful load attempt
+										trainee
+									)
 								)
 								;else return null
 								(null)
@@ -286,9 +322,29 @@
 
 
 	;Destroyes the instance of the trainee specified by the parameter "trainee".  If trainee is not specified, it will look to this entity's own label of the same name.
+	; trainee: name of trainee
+	; child_trainee: optional, name of child subtrainee to delete from this trainee.
 	#delete
 		(seq
-			(destroy_entities trainee)
+			(declare (assoc
+				child_trainee_path (call_entity trainee "GetTraineePath" (assoc trainee child_trainee))
+			))
+			(if (and child_trainee (= (null) child_trainee_path))
+				(conclude
+					(call !return (assoc errors (list "Invalid child_trainee specified.")))
+				)
+			)
+
+			(if child_trainee_path
+				(seq
+					(destroy_entities (append trainee child_trainee_path))
+					(call_entity trainee "RemoveChildTraineePaths" (assoc child_trainee child_trainee))
+				)
+
+				;else delete this trainee
+				(destroy_entities trainee)
+			)
+
 			(call !return)
 		)
 
