@@ -258,31 +258,48 @@
 
 		;if case_ids weren't specified either, use a random num_samples sampling of cases from the whole model
 		(if (= 0 (size case_ids))
-			(assign (assoc
-				case_ids
-					;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
-					(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
-						(if robust_residuals
-							(call SampleCases (assoc
-								num num_samples
-								rand_seed (rand)
-								case_weight_feature (if valid_weight_feature weight_feature)
-							))
-							;grab samples from the model
-							(call AllCases (assoc num num_samples rand_seed (rand)))
+			(seq
+				(assign (assoc
+					case_ids
+						;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
+						(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
+							(if robust_residuals
+								(call SampleCases (assoc
+									num num_samples
+									rand_seed (rand)
+									case_weight_feature (if valid_weight_feature weight_feature)
+								))
+								;grab samples from the model
+								(call AllCases (assoc num num_samples rand_seed (rand)))
+							)
+
+							;else the model is small, use the smaller of num_samples or (num_cases * 2^f) because that's the amount of all possible combinations
+							(if robust_residuals
+								(call SampleCases (assoc
+									num (min num_samples (* num_training_cases (pow 2 (size features))))
+									case_weight_feature (if valid_weight_feature weight_feature)
+								))
+								;else just use all the case ids because the model size is <= num_samples or the model is small
+								(call AllCases)
+							)
+						)
+				))
+
+				;ensure features with nulls have cases that have values for computation
+				(if (not robust_residuals)
+					(let
+						(assoc not_null_feature_output_map (call !SelectNonNullCases) )
+
+						(if (size (get not_null_feature_output_map "skip_features"))
+							(assign (assoc skip_features_map (get not_null_feature_output_map "skip_features_map") ))
 						)
 
-						;else the model is small, use the smaller of num_samples or (num_cases * 2^f) because that's the amount of all possible combinations
-						(if robust_residuals
-							(call SampleCases (assoc
-								num (min num_samples (* num_training_cases (pow 2 (size features))))
-								case_weight_feature (if valid_weight_feature weight_feature)
-							))
-							;else just use all the case ids because the model size is <= num_samples or the model is small
-							(call AllCases)
+						(if (size (get not_null_feature_output_map "non_null_cases"))
+							(accum (assoc case_ids (get not_null_feature_output_map "non_null_cases") ))
 						)
 					)
-			))
+				)
+			)
 		)
 
 		;when calculating residuals for the entire model, cache the heuristic residual values if they haven't been cached yet
@@ -650,64 +667,69 @@
 							time_series_filter_query (list)
 						))
 
-						(map
-							(lambda (let
-								(assoc
-									local_cases_map (assoc)
-									case_id (current_value 1)
-									case_values_map (zip features (retrieve_from_entity (current_value 1) features))
+						(if (contains_index skip_features_map feature)
+							(list)
 
-									interpolated_value 0
-									diff 0
-									output_categorical_action_probabilities (true)
-									categorical_action_probabilities_map (assoc)
-								)
+							;else compute residuals for feature
+							(map
+								(lambda (let
+									(assoc
+										local_cases_map (assoc)
+										case_id (current_value 1)
+										case_values_map (zip features (retrieve_from_entity (current_value 1) features))
 
-								;set the filter query if has_time_series_filter already checked that time feature is in context features
-								(if has_time_series_filter_query
-									(assign (assoc
-										time_series_filter_query
-											(call !ComputeTimeSeriesFilterQuery (assoc
-												context_map (zip react_context_features (unzip case_values_map react_context_features))
-											))
-									))
-								)
+										interpolated_value 0
+										diff 0
+										output_categorical_action_probabilities (true)
+										categorical_action_probabilities_map (assoc)
+									)
 
-								(declare (assoc
-									candidate_cases_lists
-										(compute_on_contained_entities (append
-											(if focal_case
-												(query_not_in_entity_list (list case_id focal_case))
-												(query_not_in_entity_list (list case_id))
-											)
-											(if ignore_null_action_feature
-												(query_not_equals feature (null))
-												(list)
-											)
+									;set the filter query if has_time_series_filter already checked that time feature is in context features
+									(if has_time_series_filter_query
+										(assign (assoc
 											time_series_filter_query
-											(query_nearest_generalized_distance
-												k_parameter
-												react_context_features
-												(unzip case_values_map react_context_features)
-												(get hyperparam_map "featureWeights")
-												queryDistanceTypeMap
-												query_feature_attributes_map
-												(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties") )
-												p_parameter
-												dt_parameter
-												(if valid_weight_feature weight_feature (null))
-												tie_break_random_seed
-												(null) ;radius
-												numericalPrecision
-												feature
-											)
+												(call !ComputeTimeSeriesFilterQuery (assoc
+													context_map (zip react_context_features (unzip case_values_map react_context_features))
+												))
 										))
-									case_feature_value (get case_values_map feature)
-								))
+									)
 
-								(call !InterpolateAndComputeDiffToCase)
-							))
-							case_ids
+									(declare (assoc
+										candidate_cases_lists
+											(compute_on_contained_entities (append
+												(if focal_case
+													(query_not_in_entity_list (list case_id focal_case))
+													(query_not_in_entity_list (list case_id))
+												)
+												(if ignore_null_action_feature
+													(query_not_equals feature (null))
+													(list)
+												)
+												time_series_filter_query
+												(query_nearest_generalized_distance
+													k_parameter
+													react_context_features
+													(unzip case_values_map react_context_features)
+													(get hyperparam_map "featureWeights")
+													queryDistanceTypeMap
+													query_feature_attributes_map
+													(if (get hyperparam_map "useDeviations") (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties") )
+													p_parameter
+													dt_parameter
+													(if valid_weight_feature weight_feature (null))
+													tie_break_random_seed
+													(null) ;radius
+													numericalPrecision
+													feature
+												)
+											))
+										case_feature_value (get case_values_map feature)
+									))
+
+									(call !InterpolateAndComputeDiffToCase)
+								))
+								case_ids
+							)
 						)
 					))
 					(if target_residual_feature
