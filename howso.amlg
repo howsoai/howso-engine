@@ -41,6 +41,8 @@
 ;	"set_random_seed"
 ;	"get_internal_parameters"
 ;	"set_internal_parameters"
+;   "set_auto_ablation_params"
+;   "get_auto_ablation_params"
 ;	"set_auto_analyze_params"
 ;	"move_cases"
 ;	"reset_parameter_defaults"
@@ -55,7 +57,6 @@
 ;	"get_marginal_stats"
 ;	"pairwise_distances"
 ;	"distances"
-;	"set_min_ablatement_model_size"
 ;	"set_influence_weight_threshold"
 ;	"export_trainee"
 ;	"upgrade_trainee"
@@ -695,12 +696,6 @@
 	; session: the session label to record these cases to.  If not specified, refers to this entity's label of same name.
 	; trainee : the trainee model.
 	; input_is_substituted : flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
-	; ablatement_params: assoc of feature -> threshold_type
-	; 	threshold_type is one of:
-	;		['exact'] - don't train if prediction matches exactly
-	;		['tolerance', MIN, MAX] - don't train if prediction >= (case value - MIN) and prediction <= (case value + MAX)
-	;		['relative', PERCENT] - don't train if abs(prediction - case value) / prediction <= PERCENT
-	;		['residual'] - don't train if if abs(prediction - case value) <= feature residual
 	; series: optional, name of series to pull features and case values from internal series storage.  If specified, trains on all cases that are
 	;		stored in the internal series store for the specified series and session. The trained feature set is the combined features from storage
 	;		and the passed in features.  If input_cases is of length one, the value(s) of this case are appended to all cases in the series.
@@ -728,7 +723,6 @@
 								features features
 								derived_features derived_features
 								session session
-								ablatement_params ablatement_params
 								series series
 								input_is_substituted input_is_substituted
 								accumulate_weight_feature accumulate_weight_feature
@@ -814,6 +808,62 @@
 			)
 
 			;return that this has completed
+			(call !return)
+		)
+
+	;gets the model's auto-ablate parameters set by #set_auto_ablation_params
+	#get_auto_ablation_params
+		(call !return (assoc
+			payload
+				(call_entity trainee "GetAutoAblationParams")
+		))
+
+	;sets the model to auto-ablate by tracking its size and training certain cases as weights
+	;parameters
+	; auto_ablation_enabled: flag, default is false. when true, any enabled ablation techniques will be run at during training.
+	; auto_ablation_weight_feature: string, default is ".case_weight". the weight feature that should be used when ablating.
+	; minimum_model_size: optional, stores the threshold for the minimum number of cases at which the model should auto-ablate.
+	;                     default of 1000.
+	; influence_weight_entropy_threshold: optional, the influence weight entropy quantile that a case must be beneath in order to be trained.
+	;                                     default of 0.6.
+	; exact_prediction_features: optional list of features. for each of the features specified, will ablate a case if the prediction
+	;                            matches exactly.
+	; tolerance_prediction_threshold_map: optional assoc of feature -> [MIN, MAX]. for each of the features specified, will
+	;                                     ablate a case if the prediction >= (case value - MIN) and the prediction <= (case value + MAX)
+	; relative_prediction_threshold_map: optional assoc of feature -> PERCENT. for each of the features specified, will
+	;                                    ablate a case if abs(prediction - case value) / prediction <= PERCENT
+	; residual_conviction_features: optional list of features. for each of the features specified, will ablate a case if
+	;                               abs(prediction - case value) <= feature residual
+	; conviction_upper_threshold: optional float. the conviction value below which cases will be ablated
+	; conviction_lower_threshold: optional float. the conviction value above which cases will be ablated
+	#set_auto_ablation_params
+		(declare
+			(assoc
+				auto_ablation_enabled (false)
+				auto_ablation_weight_feature ".case_weight"
+				minimum_model_size 1000
+				influence_weight_entropy_threshold 0.6
+				exact_prediction_features (null)
+				tolerance_prediction_threshold_map (null)
+				relative_prediction_threshold_map (null)
+				residual_prediction_features (null)
+				conviction_upper_threshold (null)
+				conviction_lower_threshold (null)
+			)
+
+			(call_entity trainee "SetAutoAblationParams" (assoc
+				auto_ablation_enabled auto_ablation_enabled
+				auto_ablation_weight_feature auto_ablation_weight_feature
+				minimum_model_size minimum_model_size
+				influence_weight_entropy_threshold influence_weight_entropy_threshold
+				exact_prediction_features exact_prediction_features
+				tolerance_prediction_threshold_map tolerance_prediction_threshold_map
+				relative_prediction_threshold_map relative_prediction_threshold_map
+				residual_prediction_features residual_prediction_features
+				conviction_upper_threshold conviction_upper_threshold
+				conviction_lower_threshold conviction_lower_threshold
+			))
+
 			(call !return)
 		)
 
@@ -1764,6 +1814,7 @@
 	; p_value_of_addition: true or string, default is false. if true will use default value of 'p_value_of_addition' for feature name
 	; p_value_of_removal: true or string, default is false. if true will use default value of 'p_value_of_removal' for feature name
 	; distance_contribution : true or string, if true will use default value of "distance_contribution" for feature name
+	; influence_weight_entropy: true or string, if true will use default value of "influence_weight_entropy" for feature name
 	; similarity_conviction : true or string, if true will use default value of "similarity_conviction" for feature name
 	; features: list of features for which to calculate conviction, will default to trainee's default features if unspecified
 	; case_ids: optional, the list of case ids in the model for which to calculate convictions
@@ -1786,6 +1837,7 @@
 						p_value_of_removal p_value_of_removal
 						distance_contribution distance_contribution
 						similarity_conviction similarity_conviction
+						influence_weight_entropy influence_weight_entropy
 						features features
 						case_ids case_ids
 						weight_feature weight_feature
@@ -2097,7 +2149,8 @@
 	; analysis_sub_model_size: optional. number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
 	; inverse_residuals_as_weights: optional, default is null, will be set to false for targeted and true for targetless
 	;			when true will forcibly compute and use inverse of residuals as feature weights
-	; use_case_weights: optional, default is false. when true will scale influence weights by each case's weight_feature weight
+	; use_case_weights: optional, default is null. when true will scale influence weights by each case's weight_feature weight. if use_case_weights isn't specified, it will
+	;                   be true if auto ablation is enabled and false otherwise
 	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
 	;
 	; returns success when completed
@@ -2108,7 +2161,7 @@
 				action_features (list)
 				k_folds 1
 				weight_feature ".case_weight"
-				use_case_weights (false)
+				use_case_weights (null)
 				inverse_residuals_as_weights (null)
 			)
 
@@ -2455,7 +2508,7 @@
 	;	"missing_value_accuracy": The number of correct predictions on cases with missing values values divided by the total number of cases with missing
 	;							  values for a specified feature.
 	;   "confusion_matrix": A matrix showing the number of predicted values of each class
-	;                       for each unique value of the predicted feature.
+	;                       for each unique value of the predicted feature. Outputs the sparse confusion matrix.
 	;
 	; robust: flag, optional. if specified will attempt to return stats that were computed with the specified robust or non-robust type.
 	; action_feature: string, optional. if specified will attempt to return stats that were computed for this specified action_feature.
@@ -2792,19 +2845,6 @@
 					errors (list "Failed to set parameters: invalid parameters specified.")
 				))
 			)
-		)
-
-
-	;set the minimum size of the model before ablatement kicks in, value must be above 0
-	#set_min_ablatement_model_size
-		(if (> min_ablatement_model_size 0)
-			(seq
-				(assign_to_entities trainee (assoc minAblatementModelSize min_ablatement_model_size))
-				(accum_to_entities trainee (assoc revision 1))
-				(call !return)
-			)
-
-			(call !return (assoc errors (list "Failed to set min ablatement size: invalid min_ablatement_model_size specified.")))
 		)
 
 
