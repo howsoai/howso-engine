@@ -45,43 +45,89 @@
 	#GetTraineePath
 	(get containedTraineePathMap trainee)
 
+	;store path to any child trainee to enable quick access to any subtrainee given its id
+	;parmeters:
+	; child_trainee: id of child trainee to add
+	; child_trainee_path: path to child trainee in the format of a list with repeating pars of [".trainee_container" child_trainee]
+	;	for each layer of hierarchy. e.g., (list ".trainee_container" first_child ".trainee_container" grand_child) for a 2 level hirearchy
 	#AddChildTraineePaths
 	(seq
 		;child_trainee_path is in the format of: (list traineeContainer child1 traineeContainer child2 etc..)
 		(accum_to_entities (assoc containedTraineePathMap (associate child_trainee child_trainee_path) ))
+
+		;filter out all the traineeContainer to leave just the trainee ids in the path, not including the child itself
+		(declare (assoc
+			direct_path (filter (lambda (!= traineeContainer (current_value))) (trunc child_trainee_path))
+			hierarchy_map (retrieve_from_entity "hierarchyMap")
+		))
+		;(acum_to_entities) opcode doesn't support nested layer accumulation of assoc keys, use (accum) on a local
+		;copy of the hierarchy map instead and then update hierarchyMap with the edited copy
+		(accum "hierarchy_map" direct_path (associate child_trainee (assoc)) )
+		(assign_to_entities (assoc hierarchyMap hierarchy_map))
 
 		;add path to child tainee to all contained entities in the path,
 		;iterating by 2s to include an instance of 'traineeContainer' for each child
 		(range
 			(lambda (let
 				(assoc index (current_index 1) )
-				(accum_to_entities (trunc child_trainee_path index) (assoc
-						containedTraineePathMap (associate child_trainee (tail child_trainee_path (- index) ))
+
+				;use the first 'index' ids in child_trainee_path to call the method
+				(call_entity (trunc child_trainee_path index) "AddChildTraineePaths" (assoc
+					child_trainee child_trainee
+					;pass in the child_trainee_path with the first 'index' ids removed
+					child_trainee_path (tail child_trainee_path (- index))
 				))
 			))
 			2 (- (size child_trainee_path) 1) 2
 		)
 	)
 
+	;Removes paths to any child trainee
+	;parameters:
+	; child_trainee: id of child trainee to remove
 	#RemoveChildTraineePaths
 	(seq
 		(declare (assoc child_trainee_path (get containedTraineePathMap child_trainee) ))
 
-
 		;child_trainee_path is in the format of: (list traineeContainer child1 traineeContainer child2 etc..)
 		(assign_to_entities (assoc containedTraineePathMap (remove containedTraineePathMap child_trainee) ))
 
-		;add path to child tainee to all contained entities in the path,
+		;find the parent of the child by grabbing the third-to-last value from the path
+		(declare (assoc
+			parent_trainee
+				(if (> (size child_trainee_path) 2)
+					(get child_trainee_path -3)
+					(null)
+				)
+		))
+
+		;remove the child_trainee from the hierarchyMap assoc based on its parent_trainee, regardless how many layers deep in it is
+		(assign_to_entities (assoc
+			hierarchyMap
+				(if parent_trainee
+					;the (remove) opcode doesn't support nested layer removal of assoc keys, so use (rewrite) instead
+					(rewrite
+						(lambda
+							(if (= parent_trainee (current_index))
+								(remove (current_value) child_trainee)
+								(current_value)
+							)
+						)
+						hierarchyMap
+					)
+
+					;else remove the child_trainee directly from this trainee
+					(remove hierarchyMap child_trainee)
+				)
+		))
+
+		;remove path to child tainee from all contained entities in the path,
 		;iterating by 2s to include an instance of 'traineeContainer' for each child
 		(range
 			(lambda (let
 				(assoc next_trainee_path (trunc child_trainee_path (current_index 1)) )
-				(assign_to_entities next_trainee_path (assoc
-						containedTraineePathMap
-							(remove
-								(retrieve_from_entity next_trainee_path "containedTraineePathMap")
-								child_trainee
-							)
+				(call_entity next_trainee_path "RemoveChildTraineePaths" (assoc
+					child_trainee child_trainee
 				))
 			))
 			2 (- (size child_trainee_path) 1) 2
@@ -89,6 +135,7 @@
 	)
 
 	#containedTraineePathMap (null)
+	#hierarchyMap (null)
 
 	;label for loading modules
 	#loadModulesEndpoint (null)
@@ -268,8 +315,11 @@
 		(assign_to_entities (assoc
 			revision 0
 
-			;assoc of child trainee -> id path to trainee (a list of ids)
+			;assoc of child trainee -> id path to trainee (a list of contained entity ids)
 			containedTraineePathMap (assoc)
+
+			;a nested assoc of child trainee ids representing the hierarchy tree for this trainee
+			hierarchyMap (assoc)
 
 			;amount of total influence weight to accumulate among nearest neighbors before stopping (for influential cases)
 			influenceWeightThreshold .99
