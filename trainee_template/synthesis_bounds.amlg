@@ -129,12 +129,21 @@
 					(append featureBoundsMap feature_bounds_map)
 				)
 		))
+
+		(assign (assoc
+			constrained_features
+				(indices (filter
+					(lambda (!= (null) (get (current_value) "constraint")))
+					feature_bounds_map
+				))
+		))
 	)
 
 	;Helper method for GenerateCase that may modify the generated value to ensures it stays within feature bounds.
 	;If the generated value is out of bounds, this method will attempt to modify that value up to 5 times by adding
 	;different amounts of noise based on desired_conviction until a valid value is achieved.
 	;If that fails, it'll randomly select a value within the range of feature bounds.
+	;returns (true) when new_feature_value may be outside constraints if the feature has a constraint defined, otherwise returns (false)
 	#!LimitGeneratedValueToFeatureBounds
 	(let
 		(assoc
@@ -153,6 +162,12 @@
 			boundary_max (last boundaries_tuple)
 			;halve the desired conviction to double the noise for every retry - https://arxiv.org/pdf/1808.10410
 			retry_desired_conviction (/ desired_conviction 2)
+			constraint (get feature_bounds_map (list feature "constraint"))
+		))
+
+		(declare (assoc
+			current_case_data_map (if contstraint (zip context_features context_values))
+			outside_constraint (false)
 		))
 
 		;if boundaries are same, set the generated value to the boundary since that is the only allowed value
@@ -185,12 +200,67 @@
 						)
 				))
 
+				(if constraint
+					(let
+						(assoc constraint_features (indices (get_all_labels constraint)) )
+
+						;only check constraint if all required features have been generated
+						(if (= 0 (size (remove (zip constraint_features) context_features)))
+							(let
+								(assoc
+									data_map (append current_case_data_map (assoc feature new_feature_value))
+								)
+								(assoc
+									parsed_code
+										(call ParseDerivedFeatureCode (assoc
+											code_string constraint
+											label_to_code
+												(lambda
+													(if (and (= (lambda label_value) 0) (contains_index data_map (lambda label_name)))
+														;pull the feature value
+														(let
+															(assoc val (get data_map (lambda label_name)) )
+															;encode datetime by converting string date time into seconds since epoch
+															(if (contains_index featureDateTimeMap label_name)
+																(if (!= (null) val)
+																	(call ConvertDateToEpoch (assoc date val feature label_name))
+																)
+																;else not a datetime, return continuous value
+																val
+															)
+														)
+
+														;else feature hasn't been generated yet
+														.nas
+													)
+												)
+										))
+								)
+
+								;considered out of bounds if contstraint is not satisfied
+								(if
+									(not
+										(call_sandboxed parsed_code
+											(assoc data_map data_map)
+											(* (size context_features) sandboxedComputeLimit) sandboxedMemoryLimit
+										)
+									)
+									(assign (assoc out_of_bounds (true) ))
+								)
+							)
+						)
+					)
+				)
+
 				(if (or out_of_bounds (and (= (null) new_feature_value) (= (false) allow_null)))
 					(seq
 						(if (< (current_index) 5)
 							(assign (assoc new_feature_value (call GenerateFeatureValue (assoc desired_conviction retry_desired_conviction))))
+
 							;else attempted to be generated 5 times, on the 6th just choose a random value in the specified range
 							(assign (assoc
+								outside_constraint (if constrained (true) (false))
+
 								new_feature_value
 									(if action_feature_is_dependent_and_continuous
 										(call !GetRandomWithinBoundariesForContinuousDependent)
@@ -229,10 +299,12 @@
 					)
 
 					;else within bounds, stop regenerating values
-					(conclude)
+					(conclude outside_constraint)
 				)
 			)
 		)
+
+		outside_constraint
 	)
 
 	;if after failing to generate a valid value and having to pick a random value within a feature range, when
