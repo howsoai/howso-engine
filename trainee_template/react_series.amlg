@@ -64,8 +64,8 @@
 
 		(declare (assoc
 			warnings (assoc)
-			output_influential_cases (get details "influential_cases")
-			output_cap (get details "categorical_action_probabilities")
+			requested_details (indices (filter (lambda (current_value)) details))
+			output_details (contains_value (values details) (true))
 		))
 
 		(declare (assoc
@@ -160,13 +160,23 @@
 						"action_features" output_features
 						"series" (map (lambda (get (current_value) "series")) series_output)
 					)
-					(if output_influential_cases
-						(assoc "influential_cases" (map (lambda (get (current_value) "influential_cases")) series_output))
+					(if output_details
+						;map over the requested details to build a list of lists for each series
+						(map
+							(lambda
+								;map over each series output (current_value) and pull the current detail (current_index 1)
+								(let
+									(assoc detail (current_index 1))
+									(map (lambda (get (current_value) detail)) series_output)
+								)
+							)
+							(zip requested_details)
+						)
 						(assoc)
 					)
-					(if output_cap
+					;aggregated_caps must be manually added because they will not be in requested_details
+					(if (and output_details (contains_value requested_details "categorical_action_probabilities"))
 						(assoc
-							"categorical_action_probabilities" (map (lambda (get (current_value) "categorical_action_probabilities")) series_output)
 							"aggregated_categorical_action_probabilities" (map (lambda (get (current_value) "aggregated_categorical_action_probabilities")) series_output)
 						)
 						(assoc)
@@ -329,14 +339,43 @@
 						derived_context_features
 					)
 				))
-			output_influential_cases (get details "influential_cases")
-			influential_cases (list)
-			all_influential_cases (list)
-			output_cap (get details "categorical_action_probabilities")
-			local_class_probabilities_map (assoc)
-			all_categorical_action_probabilities (list)
-			aggregated_categorical_action_probabilities (assoc)
 		))
+
+		;if this method is being called from batch_react_series, warnings will already have been declared in BatchReact
+		;otherwise declare warnings here if this is being called from the single react_series call
+		(if (= (null) warnings)
+			(declare (assoc warnings (assoc) ))
+		)
+
+		(declare (assoc
+			requested_details (indices (filter (lambda (current_value)) details))
+			output_details (contains_value (values details) (true))
+		))
+
+		(let
+			(assoc invalid_ts_details (indices (remove (zip requested_details) tsSupportedDetails) ) )
+
+			(if (size invalid_ts_details)
+				(accum (assoc
+					warnings
+						(associate
+							(concat
+								"The following details are not officially supported for react series: "
+								(apply "concat" (map (lambda (concat (current_value) ",") ) invalid_ts_details) )
+								". Behavior is experimental."
+							)
+						)
+				))
+			)
+		)
+
+		(if output_details
+			(declare (assoc
+				case_detail_values_map (call InitializeCaseDetailValuesMap (assoc details requested_details))
+				series_detail_values_map (map (lambda (list)) (zip requested_details))
+			))
+		)
+
 
 		(let
 			(assoc context_map (zip user_specified_context_features))
@@ -356,11 +395,6 @@
 			))
 		)
 
-		;if this method is being called from batch_react_series, warnings will already have been declared in BatchReact
-		;otherwise declare warnings here if this is being called from the single react_series call
-		(if (= (null) warnings)
-			(declare (assoc warnings (assoc) ))
-		)
 
 		;if initial features are provided, ensure there aren't any that do not appear in features. any extra features are deleted and ignored.
 		#!InitializeInitialSeriesFeatures
@@ -441,15 +475,24 @@
 				(accum (assoc series_data new_row))
 
 				;else there is a previous_result, accumulate new_row to it
-				(if (or output_influential_cases output_cap)
+				(if output_details
 					(let
 						;previous_result is a pair of [series_data, all_influential_cases]
-						(assoc accumulated_data_pair (previous_result 1) )
+						(assoc accumulated_data (previous_result 1) )
 						(assign (assoc
-							series_data (append (first accumulated_data_pair) new_row)
-							all_categorical_action_probabilities (get accumulated_data_pair 1)
-							all_influential_cases (last accumulated_data_pair)
+							series_data (append (get accumulated_data "series_data") new_row)
 						))
+						(if output_details
+							(assign (assoc
+								series_detail_values_map
+									(map
+										(lambda
+											(get accumulated_data (current_index))
+										)
+										series_detail_values_map
+									)
+							))
+						)
 					)
 
 					;else when not outputting explanations, previous_result is just the series_data itself
@@ -678,25 +721,39 @@
 
 			;return series_data so it's stored as previous_result for accumulation in the next iteration of the while loop
 			;and explanation details if requested
-			(if (or output_influential_cases output_cap)
+			(if output_details
 				(seq
-					(call !NormalizeReactSeriesInfluentialCases)
-
-					;update all_influential_cases on the last iteration so it can be output when react_series returns
-					(if (and done (size influential_cases))
-						;wrap the influential cases in a list so it's accumulated as a list of lists of assocs (a list per row)
-						(accum (assoc all_influential_cases (list influential_cases) ))
+					(if (contains_index case_detail_values_map "influential_cases")
+						(call !NormalizeReactSeriesInfluentialCases)
 					)
 
-					(if (and done (size local_class_probabilities_map))
-						(accum (assoc all_categorical_action_probabilities (list local_class_probabilities_map)))
+					;update series_detail_values_map on the last iteration so it can be output when react_series returns
+					(if done
+						(assign (assoc
+							series_detail_values_map
+								(map
+									(lambda
+										(if (size (get case_detail_values_map (current_index)))
+											(append (current_value) (list (get case_detail_values_map (current_index 1))) )
+
+											;don't append if the case detail value is empty
+											(current_value)
+										)
+									)
+									series_detail_values_map
+								)
+						))
 					)
 
-					;store into previous_result as a tuple of [series_data, all_categorical_action_probabilities, all_influential_cases]
-					(list
-						series_data
-						(append all_categorical_action_probabilities (list local_class_probabilities_map))
-						(append all_influential_cases (list influential_cases))
+					;store accumulated data into previous_result as an assoc
+					(append
+						(assoc "series_data" series_data)
+						(map
+							(lambda
+								(append (current_value) (list (get case_detail_values_map (current_index 1))) )
+							)
+							series_detail_values_map
+						)
 					)
 				)
 
@@ -818,10 +875,10 @@
 			)
 		)
 
-		(if output_cap
+		(if (and output_details (contains_index series_detail_values_map "categorical_action_probabilities"))
 			(let
 				(assoc
-					series_len (size all_categorical_action_probabilities)
+					series_len (size (get series_detail_values_map "categorical_action_probabilities"))
 					aggregated_cap_map
 						(reduce
 							(lambda
@@ -844,12 +901,12 @@
 									(current_value)
 								)
 							)
-							all_categorical_action_probabilities
+							(get series_detail_values_map "categorical_action_probabilities")
 						)
 				)
 
 				;normalize the aggregated caps by the series length to output a single assoc for the entire series
-				(assign (assoc
+				(declare (assoc
 					aggregated_categorical_action_probabilities
 						(map
 							(lambda (map
@@ -858,6 +915,11 @@
 							))
 							aggregated_cap_map
 						)
+				))
+
+				(assign (assoc
+					series_detail_values_map
+						(append series_detail_values_map (assoc "aggregated_categorical_action_probabilities" aggregated_categorical_action_probabilities))
 				))
 			)
 		)
@@ -881,15 +943,8 @@
 						;ensure features are output in the payload
 						"action_features" output_features
 					)
-					(if output_influential_cases
-						(assoc "influential_cases" all_influential_cases)
-						(assoc)
-					)
-					(if output_cap
-						(assoc
-							"categorical_action_probabilities" all_categorical_action_probabilities
-							"aggregated_categorical_action_probabilities" aggregated_categorical_action_probabilities
-						)
+					(if output_details
+						series_detail_values_map
 						(assoc)
 					)
 				)
@@ -1207,7 +1262,7 @@
 					;do not derive anything during this react
 					derived_action_features (list)
 					derived_context_features (list)
-					details (if (or output_influential_cases output_cap) details)
+					details (if output_details details)
 					extra_audit_features (append extra_audit_features derived_action_features)
 					ignore_case ignore_case
 					case_indices case_indices
@@ -1236,11 +1291,16 @@
 		;overwrite the last row in series data with the values from the updated current case
 		(assign "series_data" (list last_series_index) (unzip current_case_map features))
 
-		(if output_influential_cases
-			(accum (assoc influential_cases (get react_output "influential_cases") ))
-		)
-		(if output_cap
-			(accum (assoc local_class_probabilities_map (get react_output "categorical_action_probabilities") ))
+		(if output_details
+			(assign (assoc
+				case_detail_values_map
+					(map
+						(lambda
+							(append (current_value) (get react_output (current_index)))
+						)
+						case_detail_values_map
+					)
+			))
 		)
 
 		(if (size derived_action_features)
@@ -1265,8 +1325,7 @@
 				(if derivation_failed
 					(assign (assoc
 						series_data (trunc series_data)
-						influential_cases (list)
-						local_class_probabilities_map (assoc)
+						case_detail_values_map (call InitializeCaseDetailValuesMap (assoc details requested_details))
 						done (true)
 					))
 				)
@@ -1325,8 +1384,8 @@
 											(assign (assoc
 												done (true)
 												series_data (trunc series_data)
-												influential_cases (list)
-												local_class_probabilities_map (assoc)
+												;reset case detail values
+												case_detail_values_map (call InitializeCaseDetailValuesMap (assoc details requested_details))
 											))
 
 											;else reset series_data and initial features and progress and index, to regenerate the series from the start
@@ -1341,8 +1400,8 @@
 														last_series_index (- num_existing_series_rows 1)
 														first_generated_row (true)
 														current_case_map (assoc)
-														influential_cases (list)
-														local_class_probabilities_map (assoc)
+														;reset case detail values
+														case_detail_values_map (call InitializeCaseDetailValuesMap (assoc details requested_details))
 													))
 
 													(assign (assoc
@@ -1351,8 +1410,8 @@
 														last_series_index -1
 														first_generated_row (true)
 														current_case_map (assoc)
-														influential_cases (list)
-														local_class_probabilities_map (assoc)
+														;reset case detail values
+														case_detail_values_map (call InitializeCaseDetailValuesMap (assoc details requested_details))
 													))
 												)
 											)
