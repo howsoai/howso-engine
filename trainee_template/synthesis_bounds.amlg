@@ -129,12 +129,168 @@
 					(append featureBoundsMap feature_bounds_map)
 				)
 		))
+
+		(assign (assoc
+			constrained_features
+				(indices (filter
+					(lambda (!= (null) (get (current_value) "constraint")))
+					feature_bounds_map
+				))
+		))
 	)
 
-	;Helper method for GenerateCase that may modify the generated value to ensures it stays within feature bounds.
+	;Helper method for synthesis to verify all the constrained feature values are within their constraints
+	;verification is done in the same order as action_features and if it fails, will output a (null) for the generated case
+	#!VerifyConstrainedFeatureValues
+	(let
+		(assoc
+			generated_case_map (zip context_features context_values)
+			residuals_tuples_map (zip rand_ordered_features threshold_feature_residuals)
+		)
+
+		(map
+			(lambda (let
+				(assoc feature (current_value 1) )
+
+				;don't process any remaining constrained features if any constraint failed
+				(if constraint_function_failed (conclude))
+
+				(declare (assoc
+					new_feature_value (get generated_case_map feature)
+					action_value (get generated_case_map feature)
+					feature_residual (get residuals_tuples_map (list feature 0))
+					;if this is an ordinal feature, force it to use global destribution of ordinals for retries
+					ordinal_residual .infinity
+				))
+				(if (get nominalsMap feature)
+					(if (call !ConstrainNominalFeature)
+						(assign (assoc constraint_function_failed (true)))
+					)
+
+					(if (call !LimitGeneratedValueToFeatureBounds)
+						(assign (assoc constraint_function_failed (true)))
+					)
+				)
+
+				(if (!= new_feature_value action_value)
+					(seq
+						(accum (assoc generated_case_map (associate feature new_feature_value) ))
+						(assign (assoc context_values (unzip generated_case_map context_features) ))
+					)
+				)
+			))
+			;constraint features are checked in the order of action_features
+			(filter (lambda (contains_value constrained_features (current_value))) action_features)
+		)
+
+		(if constraint_function_failed
+			;fail to synth case by outputing null if there no check for uniqueness
+			(if (not generate_novel_case)
+				(conclude (null))
+			)
+		)
+	)
+
+	;Helper method for GenerateCase that may modify a generated nominal value to ensure it stays within its constraints
+	;If the generated value is not within its constraint, this method will attempt to modify that value up to 5 times by
+	;reselecting values from the available distribution
+	;returns (true) when new_feature_value may be outside constraints, otherwise returns (false)
+	#!ConstrainNominalFeature
+	(let
+		(assoc
+			constraint (get feature_bounds_map (list feature "constraint"))
+		)
+		;only check constraint if all features referenced in the constraint have been generated
+		(if (!= 0 (size (remove (get_all_labels (parse constraint)) (append context_features feature))))
+			(conclude (false))
+		)
+		(declare (assoc
+			current_case_data_map (zip context_features context_values)
+			outside_constraint (false)
+			out_of_bounds (false)
+			data_map (assoc)
+			retry_desired_conviction (/ desired_conviction 2)
+			parsed_code (null)
+			allow_null (get feature_bounds_map (list feature "allow_null"))
+		))
+
+		(while (< (current_index) 6)
+			;if it's a null and nulls are allowed, don't check constraint
+			(if (and allow_null (= (null) new_feature_value))
+				(conclude (conclude (false)))
+			)
+
+			(assign (assoc
+				data_map (append current_case_data_map (associate feature new_feature_value))
+				out_of_bounds (false)
+			))
+
+			(assign (assoc
+				parsed_code
+					(call ParseDerivedFeatureCode (assoc
+						code_string constraint
+						label_to_code
+							(lambda
+								(if (and (= (lambda label_value) 0) (contains_index data_map (lambda label_name)))
+									;pull the feature value
+									(get data_map (lambda label_name))
+
+									;else feature hasn't been generated yet
+									.nas
+								)
+							)
+					))
+			))
+
+			;considered out of bounds if constraint is not satisfied
+			(if
+				(not
+					(call_sandboxed parsed_code
+						(assoc data_map data_map)
+						(* (size context_features) sandboxedComputeLimit) sandboxedMemoryLimit
+					)
+				)
+				(assign (assoc out_of_bounds (true) ))
+			)
+
+			(if out_of_bounds
+				(seq
+					(if (< (current_index) 5)
+						(assign (assoc
+							new_feature_value
+								(call GenerateFeatureValue (assoc
+									desired_conviction retry_desired_conviction
+									feature_is_nominal (true)
+								))
+						))
+
+						;else attempted to be generated 5 times, on the 6th just stop
+						(assign (assoc
+							outside_constraint (true)
+							new_feature_value
+								(call GenerateFeatureValue (assoc
+									desired_conviction retry_desired_conviction
+									feature_is_nominal (true)
+								))
+						))
+					)
+					;halve the desired conviction to double the noise for every retry
+					(assign (assoc retry_desired_conviction (/ retry_desired_conviction 2)))
+				)
+
+				;else within constraint, stop regenerating values
+				(conclude outside_constraint)
+			)
+		)
+
+		outside_constraint
+	)
+
+	;Helper method for GenerateCase that may modify the generated value to ensures it stays within feature bounds and constraints.
 	;If the generated value is out of bounds, this method will attempt to modify that value up to 5 times by adding
 	;different amounts of noise based on desired_conviction until a valid value is achieved.
 	;If that fails, it'll randomly select a value within the range of feature bounds.
+	;returns (true) when new_feature_value may be outside constraints if the feature has a constraint defined, otherwise returns (false)
 	#!LimitGeneratedValueToFeatureBounds
 	(let
 		(assoc
@@ -153,7 +309,20 @@
 			boundary_max (last boundaries_tuple)
 			;halve the desired conviction to double the noise for every retry - https://arxiv.org/pdf/1808.10410
 			retry_desired_conviction (/ desired_conviction 2)
+			constraint (get feature_bounds_map (list feature "constraint"))
 		))
+
+		(declare (assoc
+			current_case_data_map (if constraint (zip context_features context_values))
+			outside_constraint (false)
+		))
+
+		(if constraint
+			;only check constraint if all features referenced in the constraint have been generated
+			(if (!= 0 (size (remove (get_all_labels (parse constraint)) (append context_features feature))))
+				(assign (assoc constraint (null) ))
+			)
+		)
 
 		;if boundaries are same, set the generated value to the boundary since that is the only allowed value
 		(if (and (!= (null) boundary_min) (= boundary_min boundary_max))
@@ -185,12 +354,64 @@
 						)
 				))
 
+				(if constraint
+					;if it's a null and nulls are allowed, don't check constraint
+					(if (or (not allow_null) (!= (null) new_feature_value))
+						(let
+							(assoc
+								data_map (append current_case_data_map (associate feature new_feature_value))
+							)
+
+							(declare (assoc
+								parsed_code
+									(call ParseDerivedFeatureCode (assoc
+										code_string constraint
+										label_to_code
+											(lambda
+												(if (and (= (lambda label_value) 0) (contains_index data_map (lambda label_name)))
+													;pull the feature value
+													(let
+														(assoc val (get data_map (lambda label_name)) )
+														;encode datetime by converting string date time into seconds since epoch
+														(if (contains_index featureDateTimeMap label_name)
+															(if (!= (null) val)
+																(call ConvertDateToEpoch (assoc date val feature label_name))
+															)
+															;else not a datetime, return continuous value
+															val
+														)
+													)
+
+													;else feature hasn't been generated yet
+													.nas
+												)
+											)
+									))
+							))
+
+							;considered out of bounds if constraint is not satisfied
+							(if
+								(not
+									(call_sandboxed parsed_code
+										(assoc data_map data_map)
+										(* (size context_features) sandboxedComputeLimit) sandboxedMemoryLimit
+									)
+								)
+								(assign (assoc out_of_bounds (true) ))
+							)
+						)
+					)
+				)
+
 				(if (or out_of_bounds (and (= (null) new_feature_value) (= (false) allow_null)))
 					(seq
 						(if (< (current_index) 5)
 							(assign (assoc new_feature_value (call GenerateFeatureValue (assoc desired_conviction retry_desired_conviction))))
+
 							;else attempted to be generated 5 times, on the 6th just choose a random value in the specified range
 							(assign (assoc
+								outside_constraint (if constraint (true) (false))
+
 								new_feature_value
 									(if action_feature_is_dependent_and_continuous
 										(call !GetRandomWithinBoundariesForContinuousDependent)
@@ -224,15 +445,23 @@
 									)
 							))
 						)
+
+						;ordinal features need to snap to nearest value from the allowed ordinal values list
+						(if (contains_index ordinal_features_map feature)
+							(call !GenerateAllowedOrdinalFeatureValue)
+						)
+
 						;halve the desired conviction to double the noise for every retry
 						(assign (assoc retry_desired_conviction (/ retry_desired_conviction 2)))
 					)
 
 					;else within bounds, stop regenerating values
-					(conclude)
+					(conclude outside_constraint)
 				)
 			)
 		)
+
+		outside_constraint
 	)
 
 	;if after failing to generate a valid value and having to pick a random value within a feature range, when
