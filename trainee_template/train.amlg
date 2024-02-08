@@ -411,8 +411,8 @@
 					)
 				)
 
-				;update count of nulls for all features after training
-				(call !UpdateNullCounts)
+				;update has_nulls flags for all features after training by updating all false has_nulls in featureNullRatiosMap with null
+				(call !ClearHasNullFlags)
 
 				;model has changed so clear out these cached value
 				#ClearCachedCountsAndEntropies
@@ -451,9 +451,6 @@
 			)
 		)
 
-		(if (size nominalsMap)
-			(call UpdateNominalClassCounts)
-		)
 		;auto populate derived features if necessary
 		(if (> (size derived_features) 0)
 			(call DeriveTrainFeatures (assoc
@@ -681,158 +678,27 @@
 		))
 	)
 
-	;Helper method to update current nominal class counts for the whole model
-	;no parameters, it iterates over all the known nominals in nominalsMap and for each feature stores the count for each class
-	#UpdateNominalClassCounts
-	(let
-		(assoc
-			;store all the unique classes for each nominal feature
-			nominal_class_values_map
-				(map
-					(lambda
-						(indices
-							(compute_on_contained_entities (list
-								(query_value_masses (current_index 1) (null) (contains_index numericNominalFeaturesMap (current_index 1)))
-							))
+	Helper method for training, Sets all has_nulls flags that were false to null
+	#!ClearHasNullFlags
+	(accum_to_entities (assoc
+		featureNullRatiosMap
+			(map
+				(lambda (let
+					(assoc feature (current_index 1))
+					(if (current_value)
+						(set
+							(current_value)
+							"has_nulls"
+							;leave true as true, otherwise set to null
+							(if (get (current_value) "has_nulls") (true))
 						)
+
+						;else create the has_nulls key with a null
+						(assoc "has_nulls" (null))
 					)
-					nominalsMap
-				)
-		)
-
-		;only update model if class counts are different
-		(if (!= (map (lambda (size (current_value))) nominal_class_values_map) nominalsMap)
-			(seq
-				(accum_to_entities (assoc
-					nominalsMap
-						(map
-							(lambda
-								;will be the count of classes if the feature is in the map of nominal features
-								(size (get nominal_class_values_map (current_index)))
-							)
-							nominalsMap
-						)
 				))
-
-				;update all existing featureDomainAttributes with updated nominal class counts
-				(assign_to_entities (assoc
-					hyperparameterMetadataMap
-						(rewrite
-							(lambda
-								;if this is the featureDomainAttributes assoc
-								(if (and (= "featureDomainAttributes" (current_index)) (= (assoc) (get_type (current_value))) )
-									(let
-										(assoc previous_hp_feature_limits_map (current_value 1) )
-
-										;smartly overwrite previous values with the newly computed ones
-										(map
-											(lambda (let
-												(assoc
-													previous_value (first (current_value 1))
-													new_value (last (current_value 1))
-												)
-												;not a nominal feature, don't change
-												(if (= (null) new_value)
-													previous_value
-
-													;else overwrite the value with the new one
-													new_value
-												)
-											))
-											previous_hp_feature_limits_map
-											nominalsMap
-										)
-									)
-
-									(current_value)
-								)
-							)
-							(retrieve_from_entity "hyperparameterMetadataMap")
-						)
-					defaultHyperparameters
-						(rewrite
-							(lambda
-								;if this is the featureDomainAttributes assoc
-								(if (and (= "featureDomainAttributes" (current_index)) (= (assoc) (get_type (current_value))) )
-									(let
-										(assoc previous_hp_feature_limits_map (current_value 1) )
-
-										;smartly overwrite previous values with the newly computed ones
-										(map
-											(lambda (let
-												(assoc
-													previous_value (first (current_value 1))
-													new_value (last (current_value 1))
-												)
-												;not a nominal feature, don't change
-												(if (= (null) new_value)
-													previous_value
-
-													;else overwrite the value with the new one
-													new_value
-												)
-											))
-											previous_hp_feature_limits_map
-											nominalsMap
-										)
-									)
-
-									(current_value)
-								)
-							)
-							(retrieve_from_entity "defaultHyperparameters")
-						)
-				))
+				(append (zip features) featureNullRatiosMap)
 			)
-		)
-	)
+	))
 
-	;Helper method to update current nominal counts for the specified feature
-	;store the count for each class for the specified feature into nominalsMap
-	;parameters:
-	; feature: nominal feature for which to store class counts
-	#UpdateNominalClassCountsForFeature
-	(let
-		;store all the unique classes for this nominal feature
-		(assoc
-			nominal_class_values
-				(if (contains_index nominalsMap feature)
-					(indices
-						(compute_on_contained_entities (list
-							(query_value_masses feature (null) (contains_index numericNominalFeaturesMap feature))
-						))
-					)
-					;else not nominal, so it's an empty list
-					(list)
-				)
-		)
-
-		;only update model if the class count changed
-		(if (!= (size nominal_class_values) (get nominalsMap feature) )
-			(seq
-				(accum_to_entities (assoc nominalsMap (associate feature (size nominal_class_values) ) ))
-
-				;update all existing featureDomainAttributes with updated nominal class counts for this feature
-				(assign_to_entities (assoc
-					hyperparameterMetadataMap
-						(rewrite
-							(lambda
-								(if (and (= "featureDomainAttributes" (current_index)) (= (assoc) (get_type (current_value))) )
-									(let
-										(assoc hp_null_deviations_map (current_value 1) )
-										(if (= (list) (get_type (get hp_null_deviations_map feature)) )
-											(set hp_null_deviations_map (list feature 0) (get nominalsMap feature))
-											(set hp_null_deviations_map feature (get nominalsMap feature))
-										)
-									)
-
-									(current_value)
-								)
-							)
-							(retrieve_from_entity "hyperparameterMetadataMap")
-						)
-				))
-			)
-		)
-	)
 )
