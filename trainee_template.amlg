@@ -42,131 +42,6 @@
 	(assoc "!" (null) "#" (null) "^" (null))
 
 
-	;outputs a pair of [trainee_path:list, is_contained_locally:boolean]
-	#GetTraineePath
-	(if (contains_index containedTraineePathMap trainee)
-		(list
-			(get containedTraineePathMap trainee)
-			(get containedTraineeLocationMap trainee)
-		)
-	)
-
-	;store path to any child trainee to enable quick access to any subtrainee given its id
-	;parmeters:
-	; child_trainee: id of child trainee to add
-	; parent_trainee: id of parent trainee under which to add child
-	; child_trainee_path: path to child trainee in the format of a list with repeating pars of [".trainee_container" child_trainee]
-	;	for each layer of hierarchy. e.g., (list ".trainee_container" first_child ".trainee_container" grand_child) for a 2 level hirearchy
-	#AddChildTraineePaths
-	(seq
-		;child_trainee_path is in the format of: (list traineeContainer child1 traineeContainer child2 etc..)
-		(accum_to_entities (assoc
-			containedTraineePathMap (associate child_trainee child_trainee_path)
-			;for now, all subtrainees are contained within this trainee
-			containedTraineeLocationMap (associate child_trainee (true) )
-		))
-
-		;filter out all the traineeContainer to leave just the trainee ids in the path, not including the child itself
-		(declare (assoc
-			direct_path (filter (lambda (!= traineeContainer (current_value))) (trunc child_trainee_path))
-			hierarchy_map (retrieve_from_entity "hierarchyMap")
-		))
-		;(acum_to_entities) opcode doesn't support nested layer accumulation of assoc keys, use (accum) on a local
-		;copy of the hierarchy map instead and then update hierarchyMap with the edited copy
-		(accum "hierarchy_map" direct_path (associate child_trainee (assoc)) )
-		(assign_to_entities (assoc hierarchyMap hierarchy_map))
-
-		;this is the parent of the child, set the parentId for the child
-		(if (= 0 (size direct_path))
-			(assign_to_entities (list traineeContainer child_trainee) (assoc parentId parent_trainee))
-		)
-
-		;add path to child tainee to all contained entities in the path,
-		;iterating by 2s to include an instance of 'traineeContainer' for each child
-		(range
-			(lambda (let
-				(assoc index (current_index 1) )
-
-				;use the first 'index' ids in child_trainee_path to call the method
-				(call_entity (trunc child_trainee_path index) "AddChildTraineePaths" (assoc
-					child_trainee child_trainee
-					;pass in the child_trainee_path with the first 'index' ids removed
-					child_trainee_path (tail child_trainee_path (- index))
-				))
-			))
-			2 (- (size child_trainee_path) 1) 2
-		)
-	)
-
-	;Removes paths to any child trainee
-	;parameters:
-	; child_trainee: id of child trainee to remove
-	#RemoveChildTraineePaths
-	(seq
-		(declare (assoc child_trainee_path (get containedTraineePathMap child_trainee) ))
-
-		;child_trainee_path is in the format of: (list traineeContainer child1 traineeContainer child2 etc..)
-		(assign_to_entities (assoc
-			containedTraineePathMap (remove containedTraineePathMap child_trainee)
-			containedTraineeLocationMap (remove containedTraineeLocationMap child_trainee)
-		))
-
-		;find the parent of the child by grabbing the third-to-last value from the path
-		(declare (assoc
-			parent_trainee
-				(if (> (size child_trainee_path) 2)
-					(get child_trainee_path -3)
-					(null)
-				)
-		))
-
-		;remove the child_trainee from the hierarchyMap assoc based on its parent_trainee, regardless how many layers deep in it is
-		(assign_to_entities (assoc
-			hierarchyMap
-				(if parent_trainee
-					;the (remove) opcode doesn't support nested layer removal of assoc keys, so use (rewrite) instead
-					(rewrite
-						(lambda
-							(if (= parent_trainee (current_index))
-								(remove (current_value) child_trainee)
-								(current_value)
-							)
-						)
-						hierarchyMap
-					)
-
-					;else remove the child_trainee directly from this trainee
-					(remove hierarchyMap child_trainee)
-				)
-		))
-
-		;remove path to child tainee from all contained entities in the path,
-		;iterating by 2s to include an instance of 'traineeContainer' for each child
-		(range
-			(lambda (let
-				(assoc next_trainee_path (trunc child_trainee_path (current_index 1)) )
-				(call_entity next_trainee_path "RemoveChildTraineePaths" (assoc
-					child_trainee child_trainee
-				))
-			))
-			2 (- (size child_trainee_path) 1) 2
-		)
-	)
-
-	;assoc is in the format of: trainee_id ->  (list traineeContainer child1 traineeContainer child2 etc..)
-	#containedTraineePathMap (null)
-
-	;assoc representing the hierarchy for this trainee, leaf nodes are empty assocs
-	#hierarchyMap (null)
-
-	;assoc of trainee_id -> is_internal boolean
-	; true means the trainee is a contained subtrainee
-	; false means it is in the hierarchy but not a contained trainee and communication with it requires routing outside of this trainee
-	#containedTraineeLocationMap (null)
-
-	;id of parent trainee if this trainee is a subtrainee in a hierarchy
-	#parentId (null)
-
 	;label for loading modules
 	#loadModulesEndpoint (null)
 
@@ -276,6 +151,10 @@
 	#supportedPredictionStats (list "mae" "mda" "contribution" "confusion_matrix" "mda_permutation" "r2" "rmse" "spearman_coeff" "precision" "recall" "accuracy" "missing_value_accuracy")
 	#sandboxedComputeLimit (null)
 	#sandboxedMemoryLimit (null)
+	#containedTraineePathMap (null)
+	#hierarchyMap (null)
+	#childTraineeIsContainedMap (null)
+	#parentId (null)
 
 	;list of modules for trainee template
 	#!traineeTemplateModules
@@ -301,6 +180,7 @@
 		"generate_features"
 		"get_cases"
 		"get_sessions"
+		"hierarchy"
 		"hyperparameters"
 		"impute"
 		"influences"
@@ -347,14 +227,18 @@
 		(assign_to_entities (assoc
 			revision 0
 
-			;assoc of child trainee -> id path to trainee (a list of contained entity ids)
+			;assoc is in the format of: trainee_id ->  (list traineeContainer child1 traineeContainer child2 etc..)
 			containedTraineePathMap (assoc)
 
-			;a nested assoc of child trainee ids representing the hierarchy tree for this trainee
+			;assoc representing the hierarchy for this trainee, leaf nodes are empty assocs
 			hierarchyMap (assoc)
 
-			containedTraineeLocationMap (assoc)
+			;assoc of trainee_id -> is_internal boolean
+			; true means the trainee is a contained subtrainee
+			; false means it is in the hierarchy but not a contained trainee and communication with it requires routing outside of this trainee
+			childTraineeIsContainedMap (assoc)
 
+			;id of parent trainee if this trainee is a subtrainee in a hierarchy
 			parentId (null)
 
 			;amount of total influence weight to accumulate among nearest neighbors before stopping (for influential cases)
