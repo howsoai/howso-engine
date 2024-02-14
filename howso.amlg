@@ -3056,11 +3056,12 @@
 		)
 
 
-	;moves all cases that match the specified conditions from trainee to the target trainee
-	;removes all cases that match the specified conditions if target trainee is not specified
+	;moves all cases that match the specified conditions from trainee (or child_trainee if specified) to the target_trainee
+	;removes all cases that match the specified conditions if target_trainee is not specified
 	;parameters:
-	; target_trainee : the trainee to move cases to. if not specified will remove cases
-	; case_indices : a list of session id and training index tuples that specify which cases are to be moved
+	; child_trainee: optional, child trainee from which to move cases.  If not specified, moves cases from the trainee itself.
+	; target_trainee: the trainee to move cases to. if not specified will remove cases
+	; case_indices: a list of session id and training index tuples that specify which cases are to be moved
 	; precision: flag, whether to query for 'exact' matches; if set to 'similar' will move num_cases with the most similar values. Ignored if case_indices is specified.
 	; condition: assoc of feature->value(s) (no value = must have feature, one value = must equal exactly the value, two values = inclusive between). Ignored if case_indices is specified.
 	; condition_session: optional, if specified, ignores condition and instead operates on all cases that were trained with this session id. Ignored if case_indices is specified.
@@ -3083,15 +3084,40 @@
 				distribute_weight_feature (null)
 			)
 
-			;if moving cases, make sure target trainee entity exists, otherwise return 0
+			;if moving cases, make sure target trainee entity exists, otherwise return error
 			(if (and
 					(!= target_trainee (null))
-					(not (contains_entity target_trainee))
+					(or
+						(not (contains_entity target_trainee))
+						(= (null) (call_entity trainee "GetTraineePath" (assoc trainee target_trainee)))
+					)
 				)
 				(conclude
 					(call !return (assoc
 						errors (list (concat "Failed to move cases: target trainee " target_trainee " does not exist."))
 					))
+				)
+			)
+
+			(if child_trainee
+				(let
+					(assoc child_trainee_path_tuple (call_entity trainee "GetTraineePath" (assoc trainee child_trainee)) )
+					(if (or
+							(= (null) (first child_trainee_path_tuple))
+							(= child_trainee target_trainee)
+						)
+						(conclude (conclude
+							(call !return (assoc errors (list "Invalid child_trainee specified.")))
+						))
+					)
+					(if (not (last child_trainee_path_tuple))
+						(conclude (conclude
+							(call !return (assoc errors (list "child_trainee is stored independently of this trainee." )))
+						))
+					)
+
+					;overwrite trainee with the full path id of the child
+					(assign (assoc trainee (append trainee (first child_trainee_path_tuple)) ))
 				)
 			)
 
@@ -3112,6 +3138,16 @@
 					)
 			))
 
+			(if target_trainee
+				(let
+					(assoc target_path_tuple (call_entity trainee "GetTraineePath" (assoc trainee target_trainee)) )
+					;if target_trainee is a subtrainee of trainee, overwite target_trainee with its full id path
+					(if (last target_path_tuple)
+						(assign (assoc target_trainee (append trainee (first target_path_tuple)) ))
+					)
+				)
+			)
+
 			;move or remove cases matching the criteria
 			(if (!= target_trainee (null))
 				;iterate over each case and move it from the trainee into target_trainee
@@ -3121,10 +3157,10 @@
 						(lambda
 							;if target already has an entity with this exact id, move it into the target without maintaining original id
 							(if (contains_entity target_trainee (current_value))
-								(move_entities (list trainee (current_value 1)) target_trainee)
+								(move_entities (append trainee (current_value)) target_trainee)
 
 								;else move the entity to the target maintaining its id
-								(move_entities (list trainee (current_value 1)) (list target_trainee (current_value 1)))
+								(move_entities (append trainee (current_value)) (append target_trainee (current_value)))
 							)
 						 )
 						cases_to_move
@@ -3135,7 +3171,7 @@
 						(lambda (let
 							(assoc
 								;grab all the case data as an assoc
-								case_map (get_all_labels (retrieve_entity_root (list trainee (current_value 2)) 1 ))
+								case_map (get_all_labels (retrieve_entity_root (append trainee (current_value 1)) 1 ))
 							)
 							(declare (assoc
 								;keep all features from the case except for 'sessions' since that'll have to be recomputed
