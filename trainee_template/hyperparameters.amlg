@@ -59,10 +59,6 @@
 						(assoc)
 					)
 					(if use_deviations
-						(assoc "useDeviations" (true))
-						(assoc)
-					)
-					(if feature_deviations
 						(assoc
 							"featureDeviations"
 								;append null_deviations to feature_deviations
@@ -86,10 +82,24 @@
 								)
 						)
 
+						;if not using deviations but provided null uncertainties, use those as deviations
+						(size null_deviations)
+						(assoc
+							"featureDeviations"
+								;prepend a null to represent the undefined feature deviation
+								(map (lambda (append (list (null)) (current_value))) null_deviations)
+						)
+
 						(assoc)
 					)
 					(if (size ordinal_feature_deviations)
 						(assoc "featureOrdinalDeviations" ordinal_feature_deviations)
+						(assoc)
+					)
+
+					;always store a copy of feature deviations during analyze flow, to be removed once analyze is done
+					(if feature_deviations
+						(assoc "analyzeFeatureDeviations" feature_deviations)
 						(assoc)
 					)
 
@@ -151,12 +161,17 @@
 			)
 		)
 
+		(declare (assoc deviations (get baseline_hyperparameter_map "analyzeFeatureDeviations") ))
+
+		;remove the analyze-specific deviations map from hyperparameters
+		(if deviations
+			(assign (assoc baseline_hyperparameter_map (remove baseline_hyperparameter_map "analyzeFeatureDeviations") ))
+		)
+
 		(assign_to_entities (assoc
 			hyperparameterMetadataMap
 				(set hyperparameterMetadataMap (list action_feature context_features_key robust_mode weight_feature) baseline_hyperparameter_map)
 		))
-
-		(declare (assoc deviations (get baseline_hyperparameter_map "featureDeviations") ))
 
 		;if deviations were computed, store them in residualsMap
 		(if deviations
@@ -294,17 +309,33 @@
 							(assoc deviations_map (get (current_value 1) "featureDeviations") )
 
 							(map
-								(lambda
-									(assign (assoc
-										deviations_map
-											(set
-												deviations_map
-												(current_index 1)
-												;max of user specified and stored deviation in the map
-												(max (current_value 1) (get deviations_map (current_index 1)) )
+								(lambda (let
+									(assoc
+										deviation (get deviations_map (current_index 1))
+										user_error_value (current_value 1)
+										feature (current_index 1)
+									)
+
+									(declare (assoc
+										deviation_value
+											;set to max of user specified error and stored deviation in the map
+											(if (!= (null) deviation)
+												;if deviation is a tuple, update the first value
+												(if (= (list) (get_type deviation))
+													(set deviation 0 (max user_error_value (first deviation)) )
+													;else just update the value itself
+													(max user_error_value deviation)
+												)
 											)
 									))
-								)
+
+									;if deviation is null, that means we aren't using deviations so keep it as a null
+									(if (!= (null) deviation_value)
+										(assign (assoc
+											deviations_map (set deviations_map feature deviation_value)
+										))
+									)
+								))
 								userSpecifiedFeatureErrorsMap
 							)
 
@@ -343,7 +374,11 @@
 							;else no weights, assign all active features weight 1
 							(assign (assoc
 								feature_weights_map
-									(append (zip (append defaultFeatures feature) 1) inactiveFeaturesMap)
+									(append
+										(zip (append trainedFeatures feature) 1)
+										;prevent appending null to an assoc
+										(if inactiveFeaturesMap inactiveFeaturesMap (assoc))
+									)
 							))
 						)
 
@@ -373,7 +408,7 @@
 			mode "robust"
 			weight_feature ".none"
 		)
-		
+
 		(if (= 0 (size hyperparameterParamPaths))
 			(seq
 				(if (and (not autoAnalyzeEnabled ) (>= (call GetNumTrainingCases) 2))
@@ -399,7 +434,7 @@
 		(declare (assoc
 			context_key
 				(if (or (= context_features (null)) (= context_features (list)))
-					defaultFeaturesContextKey
+					trainedFeaturesContextKey
 
 					;else context_features were passed
 					(call BuildContextFeaturesKey (assoc context_features context_features))
@@ -532,12 +567,18 @@
 							hyperparameterMetadataMap
 
 							;else one of these parameters were specified
-							(call GetHyperparameters (assoc
-								feature action_feature
-								context_features context_features
-								mode mode
-								weight_feature weight_feature
-							))
+							(call GetHyperparameters
+								(append
+									(assoc
+										feature action_feature
+										context_features context_features
+									)
+									;don't pass mode or weight_feature in if they weren't specified,
+									;allowing GetHyperparameters to use its defaults
+									(if mode (assoc mode mode) (assoc))
+									(if weight_feature (assoc weight_feature weight_feature) (assoc))
+								)
+							)
 						)
 
 					"default_hyperparameter_map" defaultHyperparameters
@@ -687,7 +728,6 @@
 					"p" 0.1
 					"dt" -1
 					"featureWeights" (null)
-					"useDeviations" (false)
 					"featureDeviations" (null)
 					"allFeatureResidualsCached" (false)
 				)
@@ -764,7 +804,7 @@
 		conviction_upper_threshold autoAblationConvictionUpperThreshold
 		conviction_lower_threshold autoAblationConvictionLowerThreshold
 	)
-	
+
 	;sets the model to auto-ablate by tracking its size and training certain cases as weights
 	;parameters
 	; auto_ablation_enabled: flag, default is false. when true, any enabled ablation techniques will be run at during training.

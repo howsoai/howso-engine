@@ -129,12 +129,168 @@
 					(append featureBoundsMap feature_bounds_map)
 				)
 		))
+
+		(assign (assoc
+			constrained_features
+				(indices (filter
+					(lambda (!= (null) (get (current_value) "constraint")))
+					feature_bounds_map
+				))
+		))
 	)
 
-	;Helper method for GenerateCase that may modify the generated value to ensures it stays within feature bounds.
+	;Helper method for synthesis to verify all the constrained feature values are within their constraints
+	;verification is done in the same order as action_features and if it fails, will output a (null) for the generated case
+	#!VerifyConstrainedFeatureValues
+	(let
+		(assoc
+			generated_case_map (zip context_features context_values)
+			residuals_tuples_map (zip rand_ordered_features threshold_feature_residuals)
+		)
+
+		(map
+			(lambda (let
+				(assoc feature (current_value 1) )
+
+				;don't process any remaining constrained features if any constraint failed
+				(if constraint_function_failed (conclude))
+
+				(declare (assoc
+					new_feature_value (get generated_case_map feature)
+					action_value (get generated_case_map feature)
+					feature_residual (get residuals_tuples_map (list feature 0))
+					;if this is an ordinal feature, force it to use global destribution of ordinals for retries
+					ordinal_residual .infinity
+				))
+				(if (get nominalsMap feature)
+					(if (call !ConstrainNominalFeature)
+						(assign (assoc constraint_function_failed (true)))
+					)
+
+					(if (call !LimitGeneratedValueToFeatureBounds)
+						(assign (assoc constraint_function_failed (true)))
+					)
+				)
+
+				(if (!= new_feature_value action_value)
+					(seq
+						(accum (assoc generated_case_map (associate feature new_feature_value) ))
+						(assign (assoc context_values (unzip generated_case_map context_features) ))
+					)
+				)
+			))
+			;constraint features are checked in the order of action_features
+			(filter (lambda (contains_value constrained_features (current_value))) action_features)
+		)
+
+		(if constraint_function_failed
+			;fail to synth case by outputing null if there no check for uniqueness
+			(if (not generate_novel_case)
+				(conclude (null))
+			)
+		)
+	)
+
+	;Helper method for GenerateCase that may modify a generated nominal value to ensure it stays within its constraints
+	;If the generated value is not within its constraint, this method will attempt to modify that value up to 5 times by
+	;reselecting values from the available distribution
+	;returns (true) when new_feature_value may be outside constraints, otherwise returns (false)
+	#!ConstrainNominalFeature
+	(let
+		(assoc
+			constraint (get feature_bounds_map (list feature "constraint"))
+		)
+		;only check constraint if all features referenced in the constraint have been generated
+		(if (!= 0 (size (remove (get_all_labels (parse constraint)) (append context_features feature))))
+			(conclude (false))
+		)
+		(declare (assoc
+			current_case_data_map (zip context_features context_values)
+			outside_constraint (false)
+			out_of_bounds (false)
+			data_map (assoc)
+			retry_desired_conviction (/ desired_conviction 2)
+			parsed_code (null)
+			allow_null (get feature_bounds_map (list feature "allow_null"))
+		))
+
+		(while (< (current_index) 6)
+			;if it's a null and nulls are allowed, don't check constraint
+			(if (and allow_null (= (null) new_feature_value))
+				(conclude (conclude (false)))
+			)
+
+			(assign (assoc
+				data_map (append current_case_data_map (associate feature new_feature_value))
+				out_of_bounds (false)
+			))
+
+			(assign (assoc
+				parsed_code
+					(call ParseDerivedFeatureCode (assoc
+						code_string constraint
+						label_to_code
+							(lambda
+								(if (and (= (lambda label_value) 0) (contains_index data_map (lambda label_name)))
+									;pull the feature value
+									(get data_map (lambda label_name))
+
+									;else feature hasn't been generated yet
+									.nas
+								)
+							)
+					))
+			))
+
+			;considered out of bounds if constraint is not satisfied
+			(if
+				(not
+					(call_sandboxed parsed_code
+						(assoc data_map data_map)
+						(* (size context_features) sandboxedComputeLimit) sandboxedMemoryLimit
+					)
+				)
+				(assign (assoc out_of_bounds (true) ))
+			)
+
+			(if out_of_bounds
+				(seq
+					(if (< (current_index) 5)
+						(assign (assoc
+							new_feature_value
+								(call GenerateFeatureValue (assoc
+									desired_conviction retry_desired_conviction
+									feature_is_nominal (true)
+								))
+						))
+
+						;else attempted to be generated 5 times, on the 6th just stop
+						(assign (assoc
+							outside_constraint (true)
+							new_feature_value
+								(call GenerateFeatureValue (assoc
+									desired_conviction retry_desired_conviction
+									feature_is_nominal (true)
+								))
+						))
+					)
+					;halve the desired conviction to double the noise for every retry
+					(assign (assoc retry_desired_conviction (/ retry_desired_conviction 2)))
+				)
+
+				;else within constraint, stop regenerating values
+				(conclude outside_constraint)
+			)
+		)
+
+		outside_constraint
+	)
+
+	;Helper method for GenerateCase that may modify the generated value to ensures it stays within feature bounds and constraints.
 	;If the generated value is out of bounds, this method will attempt to modify that value up to 5 times by adding
 	;different amounts of noise based on desired_conviction until a valid value is achieved.
 	;If that fails, it'll randomly select a value within the range of feature bounds.
+	;returns (true) when new_feature_value may be outside constraints if the feature has a constraint defined, otherwise returns (false)
 	#!LimitGeneratedValueToFeatureBounds
 	(let
 		(assoc
@@ -153,7 +309,20 @@
 			boundary_max (last boundaries_tuple)
 			;halve the desired conviction to double the noise for every retry - https://arxiv.org/pdf/1808.10410
 			retry_desired_conviction (/ desired_conviction 2)
+			constraint (get feature_bounds_map (list feature "constraint"))
 		))
+
+		(declare (assoc
+			current_case_data_map (if constraint (zip context_features context_values))
+			outside_constraint (false)
+		))
+
+		(if constraint
+			;only check constraint if all features referenced in the constraint have been generated
+			(if (!= 0 (size (remove (get_all_labels (parse constraint)) (append context_features feature))))
+				(assign (assoc constraint (null) ))
+			)
+		)
 
 		;if boundaries are same, set the generated value to the boundary since that is the only allowed value
 		(if (and (!= (null) boundary_min) (= boundary_min boundary_max))
@@ -185,12 +354,64 @@
 						)
 				))
 
+				(if constraint
+					;if it's a null and nulls are allowed, don't check constraint
+					(if (or (not allow_null) (!= (null) new_feature_value))
+						(let
+							(assoc
+								data_map (append current_case_data_map (associate feature new_feature_value))
+							)
+
+							(declare (assoc
+								parsed_code
+									(call ParseDerivedFeatureCode (assoc
+										code_string constraint
+										label_to_code
+											(lambda
+												(if (and (= (lambda label_value) 0) (contains_index data_map (lambda label_name)))
+													;pull the feature value
+													(let
+														(assoc val (get data_map (lambda label_name)) )
+														;encode datetime by converting string date time into seconds since epoch
+														(if (contains_index featureDateTimeMap label_name)
+															(if (!= (null) val)
+																(call ConvertDateToEpoch (assoc date val feature label_name))
+															)
+															;else not a datetime, return continuous value
+															val
+														)
+													)
+
+													;else feature hasn't been generated yet
+													.nas
+												)
+											)
+									))
+							))
+
+							;considered out of bounds if constraint is not satisfied
+							(if
+								(not
+									(call_sandboxed parsed_code
+										(assoc data_map data_map)
+										(* (size context_features) sandboxedComputeLimit) sandboxedMemoryLimit
+									)
+								)
+								(assign (assoc out_of_bounds (true) ))
+							)
+						)
+					)
+				)
+
 				(if (or out_of_bounds (and (= (null) new_feature_value) (= (false) allow_null)))
 					(seq
 						(if (< (current_index) 5)
 							(assign (assoc new_feature_value (call GenerateFeatureValue (assoc desired_conviction retry_desired_conviction))))
+
 							;else attempted to be generated 5 times, on the 6th just choose a random value in the specified range
 							(assign (assoc
+								outside_constraint (if constraint (true) (false))
+
 								new_feature_value
 									(if action_feature_is_dependent_and_continuous
 										(call !GetRandomWithinBoundariesForContinuousDependent)
@@ -198,10 +419,22 @@
 										;non-dependent features
 										(if (and (!= (null) boundary_max) (!= (null) boundary_min))
 											(if (and cycle_length (< boundary_max boundary_min))
-												;for exclusionary cyclics, generate a value in the allowed range
-												(+ 	boundary_min (rand (+ boundary_max (- cycle_length boundary_min))))
+												(let
+													(assoc
+														;for exclusionary cyclics, generate a value in the allowed range
+														feature_value (+ boundary_min (rand (+ boundary_max (- cycle_length boundary_min))))
+													)
+													;implicitly pass in feature_value and feature to round the value
+													(call !RoundContinuousValue)
+													feature_value
+												)
 
-												(+ boundary_min (rand (- boundary_max boundary_min)))
+												(let
+													(assoc feature_value (+ boundary_min (rand (- boundary_max boundary_min))) )
+													;implicitly pass in feature_value and feature to round the value
+													(call !RoundContinuousValue)
+													feature_value
+												)
 											)
 
 											;else only one boundary is specified, choose a random value by adding or subtracting the random from
@@ -211,28 +444,43 @@
 												;always ensure the random value is positive by taking an abs
 												(declare (assoc ln_const (abs (log (- 1 (* 2 (abs R)))))))
 
-												(if
-													;only boundary_max was specified, subtract the random value from it
-													(!= (null) boundary_max)
-													(- boundary_max (* feature_residual ln_const (/ 1 desired_conviction)))
+												(declare (assoc
+													feature_value
+														(if
+															;only boundary_max was specified, subtract the random value from it
+															(!= (null) boundary_max)
+															(- boundary_max (* feature_residual ln_const (/ 1 desired_conviction)))
 
-													;else only boundary_min was specified, add to it
-													(+ boundary_min (* feature_residual ln_const (/ 1 desired_conviction)))
-												)
+															;else only boundary_min was specified, add to it
+															(+ boundary_min (* feature_residual ln_const (/ 1 desired_conviction)))
+														)
+												))
+
+												;implicitly pass in feature_value and feature to round the value
+												(call !RoundContinuousValue)
+												feature_value
 											)
 										)
 									)
 							))
 						)
+
+						;ordinal features need to snap to nearest value from the allowed ordinal values list
+						(if (contains_index ordinal_features_map feature)
+							(call !GenerateAllowedOrdinalFeatureValue)
+						)
+
 						;halve the desired conviction to double the noise for every retry
 						(assign (assoc retry_desired_conviction (/ retry_desired_conviction 2)))
 					)
 
 					;else within bounds, stop regenerating values
-					(conclude)
+					(conclude outside_constraint)
 				)
 			)
 		)
+
+		outside_constraint
 	)
 
 	;if after failing to generate a valid value and having to pick a random value within a feature range, when
@@ -279,39 +527,46 @@
 			nominals
 		)
 
-		;boundary_pairs will be a list of all (min, max) continuous values for this continuous feature for all the dependent feature combinations
-		;if there's just the one boundary pair, output it as-is
-		(if (= 1 (size boundary_pairs))
-			(+ (first boundary_pairs) (rand (- (last boundary_pairs) (first boundary_pairs))))
+		(declare (assoc
+			feature_value
+				;boundary_pairs will be a list of all (min, max) continuous values for this continuous feature for all the dependent feature combinations
+				;if there's just the one boundary pair, output it as-is
+				(if (= 1 (size boundary_pairs))
+					(+ (first boundary_pairs) (rand (- (last boundary_pairs) (first boundary_pairs))))
 
-			;else no bounds defined, output default feature boundary random value
-			(= 0 (size boundary_pairs))
-			(+ boundary_min (rand (- boundary_max boundary_min)))
+					;else no bounds defined, output default feature boundary random value
+					(= 0 (size boundary_pairs))
+					(+ boundary_min (rand (- boundary_max boundary_min)))
 
-			;else need to output the largest min and the smallest max if min < max of all the boundary pairs
-			(let
-				(assoc
-					min (apply "max" (map (lambda (first (current_value))) boundary_pairs))
-					max (apply "min" (map (lambda (last (current_value))) boundary_pairs))
-				)
+					;else need to output the largest min and the smallest max if min < max of all the boundary pairs
+					(let
+						(assoc
+							min (apply "max" (map (lambda (first (current_value))) boundary_pairs))
+							max (apply "min" (map (lambda (last (current_value))) boundary_pairs))
+						)
 
-				;e.g, heartrate-bpm has boundary_pairs list of (40,170) and (60,220), this will pick a random value between 60 and 170
-				(if (< min max)
-					(+ min (rand (- max min)))
+						;e.g, heartrate-bpm has boundary_pairs list of (40,170) and (60,220), this will pick a random value between 60 and 170
+						(if (< min max)
+							(+ min (rand (- max min)))
 
-					;else largest min is more than smallest max, output a random value within range of
-					;all bounds for these dependent feature combinations
-					;e.g, heartrate-bpm has boundary_pairs list of (40,80) and (90,180), this will pick a random value between 40 and 180
-					(seq
-						(assign (assoc
-							min (apply "min" (map (lambda (first (current_value))) boundary_pairs))
-							max (apply "max" (map (lambda (last (current_value))) boundary_pairs))
-						))
-						;random value between range of smallest min and largest max
-						(+ min (rand (- max min)))
+							;else largest min is more than smallest max, output a random value within range of
+							;all bounds for these dependent feature combinations
+							;e.g, heartrate-bpm has boundary_pairs list of (40,80) and (90,180), this will pick a random value between 40 and 180
+							(seq
+								(assign (assoc
+									min (apply "min" (map (lambda (first (current_value))) boundary_pairs))
+									max (apply "max" (map (lambda (last (current_value))) boundary_pairs))
+								))
+								;random value between range of smallest min and largest max
+								(+ min (rand (- max min)))
+							)
+						)
 					)
 				)
-			)
-		)
+		))
+
+		;implicitly pass in feature_value and feature to round the value
+		(call !RoundContinuousValue)
+		feature_value
 	)
 )
