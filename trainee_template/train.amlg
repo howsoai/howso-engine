@@ -304,6 +304,9 @@
 				(call RemoveSeriesStore (assoc series series))
 			)
 		)
+
+		(declare (assoc num_cases (call GetNumTrainingCases)))
+
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc
 			new_case_ids
@@ -396,22 +399,35 @@
 					".trained_instance_count" trained_instance_count
 				))
 
-				;removing all defaultFeatures from features should result in an empty assoc, if it's not empty that means
-				;we're training on features that aren't in defaultFeatures yet, append them in their specified order
-				(if (!= (assoc) (remove (zip features) defaultFeatures))
-					(seq
-						(accum_to_entities (assoc
-							defaultFeatures
-								(filter
-									(lambda (not (contains_value defaultFeatures (current_value))) )
-									(append features (indices derivedFeaturesSet))
-								)
-						))
-						(assign_to_entities (assoc defaultFeaturesContextKey (call BuildContextFeaturesKey (assoc context_features defaultFeatures)) ))
+				;if any of the trained features are not defined in feature attributes, add them as continuous_numeric with default attributes
+				(let
+					(assoc new_features (remove (zip features) trainedFeatures))
 
-						;since we have trained new features, prime the caches for the query engine using all the trained features
+					(if (size new_features)
+						(seq
+							(accum_to_entities (assoc
+								featureAttributes
+									(map
+										(lambda (assoc "type" "continuous" "bounds" (assoc "allow_null" (true)) ))
+										new_features
+									)
+								queryDistanceTypeMap (map (lambda "continuous_numeric") new_features)
+							))
+							(assign_to_entities (assoc
+								trainedFeatures (sort (values (append trainedFeatures (indices featureAttributes)) (true)) )
+								trainedFeaturesContextKey
+									(call BuildContextFeaturesKey (assoc
+										context_features (values (append trainedFeatures (indices featureAttributes)) (true))
+									))
+							))
+						)
+					)
+
+					;if we have trained new features or new cases for the first time,
+					;prime the caches for the query engine using all the trained features
+					(if (or (= 0 num_cases) (size new_features))
 						(contained_entities (append
-							(map (lambda (query_exists (current_value))) defaultFeatures)
+							(map (lambda (query_exists (current_value))) trainedFeatures)
 							(query_count)
 						))
 					)
@@ -555,7 +571,7 @@
 								)
 							))
 							(if (= (assoc) inactiveFeaturesMap)
-								(zip defaultFeatures 0)
+								(zip trainedFeatures 0)
 								inactiveFeaturesMap
 							)
 						)
@@ -661,7 +677,7 @@
 
 										(let
 											;create a feature weights assoc
-											(assoc weights_map (append (zip defaultFeatures 1) features_weights_map) )
+											(assoc weights_map (append (zip trainedFeatures 1) features_weights_map) )
 
 											(append (current_value) (assoc "featureWeights" weights_map))
 										)
