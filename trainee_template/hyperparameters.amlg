@@ -37,7 +37,7 @@
 					;if clearing weights, set them to null
 					(if (= (false) use_weights)
 						;if there are inactive features, we have to reset active features to 1s and inactives to 0s
-						(if hasInactiveFeatures
+						(if inactiveFeaturesMap
 							(assoc "featureWeights"
 								(append
 									(zip
@@ -59,10 +59,6 @@
 						(assoc)
 					)
 					(if use_deviations
-						(assoc "useDeviations" (true))
-						(assoc)
-					)
-					(if feature_deviations
 						(assoc
 							"featureDeviations"
 								;append null_deviations to feature_deviations
@@ -86,10 +82,24 @@
 								)
 						)
 
+						;if not using deviations but provided null uncertainties, use those as deviations
+						(size null_deviations)
+						(assoc
+							"featureDeviations"
+								;prepend a null to represent the undefined feature deviation
+								(map (lambda (append (list (null)) (current_value))) null_deviations)
+						)
+
 						(assoc)
 					)
 					(if (size ordinal_feature_deviations)
 						(assoc "featureOrdinalDeviations" ordinal_feature_deviations)
+						(assoc)
+					)
+
+					;always store a copy of feature deviations during analyze flow, to be removed once analyze is done
+					(if feature_deviations
+						(assoc "analyzeFeatureDeviations" feature_deviations)
 						(assoc)
 					)
 
@@ -151,12 +161,17 @@
 			)
 		)
 
+		(declare (assoc deviations (get baseline_hyperparameter_map "analyzeFeatureDeviations") ))
+
+		;remove the analyze-specific deviations map from hyperparameters
+		(if deviations
+			(assign (assoc baseline_hyperparameter_map (remove baseline_hyperparameter_map "analyzeFeatureDeviations") ))
+		)
+
 		(assign_to_entities (assoc
 			hyperparameterMetadataMap
 				(set hyperparameterMetadataMap (list action_feature context_features_key robust_mode weight_feature) baseline_hyperparameter_map)
 		))
-
-		(declare (assoc deviations (get baseline_hyperparameter_map "featureDeviations") ))
 
 		;if deviations were computed, store them in residualsMap
 		(if deviations
@@ -180,8 +195,8 @@
 				(assoc
 					num_features_with_nulls
 						(size (filter
-							;keep only features that have 2 or more nulls
-							(lambda (> (get (current_value) "num_nulls") 1) )
+							;keep only features that have nulls
+							(lambda (get (current_value) "has_nulls") )
 							;ignore all inactive features (where all values are nulls)
 							(remove featureNullRatiosMap (indices inactiveFeaturesMap))
 						))
@@ -253,8 +268,13 @@
 													previous_value (first (current_value 1))
 													new_value (last (current_value 1))
 												)
-												;if a value is missing from either map, keep whichever isn't null
-												(if (or (= (null) previous_value) (= (null) new_value) )
+
+												;if both are null, keep them as null
+												(if (= (null) previous_value new_value)
+													(null)
+
+													;if either value is missing from either map, keep whichever isn't null
+													(or (= (null) previous_value) (= (null) new_value) )
 													(or previous_value new_value)
 
 													;else overwrite the value with the new one
@@ -294,17 +314,33 @@
 							(assoc deviations_map (get (current_value 1) "featureDeviations") )
 
 							(map
-								(lambda
-									(assign (assoc
-										deviations_map
-											(set
-												deviations_map
-												(current_index 1)
-												;max of user specified and stored deviation in the map
-												(max (current_value 1) (get deviations_map (current_index 1)) )
+								(lambda (let
+									(assoc
+										deviation (get deviations_map (current_index 1))
+										user_error_value (current_value 1)
+										feature (current_index 1)
+									)
+
+									(declare (assoc
+										deviation_value
+											;set to max of user specified error and stored deviation in the map
+											(if (!= (null) deviation)
+												;if deviation is a tuple, update the first value
+												(if (= (list) (get_type deviation))
+													(set deviation 0 (max user_error_value (first deviation)) )
+													;else just update the value itself
+													(max user_error_value deviation)
+												)
 											)
 									))
-								)
+
+									;if deviation is null, that means we aren't using deviations so keep it as a null
+									(if (!= (null) deviation_value)
+										(assign (assoc
+											deviations_map (set deviations_map feature deviation_value)
+										))
+									)
+								))
 								userSpecifiedFeatureErrorsMap
 							)
 
@@ -343,7 +379,11 @@
 							;else no weights, assign all active features weight 1
 							(assign (assoc
 								feature_weights_map
-									(append (zip (append defaultFeatures feature) 1) inactiveFeaturesMap)
+									(append
+										(zip (append trainedFeatures feature) 1)
+										;prevent appending null to an assoc
+										(if inactiveFeaturesMap inactiveFeaturesMap (assoc))
+									)
 							))
 						)
 
@@ -399,7 +439,7 @@
 		(declare (assoc
 			context_key
 				(if (or (= context_features (null)) (= context_features (list)))
-					defaultFeaturesContextKey
+					trainedFeaturesContextKey
 
 					;else context_features were passed
 					(call BuildContextFeaturesKey (assoc context_features context_features))
@@ -693,7 +733,6 @@
 					"p" 0.1
 					"dt" -1
 					"featureWeights" (null)
-					"useDeviations" (false)
 					"featureDeviations" (null)
 					"allFeatureResidualsCached" (false)
 				)

@@ -304,6 +304,7 @@
 				(call RemoveSeriesStore (assoc series series))
 			)
 		)
+
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc
 			new_case_ids
@@ -396,23 +397,33 @@
 					".trained_instance_count" trained_instance_count
 				))
 
-				;removing all defaultFeatures from features should result in an empty assoc, if it's not empty that means
-				;we're training on features that aren't in defaultFeatures yet, append them in their specified order
-				(if (!= (assoc) (remove (zip features) defaultFeatures))
-					(seq
-						(accum_to_entities (assoc
-							defaultFeatures
-								(filter
-									(lambda (not (contains_value defaultFeatures (current_value))) )
-									(append features (indices derivedFeaturesSet))
-								)
-						))
-						(assign_to_entities (assoc defaultFeaturesContextKey (call BuildContextFeaturesKey (assoc context_features defaultFeatures)) ))
+				;if any of the trained features are not defined in feature attributes, add them as continuous_numeric with default attributes
+				(let
+					(assoc new_features (remove (zip features) trainedFeatures))
+
+					(if (size new_features)
+						(seq
+							(accum_to_entities (assoc
+								featureAttributes
+									(map
+										(lambda (assoc "type" "continuous" "bounds" (assoc "allow_null" (true)) ))
+										new_features
+									)
+								queryDistanceTypeMap (map (lambda "continuous_numeric") new_features)
+							))
+							(assign_to_entities (assoc
+								trainedFeatures (sort (values (append trainedFeatures (indices featureAttributes)) (true)) )
+								trainedFeaturesContextKey
+									(call BuildContextFeaturesKey (assoc
+										context_features (values (append trainedFeatures (indices featureAttributes)) (true))
+									))
+							))
+						)
 					)
 				)
 
-				;update count of nulls for all features after training
-				(call !UpdateNullCounts)
+				;update has_nulls flags for all features after training by updating all false has_nulls in featureNullRatiosMap with null
+				(call !ClearHasNullFlags)
 
 				;model has changed so clear out these cached value
 				#ClearCachedCountsAndEntropies
@@ -451,9 +462,6 @@
 			)
 		)
 
-		(if (size nominalsMap)
-			(call UpdateNominalClassCounts)
-		)
 		;auto populate derived features if necessary
 		(if (> (size derived_features) 0)
 			(call DeriveTrainFeatures (assoc
@@ -532,62 +540,9 @@
 			)
 		)
 
-		;if there are features that have nulls, check if they still have nulls
-		(if hasInactiveFeatures
-			(let
-				(assoc
-					inactive_features_map
-						(filter
-							(lambda (let
-								(assoc feature (current_index 1))
-
-								;only keep those features that have no valid values (0 non-nulls)
-								(=
-									(contained_entities (list
-										(query_exists internalLabelSession)
-										(query_not_equals feature (null))
-										(query_count)
-									))
-									0
-								)
-							))
-							(if (= (assoc) inactiveFeaturesMap)
-								(zip defaultFeatures 0)
-								inactiveFeaturesMap
-							)
-						)
-				)
-
-				;if there are now less inactive features than there were, set the no-longer inactive feature weights to 1
-				(if (< (size inactive_features_map) (size inactiveFeaturesMap))
-					(call SetFeatureWeightsForFeatures (assoc
-						features_weights_map
-							(zip
-								(indices (remove inactiveFeaturesMap (indices inactive_features_map)) )
-								1
-							)
-						overwrite (true)
-					))
-				)
-
-				(if (size inactive_features_map)
-					(assign_to_entities (assoc inactiveFeaturesMap inactive_features_map ))
-
-					;else all features have some values
-					(assign_to_entities (assoc
-						inactiveFeaturesMap (null)
-						hasInactiveFeatures (false)
-					))
-				)
-			)
-		)
-
-		;if there are inactive features and they haven't been set yet, set their weight to 0
-		(if hasInactiveFeatures
-			(call SetFeatureWeightsForFeatures (assoc
-				features_weights_map inactiveFeaturesMap
-				overwrite (false)
-			))
+		;if there are features that have nulls, check if they still have nulls next time we react or analyze
+		(if inactiveFeaturesMap
+			(assign_to_entities (assoc inactiveFeaturesNeedCaching (true) ))
 		)
 
 		(accum_to_entities (assoc revision 1))
@@ -658,7 +613,7 @@
 
 										(let
 											;create a feature weights assoc
-											(assoc weights_map (append (zip defaultFeatures 1) features_weights_map) )
+											(assoc weights_map (append (zip trainedFeatures 1) features_weights_map) )
 
 											(append (current_value) (assoc "featureWeights" weights_map))
 										)
@@ -681,158 +636,95 @@
 		))
 	)
 
-	;Helper method to update current nominal class counts for the whole model
-	;no parameters, it iterates over all the known nominals in nominalsMap and for each feature stores the count for each class
-	#UpdateNominalClassCounts
-	(let
-		(assoc
-			;store all the unique classes for each nominal feature
-			nominal_class_values_map
-				(map
-					(lambda
-						(indices
-							(compute_on_contained_entities (list
-								(query_value_masses (current_index 1) (null) (contains_index numericNominalFeaturesMap (current_index 1)))
+	;Helper method for training, Sets all has_nulls flags that were false to null
+	#!ClearHasNullFlags
+	(accum_to_entities (assoc
+		featureNullRatiosMap
+			(map
+				(lambda (let
+					(assoc feature (current_index 1))
+					(if (current_value)
+						(set
+							(current_value)
+							"has_nulls"
+							;leave true as true, otherwise set to null
+							(if (get (current_value) "has_nulls") (true))
+						)
+
+						;else create the has_nulls key with a null
+						(assoc "has_nulls" (null))
+					)
+				))
+				(append (zip features) featureNullRatiosMap)
+			)
+	))
+
+	;Helper method to prime query caches for all trainedFeatures and update the inactiveFeaturesMap
+	#UpdateInactiveFeatures
+	(seq
+		;prime the caches for the query engine using all the trained features
+		(contained_entities (append
+			(map (lambda (query_exists (current_value))) trainedFeatures)
+			(query_count)
+		))
+
+		(declare (assoc
+			inactive_features_map
+				(filter
+					(lambda (let
+						(assoc feature (current_index 1))
+
+						;only keep those features that have no valid values (0 non-nulls)
+						(=
+							(contained_entities (list
+								(query_exists internalLabelSession)
+								(query_exists feature)
+								(query_not_equals feature (null))
+								(query_count)
 							))
+							0
 						)
+					))
+					(if inactiveFeaturesMap
+						inactiveFeaturesMap
+						(zip trainedFeatures 0)
 					)
-					nominalsMap
 				)
+		))
+
+		;if there are now less inactive features than there were, set the no-longer inactive feature weights to 1
+		(if (< (size inactive_features_map) (size inactiveFeaturesMap))
+			(call SetFeatureWeightsForFeatures (assoc
+				features_weights_map
+					(zip
+						(indices (remove inactiveFeaturesMap (indices inactive_features_map)) )
+						1
+					)
+				overwrite (true)
+			))
 		)
 
-		;only update model if class counts are different
-		(if (!= (map (lambda (size (current_value))) nominal_class_values_map) nominalsMap)
+		(if (size inactive_features_map)
 			(seq
-				(accum_to_entities (assoc
-					nominalsMap
-						(map
-							(lambda
-								;will be the count of classes if the feature is in the map of nominal features
-								(size (get nominal_class_values_map (current_index)))
-							)
-							nominalsMap
-						)
-				))
-
-				;update all existing featureDomainAttributes with updated nominal class counts
+				;if there are inactive features and they haven't been set yet, set their weight to 0
+				(if (!= inactiveFeaturesMap inactive_features_map)
+					(call SetFeatureWeightsForFeatures (assoc
+						features_weights_map inactiveFeaturesMap
+						overwrite (false)
+					))
+				)
 				(assign_to_entities (assoc
-					hyperparameterMetadataMap
-						(rewrite
-							(lambda
-								;if this is the featureDomainAttributes assoc
-								(if (and (= "featureDomainAttributes" (current_index)) (= (assoc) (get_type (current_value))) )
-									(let
-										(assoc previous_hp_feature_limits_map (current_value 1) )
-
-										;smartly overwrite previous values with the newly computed ones
-										(map
-											(lambda (let
-												(assoc
-													previous_value (first (current_value 1))
-													new_value (last (current_value 1))
-												)
-												;not a nominal feature, don't change
-												(if (= (null) new_value)
-													previous_value
-
-													;else overwrite the value with the new one
-													new_value
-												)
-											))
-											previous_hp_feature_limits_map
-											nominalsMap
-										)
-									)
-
-									(current_value)
-								)
-							)
-							(retrieve_from_entity "hyperparameterMetadataMap")
-						)
-					defaultHyperparameters
-						(rewrite
-							(lambda
-								;if this is the featureDomainAttributes assoc
-								(if (and (= "featureDomainAttributes" (current_index)) (= (assoc) (get_type (current_value))) )
-									(let
-										(assoc previous_hp_feature_limits_map (current_value 1) )
-
-										;smartly overwrite previous values with the newly computed ones
-										(map
-											(lambda (let
-												(assoc
-													previous_value (first (current_value 1))
-													new_value (last (current_value 1))
-												)
-												;not a nominal feature, don't change
-												(if (= (null) new_value)
-													previous_value
-
-													;else overwrite the value with the new one
-													new_value
-												)
-											))
-											previous_hp_feature_limits_map
-											nominalsMap
-										)
-									)
-
-									(current_value)
-								)
-							)
-							(retrieve_from_entity "defaultHyperparameters")
-						)
+					inactiveFeaturesMap inactive_features_map
+					inactiveFeaturesNeedCaching (false)
 				))
 			)
+
+			;else all features have some non-null values
+			(assign_to_entities (assoc
+				inactiveFeaturesMap (null)
+				inactiveFeaturesNeedCaching (false)
+			))
 		)
 	)
 
-	;Helper method to update current nominal counts for the specified feature
-	;store the count for each class for the specified feature into nominalsMap
-	;parameters:
-	; feature: nominal feature for which to store class counts
-	#UpdateNominalClassCountsForFeature
-	(let
-		;store all the unique classes for this nominal feature
-		(assoc
-			nominal_class_values
-				(if (contains_index nominalsMap feature)
-					(indices
-						(compute_on_contained_entities (list
-							(query_value_masses feature (null) (contains_index numericNominalFeaturesMap feature))
-						))
-					)
-					;else not nominal, so it's an empty list
-					(list)
-				)
-		)
-
-		;only update model if the class count changed
-		(if (!= (size nominal_class_values) (get nominalsMap feature) )
-			(seq
-				(accum_to_entities (assoc nominalsMap (associate feature (size nominal_class_values) ) ))
-
-				;update all existing featureDomainAttributes with updated nominal class counts for this feature
-				(assign_to_entities (assoc
-					hyperparameterMetadataMap
-						(rewrite
-							(lambda
-								(if (and (= "featureDomainAttributes" (current_index)) (= (assoc) (get_type (current_value))) )
-									(let
-										(assoc hp_null_deviations_map (current_value 1) )
-										(if (= (list) (get_type (get hp_null_deviations_map feature)) )
-											(set hp_null_deviations_map (list feature 0) (get nominalsMap feature))
-											(set hp_null_deviations_map feature (get nominalsMap feature))
-										)
-									)
-
-									(current_value)
-								)
-							)
-							(retrieve_from_entity "hyperparameterMetadataMap")
-						)
-				))
-			)
-		)
-	)
 )
