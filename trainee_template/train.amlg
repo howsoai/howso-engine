@@ -305,84 +305,116 @@
 			)
 		)
 
+		(declare (assoc num_cases (call GetNumTrainingCases) ))
+
+		(declare (assoc skip_ablation (call !CanTrainAblationBeSkipped) ))
+
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc
 			new_case_ids
-				(weave
-					(lambda (let
-						(assoc feature_values (first (current_value 1)))
+				(if skip_ablation
+					(map
+						(lambda (let
+							(assoc feature_values (current_value 1))
 
-						(if encode_features_on_train
-							(assign (assoc
+							;create the case and output case id
+							(call CreateCase (assoc
+								features features
 								feature_values
-									(call ConvertFromInput (assoc
-										feature_values feature_values
-										features features
-									))
+									(if encode_features_on_train
+										(call ConvertFromInput (assoc
+											feature_values feature_values
+											features features
+										))
+										;else use feature_values as-is
+										feature_values
+									)
+								session (get_value session)
+								session_training_index (+ trained_instance_count (current_index 1))
 							))
-						)
+						))
+						input_cases
+					)
 
-						;do not train on this case if it is null or all case values are null or it's within provided thresholds
-						(if (and
-								(!= (null) feature_values)
-								(not (apply "=" (append feature_values (list (null)))))
-								;no thresholds specified or the case is outside of thresholds
+					(weave
+						(lambda (let
+							(assoc feature_values (first (current_value 1)))
 
-								;if one of the ablation methods returns 0, then the case should be ablated.
-								(and
-									(call CaseOutsideThresholds)
-									(call ShouldNewCaseBeAblated (assoc
-										context_features features
-										context_values feature_values
-									))
-								)
-
-							)
-							(seq
-								;create the case and store case id
-								(declare (assoc
-									new_case_id
-										(call CreateCase (assoc
-											features
-												;if auto ablate is enabled, populate the weight feature for this case
-												(if
-													autoAblationEnabled
-													(append features (list autoAblationWeightFeature))
-													features
-												)
-											feature_values
-												;if auto ablate is enabled, populate the weight feature for this case
-												(if
-													autoAblationEnabled
-													(append feature_values (list 1))
-													feature_values
-												)
-											session (get_value session)
-											session_training_index trained_instance_count
+							(if encode_features_on_train
+								(assign (assoc
+									feature_values
+										(call ConvertFromInput (assoc
+											feature_values feature_values
+											features features
 										))
 								))
-								(accum (assoc trained_instance_count 1 ))
-
-								;output the new case id
-								(list new_case_id)
 							)
 
-							;else don't output anything, filtering out any null case ids
-							(seq
-								(accum (assoc ablated_indices_list (current_index 1)))
-								(list)
+							;do not train on this case if it is null or all case values are null or it's within provided thresholds
+							(if (and
+									(!= (null) feature_values)
+									(not (apply "=" (append feature_values (list (null)))))
+									;no thresholds specified or the case is outside of thresholds
+
+									;if one of the ablation methods returns false, then the case should be ablated.
+									(and
+										(call CaseOutsideThresholds)
+										(call ShouldNewCaseBeAblated (assoc
+											context_features features
+											context_values feature_values
+											num_cases num_cases
+										))
+									)
+								)
+								(seq
+									;create the case and store case id
+									(declare (assoc
+										new_case_id
+											(call CreateCase (assoc
+												features
+													;if auto ablate is enabled, populate the weight feature for this case
+													(if
+														autoAblationEnabled
+														(append features (list autoAblationWeightFeature))
+														features
+													)
+												feature_values
+													;if auto ablate is enabled, populate the weight feature for this case
+													(if
+														autoAblationEnabled
+														(append feature_values (list 1))
+														feature_values
+													)
+												session (get_value session)
+												session_training_index trained_instance_count
+											))
+									))
+									(accum (assoc trained_instance_count 1 ))
+
+									;output the new case id
+									(list new_case_id)
+								)
+
+								;else don't output anything, filtering out any null case ids
+								(seq
+									(accum (assoc ablated_indices_list (current_index 1)))
+									(list)
+								)
 							)
-						)
-					))
-					input_cases
-					;use weave as a map-filter by specifying null as the second list
-					(null)
+						))
+						input_cases
+						;use weave as a map-filter by specifying null as the second list
+						(null)
+					)
 				)
 		))
 
 		;set values if there were cases that were trained on
 		(if (> (size new_case_ids ) 0)
 			(seq
+				;if ablation awas skipped, trained_instance_count was never updated, update it here instead
+				(if skip_ablation (accum (assoc trained_instance_count (size new_case_ids))) )
+
 				;add action to the existing replay data
 				(assign_to_entities session (assoc
 					".replay_steps" (append cur_session_data new_case_ids)
