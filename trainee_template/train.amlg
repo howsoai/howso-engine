@@ -305,84 +305,133 @@
 			)
 		)
 
+		(declare (assoc num_cases (call GetNumTrainingCases) ))
+
+		(declare (assoc skip_ablation (call !CanTrainAblationBeSkipped) ))
+
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc
 			new_case_ids
-				(weave
-					(lambda (let
-						(assoc feature_values (first (current_value 1)))
-
-						(if encode_features_on_train
-							(assign (assoc
-								feature_values
-									(call ConvertFromInput (assoc
-										feature_values feature_values
-										features features
-									))
-							))
+				(if skip_ablation
+					(let
+						(assoc
+							train_features
+								;if auto ablate is enabled, populate the weight feature for this case
+								(if autoAblationEnabled
+									(append features (list autoAblationWeightFeature))
+									features
+								)
 						)
-
-						;do not train on this case if it is null or all case values are null or it's within provided thresholds
-						(if (and
-								(!= (null) feature_values)
-								(not (apply "=" (append feature_values (list (null)))))
-								;no thresholds specified or the case is outside of thresholds
-
-								;if one of the ablation methods returns 0, then the case should be ablated.
-								(and
-									(call CaseOutsideThresholds)
-									(call ShouldNewCaseBeAblated (assoc
-										context_features features
-										context_values feature_values
-									))
+						(map
+							(lambda (let
+								(assoc
+									feature_values
+										;if auto ablate is enabled, default the weight to 1 for this case
+										(if autoAblationEnabled
+											(append (current_value 1) (list 1))
+											(current_value 1)
+										)
 								)
 
-							)
-							(seq
-								;create the case and store case id
-								(declare (assoc
-									new_case_id
-										(call CreateCase (assoc
-											features
-												;if auto ablate is enabled, populate the weight feature for this case
-												(if
-													autoAblationEnabled
-													(append features (list autoAblationWeightFeature))
-													features
-												)
+								;create the case and output case id
+								(call CreateCase (assoc
+									features train_features
+									feature_values
+										(if encode_features_on_train
+											(call ConvertFromInput (assoc
+												feature_values feature_values
+												features train_features
+											))
+											;else use feature_values as-is
 											feature_values
-												;if auto ablate is enabled, populate the weight feature for this case
-												(if
-													autoAblationEnabled
-													(append feature_values (list 1))
-													feature_values
-												)
-											session (get_value session)
-											session_training_index trained_instance_count
+										)
+									session (get_value session)
+									session_training_index (+ trained_instance_count (current_index 1))
+								))
+							))
+							input_cases
+						)
+					)
+
+					(weave
+						(lambda (let
+							(assoc feature_values (first (current_value 1)))
+
+							(if encode_features_on_train
+								(assign (assoc
+									feature_values
+										(call ConvertFromInput (assoc
+											feature_values feature_values
+											features features
 										))
 								))
-								(accum (assoc trained_instance_count 1 ))
-
-								;output the new case id
-								(list new_case_id)
 							)
 
-							;else don't output anything, filtering out any null case ids
-							(seq
-								(accum (assoc ablated_indices_list (current_index 1)))
-								(list)
+							;do not train on this case if it is null or all case values are null or it's within provided thresholds
+							(if (and
+									(!= (null) feature_values)
+									(not (apply "=" (append feature_values (list (null)))))
+									;no thresholds specified or the case is outside of thresholds
+
+									;if one of the ablation methods returns false, then the case should be ablated.
+									(and
+										(call CaseOutsideThresholds)
+										(call ShouldNewCaseBeAblated (assoc
+											context_features features
+											context_values feature_values
+											num_cases num_cases
+										))
+									)
+								)
+								(seq
+									;create the case and store case id
+									(declare (assoc
+										new_case_id
+											(call CreateCase (assoc
+												features
+													;if auto ablate is enabled, populate the weight feature for this case
+													(if
+														autoAblationEnabled
+														(append features (list autoAblationWeightFeature))
+														features
+													)
+												feature_values
+													;if auto ablate is enabled, populate the weight feature for this case
+													(if
+														autoAblationEnabled
+														(append feature_values (list 1))
+														feature_values
+													)
+												session (get_value session)
+												session_training_index trained_instance_count
+											))
+									))
+									(accum (assoc trained_instance_count 1 ))
+
+									;output the new case id
+									(list new_case_id)
+								)
+
+								;else don't output anything, filtering out any null case ids
+								(seq
+									(accum (assoc ablated_indices_list (current_index 1)))
+									(list)
+								)
 							)
-						)
-					))
-					input_cases
-					;use weave as a map-filter by specifying null as the second list
-					(null)
+						))
+						input_cases
+						;use weave as a map-filter by specifying null as the second list
+						(null)
+					)
 				)
 		))
 
 		;set values if there were cases that were trained on
 		(if (> (size new_case_ids ) 0)
 			(seq
+				;if ablation awas skipped, trained_instance_count was never updated, update it here instead
+				(if skip_ablation (accum (assoc trained_instance_count (size new_case_ids))) )
+
 				;add action to the existing replay data
 				(assign_to_entities session (assoc
 					".replay_steps" (append cur_session_data new_case_ids)
@@ -540,63 +589,9 @@
 			)
 		)
 
-		;if there are features that have nulls, check if they still have nulls
-		(if hasInactiveFeatures
-			(let
-				(assoc
-					inactive_features_map
-						(filter
-							(lambda (let
-								(assoc feature (current_index 1))
-
-								;only keep those features that have no valid values (0 non-nulls)
-								(=
-									(contained_entities (list
-										(query_exists internalLabelSession)
-										(query_exists feature)
-										(query_not_equals feature (null))
-										(query_count)
-									))
-									0
-								)
-							))
-							(if (= (assoc) inactiveFeaturesMap)
-								(zip trainedFeatures 0)
-								inactiveFeaturesMap
-							)
-						)
-				)
-
-				;if there are now less inactive features than there were, set the no-longer inactive feature weights to 1
-				(if (< (size inactive_features_map) (size inactiveFeaturesMap))
-					(call SetFeatureWeightsForFeatures (assoc
-						features_weights_map
-							(zip
-								(indices (remove inactiveFeaturesMap (indices inactive_features_map)) )
-								1
-							)
-						overwrite (true)
-					))
-				)
-
-				(if (size inactive_features_map)
-					(assign_to_entities (assoc inactiveFeaturesMap inactive_features_map ))
-
-					;else all features have some values
-					(assign_to_entities (assoc
-						inactiveFeaturesMap (null)
-						hasInactiveFeatures (false)
-					))
-				)
-			)
-		)
-
-		;if there are inactive features and they haven't been set yet, set their weight to 0
-		(if hasInactiveFeatures
-			(call SetFeatureWeightsForFeatures (assoc
-				features_weights_map inactiveFeaturesMap
-				overwrite (false)
-			))
+		;if there are features that have nulls, check if they still have nulls next time we react or analyze
+		(if inactiveFeaturesMap
+			(assign_to_entities (assoc inactiveFeaturesNeedCaching (true) ))
 		)
 
 		(accum_to_entities (assoc revision 1))
@@ -690,7 +685,7 @@
 		))
 	)
 
-	Helper method for training, Sets all has_nulls flags that were false to null
+	;Helper method for training, Sets all has_nulls flags that were false to null
 	#!ClearHasNullFlags
 	(accum_to_entities (assoc
 		featureNullRatiosMap
@@ -712,5 +707,73 @@
 				(append (zip features) featureNullRatiosMap)
 			)
 	))
+
+	;Helper method to prime query caches for all trainedFeatures and update the inactiveFeaturesMap
+	#UpdateInactiveFeatures
+	(seq
+		;prime the caches for the query engine using all the trained features
+		(contained_entities (append
+			(map (lambda (query_exists (current_value))) trainedFeatures)
+			(query_count)
+		))
+
+		(declare (assoc
+			inactive_features_map
+				(filter
+					(lambda (let
+						(assoc feature (current_index 1))
+
+						;only keep those features that have no valid values (0 non-nulls)
+						(=
+							(contained_entities (list
+								(query_exists internalLabelSession)
+								(query_exists feature)
+								(query_not_equals feature (null))
+								(query_count)
+							))
+							0
+						)
+					))
+					(if inactiveFeaturesMap
+						inactiveFeaturesMap
+						(zip trainedFeatures 0)
+					)
+				)
+		))
+
+		;if there are now less inactive features than there were, set the no-longer inactive feature weights to 1
+		(if (< (size inactive_features_map) (size inactiveFeaturesMap))
+			(call SetFeatureWeightsForFeatures (assoc
+				features_weights_map
+					(zip
+						(indices (remove inactiveFeaturesMap (indices inactive_features_map)) )
+						1
+					)
+				overwrite (true)
+			))
+		)
+
+		(if (size inactive_features_map)
+			(seq
+				;if there are inactive features and they haven't been set yet, set their weight to 0
+				(if (!= inactiveFeaturesMap inactive_features_map)
+					(call SetFeatureWeightsForFeatures (assoc
+						features_weights_map inactive_features_map
+						overwrite (false)
+					))
+				)
+				(assign_to_entities (assoc
+					inactiveFeaturesMap inactive_features_map
+					inactiveFeaturesNeedCaching (false)
+				))
+			)
+
+			;else all features have some non-null values
+			(assign_to_entities (assoc
+				inactiveFeaturesMap (null)
+				inactiveFeaturesNeedCaching (false)
+			))
+		)
+	)
 
 )
