@@ -183,6 +183,13 @@
 						)
 						(assoc)
 					)
+					;series_generate_attempts must be manually added because they will not be in requested_details
+					(if (and output_details (contains_value requested_details "generate_attempts"))
+						(assoc
+							"series_generate_attempts" (map (lambda (get (current_value) "series_generate_attempts")) series_output)
+						)
+						(assoc)
+					)
 				)
 			"warnings" (if (size warnings) (indices warnings))
 		)
@@ -265,7 +272,7 @@
 			retries 0
 			original_desired_conviction desired_conviction
 			regenerate_series (= "always" generate_new_cases)
-			regenerate_attempts 0
+			series_generate_attempts 0
 		))
 
 		(assign (assoc
@@ -332,6 +339,7 @@
 			num_existing_series_rows 0
 			original_derived_context_features derived_context_features
 			original_action_features action_features
+			previous_row_failed (false)
 			;find and store the largest referenced lag value among derived_context_features
 			largest_max_row_lag
 				;or with 0 to prevent null
@@ -425,7 +433,30 @@
 				desired_conviction original_desired_conviction
 				do_uniqueness_check (true)
 				retries 0
+				previous_row_failed (false)
 			))
+
+			(if output_details
+				;reset the case details that are held in lists. (influential_cases, generate_attempts, etc.)
+				;these detail values are not overwritten through appends
+				(assign (assoc
+					case_detail_values_map
+						(map
+							(lambda
+								(if (= (list) (get_type (current_value)))
+									(list)
+
+									;generate_attempts is sum-ed into a digit, must be reset as a list
+									(= 0 (get_type (current_value)))
+									(list)
+
+									(current_value)
+								)
+							)
+							case_detail_values_map
+						)
+				))
+			)
 
 			;if initial conditions were provided, use them as contexts for the first case
 			(if (and first_generated_row (> (size initial_features_map) 0))
@@ -729,6 +760,18 @@
 						(call !NormalizeReactSeriesInfluentialCases)
 					)
 
+					;retries holds the amount of times the case was retried. Add 1 to represent generate_attempts
+					(if (and (not previous_row_failed) (contains_index case_detail_values_map "generate_attempts"))
+						(assign (assoc
+								case_detail_values_map
+									(set
+										case_detail_values_map
+										"generate_attempts"
+										(+ retries 1)
+									)
+							))
+					)
+
 					;update series_detail_values_map on the last iteration so it can be output when react_series returns
 					(if done
 						(assign (assoc
@@ -736,6 +779,10 @@
 								(map
 									(lambda
 										(if (size (get case_detail_values_map (current_index)))
+											(append (current_value) (list (get case_detail_values_map (current_index 1))) )
+
+											;generate_attempts should be a number, so size doesn't work
+											(= 0 (get_type (get case_detail_values_map (current_index))))
 											(append (current_value) (list (get case_detail_values_map (current_index 1))) )
 
 											;don't append if the case detail value is empty
@@ -924,6 +971,14 @@
 						(append series_detail_values_map (assoc "aggregated_categorical_action_probabilities" aggregated_categorical_action_probabilities))
 				))
 			)
+		)
+
+		(if (and output_details (contains_index series_detail_values_map "generate_attempts"))
+			;append the amount of series_generate_attempts+1 (series_generate_attempts is zero based)
+			(assign (assoc
+				series_detail_values_map
+					(append series_detail_values_map (assoc "series_generate_attempts" (+ series_generate_attempts 1) ))
+			))
 		)
 
 
@@ -1326,6 +1381,7 @@
 				;remove current (last) row and stop
 				(if derivation_failed
 					(assign (assoc
+						previous_row_failed (true)
 						series_data (trunc series_data)
 						case_detail_values_map (call InitializeCaseDetailValuesMap (assoc details requested_details))
 						done (true)
@@ -1379,10 +1435,10 @@
 								;failed to synth series, regenerate entire series if able to
 								(if regenerate_series
 									(seq
-										(accum (assoc regenerate_attempts 1))
+										(accum (assoc series_generate_attempts 1))
 
 										;after 4 full-series retries, remove current (last) row and stop
-										(if (> regenerate_attempts 4)
+										(if (> series_generate_attempts 4)
 											(assign (assoc
 												done (true)
 												series_data (trunc series_data)
