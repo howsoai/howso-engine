@@ -1,14 +1,76 @@
 (null
 
+	#ConvertChildPathToActualPath
+	(weave (range traineeContainer 1 (size path) 1) path)
 
-	;outputs a pair of [trainee_path:list, is_contained_locally:boolean]
-	#GetTraineePath
-	(if (contains_index containedTraineePathMap trainee)
-		(list
-			(get containedTraineePathMap trainee)
-			(get childTraineeIsContainedMap trainee)
+
+	;return full path to specified subtrainee in the format of (list ".trainee_container" child1 ".trainee_container" child2)
+	;parameters:
+	; name_path: optional,  list of strings specifying the user-friendly path to the child subtrainee.
+	;		May be an incomplete path as long as it uniquely identifies the trainee.
+	; id: optional, unique id of the subtrainee. Ignored if namp_path is specified.
+	#ResolveChildPath
+	(seq
+		;use id instead of name_path if provided only id
+		(if (and (= 0 (size name_path)) id)
+			(conclude
+				(if (contains_index containedTraineeIdToNamePathMap id)
+					(call ConvertChildPathToActualPath (assoc
+						path (get containedTraineeIdToNamePathMap id)
+					))
+
+					"Invalid trainee id specified."
+				)
+			)
+		)
+
+		(declare (assoc name (apply "concat" name_path) ))
+
+		;keep all those paths that match the provided name
+		(declare (assoc
+			matching_paths
+				(filter
+					(lambda (= name (substr (current_index) name)) )
+					containedTraineeNamePathStringToListMap
+				)
+		))
+
+		(if (= 1 (size matching_paths))
+			(conclude
+				(call ConvertChildPathToActualPath (assoc
+					path (first (values matching_paths))
+				))
+			)
+
+			(= 0 (size matching_paths))
+			(conclude "Invalid name path specified.")
+		)
+
+		;if there is more than one matching path, either name_path refers to a non-leaf node
+		;or it's too ambiguous.  If it's a non-leaf node, one of the matching_paths will have it as the last name listed in the path
+		(assign (assoc
+			matching_paths
+				(filter
+					(lambda (= (last name_path) (last (current_value))))
+					matching_paths
+				)
+		))
+
+		(if (= 1 (size matching_paths))
+			(call ConvertChildPathToActualPath (assoc
+				path (first (values matching_paths))
+			))
+
+			"Ambiguous name path specified, more than one trainee matches the specified name path."
 		)
 	)
+
+	#IsChildInternal
+	(get
+		childTraineeIsContainedMap
+		(apply "concat" (filter (lambda (!= traineeContainer (current_value))) child_trainee_path))
+	)
+
 
 	;Method to update the location of child trainee, whether it's contained or stored independently
 	;This method can be called by the traineeContainer child entity directly by a child trainee to update its own location
@@ -36,48 +98,62 @@
 	#UpdateParentsIsContainedMap
 	(call_container "UpdateParentsIsContainedMap" (assoc child_trainee child_trainee is_contained is_contained ))
 
-	;store path to any child trainee to enable quick access to any subtrainee given its id
+	;store path to any child trainee to enable quick access to any subtrainee given its name
 	;parmeters:
-	; child_trainee: id of child trainee to add
-	; parent_trainee: id of parent trainee under which to add child
-	; child_trainee_path: path to child trainee in the format of a list with repeating pars of [".trainee_container" child_trainee]
+	; child_name: name of child trainee to add
+	; child_id: optional, unique id of child trainee to add
+	; child_trainee_path: path to child trainee in the format of a list with repeating pars of [".trainee_container" child_name]
 	;	for each layer of hierarchy. e.g., (list ".trainee_container" first_child ".trainee_container" grand_child) for a 2 level hirearchy
 	; is_contained: boolean, default true, meaning this child is contained inside traineeContainer, false means it is stored and loaded independently
 	#AddChildTraineePaths
 	(declare
 		(assoc is_contained (true))
 
-		;child_trainee_path is in the format of: (list traineeContainer child1 traineeContainer child2 etc..)
-		(accum_to_entities (assoc
-			containedTraineePathMap (associate child_trainee child_trainee_path)
-			childTraineeIsContainedMap (associate child_trainee is_contained )
-		))
 
-		;filter out all the traineeContainer to leave just the trainee ids in the path, not including the child itself
+		;filter out all the traineeContainer to leave just the trainee names in the path
 		(declare (assoc
-			direct_path (filter (lambda (!= traineeContainer (current_value))) (trunc child_trainee_path))
+			pretty_path (filter (lambda (!= traineeContainer (current_value))) child_trainee_path)
 			hierarchy_map (retrieve_from_entity "hierarchyMap")
 		))
+
+		(declare (assoc string_path (apply "concat" pretty_path ) ))
+
+		(accum_to_entities (assoc
+			containedTraineeNamePathStringToListMap (associate string_path pretty_path)
+			childTraineeIsContainedMap (associate string_path is_contained )
+		))
+
+		(if child_id
+			(accum_to_entities (assoc
+				containedTraineeIdToNamePathMap (associate child_id pretty_path)
+				containedTraineeNamePathStringToIdMap (associate string_path child_id)
+			))
+		)
+
+		;remove the child itself from the pretty path
+		(assign (assoc pretty_path (trunc pretty_path)))
+
 		;(accum_to_entities) opcode doesn't support nested layer accumulation of assoc keys, use (accum) on a local
 		;copy of the hierarchy map instead and then update hierarchyMap with the edited copy
-		(accum "hierarchy_map" direct_path (associate child_trainee (assoc)) )
+		(accum "hierarchy_map" pretty_path (associate child_name (assoc)) )
 		(assign_to_entities (assoc hierarchyMap hierarchy_map))
 
 		;this is the parent of the child, set the parentId for the child
-		(if (= 0 (size direct_path))
-			(assign_to_entities (list traineeContainer child_trainee) (assoc parentId parent_trainee))
-		)
+		;(if (= 0 (size pretty_path))
+		;	(assign_to_entities (list traineeContainer child_name) (assoc parentId parent_trainee))
+		;)
 
 		;add path to child trainee to all contained entities in the path,
 		;iterating by 2s to include an instance of 'traineeContainer' for each child
+		;child_trainee_path is in the format of: (list traineeContainer child1 traineeContainer child2 etc..)
 		(range
 			(lambda (let
 				(assoc index (current_index 1) )
 
 				;use the first 'index' ids in child_trainee_path to call the method
 				(call_entity (trunc child_trainee_path index) "AddChildTraineePaths" (assoc
-					child_trainee child_trainee
-					parent_trainee parent_trainee
+					child_name child_name
+					child_id child_id
 					;pass in the child_trainee_path with the first 'index' ids removed
 					child_trainee_path (tail child_trainee_path (- index))
 				))
@@ -88,15 +164,21 @@
 
 	;Removes paths to any child trainee
 	;parameters:
-	; child_trainee: id of child trainee to remove
+	; child_trainee_path: path to child trainee to remove in the format of: (list traineeContainer child1 traineeContainer child2 etc..)
 	#RemoveChildTraineePaths
 	(seq
-		(declare (assoc child_trainee_path (get containedTraineePathMap child_trainee) ))
+		(declare (assoc
+			pretty_path (filter (lambda (!= traineeContainer (current_value))) child_trainee_path)
+		))
+		(declare (assoc
+			child_id (get containedTraineeNamePathStringToIdMap pretty_path)
+		))
 
-		;child_trainee_path is in the format of: (list traineeContainer child1 traineeContainer child2 etc..)
 		(assign_to_entities (assoc
-			containedTraineePathMap (remove containedTraineePathMap child_trainee)
-			childTraineeIsContainedMap (remove childTraineeIsContainedMap child_trainee)
+			containedTraineeNamePathStringToListMap (remove containedTraineeNamePathStringToListMap pretty_path)
+			containedTraineeNamePathStringToIdMap (remove containedTraineeNamePathStringToIdMap pretty_path)
+			containedTraineeIdToNamePathMap (remove containedTraineeIdToNamePathMap child_id)
+			childTraineeIsContainedMap (remove childTraineeIsContainedMap pretty_path)
 		))
 
 		;find the parent of the child by grabbing the third-to-last value from the path
@@ -108,23 +190,22 @@
 				)
 		))
 
-		;remove the child_trainee from the hierarchyMap assoc based on its parent_trainee, regardless how many layers deep in it is
 		(assign_to_entities (assoc
 			hierarchyMap
+				;remove the child_trainee from the hierarchyMap assoc regardless how many layers deep in it is
 				(if parent_trainee
-					;the (remove) opcode doesn't support nested layer removal of assoc keys, so use (rewrite) instead
-					(rewrite
-						(lambda
-							(if (= parent_trainee (current_index))
-								(remove (current_value) child_trainee)
-								(current_value)
-							)
+					(let
+						(assoc hierarchy_map (retrieve_from_entity "hierarchyMap"))
+
+						(set
+							hierarchy_map
+							(trunc pretty_path)
+							(remove (get hierarchy_map (trunc pretty_path)) (last pretty_path))
 						)
-						hierarchyMap
 					)
 
-					;else remove the child_trainee directly from this trainee
-					(remove hierarchyMap child_trainee)
+					;else remove the child trainee directly from this trainee
+					(remove hierarchyMap (last pretty_path))
 				)
 		))
 
@@ -134,7 +215,7 @@
 			(lambda (let
 				(assoc next_trainee_path (trunc child_trainee_path (current_index 1)) )
 				(call_entity next_trainee_path "RemoveChildTraineePaths" (assoc
-					child_trainee child_trainee
+					child_trainee_path (tail child_trainee_path (- (current_index 1)))
 				))
 			))
 			2 (- (size child_trainee_path) 1) 2
