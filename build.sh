@@ -120,7 +120,7 @@ update_version_file() {
   git checkout version.json
   cp ${src_dir}/version.json ${src_dir}/version.json.orig
   jq ". | .version=\"${engine_version}\"" ${src_dir}/version.json.orig > ${src_dir}/version.json.orig
-  jq ".dependencies.amalgam |= \"${amlg_version}\"" ${src_dir}/version.json.orig > ${src_dir}/version.json
+  jq ".dependencies.amalgam |= ${amlg_version}" ${src_dir}/version.json.orig > ${src_dir}/version.json
   rm ${src_dir}/version.json.orig
   cat ${src_dir}/version.json
 }
