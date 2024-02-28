@@ -131,6 +131,7 @@ update_version_file() {
   rm ${src_dir}/version.json.orig
 
   cat ${src_dir}/version.json
+  echo 'Done updating version.json'
 }
 
 reset_version_file() {
