@@ -52,7 +52,7 @@ build() {
 
   # ensure amalgam binary exists.
   check_amalgam_exe
-  echo "Building howso-engine version ${engine_version} with amalgam version ${amlg_version}"
+  echo "Building howso-engine version \"${engine_version}\" with amalgam version \"${amlg_version}\""
   ${amlg_exe} deploy_howso.amlg
   if [ ! -f ~/.howso/lib/dev/engine/howso.caml ]; then echo "no caml files built - howso engine build failed"; exit 76; fi
   cp -r ~/.howso/lib/dev/engine/* ${pkg_dir}/
