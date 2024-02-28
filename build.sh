@@ -54,8 +54,8 @@ build() {
   # Create howso artifact:
   ${amlg_exe} deploy_howso.amlg
   if [ ! -f ~/.howso/lib/dev/engine/howso.caml ]; then
-    echo "No caml files built - howso engine build failed";
-    exit 76;
+    echo "No caml files built - howso engine build failed"
+    exit 76
   fi
   cp -r ~/.howso/lib/dev/engine/* ${pkg_dir}/
 }
@@ -140,7 +140,7 @@ check_amalgam_exe() {
   # a proper version and locate it at howso-engine/target/bin/amalgam
   if [[ ! -x $amlg_exe ]]; then
     echo "${amlg_exe} does not exist. Download a proper amalgam binary."
-    exit 146;
+    exit 146
   fi
   amlg_version=$($amlg_exe --version)
 }
