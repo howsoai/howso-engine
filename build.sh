@@ -138,7 +138,7 @@ check_amalgam_exe() {
     exit 146;
   fi
   amlg_version=$(${amlg_exe} --version)
-  #echo "${amlg_version}"
+  echo "Amalgam version: \"${amlg_version}\""
 }
 
 package() {
