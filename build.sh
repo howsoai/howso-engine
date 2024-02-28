@@ -117,19 +117,15 @@ build_package() {
 update_version_file() {
   engine_version=${1:-'0.0.0'}
   echo "Updating version.json with: \"version\": \"${engine_version}\", amalgam=\"${amlg_version}\""
+
   cd  ${src_dir}
   git checkout version.json
-  cp ${src_dir}/version.json ${src_dir}/version.json.orig
 
-  cat ${src_dir}/version.json.orig
-
-  jq ". | .version=\"${engine_version}\"" ${src_dir}/version.json.orig > ${src_dir}/version.json.orig
-
-  cat ${src_dir}/version.json.orig
-
-  jq ". | .dependencies.amalgam=\"${amlg_version}\"" ${src_dir}/version.json.orig > ${src_dir}/version.json
-  rm ${src_dir}/version.json.orig
-
+  temp_file=${src_dir}/version.json.orig
+  cp ${src_dir}/version.json $temp_file
+  jq ". | .version=\"${engine_version}\"" ${temp_file} > ${temp_file}.tmp && mv ${temp_file}.tmp ${temp_file}
+  jq ". | .dependencies.amalgam=\"${amlg_version}\"" ${temp_file} > ${src_dir}/version.json
+  rm ${temp_file}
   cat ${src_dir}/version.json
   echo 'Done updating version.json'
 }
