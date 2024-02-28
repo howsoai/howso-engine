@@ -114,11 +114,13 @@ build_package() {
 
 update_version_file() {
   engine_version=${1:-'0.0.0'}
-  echo "Updating version.json with "version": ${engine_version}"
+  check_amalgam_exe
+  echo "Updating version.json with: \"version\": \"${engine_version}\", amalgam=\"${amlg_version}\""
   cd  ${src_dir}
   git checkout version.json
   cp ${src_dir}/version.json ${src_dir}/version.json.orig
-  jq ". | .version=\"${engine_version}\"" ${src_dir}/version.json.orig > ${src_dir}/version.json
+  jq ". | .version=\"${engine_version}\"" ${src_dir}/version.json.orig > ${src_dir}/version.json.orig
+  jq ".dependencies.amalgam |= \"${amlg_version}\"" ${src_dir}/version.json.orig > ${src_dir}/version.json
   rm ${src_dir}/version.json.orig
   #cat ${src_dir}/version.json
 }
@@ -135,8 +137,8 @@ check_amalgam_exe() {
     echo "${amlg_exe} does not exist. Download a proper amalgam binary."
     exit 146;
   fi
-  amlg_version=$(${amlg_exe} --version | awk '{print $3}')
-  echo "${amlg_version}"
+  amlg_version=$(${amlg_exe} --version)
+  #echo "${amlg_version}"
 }
 
 package() {
