@@ -19,7 +19,6 @@ src_dir=$( cd "$(dirname "${BASH_SOURCE[0]}")"/; pwd -P )
 out_dir=${src_dir}/target
 pkg_dir=${out_dir}/package
 amlg_exe=${src_dir}/target/bin/amalgam-mt
-amlg_version=$(jq '.version' ${src_dir}/target/docs/version.json)
 
 # root directory for release artifacts.
 rel_dir=${src_dir}/release
@@ -36,6 +35,7 @@ if [[ "$arch" = 'x86_64' ]]; then arch="amd64"; fi
 
 build() {
   engine_version=${1:-'0.0.0'}
+  check_amalgam_exe
   echo "Building Howso Engine version \"${engine_version}\" with amalgam version \"${amlg_version}\"..."
   update_version_file ${engine_version}
 
@@ -52,7 +52,6 @@ build() {
   mkdir -p ${pkg_dir}/
 
   # Create howso artifact:
-  check_amalgam_exe
   ${amlg_exe} deploy_howso.amlg
   if [ ! -f ~/.howso/lib/dev/engine/howso.caml ]; then
     echo "No caml files built - howso engine build failed";
@@ -69,11 +68,11 @@ test() {
   if [[ "$arm_ver" == "arm64_8a" ]]; then
     amlg_exe=${src_dir}/target/bin/amalgam-st
   fi
+  check_amalgam_exe
 
   update_version_file ${engine_version}
   cd ${src_dir}/unit_tests
   echo "Running howso-engine unit tests with amalgam version \"${amlg_version}\"..."
-  check_amalgam_exe
   ${amlg_exe} ./ut_comprehensive_unit_test.amlg | tee /tmp/ut_results
   reset_version_file
   local ut_res=$(cat /tmp/ut_results | grep "PASSED : Total comprehensive test execution time" | wc -l)
@@ -146,7 +145,7 @@ check_amalgam_exe() {
     echo "${amlg_exe} does not exist. Download a proper amalgam binary."
     exit 146;
   fi
-  echo "Amalgam version: \"$(${amlg_exe} --version)\""
+  amlg_version=$($amlg_exe --version)
 }
 
 package() {
