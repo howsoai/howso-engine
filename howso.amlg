@@ -101,59 +101,30 @@
 		(if (and (or child_name_path child_id) (not (contains_entity trainee)))
 			(conclude "Specified invalid trainee.")
 		)
-
-		(if (size child_name_path)
-			(seq
-				;if child_name_path is provided, the last item is the name of the new trainee
-				(if (= 1 (size child_name_path))
-					(conclude
-						(if (contains_entity (list trainee ".trainee_container") (first child_name_path))
-							"Specified child is already in the hierarchy"
-
-							;else it's a direct child of this trainee
-							(list ".trainee_container" (first child_name_path))
-						)
-					)
-				)
-
-				(declare (assoc
-					path_to_parent (call_entity trainee "ResolveChildPath" (assoc name_path (trunc child_name_path)))
-				))
-
-				(conclude
-					(if (~ "string" path_to_parent)
-						path_to_parent
-
-						(append path_to_parent ".trainee_container" (last child_name_path))
-					)
-				)
-			)
-
-			;else check if child_id was specified
-			child_id
-			(seq
-				(if (~ (list) (call_entity trainee "ResolveChildPath" (assoc id child_id)))
-					(conclude "Specified child_id is already in the hierarchy.")
-				)
-
-				(if parent_id
-					(let
-						(assoc
-							parent_trainee_path (call_entity trainee "ResolveChildPath" (assoc id parent_id))
-						)
-						(if (!~ (list) parent_trainee_path)
-							(conclude "Specified invalid parent id.")
-						)
-
-						;set path to the child through whatever the path is to its parent
-						(append parent_trainee_path ".trainee_container" child_id)
-					)
-
-					;else it's a direct child of this trainee
-					(list ".trainee_container" child_id)
-				)
-			)
+		(if (and (= (null) child_id) (= 0 (size child_name_path)))
+			(conclude (null))
 		)
+
+		(declare (assoc new_child_name (get payload "trainee") ))
+
+		(declare (assoc
+			path_to_parent
+				(if (size child_name_path)
+					(call_entity trainee "ResolveChildPath" (assoc name_path child_name_path))
+
+					(call_entity trainee "ResolveChildPath" (assoc id child_id))
+				)
+		))
+
+		(if (!~ (list) path_to_parent)
+			(conclude "Specified invalid child trainee.")
+		)
+
+		(if (contains_entity (append trainee path_to_parent ".trainee_container" new_child_name))
+			(conclude "Specified trainee is already in the hierarchy.")
+		)
+
+		(append path_to_parent ".trainee_container" new_child_name)
 	)
 
 	;Pull the hierarchy for a trainee, returns an assoc of:
@@ -176,8 +147,6 @@
 	; payload: payload to pass to the method
 	; child_name_path: optional, list of strings specifying the user-friendly path of the child subtrainee for execution of method
 	; child_id: optional, id of child trainee to execute method. Ignored if child_name_path is specified
-	; parent_id: optional, id of subtrainee under which to load or create the child subtrainee. Applicable only to 'load' and 'create_trainee' operations and if child_id is specified.
-	;	If child_name_path is specified, this parameter is ignored. If both child_name_path and this parameter are unspecified, the trainee itself is the parent.
 	; as_external: optional, boolean, applicable only to 'load' and 'save' and if specifying child_name_path or child_id.
 	;	For 'load' updates hierarchy by adding the child as an independently stored trainee to the hierarchy without loading the trainee as a subtrainee,
 	;	For 'save', stores the child out as an independent trainee.
@@ -210,13 +179,14 @@
 		))
 
 		(if (= "delete" method)
-		(seq
-			(call_entity trainee "RemoveChildTraineePaths" (assoc child_trainee_path child_trainee_path))
-			(conclude
-				(if is_internal
-					(call !return)
-					;TODO: route the delete message to any independent parent in the path to the child trainee
-					(call !return (assoc warnings (list "Hierarchy has been updated but child trainee was not removed because it is stored independently of this trainee.")))
+			(seq
+				(call_entity trainee "RemoveChildTraineePaths" (assoc child_trainee_path child_trainee_path))
+				(conclude
+					(if is_internal
+						(call !return)
+						;TODO: route the delete message to any independent parent in the path to the child trainee
+						(call !return (assoc warnings (list "Hierarchy has been updated but child trainee was not removed because it is stored independently of this trainee.")))
+					)
 				)
 			)
 		)
@@ -231,21 +201,21 @@
 		(declare (assoc
 			child_name
 				(if (or (= method "create_trainee") (= method "load"))
-					(if (size child_name_path)
-						(last child_name_path)
-
-						(!= (null) child_id)
-						child_id
-					)
+					;set name to the trainee in the payload
+					(get payload "trainee")
 				)
 		))
+
+		(if (= (null) child_trainee_path)
+			(assign (assoc child_trainee_path (list ".trainee_container" child_name)))
+		)
 
 		;if loading as external, update the hierarchy maps and return without actually loading the trainee
 		(if (and (= method "load") as_external)
 			(seq
 				(call_entity trainee "AddChildTraineePaths" (assoc
 					child_name child_name
-					child_id child_id
+					child_id (get payload "trainee_id")
 					child_trainee_path child_trainee_path
 					is_contained (false)
 				))
@@ -260,8 +230,8 @@
 				(apply "call"
 					;parse method to evaluate it, when the opcode 'call' is applied, it'll be the actual name of the method instead of the literal 'method'
 					(list (parse method) (append
-						(assoc "trainee" (append trainee child_trainee_path))
 						payload
+						(assoc "trainee" (append trainee child_trainee_path))
 					))
 				)
 		))
@@ -275,7 +245,7 @@
 
 				(call_entity trainee "AddChildTraineePaths" (assoc
 					child_name child_name
-					child_id child_id
+					child_id (get payload "trainee_id")
 					child_trainee_path child_trainee_path
 				))
 			)
@@ -299,6 +269,7 @@
 	;parameters:
 	; filepath: path to the file (optional)
 	; trainee: name of trainee to create
+	; trainee_id: optional, unique id for trainee
 	#create_trainee
 		(seq
 			(declare (assoc
@@ -306,7 +277,7 @@
 			))
 
 			(if (!= (null) result)
-				(call_entity trainee "Initialize")
+				(call_entity trainee "Initialize" (assoc trainee_id trainee_id))
 			)
 
 			(if debug_print
@@ -446,98 +417,103 @@
 	#copy
 		(seq
 			(declare (assoc
-				parent_trainee_path_tuple (list (list) (true))
-				child_trainee_path_tuple (list (list) (true))
+				;flag will be set if copying a trainee into the hierarchy and the hirearchy definition will need to be updated
+				update_hierarchy (false)
+				source_trainee trainee
 			))
 
-			(if (or (= trainee target_trainee) (!= (null) (call_entity trainee "GetTraineePath" (assoc trainee target_trainee))))
-				(conclude
-					(call !return (assoc
-						errors (list (concat "Failed to copy: " target_trainee " trainee already exists."))
-					))
-				)
-			)
-
-			(if parent_trainee
-				(seq
-					(if (!= parent_trainee trainee)
-						(assign (assoc parent_trainee_path_tuple (call_entity trainee "GetTraineePath" (assoc trainee parent_trainee)) ))
-					)
-
-					(if (= (null) (first parent_trainee_path_tuple))
-						(conclude (conclude
-							(call !return (assoc errors (list "Invalid parent_trainee specified.")))
-						))
-					)
-					(if (not (last parent_trainee_path_tuple))
-						(conclude (conclude
-							(call !return (assoc errors (list "parent_trainee is stored independently of this trainee." )))
-						))
-					)
-
-					(if child_trainee
-						(seq
-							(assign (assoc child_trainee_path_tuple (call_entity trainee "GetTraineePath" (assoc trainee child_trainee)) ))
-							(if (= (null) (first child_trainee_path_tuple))
-								(conclude (conclude
-									(call !return (assoc errors (list "Invalid child_trainee specified.")))
-								))
-							)
-							(if (not (last child_trainee_path_tuple))
-								(conclude (conclude
-									(call !return (assoc errors (list "child_trainee is stored independently of this trainee." )))
-								))
-							)
-						)
-
-						;else set child to empty list so that trainee itself is copied
-						(assign (assoc child_trainee (list)))
-					)
-				)
-
-				;else specified child_trainee without parent_trainee
-				child_trainee
-				(conclude
-					(call !return (assoc errors (list "Specified child_trainee without specifying parent_trainee.") ))
-				)
-
-				;else copying this trainee itself, but target_trainee already exists
-				(contains_entity target_trainee)
-				(conclude
-					(call !return (assoc errors (list (concat "Failed to copy: " target_trainee " trainee already exists.")) ))
-				)
-			)
-
-			(if parent_trainee
+			(if (or target_id target_name_path)
 				(let
 					(assoc
-						child_trainee_path (append trainee (first child_trainee_path_tuple))
-						parent_trainee_path (append trainee (first parent_trainee_path_tuple) ".trainee_container" target_trainee)
+						target_trainee_path
+							(call_entity trainee "ResolveChildPath" (assoc
+								name_path target_name_path
+								id target_id
+							))
+					)
+					(if (~ "string" target_trainee_path)
+						(conclude (call !return (assoc errors (list target_trainee_path))) )
+					)
+					(if (not (call_entity trainee "IsChildInternal" (assoc child_trainee_path target_trainee_path)))
+						(conclude (call !return (assoc errors (list "Specified target location trainee is stored independently."))) )
+					)
+					(if (contains_entity (append trainee target_trainee_path ".trainee_container" target_trainee))
+						(conclude (call !return (assoc errors (list "Specified target_trainee already exists."))) )
 					)
 
-					;can't copy any trainees that have their own hirerachy to prevent having duplicate named trainees in the system
-					(if (size (retrieve_from_entity child_trainee_path "hierarchyMap"))
-						(conclude
-							(call !return (assoc errors (list "Cannot copy a trainee that has its own hierarchy.")))
-						)
-					)
-
-					(clone_entities child_trainee_path parent_trainee_path)
-
-					(call_entity trainee "AddChildTraineePaths" (assoc
-						child_trainee target_trainee
-						parent_trainee parent_trainee
-						child_trainee_path (append (first parent_trainee_path_tuple) ".trainee_container" target_trainee)
+					(assign (assoc
+						update_hierarchy (true)
+						target_trainee (append trainee target_trainee_path ".trainee_container" target_trainee)
 					))
-
-					(call !return (assoc payload (assoc "name" target_trainee) ))
 				)
 
-				;else just copy trainee
-				(call !return (assoc
-					payload (assoc "name" (first (clone_entities trainee target_trainee)) )
-				))
+				;else making a direct copy
+				(if (contains_entity target_trainee)
+					(conclude (call !return (assoc errors (list "Specified target_trainee already exists."))) )
+				)
 			)
+
+			(if (or source_id source_name_path)
+				(let
+					(assoc
+						source_trainee_path
+							(call_entity trainee "ResolveChildPath" (assoc
+								name_path source_name_path
+								id source_id
+							))
+					)
+					(if (~ "string" source_trainee_path)
+						(conclude (call !return (assoc errors (list source_trainee_path))) )
+					)
+					(if (not (call_entity trainee "IsChildInternal" (assoc child_trainee_path source_trainee_path)))
+						(conclude (call !return (assoc errors (list "Specified source trainee is stored independently."))) )
+					)
+
+					(assign (assoc source_trainee (append trainee source_trainee_path) ))
+				)
+			)
+
+			;update the hierarchy definition
+			(if update_hierarchy
+				(let
+					(assoc sub_hierarchy_map (call_entity source_trainee "get_hierarchy") )
+					(call_entity trainee "AddChildTraineePaths" (assoc
+						child_name (last target_trainee)
+						child_trainee_path (tail target_trainee)
+					))
+
+					;;;;^^^TODO: remove all child trainee ids
+
+					;if the copied trainee has its own hierarchy, add all the child trainee paths for all the children of the copied trainee
+					(if (size (get sub_hierarchy_map "is_contained_map"))
+						(let
+							(assoc
+								subtrainee_contained_map (get sub_hierarchy_map "is_contained_map")
+								contained_trainee_path_map (retrieve_from_entity source_trainee "containedTraineeNamePathStringToListMap")
+							)
+
+							;add all the child trainee paths for all the children of the copied trainee
+							(map
+								(lambda
+									(call_entity trainee "AddChildTraineePaths" (assoc
+										child_name (last (current_value 1))
+										child_trainee_path (append (tail source_trainee) (current_value 1))
+										is_contained (get subtrainee_contained_map (current_index 1))
+									))
+								)
+								contained_trainee_path_map
+							)
+						)
+					)
+				)
+			)
+
+			;do the actual copy here
+			(declare (assoc
+				name (first (clone_entities source_trainee target_trainee))
+			))
+
+			(call !return (assoc payload (assoc "name" name ) ))
 		)
 
 
@@ -3179,7 +3155,7 @@
 				(map
 					(lambda
 						;if target already has an entity with this exact id, move it into the target without maintaining original id
-						(if (contains_entity target_trainee (current_value))
+						(if (contains_entity (append target_trainee (current_value)))
 							(move_entities (append trainee (current_value)) target_trainee)
 
 							;else move the entity to the target maintaining its id
