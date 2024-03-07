@@ -35,7 +35,8 @@ if [[ "$arch" = 'x86_64' ]]; then arch="amd64"; fi
 
 build() {
   engine_version=${1:-'0.0.0'}
-  echo "Building Howso Engine version ${engine_version}..."
+  check_amalgam_exe
+  echo "Building Howso Engine version \"${engine_version}\" with amalgam version \"${amlg_version}\"..."
   update_version_file ${engine_version}
 
   cd ${src_dir}
@@ -50,11 +51,12 @@ build() {
   # make package output directory.
   mkdir -p ${pkg_dir}/
 
-  # ensure amalgam binary exists.
-  check_amalgam_exe
-  echo "Building howso-engine version ${engine_version} with amalgam version ${amlg_version}"
+  # Create howso artifact:
   ${amlg_exe} deploy_howso.amlg
-  if [ ! -f ~/.howso/lib/dev/engine/howso.caml ]; then echo "no caml files built - howso engine build failed"; exit 76; fi
+  if [ ! -f ~/.howso/lib/dev/engine/howso.caml ]; then
+    echo "No caml files built - howso engine build failed"
+    exit 76
+  fi
   cp -r ~/.howso/lib/dev/engine/* ${pkg_dir}/
 }
 
@@ -66,11 +68,11 @@ test() {
   if [[ "$arm_ver" == "arm64_8a" ]]; then
     amlg_exe=${src_dir}/target/bin/amalgam-st
   fi
+  check_amalgam_exe
 
   update_version_file ${engine_version}
   cd ${src_dir}/unit_tests
-  check_amalgam_exe
-  echo "Running howso-engine unit tests on amalgam version ${amlg_version}"
+  echo "Running howso-engine unit tests with amalgam version \"${amlg_version}\"..."
   ${amlg_exe} ./ut_comprehensive_unit_test.amlg | tee /tmp/ut_results
   reset_version_file
   local ut_res=$(cat /tmp/ut_results | grep "PASSED : Total comprehensive test execution time" | wc -l)
@@ -114,13 +116,18 @@ build_package() {
 
 update_version_file() {
   engine_version=${1:-'0.0.0'}
-  echo "Updating version.json with "version": ${engine_version}"
+  echo "Updating version.json with: \"version\": \"${engine_version}\", amalgam=\"${amlg_version}\""
+
   cd  ${src_dir}
   git checkout version.json
-  cp ${src_dir}/version.json ${src_dir}/version.json.orig
-  jq ". | .version=\"${engine_version}\"" ${src_dir}/version.json.orig > ${src_dir}/version.json
-  rm ${src_dir}/version.json.orig
-  #cat ${src_dir}/version.json
+
+  temp_file=${src_dir}/version.json.orig
+  cp ${src_dir}/version.json $temp_file
+  jq ". | .version=\"${engine_version}\"" ${temp_file} > ${temp_file}.tmp && mv ${temp_file}.tmp ${temp_file}
+  jq ". | .dependencies.amalgam=\"${amlg_version}\"" ${temp_file} > ${src_dir}/version.json
+  rm ${temp_file}
+  cat ${src_dir}/version.json
+  echo 'Done updating version.json'
 }
 
 reset_version_file() {
@@ -129,14 +136,13 @@ reset_version_file() {
 }
 
 check_amalgam_exe() {
-  # Check if the amalgam binary exists.  If not, warn user to download
+  # Check if the amalgam binary exists. If not, warn user to download
   # a proper version and locate it at howso-engine/target/bin/amalgam
   if [[ ! -x $amlg_exe ]]; then
     echo "${amlg_exe} does not exist. Download a proper amalgam binary."
-    exit 146;
+    exit 146
   fi
-  amlg_version=$(${amlg_exe} --version | awk '{print $3}')
-  echo "${amlg_version}"
+  amlg_version=$($amlg_exe --version)
 }
 
 package() {
