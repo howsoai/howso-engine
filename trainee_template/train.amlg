@@ -66,40 +66,7 @@
 		;recorded data for the current session
 		(declare (assoc
 			cur_session_data (retrieve_from_entity session ".replay_steps")
-			reserved_feature_names
-				(if allow_training_reserved_features
-					(list)
-					;filter out any normal features, leaving only invalid feature names that start with reserved characters
-					(filter
-						(lambda
-							(contains_index untrainableFeatureCharacterSet (first (current_value)))
-						)
-						features
-					)
-				)
 		))
-
-		;if any features are in the reserved list, can't train, output the error message
-		(if (> (size reserved_feature_names) 0)
-			(conclude
-				(assoc
-					"error"
-						(concat
-							"The following features should not start with characters '.' '^' '!' or '#' : "
-							;change list of features into a space-separated list of feature names
-							(apply "concat"
-								(weave
-									reserved_feature_names
-									(range " " 1 (size reserved_feature_names) 1)
-								)
-							)
-						)
-					"num_trained" 0
-					"ablated_indices" (list)
-					"status" (null)
-				)
-			)
-		)
 
 		(declare (assoc
 			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
@@ -108,51 +75,16 @@
 			message (null)
 			ablated_indices_list (list)
 			cur_session_case_indices_map (retrieve_from_entity session ".indices_map")
+			warnings (list)
 		))
 
-		(if (!= (null) series)
-			(if (= (size series_cases) 0)
-				(assign (assoc
-					input_cases (null)
-					message "Specified series does not exist"
-				))
-
-				;if input cases don't match the number of cases stored in series
-				(and (> (size input_cases) 1) (!= (size input_cases) (size series_cases)))
-				(assign (assoc
-					input_cases (null)
-					message "input_cases do not match length of specified series"
-				))
-			)
-		)
-
-		;if bad input, ie, size of series does not match the training input_cases, don't train anything
-		(if (= (null) input_cases)
-			(conclude
-				(assoc
-					"error" message
-					"num_trained" 0
-					"ablated_indices" ablated_indices_list
-					"status" status_output
-				)
-			)
-		)
+		;parameter and data checks
+		(call !PreTrainChecks)
 
 		;get time series derived features list, if applicable
 		(if (and (= (null) derived_features) (!= (null) tsTimeFeature) )
 			(assign (assoc
 				derived_features (get tsModelFeaturesMap "ts_derived_features")
-			))
-		)
-
-		(if (and (!= (null) tsTimeFeature) skip_auto_analyze)
-			(declare (assoc
-				warnings
-					(list (concat
-						"Using \"skip_auto_analyze\" when training time-series data may "
-						"result in less accurate modeling of the data as model parameters may not be "
-						"appropriately tuned when values are imputed."
-					))
 			))
 		)
 
@@ -487,8 +419,8 @@
 					)
 				)
 
-				;update has_nulls flags for all features after training by updating all false has_nulls in featureNullRatiosMap with null
-				(call !ClearHasNullFlags)
+				;update cached data properties has_nulls, null ratios, marginal stats, etc
+				(call !ClearCachedDataProperties)
 
 				;model has changed so clear out these cached value
 				#ClearCachedCountsAndEntropies
@@ -541,37 +473,7 @@
 		;and return the appropriate status to client so that analysis could be started
 		(if (> (size new_case_ids ) 0)
 			(if (and skip_ablation autoAnalyzeEnabled)
-				#!AutoAnalyzeIfNeeded
-				(let
-					(assoc num_cases (call GetNumTrainingCases))
-					(if
-						(and
-							(>= num_cases autoAnalyzeThreshold)
-							(or (< num_cases autoAnalyzeLimitSize) (<= autoAnalyzeLimitSize 0))
-						)
-						(if skip_auto_analyze
-							;if skip_auto_analyze, send back "analyze" status so users knows an analyze is needed
-							(assign (assoc status_output "analyze"))
-
-							;otherwise do the analyze
-							(seq
-								(if (!= (null) savedAnalyzeParameterMap)
-									(call Analyze savedAnalyzeParameterMap)
-
-									(call Analyze (assoc
-										targeted_model "targetless"
-										context_features trainedFeatures
-										weight_feature ".none"
-										use_case_weights (false)
-										inverse_residuals_as_weights (true)
-										k_folds 1
-									))
-								)
-								(assign (assoc status_output "analyzed"))
-							)
-						)
-					)
-				)
+				(call !AutoAnalyzeIfNeeded)
 			)
 		)
 
@@ -651,6 +553,126 @@
 		)
 	)
 
+
+	#!PreTrainChecks
+	(declare
+		(assoc
+			reserved_feature_names
+				(if allow_training_reserved_features
+					(list)
+					;filter out any normal features, leaving only invalid feature names that start with reserved characters
+					(filter
+						(lambda
+							(contains_index untrainableFeatureCharacterSet (first (current_value)))
+						)
+						features
+					)
+				)
+		)
+
+		;if any features are in the reserved list, can't train, output the error message
+		(if (> (size reserved_feature_names) 0)
+			(conclude (conclude
+				(assoc
+					"error"
+						(concat
+							"The following features should not start with characters '.' '^' '!' or '#' : "
+							;change list of features into a space-separated list of feature names
+							(apply "concat"
+								(weave
+									reserved_feature_names
+									(range " " 1 (size reserved_feature_names) 1)
+								)
+							)
+						)
+					"num_trained" 0
+					"ablated_indices" (list)
+					"status" (null)
+				)
+			))
+		)
+
+		;if specifying a series, make sure there are series_cases and the lengths match
+		(if (!= (null) series)
+			(if (= (size series_cases) 0)
+				(assign (assoc
+					input_cases (null)
+					message "Specified series does not exist"
+				))
+
+				;if input cases don't match the number of cases stored in series
+				(and (> (size input_cases) 1) (!= (size input_cases) (size series_cases)))
+				(assign (assoc
+					input_cases (null)
+					message "input_cases do not match length of specified series"
+				))
+			)
+		)
+
+		;if bad input, ie, size of series does not match the training input_cases, don't train anything
+		(if (= (null) input_cases)
+			(conclude (conclude
+				(assoc
+					"error" message
+					"num_trained" 0
+					"ablated_indices" ablated_indices_list
+					"status" status_output
+				)
+			))
+		)
+
+		;warn if using skip_auto_analyze when training time series data
+		(if (and (!= (null) tsTimeFeature) skip_auto_analyze)
+			(accum (assoc
+				warnings
+					(list (concat
+						"Using \"skip_auto_analyze\" when training time-series data may "
+						"result in less accurate modeling of the data as as statistics calculated "
+						"from the data used for inference will not take into account derived and "
+						"imputed data for the time series."
+					))
+			))
+		)
+	)
+
+	;private helper method that checks if the conditions for auto-analyze are met, and calls the analyze if so
+	;this method should be called within #Train
+	;
+	;parameters:
+	; skip_auto_analyze: flag, if true and auto-analyze is needed, then status_output will be assigned to "analyze".
+	;                    If false, and auto-analyze is needed, the analyze will be executed.
+	#!AutoAnalyzeIfNeeded
+	(let
+		(assoc num_cases (call GetNumTrainingCases))
+		(if
+			(and
+				(>= num_cases autoAnalyzeThreshold)
+				(or (< num_cases autoAnalyzeLimitSize) (<= autoAnalyzeLimitSize 0))
+			)
+			(if skip_auto_analyze
+				;if skip_auto_analyze, send back "analyze" status so users knows an analyze is needed
+				(assign (assoc status_output "analyze"))
+
+				;otherwise do the analyze
+				(seq
+					(if (!= (null) savedAnalyzeParameterMap)
+						(call Analyze savedAnalyzeParameterMap)
+
+						(call Analyze (assoc
+							targeted_model "targetless"
+							context_features trainedFeatures
+							weight_feature ".none"
+							use_case_weights (false)
+							inverse_residuals_as_weights (true)
+							k_folds 1
+						))
+					)
+					(assign (assoc status_output "analyzed"))
+				)
+			)
+		)
+	)
+
 	;set specified feature weights in all hyperparameter maps (defaultHyperparameters and hyperparameterMetadataMap)
 	;If weights haven't been defined yet, set them to 0 for invacitves and 1 for actives
 	;If already defined, will overwrite the weight of the specified features in feature_weights_map
@@ -724,7 +746,7 @@
 	)
 
 	;Helper method for training, Sets all has_nulls flags that were false to null
-	#!ClearHasNullFlags
+	#!ClearCachedDataProperties
 	(accum_to_entities (assoc
 		featureNullRatiosMap
 			(map
@@ -744,6 +766,14 @@
 				))
 				(append (zip features) featureNullRatiosMap)
 			)
+		averageModelCaseEntropyAddition (null)
+		averageModelCaseEntropyRemoval (null)
+		storedCaseConvictionsFeatureAddition (null)
+		averageModelCaseDistanceContribution (null)
+		staleOrdinalValuesCount (true)
+		nominalClassProbabilitiesMap (assoc)
+		expectedValuesMap (assoc)
+		featureMarginalStatsMap (assoc)
 	))
 
 	;Helper method to prime query caches for all trainedFeatures and update the inactiveFeaturesMap
