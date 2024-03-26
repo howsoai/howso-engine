@@ -8,7 +8,7 @@
 ;	"delete"
 ;	"get_loaded_trainees"
 ;	"get_num_training_cases"
-;   "edit_cases"
+;	"edit_cases"
 ;	"get_sessions"
 ;	"get_session_metadata"
 ;	"set_session_metadata"
@@ -26,6 +26,8 @@
 ;	"get_cases"
 ;	"save"
 ;	"copy"
+;	"copy_subtrainee"
+;	"rename_subtrainee"
 ;	"set_conviction_upper_threshold"
 ;	"set_conviction_lower_threshold"
 ;	"set_feature_attributes"
@@ -41,10 +43,11 @@
 ;	"set_random_seed"
 ;	"get_internal_parameters"
 ;	"set_internal_parameters"
-;   "set_auto_ablation_params"
-;   "get_auto_ablation_params"
+;	"set_auto_ablation_params"
+;	"get_auto_ablation_params"
 ;	"set_auto_analyze_params"
 ;	"move_cases"
+;	"remove_cases"
 ;	"reset_parameter_defaults"
 ;	"get_trainee_version"
 ;	"remove_feature"
@@ -63,6 +66,8 @@
 ;	"get_api"
 ;	"get_revision"
 ;	"evaluate"
+;	"get_hierarchy"
+;	"execute_on_subtrainee"
 ;
 ; Style notes:
 ; all methods are assumed to have null values as defaults for parameters
@@ -90,18 +95,258 @@
 			(retrieve_from_entity trainee "pointVersion")
 		)
 
-
-	;creates a new instance of a trainee as specified by the entity label "trainee"
+	;Pull the hierarchy for a trainee, returns an assoc of:
+	;the currently contained hierarchy as a nested assoc with (false) for trainees that are stored independently.
+	;
 	;parameters:
-	;	filepath: path to the file (optional)
+	; trainee: id of trainee whose hierarchy info to return
+	#get_hierarchy
+		(call !return (assoc
+			payload (call_entity trainee "GetHierarchy")
+		))
+
+	;Rename a contained trainee
+	;
+	;parameters:
+	; trainee: name of trainee whose contained trainee should be renamed
+	; child_name_path: optional, list of strings specifying the user-friendly path of the child subtrainee to rename
+	; child_id: optional, id of child trainee to rename. Ignored if child_name_path is specified
+	; new_name: new name of child trainee
+	#rename_subtrainee
+	(declare
+		(assoc
+			trainee (null)
+			child_name_path (null)
+			child_id (null)
+			new_name (null)
+		)
+
+		(if (= (null) trainee)
+			(conclude (call !return (assoc errors (list "No trainee specified."))))
+
+			(= (null) new_name)
+			(conclude (call !return (assoc errors (list "Must specify new_name."))))
+		)
+
+		(declare (assoc
+			child_entity_path
+				(call_entity trainee "ResolveChildEntityPath" (assoc
+					name_path child_name_path
+					id child_id
+				))
+		))
+
+		(if (~ "string" child_entity_path)
+			(conclude (call !return (assoc errors (list child_entity_path))) )
+		)
+
+		(declare (assoc
+			new_name_path (append trainee (trunc child_entity_path) new_name)
+		))
+
+		(if (contains_entity new_name_path)
+			(conclude (call !return (assoc errors (list "Trainee with specified new name already exists."))))
+		)
+
+		(move_entities (append trainee child_entity_path) new_name_path)
+
+		(call_entity trainee "RemoveChildTraineeReferences" (assoc child_entity_path child_entity_path ))
+		(call_entity trainee "AddChildTraineeReferences" (assoc
+			child_id (retrieve_from_entity new_name_path "traineeId")
+			child_entity_path (tail new_name_path)
+		))
+
+
+		(call !return)
+	)
+
+
+	;Execute any method in the API directly on any child trainee of trainee, used for hierarchy operations.
+	;
+	;parameters:
+	; trainee: name of trainee
+	; method: name of method to execute
+	; payload: payload to pass to the method
+	; child_name_path: optional, list of strings specifying the user-friendly path of the child subtrainee for execution of method
+	; child_id: optional, id of child trainee to execute method. Ignored if child_name_path is specified
+	; as_external: optional, boolean, applicable only to 'load' and 'save' and if specifying child_name_path or child_id.
+	;	For 'save', stores the child out as an independent trainee and removes it as a contained entity.
+	;	For 'load' updates hierarchy by adding the child as an independently stored trainee to the hierarchy without loading the trainee as a subtrainee.
+	; load_external_trainee_id: optional, trainee id of trainee being loaded, must be specified only when 'load' and as_external is true.
+	#execute_on_subtrainee
+	(declare
+		(assoc payload (assoc))
+
+		(if (= (null) trainee)
+			(conclude (call !return (assoc errors (list "No trainee specified."))) )
+
+			(not (contains_entity trainee))
+			(conclude (call !return (assoc errors (list "Specified invalid trainee."))) )
+		)
+
+		;providing id of child under which to creating/loading a trainee, find the path to that child using its id
+		(if (and child_id (= (null) child_name_path) (or (= "create_trainee" method) (= "load" method)))
+			(seq
+				(assign (assoc
+					child_name_path (call_entity trainee "ResolveChildEntityPath" (assoc id child_id))
+				))
+				(if (~ "string" child_name_path)
+					(conclude (call !return (assoc errors (list child_name_path))) )
+				)
+				(assign (assoc child_name_path (filter (lambda (!= ".trainee_container" (current_value))) child_name_path)))
+			)
+		)
+
+		(declare (assoc
+			child_entity_path
+				(call_entity trainee "ResolveChildEntityPath" (assoc
+					name_path
+						(if (or (= "create_trainee" method) (= "load" method))
+							(append (or child_name_path (list)) (get payload "trainee"))
+							child_name_path
+						)
+					id child_id
+					;if creating or loading, the child should not already exist
+					child_should_not_exist (or (= "create_trainee" method) (= "load" method))
+				))
+			is_internal (true)
+		))
+
+		(if (~ "string" child_entity_path)
+			(if (and (= "delete" method)  "Specified an indepedently stored trainee." child_entity_path)
+				(assign (assoc is_internal (false) ))
+
+				(conclude (call !return (assoc errors (list child_entity_path))) )
+			)
+		)
+
+		(if (= "delete" method)
+			(let
+				(assoc
+					child_entity_path
+						(call_entity trainee "ResolveChildEntityPath" (assoc
+							name_path child_name_path
+							id child_id
+							child_must_be_contained (false)
+						))
+				)
+				(call_entity trainee "RemoveChildTraineeReferences" (assoc child_entity_path child_entity_path))
+				(conclude
+					(if is_internal
+						(call delete (assoc trainee (append trainee child_entity_path)))
+						;TODO: 19626 route the delete message to any independent parent in the path to the child trainee
+						(call !return (assoc warnings (list "Hierarchy has been updated but child trainee was not removed because it is stored independently of this trainee.")))
+					)
+				)
+			)
+		)
+
+		;TODO: 19626 route output the message to the child trainee instead of erroring out
+		(if (= (false) is_internal)
+			(conclude
+				(call !return (assoc errors (list "Specified child trainee is not a subtrainee.")))
+			)
+		)
+
+		(declare (assoc
+			child_name
+				(if (contains_value (list "create_trainee" "load" "delete") method)
+					;set name to the trainee in the payload
+					(get payload "trainee")
+				)
+		))
+
+		(if (= (null) child_entity_path)
+			(assign (assoc child_entity_path (list ".trainee_container" child_name)))
+		)
+
+		;if loading as external, update the hierarchy maps and return without actually loading the trainee
+		(if (and (= "load" method) as_external)
+			(seq
+				(if (= (null) load_external_trainee_id)
+					(conclude (conclude
+						(call !return (assoc errors (list "load_external_trainee_id must be specified when loading as external.")))
+					))
+				)
+
+				(declare (assoc
+					path_to_existing_by_id (call_entity trainee "GetEntityPathById" (assoc id load_external_trainee_id))
+				))
+
+				(if (!= (null) path_to_existing_by_id)
+					(conclude (conclude
+						(call !return (assoc errors (list "A trainee with this id is already loaded.")))
+					))
+				)
+
+				(call_entity trainee "AddChildTraineeReferences" (assoc
+					child_id load_external_trainee_id
+					child_entity_path child_entity_path
+					is_contained (false)
+				))
+				(conclude (call !return))
+			)
+		)
+
+		;call the method on the child directly with the payload
+		;convert (list method (assoc trainee (list path_to_trainee))) into: (call method (assoc trainee (list path_to_trainee)))
+		(declare (assoc
+			output
+				(apply "call"
+					;parse method to evaluate it, when the opcode 'call' is applied, it'll be the actual name of the method instead of the literal 'method'
+					(list (parse method) (append
+						payload
+						(assoc "trainee" (append trainee child_entity_path))
+					))
+				)
+		))
+
+		;post-execute operations if the execution was succesfull
+		(if (= 0 (size (get output "errors")))
+			(if (= "load" method)
+				(call_entity trainee "AddChildTraineeReferences" (assoc
+					child_entity_path child_entity_path
+				))
+
+				(= "create_trainee" method)
+				(call_entity trainee "AddChildTraineeReferences" (assoc
+					child_id (get payload "trainee_id")
+					child_entity_path child_entity_path
+				))
+
+				;saving a child trainee sets it as independent and removes it as a contained trainee
+				(and (= "save" method) as_external)
+				(seq
+					(call_entity trainee "UpdateParentsIsContainedMap" (assoc
+						child_entity_path child_entity_path
+						is_contained (false)
+					))
+					(destroy_entities (append trainee child_entity_path))
+				)
+			)
+		)
+
+		output
+	)
+
+	;creates a new instance of a trainee as specified by the entity label "trainee".
+	;parameters:
+	; filepath: path to the file (optional)
+	; trainee: name of trainee to create
+	; trainee_id: optional, unique id for trainee
 	#create_trainee
 		(seq
+			;when creating a non-contained trainee, set its trainee_id to be the same as its name if id is unspecified
+			(if (and (= (null) trainee_id) (~ "string" trainee))
+				(assign (assoc trainee_id trainee))
+			)
+
 			(declare (assoc
 				result (load_entity (concat filepath !trainee_template_filename "." !file_extension) trainee (false) (false))
 			))
 
 			(if (!= (null) result)
-				(call_entity trainee "Initialize")
+				(call_entity trainee "Initialize" (assoc trainee_id trainee_id))
 			)
 
 			(if debug_print
@@ -109,7 +354,7 @@
 			)
 
 			(if result
-				(call !return (assoc payload (assoc "name" result) ))
+				(call !return (assoc payload (assoc "name" result "id" trainee_id) ))
 
 				(call !return (assoc errors (list "Failed to create trainee: ensure a valid filepath.")))
 			)
@@ -136,11 +381,11 @@
 	;parameters:
 	; filepath: base path to load from
 	; filename: name to load (without extension)
-	; trainee: name to refer to this instance by
+	; trainee: name of this trainee
 	; separate_files: flag, default to false. if set to true will load each case from its individual file
 	#load
-		(seq
-			(declare (assoc
+		(let
+			(assoc
 				loaded_trainee
 					(if (and separate_files (= "amlg" !file_extension))
 						(let (assoc temptrainee "_temptrainee")
@@ -156,6 +401,7 @@
 									;return the name of the trainee to indicate a successful load attempt
 									trainee
 								)
+
 								;else return null
 								(null)
 							)
@@ -169,19 +415,18 @@
 								(seq
 									;destroy the previously existing trainee
 									(destroy_entities trainee)
-
 									;move the trainee under the temporary label to the trainee label;
 									(move_entities temptrainee trainee)
-
 									;return the name of the trainee to indicate a successful load attempt
 									trainee
 								)
+
 								;else return null
 								(null)
 							)
 						)
 					)
-			))
+			)
 
 			(if loaded_trainee
 				(call !return (assoc payload (assoc "name" loaded_trainee) ))
@@ -191,23 +436,34 @@
 		)
 
 
-	;Saves a trainee with the following optional parameters.  If a parameter is not specified, it will look to this entity's own label of the same name.
-	;escapes trainee filenames on save
+	;Saves a trainee with the following optional parameters, escapes trainee filenames on save
+	;
+	;parameters:
 	; filepath: base path to store to
 	; filename: name to store (without extension)
 	; trainee: trainee instance name to store
+	; trainee_id: optional, unique id for trainee. Must be provided if trainee does not have one already specified.
 	; separate_files: flag, default to false. if set to true will save each case as an individual file
-	;returns true on success, false on failure
 	#save
-		(let
-			(assoc
+		(seq
+			(if (= (null) trainee_id (retrieve_from_entity trainee "traineeId"))
+				(conclude
+					(call !return (assoc errors (list "Trainee must have a unique trainee_id specified.")))
+				)
+
+				;else the trainee doesn't have its traineeId set, update it here prior to saving
+				(= (null) (retrieve_from_entity trainee "traineeId"))
+				(assign_to_entities trainee (assoc traineeId trainee_id))
+			)
+
+			(declare (assoc
 				success
 					(if (and separate_files (= "amlg" !file_extension))
 						(store_entity (concat filepath filename "." !file_extension) trainee (true))
 
 						(store (concat filepath filename "." !file_extension) (flatten_entity trainee (false)) )
 					)
-			)
+			))
 
 			(if success
 				(call !return)
@@ -217,7 +473,10 @@
 		)
 
 
-	;Destroyes the instance of the trainee specified by the parameter "trainee".  If trainee is not specified, it will look to this entity's own label of the same name.
+	;Destroys the instance of the trainee specified by the parameter "trainee".
+	;
+	;parameters:
+	; trainee: name of trainee
 	#delete
 		(seq
 			(destroy_entities trainee)
@@ -237,6 +496,116 @@
 
 			;else error
 			(call !return (assoc errors (list (concat "Failed to copy: " target_trainee " trainee already exists.")) ))
+		)
+
+	;creates a copy of a trainee and stores it a subtrainee, returns the name of the copied trainee on success
+	;
+	;parameters:
+	; trainee: trainee instance to copy or to operate under if providing a child trainee
+	; target_trainee: name of copy
+	; target_name_path: optional, list of strings specifying the user-friendly path of the child subtrainee to copy trainee into.
+	; target_id: optional, id of target trainee to copy trainee into.  Ignored if target_name_path is specified.
+	;		If neither target_name_path nor target_id are specified, copies as a direct child of trainee
+	; source_name_path: optional, list of strings specifying the user-friendly path of the child subtrainee to copy.
+	; source_id: optional, id of source trainee to copy. Ignored if source_name_path is specified.
+	;		If neither source_name_path nor source_id are specified, copies the trainee itself.
+	#copy_subtrainee
+		(let
+			(assoc
+				;flag will be set if copying a trainee into the hierarchy and the hirearchy definition will need to be updated
+				update_hierarchy (false)
+				source_trainee trainee
+			)
+
+			(if (or target_id target_name_path)
+				(let
+					(assoc
+						target_entity_path
+							(call_entity trainee "ResolveChildEntityPath" (assoc
+								name_path target_name_path
+								id target_id
+							))
+					)
+					(if (~ "string" target_entity_path)
+						(conclude (conclude (call !return (assoc errors (list target_entity_path))) ))
+					)
+
+					(assign (assoc
+						target_entity_path
+							(call_entity trainee "ResolveChildEntityPath" (assoc
+								name_path (append target_name_path target_trainee)
+								id target_id
+								child_should_not_exist (true)
+							))
+					))
+					(if (~ "string" target_entity_path)
+						(conclude (conclude (call !return (assoc errors (list target_entity_path))) ))
+					)
+
+					(assign (assoc
+						update_hierarchy (true)
+						target_trainee (append trainee target_entity_path)
+					))
+				)
+
+				;else making a direct copy into the main trainee
+				(seq
+					(assign (assoc target_trainee (append trainee ".trainee_container" target_trainee) ))
+
+					(if (contains_entity target_trainee)
+						(conclude (conclude (call !return (assoc errors (list "Specified target_trainee already exists."))) ))
+					)
+
+					(if (= (false) (get (retrieve_from_entity trainee "childTraineeIsContainedMap") target_trainee))
+						(conclude (conclude (call !return (assoc errors (list "Specified target location trainee is stored independently."))) ))
+					)
+				)
+			)
+
+			(if (or source_id source_name_path)
+				(let
+					(assoc
+						source_entity_path
+							(call_entity trainee "ResolveChildEntityPath" (assoc
+								name_path source_name_path
+								id source_id
+							))
+					)
+					(if (~ "string" source_entity_path)
+						(conclude (conclude (call !return (assoc errors (list source_entity_path))) ))
+					)
+
+					(assign (assoc
+						update_hierarchy (true)
+						source_trainee (append trainee source_entity_path)
+					))
+
+					;if copying directly into the trainee, target_trainee will be the name of the target instead of the path, overwrite as the path to it
+					(if (~ "string" target_trainee)
+						(assign (assoc target_trainee (list trainee ".trainee_container" target_trainee) ))
+					)
+				)
+			)
+
+			;do the actual copy here
+			(declare (assoc
+				name (first (clone_entities source_trainee target_trainee))
+			))
+
+			;update the hierarchy definition if copy was a success
+			(if (and name update_hierarchy)
+				(seq
+					;remove traineeId from copy to make sure there aren't two trainees with the same id
+					(assign_to_entities target_trainee (assoc traineeId (null)))
+
+					(call_entity trainee "AddChildTraineeReferences" (assoc
+						child_entity_path (tail target_trainee)
+						child_id (null)
+					))
+				)
+			)
+
+			(call !return (assoc payload (assoc "name" name ) ))
 		)
 
 
@@ -705,17 +1074,17 @@
 	; auto_ablation_enabled: flag, default is false. when true, any enabled ablation techniques will be run at during training.
 	; auto_ablation_weight_feature: string, default is ".case_weight". the weight feature that should be used when ablating.
 	; minimum_model_size: optional, stores the threshold for the minimum number of cases at which the model should auto-ablate.
-	;                     default of 1000.
+	;					 default of 1000.
 	; influence_weight_entropy_threshold: optional, the influence weight entropy quantile that a case must be beneath in order to be trained.
-	;                                     default of 0.6.
+	;									 default of 0.6.
 	; exact_prediction_features: optional list of features. for each of the features specified, will ablate a case if the prediction
-	;                            matches exactly.
+	;							matches exactly.
 	; tolerance_prediction_threshold_map: optional assoc of feature -> [MIN, MAX]. for each of the features specified, will
-	;                                     ablate a case if the prediction >= (case value - MIN) and the prediction <= (case value + MAX)
+	;									 ablate a case if the prediction >= (case value - MIN) and the prediction <= (case value + MAX)
 	; relative_prediction_threshold_map: optional assoc of feature -> PERCENT. for each of the features specified, will
-	;                                    ablate a case if abs(prediction - case value) / prediction <= PERCENT
+	;									ablate a case if abs(prediction - case value) / prediction <= PERCENT
 	; residual_conviction_features: optional list of features. for each of the features specified, will ablate a case if
-	;                               abs(prediction - case value) <= feature residual
+	;							   abs(prediction - case value) <= feature residual
 	; conviction_upper_threshold: optional float. the conviction value below which cases will be ablated
 	; conviction_lower_threshold: optional float. the conviction value above which cases will be ablated
 	#set_auto_ablation_params
@@ -911,7 +1280,7 @@
 	; 		accepted values:
 	; 			'max': the maximum local distance
 	; 			'min': the minimum local distance
-	; 	    	'most_similar': the closest distance of the most similar case
+	; 			'most_similar': the closest distance of the most similar case
 	; 			null: the minimum local distance
 	#react
 		(declare
@@ -1123,7 +1492,7 @@
 	; series_stop_map: assoc of feature -> stop conditions:
 	;		for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
 	;		for nominal features:  { feature:  { "values" : ['val1', 'val2' ]} }  - stops series when feature value matches any of the values listed
-	;       specifying ".series_progress" with a value between 0 and 1.0 corresponding to percent completion e.g., { ".series_progress" : .95 } -
+	;	   specifying ".series_progress" with a value between 0 and 1.0 corresponding to percent completion e.g., { ".series_progress" : .95 } -
 	;			stops series when it progresses at or beyond 95%.
 	; max_series_length: optional, maximum size a series is allowed to be.  Default is 3 * model_size, a 0 or less is no limit.
 	; derived_context_features: list of context features whose values should be computed from the entire series in the specified order.
@@ -2018,7 +2387,7 @@
 	; inverse_residuals_as_weights: optional, default is null, will be set to false for targeted and true for targetless
 	;			when true will forcibly compute and use inverse of residuals as feature weights
 	; use_case_weights: optional, default is null. when true will scale influence weights by each case's weight_feature weight. if use_case_weights isn't specified, it will
-	;                   be true if auto ablation is enabled and false otherwise
+	;				   be true if auto ablation is enabled and false otherwise
 	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
 	;
 	; returns success when completed
@@ -2367,8 +2736,8 @@
 	;	"contribution": feature contribution to predicted value when each feature is dropped from the model, applies to all features.
 	;	"mda_permutation": mean decrease in accuracy that used scrambling of feature values instead of dropping each feature, applies to all features.
 	;	"mae" : Mean absolute error. For continuous features, this is calculated as the mean of absolute values of the difference
-    ;		between the actual and predicted values. For nominal features, this is 1 - the average categorical action probability of each case's
-    ;		correct classes. Categorical action probabilities are the probabilities for each class for the action feature.
+	;		between the actual and predicted values. For nominal features, this is 1 - the average categorical action probability of each case's
+	;		correct classes. Categorical action probabilities are the probabilities for each class for the action feature.
 	;	"r2": r-squared coefficient of determination, for continuous features only.
 	;	"rmse": root mean squared error, for continuous features only.
 	;	"spearman_coeff": Spearman's rank correlation coefficient, for continuous features only.
@@ -2378,7 +2747,7 @@
 	;	"missing_value_accuracy": The number of correct predictions on cases with missing values values divided by the total number of cases with missing
 	;							  values for a specified feature.
 	;   "confusion_matrix": A matrix showing the number of predicted values of each class
-	;                       for each unique value of the predicted feature. Outputs the sparse confusion matrix.
+	;					   for each unique value of the predicted feature. Outputs the sparse confusion matrix.
 	;
 	; robust: flag, optional. if specified will attempt to return stats that were computed with the specified robust or non-robust type.
 	; action_feature: string, optional. if specified will attempt to return stats that were computed for this specified action_feature.
@@ -2685,7 +3054,7 @@
 	; hyperparameter_map: required. must have at least an action feature (e.g., .targetless) -> context feature key (sorted and concatenated context features with "." separators) ->robust -> k, p and dt provided.
 	;	example:
 	;   {
-	;	    ".targetless" { "featureA.featureB.": { "robust" : { "k" : number, "p" : number, "dt": number }}},
+	;		".targetless" { "featureA.featureB.": { "robust" : { "k" : number, "p" : number, "dt": number }}},
 	;		"featureA" : { "featureB.featureC.": { "full" : { "k" : number, "p" : number, "dt": number }}},
 	;			...
 	;	}
@@ -2728,11 +3097,71 @@
 		)
 
 
-	;moves all cases that match the specified conditions from trainee to the target trainee
-	;removes all cases that match the specified conditions if target trainee is not specified
+	;removes all cases that match the specified conditions from trainee
+	;
 	;parameters:
-	; target_trainee : the trainee to move cases to. if not specified will remove cases
-	; case_indices : a list of session id and training index tuples that specify which cases are to be moved
+	; trainee: name of trainee
+	; case_indices: a list of session id and training index tuples that specify which cases are to be removed
+	; precision: flag, whether to query for 'exact' matches; if set to 'similar' will move num_cases with the most similar values. Ignored if case_indices is specified.
+	; condition: assoc of feature->value(s) (no value = must have feature, one value = must equal exactly the value, two values = inclusive between). Ignored if case_indices is specified.
+	; condition_session: optional, if specified, ignores condition and instead operates on all cases that were trained with this session id. Ignored if case_indices is specified.
+	; num_cases: optional, limit on the number of cases to move; If set to zero there will be no limit. Ignored if case_indices is specified.
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
+	; session: the session id when this call is being made. Applicable  only when target_trainee is specified,
+	; 	used for training the cases into the target_trainee
+	; distribute_weight_feature: name of feature into which to distribute the removed cases' weights to their neighbors.
+	#remove_cases
+		(declare
+			(assoc
+				case_indices (null)
+				condition (assoc)
+				precision "exact"
+				num_cases (null)
+				session "none"
+				distribute_weight_feature (null)
+			)
+
+			;build list of case ids that match criteria
+			(declare (assoc
+				cases_to_remove
+					(if (= (null) case_indices)
+						;compute the cases to re/move
+						(call_entity trainee "GetCasesByCondition" (assoc
+							condition condition
+							condition_session condition_session
+							precision precision
+							num_cases num_cases
+						))
+
+						;else use case_indices
+						(call_entity trainee "GetCaseIds" (assoc case_indices case_indices))
+					)
+			))
+
+			;remove cases and do session cleanup
+			(call_entity trainee "RemoveCases" (assoc
+				cases cases_to_remove
+				distribute_weight_feature distribute_weight_feature
+			))
+
+			(accum_to_entities trainee (assoc revision 1))
+
+			;return the number of cases moved
+			(call !return (assoc payload (assoc "count" (size cases_to_remove)) ))
+		)
+
+	;moves all cases that match the specified conditions from trainee (or child trainee if specified) to the target trainee
+	;
+	;parameters:
+	; trainee: name of trainee
+	; target_name_path: optional, list of strings specifying the user-friendly path of the child subtrainee to move cases to.
+	; target_id: optional, id of target trainee to move cases to. Ignored if target_name_path is specified.
+	;		If neither target_name_path nor target_id are specified, moves cases to the trainee itself.
+	; source_name_path: optional, list of strings specifying the user-friendly path of the child subtrainee from which to move cases.
+	; source_id: optional, id of source trainee from which to move cases. Ignored if source_name_path is specified.
+	;		If neither source_name_path nor source_id are specified, moves cases from the trainee itself.
+	;
+	; case_indices: a list of session id and training index tuples that specify which cases are to be moved
 	; precision: flag, whether to query for 'exact' matches; if set to 'similar' will move num_cases with the most similar values. Ignored if case_indices is specified.
 	; condition: assoc of feature->value(s) (no value = must have feature, one value = must equal exactly the value, two values = inclusive between). Ignored if case_indices is specified.
 	; condition_session: optional, if specified, ignores condition and instead operates on all cases that were trained with this session id. Ignored if case_indices is specified.
@@ -2755,16 +3184,50 @@
 				distribute_weight_feature (null)
 			)
 
-			;if moving cases, make sure target trainee entity exists, otherwise return 0
-			(if (and
-					(!= target_trainee (null))
-					(not (contains_entity target_trainee))
+			(declare (assoc target_trainee (null) ))
+
+			(if (and target_id (contains_entity target_id))
+				(assign (assoc target_trainee target_id))
+
+				(or target_id target_name_path)
+				(let
+					(assoc
+						target_entity_path
+							(call_entity trainee "ResolveChildEntityPath" (assoc
+								name_path target_name_path
+								id target_id
+							))
+					)
+					(if (~ "string" target_entity_path)
+						(conclude (conclude (call !return (assoc errors (list target_entity_path))) ))
+					)
+
+					(assign (assoc target_trainee (append trainee target_entity_path) ))
 				)
-				(conclude
-					(call !return (assoc
-						errors (list (concat "Failed to move cases: target trainee " target_trainee " does not exist."))
-					))
+
+				;else target is self
+				(assign (assoc target_trainee trainee))
+			)
+
+			(if (or source_id source_name_path)
+				(let
+					(assoc
+						source_entity_path
+							(call_entity trainee "ResolveChildEntityPath" (assoc
+								name_path source_name_path
+								id source_id
+							))
+					)
+					(if (~ "string" source_entity_path)
+						(conclude (conclude (call !return (assoc errors (list source_entity_path))) ))
+					)
+
+					(assign (assoc trainee (append trainee source_entity_path) ))
 				)
+			)
+
+			(if (= trainee target_trainee)
+				(conclude (call !return (assoc errors (list "Can't move to cases to self."))))
 			)
 
 			;build list of case ids that match criteria
@@ -2784,30 +3247,30 @@
 					)
 			))
 
-			;move or remove cases matching the criteria
-			(if (!= target_trainee (null))
-				;iterate over each case and move it from the trainee into target_trainee
-				(if preserve_session_data
-					;just move the cases without editing session data
-					(map
-						(lambda
-							;if target already has an entity with this exact id, move it into the target without maintaining original id
-							(if (contains_entity target_trainee (current_value))
-								(move_entities (list trainee (current_value 1)) target_trainee)
 
-								;else move the entity to the target maintaining its id
-								(move_entities (list trainee (current_value 1)) (list target_trainee (current_value 1)))
-							)
-						 )
-						cases_to_move
-					)
+			;iterate over each case and move it from the trainee into target_trainee
+			(if preserve_session_data
+				;just move the cases without editing session data
+				(map
+					(lambda
+						;if target already has an entity with this exact id, move it into the target without maintaining original id
+						(if (contains_entity (append target_trainee (current_value)))
+							(move_entities (append trainee (current_value)) target_trainee)
 
-					;else move the cases by retraining them in the target trainee and clearing out session data from trainee
+							;else move the entity to the target maintaining its id
+							(move_entities (append trainee (current_value)) (append target_trainee (current_value)))
+						)
+						)
+					cases_to_move
+				)
+
+				;else move the cases by retraining them in the target trainee and clearing out session data from trainee
+				(seq
 					(map
 						(lambda (let
 							(assoc
 								;grab all the case data as an assoc
-								case_map (get_all_labels (retrieve_entity_root (list trainee (current_value 2)) 1 ))
+								case_map (get_all_labels (retrieve_entity_root (append trainee (current_value 1)) 1 ))
 							)
 							(declare (assoc
 								;keep all features from the case except for 'sessions' since that'll have to be recomputed
@@ -2827,15 +3290,13 @@
 						))
 						cases_to_move
 					)
-				)
-			)
 
-			;remove cases and do session cleanup
-			(if (or (not preserve_session_data) (= (null) target_trainee))
-				(call_entity trainee "RemoveCases" (assoc
-					cases cases_to_move
-					distribute_weight_feature distribute_weight_feature
-				))
+					;remove cases and do session cleanup
+					(call_entity trainee "RemoveCases" (assoc
+						cases cases_to_move
+						distribute_weight_feature distribute_weight_feature
+					))
+				)
 			)
 
 			(accum_to_entities trainee (assoc revision 1))
@@ -3101,7 +3562,7 @@
 			;save the updated trainee
 			(call save (assoc trainee trainee filename trainee filepath trainee_filepath))
 
-			;print statement for use in utiility scripts: upgrade_trainee and export_trainee
+			;print statement for use in utility scripts: upgrade_trainee and export_trainee
 			(print
 				"Updated " trainee " to version: "
 				(retrieve_from_entity trainee "majorVersion") "."
@@ -3282,7 +3743,7 @@
 				(conclude (null))
 			)
 
-			(call_entity temptrainee "Initialize")
+			(call_entity temptrainee "Initialize" (assoc trainee_id (retrieve_from_entity trainee "traineeId")))
 
 			(declare (assoc
 				old_major_version (retrieve_from_entity trainee "majorVersion")
