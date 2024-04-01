@@ -4,7 +4,7 @@
 
 	;returns array of ids of all cases that exist in this trained model
 	;by finding all the entities that have a reference to replay sessions
-	#AllCases
+	#!AllCases
 	(declare
 		(assoc
 			num (null)
@@ -37,7 +37,7 @@
 	; num: number of samples to return
 	; rand_seed: optional random seed
 	; case_weight_feature: optional, if provided will use this feature to do case weighted sampling
-	#SampleCases
+	#!SampleCases
 	(declare
 		(assoc
 			num (null)
@@ -67,19 +67,23 @@
 			(contained_entities (list
 				(query_exists internalLabelSession)
 				(if case_weight_feature
-					(query_weighted_sample case_weight_feature (call GetNumTrainingCases) (rand))
-					(query_sample (call GetNumTrainingCases) (rand))
+					(query_weighted_sample case_weight_feature (call !GetNumTrainingCases) (rand))
+					(query_sample (call !GetNumTrainingCases) (rand))
 				)
 			))
 		)
 	)
 
-	;returns the total number of training cases -- if data is properly cleaned up
-	#GetNumTrainingCases
+	;returns the total number of training cases for trainee
+	#get_num_training_cases
+	(call !Return (assoc payload (assoc "count" (call !GetNumTrainingCases) ) ))
+
+	;returns the total number of training cases
+	#!GetNumTrainingCases
 	(compute_on_contained_entities (list (query_exists internalLabelSession) (query_count)))
 
 	;parameters: session and session_index
-	#GetCaseGivenReplaySession
+	#!GetCaseGivenReplaySession
 	(get (retrieve_from_entity session ".replay_steps") session_index)
 
 	;returns assoc with features and cases - a list of lists of all feature values. Retrieves all feature values for cases for
@@ -88,7 +92,7 @@
 	;
 	;parameters:
 	; features: list of features to retrieve.
-	; skip_decoding: set flag to skip decoding feature values into their nominal values for output.
+	; indicate_imputed: if set to 1 will return the audit data of which features for each row were imputed (auto-filled)
 	; session: optional session from which to get cases (even if by condition).
 	; case_indices: optional, list of pair (list) of session id and index, where index is the original 0-based session_training_index of the
 	;		case as it was trained. If specified, ignores session and condition/precision parameters.
@@ -96,7 +100,9 @@
 	; num_cases: optional, limit on the number of cases to retrieve; If set to zero there will be no limit.
 	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
 	; precision: optional string. default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
-	#RetrieveAllCases
+	;
+	; skip_decoding: set flag to skip decoding feature values into their nominal values for output.
+	#get_cases
 	(declare
 		(assoc
 			features (list)
@@ -106,6 +112,11 @@
 			condition (null)
 			num_cases (null)
 			precision "exact"
+			indicate_imputed (false)
+		)
+
+		(if indicate_imputed
+			(accum (assoc features internalLabelImputed))
 		)
 
 		(if (and (= 0 (size features)) (> (size trainedFeatures) 0))
@@ -153,7 +164,7 @@
 						)
 
 						;specify no limit for how many to match as long as they match the condition
-						(call GetCasesByCondition (assoc
+						(call !GetCasesByCondition (assoc
 							condition condition
 							condition_session condition_session_value
 							precision precision
@@ -165,7 +176,7 @@
 					(apply "append"
 						(map
 							(lambda (retrieve_from_entity (current_value) ".replay_steps"))
-							(call GetSessionIds)
+							(call !GetSessionIds)
 						)
 
 					)
@@ -193,42 +204,45 @@
 		))
 
 		;output a map with features and cases
-		(assoc
-			features features
-			cases
-				(if (and hasEncodedFeatures (not skip_decoding))
-					;decode nominal features if necessary
-					(map
-						(lambda
-							(call ConvertToOutput (assoc
-								features features
-								feature_values (current_value 1)
-								has_rounded_features has_rounded_features
-								has_datetime_features has_datetime_features
-							))
+		(call !Return (assoc
+			payload
+				(assoc
+					features features
+					cases
+						(if (and hasEncodedFeatures (not skip_decoding))
+							;decode nominal features if necessary
+							(map
+								(lambda
+									(call !ConvertToOutput (assoc
+										features features
+										feature_values (current_value 1)
+										has_rounded_features has_rounded_features
+										has_datetime_features has_datetime_features
+									))
+								)
+								case_values_list
+							)
+
+							;else round if needed
+							has_rounded_features
+							(map
+								(lambda (call !RoundContinuousFeatures (assoc features features feature_values (current_value 1) )))
+								case_values_list
+							)
+
+							;else just return the values
+							case_values_list
 						)
-						case_values_list
-					)
-
-					;else round if needed
-					has_rounded_features
-					(map
-						(lambda (call RoundContinuousFeatures (assoc features features feature_values (current_value 1) )))
-						case_values_list
-					)
-
-					;else just return the values
-					case_values_list
 				)
-		)
+		))
 	)
 
 	;retrieves the values of the specified entities (defaults to all cases) based on the feature
 	; returns an assoc with keys being the entity ids and values being the values of the feature
-	#RetrieveCaseValues
+	#!RetrieveCaseValues
 	(declare
 		(assoc
-			entities (call AllCases)
+			entities (call !AllCases)
 			feature ""
 		)
 		(map
@@ -244,7 +258,7 @@
 	;parameters:
 	; session: session id for the case
 	; session_training_index: the index of the case in the original order that it was trained for the specified session
-	#GetCaseId
+	#!GetCaseId
 	(first
 		;return the one entity that was trained in this session at this session_training_index
 		(contained_entities (list
@@ -257,7 +271,7 @@
 	;
 	;parameters:
 	; case_indices: a list of session and session training index tuples
-	#GetCaseIds
+	#!GetCaseIds
 	(let
 		(assoc
 			;getting the list of unique session IDs, to then get the .indices_map for each session
@@ -296,7 +310,7 @@
 	;	n values = must match any of these values exactly
 	; num_cases: optional, limit on the number of cases to get; If set to zero there will be no limit.
 	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
-	#GetCasesByCondition
+	#!GetCasesByCondition
 	(declare (assoc
 			condition (assoc)
 			condition_session (null)
@@ -310,7 +324,7 @@
 				(assign (assoc
 					num_cases
 						(get
-							(call GetHyperparameters (assoc
+							(call !GetHyperparameters (assoc
 								feature ".targetless"
 								mode "robust"
 								weight_feature ".none"
@@ -406,7 +420,7 @@
 							;list of features where the condition is a range or null
 							other_features (list)
 							hyperparam_map
-								(call GetHyperparameters (assoc
+								(call !GetHyperparameters (assoc
 									feature ".targetless"
 									mode "robust"
 									weight_feature ".none"
@@ -497,7 +511,7 @@
 	; sort_feature: the feature for which to sort the cases by
 	; num: number of cases to return, positive value will return the top (largest value), negative will return smallest
 	; features : the features for which values should be returned
-	#RetrieveExtremeCasesForFeature
+	#retrieve_extreme_cases_for_feature
 	(declare
 		(assoc
 			features (null)
@@ -555,38 +569,39 @@
 		))
 
 		;sort the list of case values
-		(assign (assoc
-			case_values_list (sort sort_by_feature_value case_values_list)
-		))
+		(assign (assoc case_values_list (sort sort_by_feature_value case_values_list) ))
 
-		(associate
-			"features" features
-			"cases"
-				(if (and hasEncodedFeatures (not skip_decoding))
-					;decode nominal features if necessary
-					(map
-						(lambda
-							(call ConvertToOutput (assoc
-								features features
-								feature_values (current_value 1)
-								has_rounded_features has_rounded_features
-								has_datetime_features has_datetime_features
-							))
+		(call !Return (assoc
+			payload
+				(associate
+					"features" features
+					"cases"
+						(if (and hasEncodedFeatures (not skip_decoding))
+							;decode nominal features if necessary
+							(map
+								(lambda
+									(call !ConvertToOutput (assoc
+										features features
+										feature_values (current_value 1)
+										has_rounded_features has_rounded_features
+										has_datetime_features has_datetime_features
+									))
+								)
+								case_values_list
+							)
+
+							;else round if needed
+							has_rounded_features
+							(map
+								(lambda (call !RoundContinuousFeatures (assoc features features feature_values (current_value 1) )))
+								case_values_list
+							)
+
+							;else just return the values
+							case_values_list
 						)
-						case_values_list
-					)
-
-					;else round if needed
-					has_rounded_features
-					(map
-						(lambda (call RoundContinuousFeatures (assoc features features feature_values (current_value 1) )))
-						case_values_list
-					)
-
-					;else just return the values
-					case_values_list
 				)
-		)
+		))
 	)
 
 	;Method to return an assoc with features that should be skipped due to not having enough non-null values

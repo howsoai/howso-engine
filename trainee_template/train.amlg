@@ -1,6 +1,19 @@
 (null
 
-	;records an entire session in one call, does not do any filtering.
+	;train the passed in cases, filtering out cases that match optionally passed in ablation parameters
+	; returns a response object in the following format:
+	;	(associate
+	;		"success" (true)/(false)
+	;		"num_trained" num_trained_cases
+	;		"ablated_indices" (list of ablated case indices)
+	;		"status" "status output message"
+	;		"message" "if failed to succeed, the error/reason message will be here"
+	;	)
+	; 	list of 'status' values:
+	;		(null) - default output, no status output
+	;		"analyzed" - if auto analysis is enabled and model has grown large enough to be analyzed again and was analyzed
+	;		"analyze" - if auto analysis is enabled and model has grown large enough to be analyzed again but was not analyzed
+	;
 	; parameters:
 	; input_cases : list of cases, ie a list of lists of values.
 	; features : the list of features.
@@ -8,17 +21,17 @@
 	;	   the 'auto_derive_on_train' feature attribute set to True will be auto-derived. If provided an empty list, will not derive any features.
 	;	   Any derived_features that are already in the 'features' list will not be derived since their values are being explicitly provided.
 	; session: the session label to record these cases to.  If not specified, refers to this entity's label of same name.
+	; trainee : the trainee model.
 	; input_is_substituted : flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
 	; series: optional, name of series to pull features and case values from internal series storage.  If specified, trains on all cases that are
-	;		stored in the internal series store for the specified series. The trained feature set is the combined features from storage
+	;		stored in the internal series store for the specified series and session. The trained feature set is the combined features from storage
 	;		and the passed in features.  If input_cases is of length one, the value(s) of this case are appended to all cases in the series.
 	;		If input_cases is the same length as the series, the value of each case in input_cases is applied in order to each of the cases in the
 	;		series.
-	; allow_training_reserved_features: flag, If true, skips check whether specified feature names start with reserved characters.
 	; accumulate_weight_feature: name of feature into which to accumulate neighbors' influences as weight for ablated cases. If unspecified, will not accumulate weights.
-	; train_weights_only: flag, if set to true, and accmuulate_weight_feature is provided, will not train on the cases, but instead accumulate all of their neighbor weights.
+	; train_weights_only: flag, if set to true, and accumulate_weight_feature is provided, will not train on the cases, but instead accumulate all of their neighbor weights.
 	; skip_auto_analyze: flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended
-	#Train
+	#train
 	(declare
 		(assoc
 			input_cases (list)
@@ -78,7 +91,7 @@
 			warnings (list)
 		))
 
-		;parameter and data checks
+		;parameter and data checks, returns on error
 		(call !PreTrainChecks)
 
 		;get time series derived features list, if applicable
@@ -95,7 +108,7 @@
 				input_cases
 					(map
 						(lambda
-							(call UnsubstituteFeatureValues (assoc
+							(call !UnsubstituteFeatureValues (assoc
 								features features
 								feature_values (current_value 1)
 							))
@@ -119,7 +132,7 @@
 						(lambda (let
 							(assoc feature_values (current_value 1))
 							;implicitly pass in features and feature_values
-							(call ConvertFromInput)
+							(call !ConvertFromInput)
 						))
 						input_cases
 					)
@@ -132,7 +145,7 @@
 		;don't train the data, only accumulate weights to neighbors
 		(if (and train_weights_only accumulate_weight_feature)
 			(seq
-				(call AccumulateCaseInfluenceWeights (assoc
+				(call !AccumulateCaseInfluenceWeights (assoc
 					features features
 					accumulate_weight_feature accumulate_weight_feature
 					cases input_cases
@@ -141,11 +154,15 @@
 				(accum_to_entities (assoc revision 1))
 
 				(conclude
-					(assoc
-						"num_trained" 0
-						"ablated_indices" (list)
-						"status" status_output
-					)
+					(call !Return (assoc
+						warnings warnings
+						payload
+							(assoc
+								"num_trained" 0
+								"ablated_indices" (list)
+								"status" status_output
+							)
+					))
 				)
 			)
 		)
@@ -196,11 +213,11 @@
 				))
 
 				;clear out stored series
-				(call RemoveSeriesStore (assoc series series))
+				(call remove_series_store (assoc series series))
 			)
 		)
 
-		(declare (assoc num_cases (call GetNumTrainingCases) ))
+		(declare (assoc num_cases (call !GetNumTrainingCases) ))
 
 		(declare (assoc skip_ablation (call !CanTrainAblationBeSkipped) ))
 
@@ -244,7 +261,7 @@
 							(assign_to_entities (assoc
 								trainedFeatures (sort (values (append trainedFeatures (indices featureAttributes)) (true)) )
 								trainedFeaturesContextKey
-									(call BuildContextFeaturesKey (assoc
+									(call !BuildContextFeaturesKey (assoc
 										context_features (values (append trainedFeatures (indices featureAttributes)) (true))
 									))
 							))
@@ -281,7 +298,7 @@
 
 		;auto populate derived features if necessary
 		(if (> (size derived_features) 0)
-			(call DeriveTrainFeatures (assoc
+			(call !DeriveTrainFeatures (assoc
 				features features
 				;keep and derive only those features that are not in the features list
 				derived_features (filter (lambda (not (contains_value features (current_value)))) derived_features)
@@ -318,13 +335,13 @@
 
 								(assign (assoc
 									dependents_combinations_map
-										(call ComputeDependentBoundaries (assoc
+										(call !ComputeDependentBoundaries (assoc
 											nominals dependent_nominals
 											value_feature continuous_feature
 										))
 								))
 
-								(call AccumulateDependentValuesCombinations (assoc
+								(call !AccumulateDependentValuesCombinations (assoc
 									nested_value_combinations_map dependents_combinations_map
 									values_lists (list)
 									value_feature (first dependent_nominals)
@@ -357,7 +374,7 @@
 
 		;if accumulate_weight_feature was specified and there are ablated cases, accumulate weights to their neighbors
 		(if (and (size ablated_indices_list) accumulate_weight_feature)
-			(call AccumulateCaseInfluenceWeights (assoc
+			(call !AccumulateCaseInfluenceWeights (assoc
 				features features
 				accumulate_weight_feature accumulate_weight_feature
 				cases (unzip input_cases ablated_indices_list)
@@ -365,15 +382,18 @@
 		)
 
 		;return response
-		(assoc
-			"num_trained" (size new_case_ids)
-			"ablated_indices" ablated_indices_list
-			"status" status_output
-			"warnings" warnings
-		)
+		(call !Return (assoc
+			warnings warnings
+			payload
+				(assoc
+					"num_trained" (size new_case_ids)
+					"ablated_indices" ablated_indices_list
+					"status" status_output
+				)
+		))
 	)
 
-	;private helper method for Train that checks for invalid features or parameters
+	;private helper method for train that checks for invalid features or parameters
 	#!PreTrainChecks
 	(declare
 		(assoc
@@ -393,9 +413,9 @@
 		;if any features are in the reserved list, can't train, output the error message
 		(if (> (size reserved_feature_names) 0)
 			(conclude (conclude
-				(assoc
-					"error"
-						(concat
+				(call !Return (assoc
+					errors
+						(list (concat
 							"The following features should not start with characters '.' '^' '!' or '#' : "
 							;change list of features into a space-separated list of feature names
 							(apply "concat"
@@ -404,11 +424,14 @@
 									(range " " 1 (size reserved_feature_names) 1)
 								)
 							)
+						))
+					payload
+						(assoc
+							"num_trained" 0
+							"ablated_indices" (list)
+							"status" (null)
 						)
-					"num_trained" 0
-					"ablated_indices" (list)
-					"status" (null)
-				)
+				))
 			))
 		)
 
@@ -432,12 +455,15 @@
 		;if bad input, ie, size of series does not match the training input_cases, don't train anything
 		(if (= (null) input_cases)
 			(conclude (conclude
-				(assoc
-					"error" message
-					"num_trained" 0
-					"ablated_indices" ablated_indices_list
-					"status" status_output
-				)
+				(call !Return (assoc
+					errors (list message)
+					payload
+						(assoc
+							"num_trained" 0
+							"ablated_indices" ablated_indices_list
+							"status" status_output
+						)
+				))
 			))
 		)
 
@@ -479,11 +505,11 @@
 					)
 
 					;create the case and output case id
-					(call CreateCase (assoc
+					(call !CreateCase (assoc
 						features train_features
 						feature_values
 							(if encode_features_on_train
-								(call ConvertFromInput (assoc
+								(call !ConvertFromInput (assoc
 									feature_values feature_values
 									features train_features
 								))
@@ -505,7 +531,7 @@
 				(if encode_features_on_train
 					(assign (assoc
 						feature_values
-							(call ConvertFromInput (assoc
+							(call !ConvertFromInput (assoc
 								feature_values feature_values
 								features features
 							))
@@ -520,8 +546,8 @@
 
 						;if one of the ablation methods returns false, then the case should be ablated.
 						(and
-							(call CaseOutsideThresholds)
-							(call ShouldNewCaseBeAblated (assoc
+							(call !CaseOutsideThresholds)
+							(call !ShouldNewCaseBeAblated (assoc
 								context_features features
 								context_values feature_values
 								num_cases num_cases
@@ -532,7 +558,7 @@
 						;create the case and store case id
 						(declare (assoc
 							new_case_id
-								(call CreateCase (assoc
+								(call !CreateCase (assoc
 									features
 										;if auto ablate is enabled, populate the weight feature for this case
 										(if
@@ -574,14 +600,14 @@
 	)
 
 	;private helper method that checks if the conditions for auto-analyze are met, and calls the analyze if so
-	;this method should be called within #Train
+	;this method should be called within #train
 	;
 	;parameters:
 	; skip_auto_analyze: flag, if true and auto-analyze is needed, then status_output will be assigned to "analyze".
 	;                    If false, and auto-analyze is needed, the analyze will be executed.
 	#!AutoAnalyzeIfNeeded
 	(let
-		(assoc num_cases (call GetNumTrainingCases))
+		(assoc num_cases (call !GetNumTrainingCases))
 		(if
 			(and
 				(>= num_cases autoAnalyzeThreshold)
@@ -594,9 +620,9 @@
 				;otherwise do the analyze
 				(seq
 					(if (!= (null) savedAnalyzeParameterMap)
-						(call Analyze savedAnalyzeParameterMap)
+						(call !Analyze savedAnalyzeParameterMap)
 
-						(call Analyze (assoc
+						(call !Analyze (assoc
 							targeted_model "targetless"
 							context_features trainedFeatures
 							weight_feature ".none"
@@ -619,7 +645,7 @@
 	; features_weights_map: assoc of feature -> weight to overwrite in all hyperparameter sets
 	; overwrite: flag, if set to true will assume that featureWeights already exist and overwrites them.
 	;			 When false, will create featureWeights in the hyperparameter set
-	#SetFeatureWeightsForFeatures
+	#!SetFeatureWeightsForFeatures
 	(declare
 		(assoc
 			features_weights_map (assoc)
@@ -757,7 +783,7 @@
 
 		;if there are now less inactive features than there were, set the no-longer inactive feature weights to 1
 		(if (< (size inactive_features_map) (size inactiveFeaturesMap))
-			(call SetFeatureWeightsForFeatures (assoc
+			(call !SetFeatureWeightsForFeatures (assoc
 				features_weights_map
 					(zip
 						(indices (remove inactiveFeaturesMap (indices inactive_features_map)) )
@@ -771,7 +797,7 @@
 			(seq
 				;if there are inactive features and they haven't been set yet, set their weight to 0
 				(if (!= inactiveFeaturesMap inactive_features_map)
-					(call SetFeatureWeightsForFeatures (assoc
+					(call !SetFeatureWeightsForFeatures (assoc
 						features_weights_map inactive_features_map
 						overwrite (false)
 					))
