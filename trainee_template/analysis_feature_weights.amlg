@@ -381,4 +381,108 @@
 			(accum (assoc analyzed_hp_map (assoc "allFeatureResidualsCached" (true))))
 		)
 	)
+
+	;Compute and store case weights for all cases if there are any features with the id_feature attribute set to true
+	;Each case weights as the reciprocal of the count of the id feature value in the dataset.  If there are multiple
+	;id features, the product of the weights of all the id features is the case weight, which is stored
+	;in each case into the .case_weight feature
+	#!ComputeAndStoreIdFeatureCaseWeights
+	(let
+		(assoc
+			;accumulate a list of id features that are explicitly not unique, since uniqueness preserves id-based weighting
+			id_features
+				(filter
+					(lambda
+						(and
+							(get featureAttributes (list (current_value 1) "id_feature"))
+							(not (contains_index uniqueNominalsSet (current_value)))
+						)
+					)
+					(indices categoricalFeaturesSet)
+				)
+		)
+
+		(if (= 0 (size id_features))
+			(conclude)
+		)
+
+		;if model has ID features, set the hasPopulatedCaseWeight flag
+		(assign_to_entities (assoc hasPopulatedCaseWeight (true)))
+
+		(declare (assoc
+			all_cases_map (zip (call !AllCases))
+			;assoc of { feature -> { value -> weight } }
+			feature_case_weight_map
+				(map
+					(lambda (let
+						(assoc feature (current_index 1))
+						;store class counts as weights (reciprocal of count) for all cases for each id feature
+						(map
+							(lambda (/ 1 (current_value)))
+
+							;grab the un-weighted count of each class
+							(compute_on_contained_entities (list
+								(query_value_masses
+									feature
+									(null)
+									;as numeric value
+									(or
+										(not (contains_index nominalsMap feature))
+										(contains_index numericNominalFeaturesMap feature)
+									)
+								)
+							))
+						)
+					))
+					(zip id_features)
+				)
+		))
+
+		(if (= 1 (size id_features))
+			(let
+				(assoc feature (first id_features))
+				;store .case_weight to be same as the weight for the one id feature
+				(call !StoreCaseValues (assoc
+					case_values_map
+						(map
+							(lambda
+								(get
+									feature_case_weight_map
+									(list feature (retrieve_from_entity (current_index 1) feature))
+								)
+							)
+							all_cases_map
+						)
+					label_name ".case_weight"
+				))
+			)
+
+			;else there are several id features, compute and store .case_weight
+			;as the product of all id feature case weights for each case
+			(call !StoreCaseValues (assoc
+				case_values_map
+					(map
+						(lambda (let
+							(assoc case_id (current_index 1))
+
+							;multiply all the case weights for all the id features
+							(apply "*"
+								;list of all the case weights for all the id features
+								(map
+									(lambda
+										(get
+											feature_case_weight_map
+											(list (current_value 1) (retrieve_from_entity case_id (current_value 1)))
+										)
+									)
+									id_features
+								)
+							)
+						))
+						all_cases_map
+					)
+				label_name ".case_weight"
+			))
+		)
+	)
 )
