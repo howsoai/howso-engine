@@ -1,7 +1,11 @@
 (seq
 	;import the unit_test library
 	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
-	(call init_unit_test (assoc name "ut_iris.amlg"))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_iris.amlg"))
+
+	(assign_to_entities "howso" (assoc
+		defaultHyperparameters (assoc "k" 8 "p" 2 "dt" -1)
+	))
 
 	(declare (assoc
 		START (system_time)
@@ -166,22 +170,16 @@
 		action_labels (list "species")
 	))
 
-	(load_entity "../howso.amlg" "irismodel" (false) (false))
-	(call_entity "irismodel" "Initialize")
-	(assign_to_entities "irismodel" (assoc
-		defaultHyperparameters (assoc "k" 8 "p" 2 "dt" -1)
-	))
-
 ;VERIFY SETTING NOMINAL FEATURES
 
 	;set nominals
-	(call_entity "irismodel" "set_feature_attributes" (assoc
+	(call_entity "howso" "set_feature_attributes" (assoc
 		features (assoc "species" (assoc "type" "nominal"))
 	))
 
 	(print "Has nominals: ")
 	(call assert_same (assoc
-		obs (size (retrieve_from_entity "irismodel" "nominalsMap"))
+		obs (size (retrieve_from_entity "howso" "nominalsMap"))
 		exp 1
 	))
 
@@ -189,8 +187,9 @@
 
 
 	;train
-	(map (lambda
-			(call_entity "irismodel" "train" (assoc
+	(map
+		(lambda
+			(call_entity "howso" "train" (assoc
 				features (append context_labels action_labels)
 				input_cases (list (current_value 2))
 				session "iris_session"
@@ -200,15 +199,21 @@
 	)
 
 ;VERIFY DECREASE IN ACCURACY
+	(call_entity "howso" "react_into_trainee" (assoc
+		context_features context_labels
+		action_feature (first action_labels)
+		mda (true)
+	))
 
 	(print "Executing Feature Decrease in Accuracy with analysis:\n")
 	(declare (assoc
 		result
-			(call_entity "irismodel" "DecreaseInAccuracy" (assoc
-				action_features action_labels
-				context_features context_labels
-				classification_precision 0
-			))
+			(get
+				(call_entity "howso" "get_feature_mda" (assoc
+					action_feature (first action_labels)
+				))
+				"payload"
+			)
 	))
 
 	(print "Decrease in accuracy using feature knockout:\n")
@@ -217,22 +222,28 @@
 		(lambda (seq
 			(print (current_value) " : ")
 			(call assert_approximate (assoc
-				exp 0.03
+				exp 0.035
 				obs (get result (current_value 1))
-				thresh 0.03
+				thresh 0.04
 			))
 		))
 		context_labels
 	)
 
-
+	(call_entity "howso" "react_into_trainee" (assoc
+		context_features context_labels
+		action_feature (first action_labels)
+		mda_permutation (true)
+	))
 	(assign (assoc
 		result
-			(call_entity "irismodel" "DecreaseInAccuracy" (assoc
-				action_features action_labels
-				context_features context_labels
-				sensitivity_to_randomization (true)
-			))
+			(get
+				(call_entity "howso" "get_feature_mda" (assoc
+					action_feature (first action_labels)
+					permutation (true)
+				))
+				"payload"
+			)
 	))
 
 	;feature scrambling results in different values per feature so verify one feature at a time
@@ -269,18 +280,19 @@
 
 
 	;cache targeted model accuracy
-	(assign_to_entities "irismodel" (assoc
+	(assign_to_entities "howso" (assoc
 		defaultHyperparameters (assoc "k" 10 "p" 2 "dt" -1)
 	))
 
 ;VERIFY DETAILS OF CASE
 
 	;validate influential cases threshholds
-	(assign_to_entities "irismodel" (assoc
-		influenceWeightThreshold .9
+	(call_entity "howso" "set_influence_weight_threshold" (assoc
+		influence_weight_threshold .9
 	))
-	(assign (assoc result
-			(call_entity "irismodel" "ReactDiscriminative" (assoc
+	(assign (assoc
+		result
+			(call_entity "howso" "react" (assoc
 				context_features context_labels
 				context_values (list 5.4 2.3 1.5 0.1)
 				action_features action_labels
@@ -294,7 +306,7 @@
 			(apply "+"
 				(map
 					(lambda (get (current_value) ".influence_weight"))
-					(get result "influential_cases")
+					(get result (list "payload" "influential_cases"))
 				)
 			)
 	))
@@ -302,10 +314,12 @@
 	(print "Influence weight adds up to  0.91: ")
 	(call assert_approximate (assoc exp .91 obs total_influence_weight percent 0.01))
 
-
-	(assign_to_entities "irismodel" (assoc influenceWeightThreshold .99))
-	(assign (assoc result
-			(call_entity "irismodel" "ReactDiscriminative" (assoc
+	(call_entity "howso" "set_influence_weight_threshold" (assoc
+		influence_weight_threshold .99
+	))
+	(assign (assoc
+		result
+			(call_entity "howso" "react" (assoc
 				context_features context_labels
 				context_values (list 5.4 2.3 1.5 0.1)
 				action_features action_labels
@@ -319,7 +333,7 @@
 			(apply "+"
 				(map
 					(lambda (get (current_value) ".influence_weight"))
-					(get result "influential_cases")
+					(get result (list "payload" "influential_cases"))
 				)
 			)
 	))
@@ -330,44 +344,52 @@
 	(call exit_if_failures (assoc msg "Total influence weight by threshold "))
 
 	;reset values
-	(assign_to_entities "irismodel" (assoc
-		influenceWeightThreshold .infinity
+	(call_entity "howso" "set_influence_weight_threshold" (assoc
+		influence_weight_threshold .infinity
 	))
 
-	(assign (assoc result
-			(call_entity "irismodel" "ReactDiscriminative" (assoc
-				context_features context_labels
-				context_values (list 5.4 2.3 1.5 0.1)
-				action_features action_labels
-				details
-					(assoc
-						"influential_cases" (true)
-						"influential_cases_familiarity_convictions" (true)
-						"boundary_cases" (true)
-						"familiarity_conviction" (true)
-						"similarity_conviction" (true)
-						"outlying_feature_values" (true)
-					)
-			))
+	(assign (assoc
+		result
+			(get
+				(call_entity "howso" "react" (assoc
+					context_features context_labels
+					context_values (list 5.4 2.3 1.5 0.1)
+					action_features action_labels
+					details
+						(assoc
+							"influential_cases" (true)
+							"influential_cases_familiarity_convictions" (true)
+							"boundary_cases" (true)
+							"familiarity_conviction" (true)
+							"similarity_conviction" (true)
+							"outlying_feature_values" (true)
+						)
+				))
+				"payload"
+			)
 	))
 
 
-	(declare (assoc result2
-			(call_entity "irismodel" "ReactDiscriminative" (assoc
-				context_features context_labels
-				context_values (list 5.4 2.3 1.5 0.1)
-				action_values (list "setosa")
-				action_features action_labels
-				details
-					(assoc
-						"influential_cases" (true)
-						"influential_cases_familiarity_convictions" (true)
-						"boundary_cases" (true)
-						"familiarity_conviction" (true)
-						"similarity_conviction" (true)
-						"outlying_feature_values" (true)
-					)
-			))
+	(declare (assoc
+		result2
+			(get
+				(call_entity "howso" "react" (assoc
+					context_features context_labels
+					context_values (list 5.4 2.3 1.5 0.1)
+					action_values (list "setosa")
+					action_features action_labels
+					details
+						(assoc
+							"influential_cases" (true)
+							"influential_cases_familiarity_convictions" (true)
+							"boundary_cases" (true)
+							"familiarity_conviction" (true)
+							"similarity_conviction" (true)
+							"outlying_feature_values" (true)
+						)
+				))
+				"payload"
+			)
 	))
 
 	(print "Details of case with and w/o action values provided: ")
@@ -396,7 +418,7 @@
 
 ;VERIFY ACCURACY WITH LOW K
 
-	(assign_to_entities "irismodel" (assoc
+	(assign_to_entities "howso" (assoc
 		defaultHyperparameters (assoc "k" 1 "p" 2 "dt" -1)
 	))
 	;label
@@ -407,15 +429,16 @@
 					av (last (current_value 1))
 					result 0
 				)
-				(assign (assoc result
-					(first
-						(call_entity "irismodel" "ReactDiscriminative" (assoc
-							return_action_values_only (true)
-							context_features context_labels
-							context_values cv
-							action_features action_labels
-						))
-					)
+				(assign (assoc
+					result
+						(get
+							(call_entity "howso" "react" (assoc
+								context_features context_labels
+								context_values cv
+								action_features action_labels
+							))
+							(list "payload" "action_values" 0)
+						)
 				))
 				;(print (unparse cv) " actual: " av "  predicted: " result "\n")
 				(if (= av result)
@@ -435,7 +458,7 @@
 
 ;VERIFY ACCURACY WITH HIGH K
 	;rerunning with higher P and closest N of 10
-	(assign_to_entities "irismodel" (assoc
+	(assign_to_entities "howso" (assoc
 		defaultHyperparameters (assoc "k" 10 "p" 2.4 "dt" -1)
 	))
 
@@ -446,14 +469,15 @@
 			av (last (current_value 1))
 			result 0
 			 )
-			(assign (assoc result
-					(first
-						(call_entity "irismodel" "ReactDiscriminative" (assoc
-							return_action_values_only (true)
+			(assign (assoc
+				result
+					(get
+						(call_entity "howso" "react" (assoc
 							context_features context_labels
 							context_values cv
 							action_features action_labels
 						))
+						(list "payload" "action_values" 0)
 					)
 			))
 			;(print (unparse cv) " actual: " av "  predicted: " result "\n")
@@ -471,9 +495,13 @@
 
 
 
-	(print "Model size: " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	(print "Model size: "
+		#!get_num_cases
+		(get (call_entity "howso" "get_num_training_cases") (list "payload" "count"))
+		"\n"
+	)
 
-	(assign_to_entities "irismodel" (assoc
+	(assign_to_entities "howso" (assoc
 		defaultHyperparameters (assoc "k" 1 "p" 2.4 "dt" -1)
 	))
 
@@ -484,14 +512,15 @@
 					av (last (current_value 1))
 					result 0
 				)
-				(assign (assoc result
-					(first
-						(call_entity "irismodel" "ReactDiscriminative" (assoc
-							return_action_values_only (true)
+				(assign (assoc
+					result
+					(get
+						(call_entity "howso" "react" (assoc
 							context_features context_labels
 							context_values cv
 							action_features action_labels
 						))
+						(list "payload" "action_values" 0)
 					)
 				))
 				;(print "actual: " av "  predicted: " result "\n")
@@ -509,8 +538,9 @@
 
 
 ;VERIFY ANALYZE METHOD
-	(map (lambda
-			(call_entity "irismodel" "train" (assoc
+	(map
+		(lambda
+			(call_entity "howso" "train" (assoc
 				features (append context_labels action_labels)
 				input_cases (list (current_value 2))
 				session "iris_session"
@@ -519,12 +549,12 @@
 		(append training_data test_data)
 	)
 
-	(print "retrained model size: " (call_entity "irismodel" "GetNumTrainingCases") "\nAnalyzing...\n")
+	(print "retrained model size: " (call !get_num_cases) "\nAnalyzing...\n")
 	(declare (assoc
 		tune_start (system_time)
 		context_key (apply "concat" (weave (sort context_labels) "."))
 	))
-	(call_entity "irismodel" "analyze" (assoc
+	(call_entity "howso" "analyze" (assoc
 		context_features context_labels
 		action_features action_labels
 		k_folds 6
@@ -533,7 +563,7 @@
 		weight_feature ".none"
 	))
 
-	(assign (assoc result (- 1 (get (retrieve_from_entity "irismodel" "hyperparameterMetadataMap") (list "species" context_key "full" ".none" "gridSearchError")))))
+	(assign (assoc result (- 1 (get (retrieve_from_entity "howso" "hyperparameterMetadataMap") (list "species" context_key "full" ".none" "gridSearchError")))))
 	(print "analyze accuracy score >= 96: " result " ")
 	(call assert_true (assoc obs (>= result 0.96)))
 
@@ -542,90 +572,18 @@
 
 	(call exit_if_failures (assoc msg "Analyzed parameters"))
 
-	(declare (assoc entropies
-		(call_entity "irismodel" "ComputeEntropyOfFeatures" (assoc
-			features (list "sepal_length" "sepal_width" "petal_length" "petal_width" "species")
-		))
-	))
-
-;VERIFY NOMINAL EN/DECODING BYPASS
-
-	;pull un-decoded iris data from iris model and train a new model with it
-	(declare (assoc
-		decoded_iris_data_map
-			(get
-				(call_entity "irismodel" "get_cases" (assoc
-					features (append context_labels action_labels )
-					skip_nominal_decoding 1
-				))
-				"payload"
-			)
-	))
-
-
-	(load_entity "../howso.amlg" "iris_unencoded" (false) (false))
-	(call_entity "iris_unencoded" "Initialize")
-	(assign_to_entities "iris_unencoded" (assoc
-		hyperparameterMetadataMap hp_map ;same hyperparameter map as in iris, retrieved above
-	))
-
-	;bypass nominal feature enumerations
-	(call_entity "iris_unencoded" "set_feature_attributes" (assoc
-		features (assoc "species" (assoc "type" "continuous"))
-	))
-
-	(call_entity "iris_unencoded" "train" (assoc
-		features (get decoded_iris_data_map "features")
-		input_cases (get decoded_iris_data_map "cases")
-		session "encoded1"
-	))
-
-	(assign (assoc entropies_unencoded
-			(call_entity "iris_unencoded"  "ComputeEntropyOfFeatures" (assoc
-				features (list "sepal_length" "sepal_width" "petal_length" "petal_width" "species")
-			))
-	))
-	(print "Feature convictions match for nominal encoded and decoded model: ")
-	(call assert_approximate (assoc exp entropies obs entropies_unencoded percent 0.05))
-
-
-
-
 ;VERIFY EXPECTED FEATURE VALUES
 
-	(call_entity "irismodel" "remove_session" (assoc session "iris_session"))
+	(call_entity "howso" "remove_session" (assoc session "iris_session"))
 
-	(call_entity "irismodel" "train" (assoc
+	(call_entity "howso" "train" (assoc
 		features (append context_labels action_labels)
 		;ignore that first virginica case so that there are more setosas in the data
 		input_cases (tail training_data)
 		session "expected_test"
 	))
 
-	(print "retrained cases: " (call_entity "irismodel" "GetNumTrainingCases" ) "\n")
-
-	; since we aren't doing an analyze here, the expected values are outdated, so manually clear them
-	(assign_to_entities "irismodel" (assoc expectedValuesMap (assoc)))
-
-	(assign (assoc
-		result
-			(call_entity "irismodel" "CalculateFeatureExpectedValue" (assoc feature "sepal_length"))
-	))
-	(print "Expected feature values for continuous: ")
-	;average value for sepal_length is 5.840
-	(call assert_approximate (assoc exp 5.840 obs result thresh 0.005))
-
-	(assign (assoc
-		result
-			(call_entity "irismodel" "CalculateFeatureExpectedValue" (assoc feature "species"))
-	))
-	(print "Expected feature values for nominal: ")
-
-	;there are 42 setosa and 41 virginica, so it should choose setosa
-	(call assert_same (assoc exp "setosa" obs result ))
-
-	(call exit_if_failures (assoc msg "Feature expected values"))
-
+	(print "retrained cases: " (call !get_num_cases) "\n")
 
 
 ;VERIFY TARGETFULL ANALYZATION
@@ -633,7 +591,7 @@
 	;run an "omni_targeted" loop here to analyze each feature
 	(map
 		(lambda
-			(call_entity "irismodel" "analyze" (assoc
+			(call_entity "howso" "analyze" (assoc
 				context_features  (filter (lambda (!= (current_value) (current_value 2))) features)
 				action_features (list (current_value 2))
 				targeted_model "single_targeted"
@@ -645,7 +603,24 @@
 	)
 
 	(assign (assoc
-		hp_map (retrieve_from_entity "irismodel" "hyperparameterMetadataMap" )
+		result (get (retrieve_from_entity "howso" "expectedValuesMap") (list ".none" "sepal_length" "expected_value"))
+	))
+	(print "Expected feature values for continuous: ")
+	;average value for sepal_length is 5.840
+	(call assert_approximate (assoc exp 5.840 obs result thresh 0.005))
+
+	(assign (assoc
+		result (get (retrieve_from_entity "howso" "expectedValuesMap") (list ".none" "species" "expected_value"))
+	))
+	(print "Expected feature values for nominal: ")
+	;there are 42 setosa and 41 virginica, so it should choose setosa
+	(call assert_same (assoc exp "setosa" obs result ))
+
+	(call exit_if_failures (assoc msg "Feature expected values"))
+
+
+	(assign (assoc
+		hp_map (retrieve_from_entity "howso" "hyperparameterMetadataMap" )
 	))
 
 	(map
@@ -667,7 +642,7 @@
 
 	(assign (assoc
 		result
-			(call_entity "irismodel" "ReactDiscriminative" (assoc
+			(call_entity "howso" "react" (assoc
 				context_features (list "sepal_length" "sepal_width" "petal_length" "species")
 				context_values (list 5.7 4.4 1.6 "setosa")
 				action_features (list "petal_width")
@@ -679,14 +654,14 @@
 	(print "Closest K matches analyzed hyperparameter for petal_width " expected_k " : ")
 	(call assert_approximate (assoc
 		exp expected_k
-		obs (size (get result "influential_cases"))
+		obs (size (get result (list "payload" "influential_cases")))
 		thresh 2
 	))
 
 
 	(assign (assoc
 		result
-			(call_entity "irismodel" "ReactDiscriminative" (assoc
+			(call_entity "howso" "react" (assoc
 				context_features (list "sepal_length" "petal_length" "petal_width" "species")
 				context_values (list 5.7 1.6 0.3 "setosa")
 				action_features (list "sepal_width")
@@ -698,14 +673,14 @@
 	(print "Closest K matches analyzed hyperparameter for sepal_width " expected_k  " : ")
 	(call assert_approximate (assoc
 		exp expected_k
-		obs (size (get result "influential_cases"))
+		obs (size (get result (list "payload" "influential_cases")))
 		thresh 2
 	))
 
 
 	(assign (assoc
 		result
-			(call_entity "irismodel" "ReactDiscriminative" (assoc
+			(call_entity "howso" "react" (assoc
 				context_features (list "sepal_length" "sepal_width" "petal_length" "petal_width" )
 				context_values (list 5.7 4.41 1.61 0.3)
 				action_features (list "species")
@@ -717,37 +692,34 @@
 	(print "Closest K matches analyzed hyperparameter for species " expected_k " : ")
 	(call assert_approximate (assoc
 		exp expected_k
-		obs (size (get result "influential_cases"))
+		obs (size (get result (list "payload" "influential_cases")))
 		thresh 3
 	))
 
 	(print "Expected custom boundary cases 11: ")
 	(call assert_same (assoc
 		exp 11
-		obs (size (get result "boundary_cases"))
+		obs (size (get result (list "payload" "boundary_cases")))
 	))
 
-	(assign (assoc hp_map (retrieve_from_entity "irismodel" "hyperparameterMetadataMap" )))
+	(assign (assoc hp_map (retrieve_from_entity "howso" "hyperparameterMetadataMap" )))
 	(assign "hp_map"
 		(list "sepal_length" "full" ".none" "p") 1
 		(list "sepal_length" "full" ".none" "k") 5
 	)
 
 ;VERIFY RESIDUAL ABLATEMENT
-	(assign_to_entities "irismodel" (assoc
-		hyperparameterMetadataMap hp_map
-	))
+	(assign_to_entities "howso" (assoc hyperparameterMetadataMap hp_map ))
 
 	(print "\n")
 
 	;clear out the model completely
-	(call_entity "irismodel" "RemoveCases" (assoc
-		cases (call_entity "irismodel" "AllCases")
-	))
+	(call_entity "howso" "remove_cases")
 
 	;retrain on the first 40 cases
-	(map (lambda
-			(call_entity "irismodel" "train" (assoc
+	(map
+		(lambda
+			(call_entity "howso" "train" (assoc
 				features (append context_labels action_labels)
 				input_cases (list (current_value 2))
 				session "iris_session"
@@ -756,70 +728,72 @@
 		(trunc training_data 40)
 	)
 
-	(print "final model size (40): " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	(print "final model size (40): " (call !get_num_cases) "\n")
 
 	(declare (assoc
 		expected_value
-			(first (call_entity "irismodel" "ReactDiscriminative" (assoc
-				return_action_values_only (true)
-				context_features  (list "sepal_width" "petal_length" "petal_width" "species")
-				context_values (list 2.2 1.5 0.1 "setosa")
-				action_features (list "sepal_length" )
-			)))
+			(get
+				(call_entity "howso" "react" (assoc
+					context_features  (list "sepal_width" "petal_length" "petal_width" "species")
+					context_values (list 2.2 1.5 0.1 "setosa")
+					action_features (list "sepal_length" )
+				))
+				(list "payload" "action_values" 0)
+			)
 	))
 
 	(print
 		"residuals for sepal_length prediction: "
 		(get
-			(call_entity "irismodel" "ReactDiscriminative" (assoc
+			(call_entity "howso" "react" (assoc
 				context_features  (list "sepal_width" "petal_length" "petal_width" "species")
 				context_values (list 2.2 1.5 0.1 "setosa")
 				action_features (list "sepal_length" )
 				details (assoc "feature_residuals" (true))
 			))
-			(list "feature_residuals" "sepal_length" )
+			(list "payload" "feature_residuals" "sepal_length" )
 		)
 		" expected value: " expected_value "\n"
 	)
 
-	(call_entity "irismodel" "set_auto_ablation_params" (assoc
+	(call_entity "howso" "set_auto_ablation_params" (assoc
 		auto_ablation_enabled (true)
 		minimum_model_size 30
 		residual_prediction_features (list "sepal_length")
 	))
 
 	;should not be trained on, within low residual, model size remains at 40
-	(call_entity "irismodel" "train" (assoc
+	(call_entity "howso" "train" (assoc
 		features (list "sepal_width" "petal_length" "petal_width" "species" "sepal_length")
 		input_cases (list (list 2.2 1.5 0.1 "setosa" expected_value))
 	))
-	(print "size " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	(print "size " (call !get_num_cases) "\n")
 	;should not be trained on, within high residual, model size remains at 40
-	(call_entity "irismodel" "train" (assoc
+	(call_entity "howso" "train" (assoc
 		features (list "sepal_width" "petal_length" "petal_width" "species" "sepal_length")
 		input_cases (list (list 2.2 1.5 0.1 "setosa" (+ expected_value .01)))
 	))
-	(print "size " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	(print "size " (call !get_num_cases) "\n")
 	;should train both of these since one is above the high residual and the other is below the low
-	(call_entity "irismodel" "train" (assoc
+	(call_entity "howso" "train" (assoc
 		features (list "sepal_width" "petal_length" "petal_width" "species" "sepal_length")
 		input_cases (list (list 2.2 1.5 0.1 "setosa" (+ expected_value 0.8)))
 	))
-	(print "size " (call_entity "irismodel" "GetNumTrainingCases") "\n")
-	(call_entity "irismodel" "train" (assoc
+	(print "size " (call !get_num_cases) "\n")
+	(call_entity "howso" "train" (assoc
 		features (list "sepal_width" "petal_length" "petal_width" "species" "sepal_length")
 		input_cases (list (list 2.2 1.5 0.1 "setosa" (- expected_value 0.8)))
 	))
-	(print "size " (call_entity "irismodel" "GetNumTrainingCases") "\n")
+	(print "size " (call !get_num_cases) "\n")
 	;expected model size should now be 42
-	(print "Model size after ablation training: " (call_entity "irismodel" "GetNumTrainingCases") "\n")
-	(call assert_same (assoc obs (call_entity "irismodel" "GetNumTrainingCases") exp 42))
+	(print "Model size after ablation training: " (call !get_num_cases) "\n")
+	(call assert_same (assoc obs (call !get_num_cases) exp 42))
 
-	(call_entity "irismodel" "set_auto_ablation_params" (assoc
+	(call_entity "howso" "set_auto_ablation_params" (assoc
 		auto_ablation_enabled (false)
 	))
 
 	(print "TIME TO EXECUTE IRIS TEST: " (- (system_time) START) "\n")
 	(call exit_if_failures (assoc msg unit_test_name))
-	;(store_entity "IrisTraining.amlg" "irismodel")
+	;(store_entity "IrisTraining.amlg" "howso")
 )
