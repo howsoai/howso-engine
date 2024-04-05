@@ -5,6 +5,17 @@
 	#get_hierarchy
 	(call !Return (assoc payload (call !GetHierarchy) ))
 
+	;Returns the full entity path to a child trainee provided its unique trainee id if it is contained in the hierarchy.
+	;Iterates down the hierarchy searching for a trainee that matches the specified id, returns null if not found or
+	;a string error if found but trainee is stored externally as an independent trainee.
+	;
+	;parameters:
+	; id: unique id of trainee
+	; path: optional, list of strings, entity path to parent of trainee
+	#get_entity_path_by_id
+	(call !Return (assoc
+		payload (call !GetEntityPathById (assoc id id path path))
+	))
 
 	;Rename a contained trainee
 	;
@@ -47,7 +58,7 @@
 		(call !RemoveChildTraineeReferences (assoc child_entity_path child_entity_path ))
 		(call !AddChildTraineeReferences (assoc
 			child_id (retrieve_from_entity new_name_path "traineeId")
-			child_entity_path (tail new_name_path)
+			child_entity_path new_name_path
 		))
 
 		(call !Return)
@@ -61,16 +72,16 @@
 	; payload: payload to pass to the method
 	; child_name_path: optional, list of strings specifying the user-friendly path of the child subtrainee for execution of method
 	; child_id: optional, id of child trainee to execute method. Ignored if child_name_path is specified
-	; as_external: optional, boolean, applicable only to 'load' and 'save' and if specifying child_name_path or child_id.
+	; as_external: optional, boolean, applicable only to 'load_subtrainee' and 'save' and if specifying child_name_path or child_id.
 	;	For 'save', stores the child out as an independent trainee and removes it as a contained entity.
-	;	For 'load' updates hierarchy by adding the child as an independently stored trainee to the hierarchy without loading the trainee as a subtrainee.
-	; load_external_trainee_id: optional, trainee id of trainee being loaded, must be specified only when 'load' and as_external is true.
+	;	For 'load_subtrainee' updates hierarchy by adding the child as an independently stored trainee to the hierarchy without loading the trainee as a subtrainee.
+	; load_external_trainee_id: optional, trainee id of trainee being loaded, must be specified only when 'load_subtrainee' and as_external is true.
 	#execute_on_subtrainee
 	(declare
 		(assoc payload (assoc))
 
 		;providing id of child under which to creating/loading a trainee, find the path to that child using its id
-		(if (and child_id (= (null) child_name_path) (or (= "create_trainee" method) (= "load" method)))
+		(if (and child_id (= (null) child_name_path) (or (= "create_subtrainee" method) (= "load_subtrainee" method)))
 			(seq
 				(assign (assoc
 					child_name_path (call !ResolveChildEntityPath (assoc id child_id))
@@ -78,7 +89,7 @@
 				(if (~ "string" child_name_path)
 					(conclude (call !Return (assoc errors (list child_name_path))) )
 				)
-				(assign (assoc child_name_path (filter (lambda (!= ".trainee_container" (current_value))) child_name_path)))
+				(assign (assoc child_name_path (filter (lambda (!= traineeContainer (current_value))) child_name_path)))
 			)
 		)
 
@@ -86,13 +97,13 @@
 			child_entity_path
 				(call !ResolveChildEntityPath (assoc
 					name_path
-						(if (or (= "create_trainee" method) (= "load" method))
+						(if (or (= "create_subtrainee" method) (= "load_subtrainee" method))
 							(append (or child_name_path (list)) (get payload "trainee"))
 							child_name_path
 						)
 					id child_id
 					;if creating or loading, the child should not already exist
-					child_should_not_exist (or (= "create_trainee" method) (= "load" method))
+					child_should_not_exist (or (= "create_subtrainee" method) (= "load_subtrainee" method))
 				))
 			is_internal (true)
 		))
@@ -135,18 +146,18 @@
 
 		(declare (assoc
 			child_name
-				(if (contains_value (list "create_trainee" "load" "delete") method)
+				(if (contains_value (list "create_subtrainee" "load_subtrainee" "delete") method)
 					;set name to the trainee in the payload
 					(get payload "trainee")
 				)
 		))
 
 		(if (= (null) child_entity_path)
-			(assign (assoc child_entity_path (list ".trainee_container" child_name)))
+			(assign (assoc child_entity_path (list traineeContainer child_name)))
 		)
 
 		;if loading as external, update the hierarchy maps and return without actually loading the trainee
-		(if (and (= "load" method) as_external)
+		(if (and (= "load_subtrainee" method) as_external)
 			(seq
 				(if (= (null) load_external_trainee_id)
 					(conclude (conclude
@@ -177,24 +188,28 @@
 		;convert (list method (assoc trainee (list path_to_trainee))) into: (call method (assoc trainee (list path_to_trainee)))
 		(declare (assoc
 			output
-				(apply "call"
-					;parse method to evaluate it, when the opcode 'call' is applied, it'll be the actual name of the method instead of the literal 'method'
-					(list (parse method) (append
-						payload
-						(assoc "trainee"  child_entity_path)
-					))
+				;create, save and load need root access to filesystem, so they must be executed by the parent trainee, otherwise the child trainee can execute the method itself
+				(if (contains_value (list "create_subtrainee" "load_subtrainee" "save") method)
+					(apply "call"
+						;parse method to evaluate it, when the opcode 'call' is applied, it'll be the actual name of the method instead of the literal 'method'
+						(list (parse method) (append
+							payload
+							(assoc "trainee" (tail child_entity_path))
+						))
+					)
+
+					;else have the child trainee run the method itself
+					(call_entity child_entity_path method payload)
 				)
 		))
 
 		;post-execute operations if the execution was succesfull
 		(if (= 0 (size (get output "errors")))
-			(if (= "load" method)
-				(call !AddChildTraineeReferences (assoc child_entity_path child_entity_path ))
-
-				(= "create_trainee" method)
+			(if (= "load_subtrainee" method)
 				(call !AddChildTraineeReferences (assoc
-					child_id (get payload "trainee_id")
 					child_entity_path child_entity_path
+					;should pull that from loaded child
+					child_id (null)
 				))
 
 				;saving a child trainee sets it as independent and removes it as a contained trainee
@@ -216,21 +231,30 @@
 	;creates a new instance of a contained trainee as specified by the entity label "trainee".
 	;parameters:
 	; filepath: path to the file (optional)
-	; trainee: name path of trainee to create
+	; trainee: name of trainee to create
 	; trainee_id: optional, unique id for trainee
-	#create_trainee
+	#create_subtrainee
 	(seq
+		;create contained trainee inside the traineeContainer
+		(assign (assoc trainee_path (append traineeContainer trainee) ))
+
 		(declare (assoc
-			result (load_entity (concat filepath !trainee_template_filename "." !file_extension) trainee (false) (false))
+			result (load_entity (concat filepath !trainee_template_filename "." !file_extension) trainee_path (false) (false))
 		))
 
 		(if (!= (null) result)
-			(call_entity trainee "Initialize" (assoc trainee_id trainee_id))
-		)
+			(seq
+				(call_entity trainee_path "Initialize" (assoc trainee_id trainee_id))
 
-		(if result
-			(call !Return (assoc payload (assoc "name" result "id" trainee_id) ))
+				(call !AddChildTraineeReferences (assoc
+					child_id trainee_id
+					child_entity_path trainee_path
+				))
 
+				(call !Return (assoc payload (assoc "name" result "id" trainee_id) ))
+			)
+
+			;else error out
 			(call !Return (assoc errors (list "Failed to create trainee: ensure a valid filepath.")))
 		)
 	)
@@ -247,9 +271,11 @@
 	; filename: name to load (without extension)
 	; trainee: name path of trainee to laod
 	; separate_files: flag, default to false. if set to true will load each case from its individual file
-	#load
-	(let
-		(assoc
+	#load_subtrainee
+	(seq
+		(declare (assoc trainee_path (append traineeContainer trainee) ))
+
+		(declare (assoc
 			loaded_trainee
 				(if (and separate_files (= "amlg" !file_extension))
 					(let (assoc temptrainee "_temptrainee")
@@ -259,11 +285,11 @@
 						(if (contains_entity temptrainee)
 							(seq
 								;destroy the previously existing trainee
-								(destroy_entities trainee)
+								(destroy_entities trainee_path)
 								;move the trainee under the temporary label to the trainee label;
-								(move_entities temptrainee trainee)
+								(move_entities temptrainee trainee_path)
 								;return the name of the trainee to indicate a successful load attempt
-								trainee
+								trainee_path
 							)
 
 							;else return null
@@ -278,11 +304,11 @@
 						(if (and (!= (null) temptrainee) (contains_entity temptrainee))
 							(seq
 								;destroy the previously existing trainee
-								(destroy_entities trainee)
+								(destroy_entities trainee_path)
 								;move the trainee under the temporary label to the trainee label;
-								(move_entities temptrainee trainee)
+								(move_entities temptrainee trainee_path)
 								;return the name of the trainee to indicate a successful load attempt
-								trainee
+								trainee_path
 							)
 
 							;else return null
@@ -290,7 +316,7 @@
 						)
 					)
 				)
-		)
+		))
 
 		(if loaded_trainee
 			(call !Return (assoc payload (assoc "name" loaded_trainee) ))
@@ -309,22 +335,24 @@
 	; separate_files: flag, default to false. if set to true will save each case as an individual file
 	#save
 	(seq
-		(if (= (null) trainee_id (retrieve_from_entity "traineeId"))
+		(declare (assoc trainee_path (append traineeContainer trainee) ))
+
+		(if (= (null) trainee_id (retrieve_from_entity trainee_path "traineeId"))
 			(conclude
 				(call !Return (assoc errors (list "Trainee must have a unique trainee_id specified.")))
 			)
 
 			;else the trainee doesn't have its traineeId set, update it here prior to saving
-			(= (null) (retrieve_from_entity "traineeId"))
-			(assign_to_entities (assoc traineeId trainee_id))
+			(= (null) (retrieve_from_entity trainee_path "traineeId"))
+			(assign_to_entities trainee_path (assoc traineeId trainee_id))
 		)
 
 		(declare (assoc
 			success
 				(if (and separate_files (= "amlg" !file_extension))
-					(store_entity (concat filepath filename "." !file_extension) trainee (true))
+					(store_entity (concat filepath filename "." !file_extension) trainee_path (true))
 
-					(store (concat filepath filename "." !file_extension) (flatten_entity trainee (false)) )
+					(store (concat filepath filename "." !file_extension) (flatten_entity trainee_path (false)) )
 				)
 		))
 
@@ -397,7 +425,7 @@
 
 			;else making a direct copy into the main trainee
 			(seq
-				(assign (assoc target_trainee (append ".trainee_container" target_trainee) ))
+				(assign (assoc target_trainee (append traineeContainer target_trainee) ))
 
 				(if (contains_entity target_trainee)
 					(conclude (conclude (call !Return (assoc errors (list "Specified target_trainee already exists."))) ))
@@ -429,7 +457,7 @@
 
 				;if copying directly into the trainee, target_trainee will be the name of the target instead of the path, overwrite as the path to it
 				(if (~ "string" target_trainee)
-					(assign (assoc target_trainee (list ".trainee_container" target_trainee) ))
+					(assign (assoc target_trainee (list traineeContainer target_trainee) ))
 				)
 			)
 		)
@@ -488,7 +516,10 @@
 			distribute_weight_feature (null)
 		)
 
-		(declare (assoc target_trainee (null) ))
+		(declare (assoc
+			target_trainee (null)
+			trainee (null)
+		))
 
 		(if	(or target_id target_name_path)
 			(let
@@ -536,15 +567,25 @@
 			cases_to_move
 				(if (= (null) case_indices)
 					;compute the cases to re/move
-					(call_entity trainee "GetCasesByCondition" (assoc
-						condition condition
-						condition_session condition_session
-						precision precision
-						num_cases num_cases
-					))
+					(get
+						(call_entity trainee "get_cases" (assoc
+							condition condition
+							session condition_session
+							precision precision
+							num_cases num_cases
+							output_ids (true)
+						))
+						(list "payload" "cases")
+					)
 
 					;else use case_indices
-					(call_entity trainee "GetCaseIds" (assoc case_indices case_indices))
+					(get
+						(call_entity trainee "get_cases" (assoc
+							case_indices case_indices
+							output_ids (true)
+						))
+						(list "palyoad" "cases")
+					)
 				)
 		))
 
@@ -593,10 +634,20 @@
 				)
 
 				;remove cases and do session cleanup
-				(call_entity trainee "RemoveCases" (assoc
-					cases cases_to_move
-					distribute_weight_feature distribute_weight_feature
-				))
+				(if (= (null) case_indices)
+					(call_entity trainee "remove_cases" (assoc
+						condition condition
+						condition_session condition_session
+						precision precision
+						num_cases num_cases
+						distribute_weight_feature distribute_weight_feature
+					))
+
+					(call_entity trainee "remove_cases" (assoc
+						cases_indices case_indices
+						distribute_weight_feature distribute_weight_feature
+					))
+				)
 			)
 		)
 
@@ -621,7 +672,7 @@
 			(map
 				(lambda
 					(if (get childTraineeIsContainedMap (current_value))
-						(call_entity (list traineeContainer (current_value 1)) "!GetHierarchy")
+						(get (call_entity (list traineeContainer (current_value 1)) "get_hierarchy") "payload")
 
 						;can't traverse down trainees that are stored externally
 						(false)
@@ -670,10 +721,13 @@
 
 			(assign (assoc
 				output_path
-					(call_entity (list traineeContainer child_name) "GetEntityPathById" (assoc
-						path (append path traineeContainer child_name)
-						id id
-					))
+					(get
+						(call_entity (list traineeContainer child_name) "get_entity_path_by_id" (assoc
+							path (append path traineeContainer child_name)
+							id id
+						))
+						"payload"
+					)
 			))
 
 			(if (or
