@@ -1,0 +1,387 @@
+;Module for trainee.
+;Contains methods for exporting and upgrading the trainee.
+(null
+
+	;export trainee's metadata, case and session data into json files.
+	;this method should be run by a script from the ./migrations folder
+	;
+	;parameters:
+	; trainee: name of trainee, reference for filename
+	; decode_cases: flag, default false. if true will decode (e.g., convert from epoch to datetime) any encoded feature values
+	;				when exporting cases If false case feature values will be exported just as they are stored in the trainee
+	; root_filepath: base path to Howso Engine Core installation
+	#export_trainee
+	(declare
+		(assoc decode_cases (false) )
+
+		(declare (assoc
+			migration_filepath (concat root_filepath !migration_folder)
+		))
+
+		(call !export_trainee_metadata (assoc trainee trainee migration_filepath migration_filepath))
+
+		(if decode_cases
+			(call !export_cases_and_sessions_decoded (assoc trainee trainee migration_filepath migration_filepath))
+
+			(call !export_cases_and_sessions (assoc trainee trainee migration_filepath migration_filepath))
+		)
+
+		(call !Return)
+	)
+
+	;method to return the list of all model attributes that can be exported/imported
+	#get_export_attributes
+	(indices (get (retrieve_from_entity "!InitializeValues") 0))
+
+	;Export trainee metadata in json format as a dict of: { label : value }
+	;
+	;parameters:
+	; trainee: name of trainee, reference for filename
+	; migration_filepath: path to migration folder where migration scripts are stored
+	#!export_trainee_metadata
+	(declare
+		(assoc
+			meta_labels_to_persist (call get_export_attributes)
+			meta_values_to_persist (list)
+		)
+
+		(assign (assoc
+			meta_values_to_persist
+				(map
+					(lambda
+						;code needs to be stored as a string
+						(if (= "!featureCustomDerivedMethods" (current_value))
+							(unparse (retrieve_from_entity (current_value)))
+
+							(retrieve_from_entity (current_value))
+						)
+
+					)
+					meta_labels_to_persist
+				)
+		))
+
+		;ensure the version of the trainee is exported along with the data
+		(accum (assoc
+				meta_values_to_persist (retrieve_from_entity (list "!majorVersion" "!minorVersion" "!pointVersion"))
+				meta_labels_to_persist (list "!majorVersion" "!minorVersion" "!pointVersion")
+		))
+
+		(store
+			(concat migration_filepath trainee ".meta.json")
+			(zip meta_labels_to_persist meta_values_to_persist)
+		)
+	)
+
+
+	;Export entities in json format as they are currently stored in the trainee
+	;as dict of:  { entity_id : { feature : value } }
+	;
+	;parameters:
+	; trainee: name of trainee, reference for filename
+	; migration_filepath: path to migration folder where migration scripts are stored
+	#!export_cases_and_sessions
+	(store
+		(concat migration_filepath trainee ".exp.json")
+		(map
+			(lambda
+				(get_all_labels
+					(retrieve_entity_root (current_index) (true))
+				)
+			)
+			(zip (contained_entities))
+		)
+	)
+
+
+	;Export entities in json format, keeping all original case values as they were trained,
+	;instead of whatever they are encoded internally.
+	;as dict of:  { entity_id : { feature : value } }
+	;Decode nominal encoding, round and convert from epoch back to correct datetime formats as necessary
+	;
+	;parameters:
+	; trainee: name of trainee, reference for filename
+	; migration_filepath: path to migration folder where migration scripts are stored
+	#!export_cases_and_sessions_decoded
+	(seq
+
+		(declare (assoc
+			has_encoded_features (retrieve_from_entity "!hasEncodedFeatures")
+			has_rounded_features (retrieve_from_entity "!hasRoundedFeatures")
+			has_datetime_features (retrieve_from_entity "!hasDateTimeFeatures")
+		))
+
+		;if there are no encoded features, run the raw ExportCasesAndSessions call
+		(if (= (false) has_encoded_features has_rounded_features has_datetime_features)
+			(conclude (call !export_cases_and_sessions))
+		)
+
+		(store
+			(concat migration_filepath trainee ".exp.json")
+			(map
+				(lambda (let
+					(assoc
+						;assoc of feature -> feature value
+						entity_code_map	(get_all_labels (retrieve_entity_root (current_index 1) (true)) )
+					)
+
+					;"case" entity has a label named ".session", decode values as needed
+					(if (contains_index entity_code_map !internalLabelSession)
+						(zip
+							(indices entity_code_map)
+							;decode the values accordingly
+							(if has_encoded_features
+								(call !ConvertToOutput (assoc
+									features (indices entity_code_map)
+									feature_values (values entity_code_map)
+									has_rounded_features has_rounded_features
+									has_datetime_features has_datetime_features
+								))
+
+								has_rounded_features
+								(call !RoundContinuousFeatures (assoc
+									features (indices entity_code_map)
+									feature_values (values entity_code_map)
+								))
+							)
+						)
+
+						;else non-case entity, output as-is
+						entity_code_map
+					)
+				))
+				(zip (contained_entities))
+			)
+		)
+	)
+
+	;update version to latest and overwrite persisted trainee, auto importing any exported data.
+	;this method should be run by a script from the ./upgrade_migration folder
+	;
+	;parameters:
+	; trainee: name of trainee to import and update
+	; root_filepath: base path to Howso Engine Core installation
+	; trainee_filepath: optional, base path from which to load persisted trainee
+	; separate_files: optional flag, if true will load each case from its individual file
+	#upgrade_trainee
+	(seq
+		(declare (assoc
+			;metadata json should be in the format of: { label : value }
+			import_metadata_map (load (concat root_filepath !migration_folder trainee ".meta.json") )
+			;cases and sessions json should be in the format of: { entity_id : { feature : value } }
+			import_cases_and_sessions_map (load (concat root_filepath !migration_folder  trainee ".exp.json") )
+		))
+
+		(assign (assoc new_trainee_path (append !traineeContainer (concat "_temptrainee" (rand))) ))
+
+		(declare (assoc
+			result (load_entity (concat filepath !trainee_template_filename "." !file_extension) new_trainee_path (false) (false))
+		))
+
+		(if (= (null) result)
+			(conclude
+				(call !Return (assoc errors (list "Failed to load trainee: invalid filepath or filename provided") ))
+			)
+		)
+
+		(call_entity new_trainee_path "Initialize" (assoc trainee_id (retrieve_from_entity "!traineeId") ))
+
+		(declare (assoc
+			old_major_version (retrieve_from_entity "!majorVersion")
+			old_minor_version (retrieve_from_entity "!minorVersion")
+			old_point_version (retrieve_from_entity "!pointVersion")
+		))
+
+		;if not importing metadata from saved file, then copy it from this trainee
+		(if (= (null) import_metadata_map)
+			(let
+				(assoc
+					;create a list of all the matadata labels
+					labels_to_keep (call_entity new_trainee_path "get_export_attributes")
+					old_labels (call get_export_attributes)
+				)
+
+				;keep only those that are in the old trainee
+				(assign (assoc
+					labels_to_keep (filter (lambda (contains_label (current_value))) labels_to_keep)
+				))
+
+				;set import_metadata_map to values from the old trainee
+				(assign (assoc
+					import_metadata_map (zip labels_to_keep (retrieve_from_entity labels_to_keep))
+				))
+			)
+
+			;else overwrite old version from exported file instead of from trainee
+			(seq
+				(assign (assoc
+					old_major_version (get import_metadata_map "!majorVersion")
+					old_minor_version (get import_metadata_map "!minorVersion")
+					old_point_version (get import_metadata_map "!pointVersion")
+				))
+				;remove old versions
+				(assign (assoc import_metadata_map (remove import_metadata_map (list "!majorVersion" "!minorVersion" "!pointVersion")) ))
+
+				(assign (assoc
+					import_metadata_map
+						(set import_metadata_map
+							"!featureCustomDerivedMethods"
+							(parse (get import_metadata_map "!featureCustomDerivedMethods"))
+						)
+				))
+			)
+		)
+
+		;overwrite trainee code with the new code, this does not overwrite contained entities (cases, sessions),
+		;but does overwrite all labels including versions with new ones
+		(assign_entity_roots (retrieve_entity_root new_trainee_path))
+		(destroy_entities new_trainee_path)
+
+		;for each label pull its value from the old trainee and overwrite it in the new one
+		(assign_to_entities import_metadata_map)
+
+		;import cases and sessions from saved json and re-create them in the trainee
+		(if import_cases_and_sessions_map
+			;iterate over all the entities and re-create them as contained entities with corresponding features and values
+			(map
+				(lambda
+					(create_entities
+						(current_index)
+						(set_type
+							(zip_labels
+								(indices (current_value))
+								(values (current_value))
+							)
+							(null)
+						)
+					)
+				)
+				import_cases_and_sessions_map
+			)
+		)
+
+		;recreate custom derive feature code on trainee if it has derived features
+		(call !recreate_feature_custom_derived_methods)
+
+		;iterate over all the applicable migration script versions and apply each one in order
+		(call !execute_migration_scripts)
+
+		(accum_to_entities (assoc !revision 1)
+
+		;print statement for use in utility scripts: upgrade_trainee and export_trainee
+		(print
+			"Updated " trainee " to version: "
+			(retrieve_from_entity "!majorVersion") "."
+			(retrieve_from_entity "!minorVersion") "."
+			(retrieve_from_entity "!pointVersion")
+			"\n"
+		)
+
+		(call !Return)
+	)
+
+
+	;Helper method to re-create the !featureCustomDerivedMethods label from attributes for a trainee, used when upgrading a trainee
+	#!recreate_feature_custom_derived_methods
+	(let
+		(assoc
+			custom_derived_features_map
+				(filter
+					(lambda (or
+						(!= (null) (get (current_value) "auto_derive_on_train"))
+						(!= (null) (get (current_value) "derived_feature_code"))
+					))
+					(retrieve_from_entity "!featureAttributes")
+				)
+		)
+
+		;only if there are derived features
+		(if (size custom_derived_features_map)
+			(let
+				(assoc
+					;filter features, leaving only those with custom derivations
+					custom_derived_features_map
+						(filter
+							(lambda (or
+								(= "custom" (get (current_value) (list "auto_derive_on_train" "derive_type")))
+								(!= (null) (get (current_value) "derived_feature_code"))
+							))
+							custom_derived_features_map
+						)
+				)
+
+				;cache all the custom specified derivation code into trainee
+				(assign_to_entities (assoc
+					!featureCustomDerivedMethods
+						(call !ComposeCustomDerivedMethods (assoc
+							custom_derived_features_map custom_derived_features_map
+						))
+				))
+			)
+		)
+	)
+
+	;Helper method to iterate over migration scripts and execute applicable ones
+	;based on which version trainee is being upgraded from
+	;parameters:
+	; old_major_version: number, previous major version
+	; old_minor_version: number, previous minor version
+	; old_point_version: number, previous point version
+	#!execute_migration_scripts
+	(seq
+		(declare (assoc migration_filepath (concat root_filepath !migration_folder) ))
+
+		;perform all custom version-based conversions on metadata/cases/sessions here now that they are stored in the trainee
+		(declare (assoc migration_conversions (load (concat migration_filepath "migrations" "." !file_extension))))
+
+		;filter out all script versions older than the version of the trainee being upgraded
+		(declare (assoc
+			migration_versions
+				(filter
+					(lambda (let
+						(assoc
+							file_versions (split (current_value 1) "\\.")
+							major 0
+							minor 0
+							point 0
+						)
+						(assign (assoc
+							major (first file_versions)
+							minor (get file_versions 1)
+							point (last file_versions)
+						))
+
+						;keep files with newer major version. if major is same, consider minor version, etc.
+						(if (> major old_major_version)
+							(true)
+
+							;filter out older major versions
+							(< major old_major_version)
+							(false)
+
+							(> minor old_minor_version)
+							(true)
+
+							;major is same, filter out older minor versions
+							(< minor old_minor_version)
+							(false)
+
+							(> point old_point_version)
+							(true)
+
+							;else filter out any version that is same or older
+							(false)
+						)
+					))
+					(sort (indices (first migration_conversions)))
+				)
+		))
+
+		;execute all the necessary conversion scripts in ascending version order
+		(map
+			(lambda (call (get (first migration_conversions) (current_value))))
+			migration_versions
+		)
+	)
+
+)
