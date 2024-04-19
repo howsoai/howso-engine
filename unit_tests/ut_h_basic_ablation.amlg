@@ -1,0 +1,245 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_basic_ablation.amlg"))
+
+	(call_entity "howso" "set_internal_parameters" (assoc
+		default_hyperparameter_map (assoc "k" 2 "p" 0.4 "dt" -1)
+	))
+
+	(declare (assoc
+		training_data
+			(list
+				(list 1 5 1 1 1)
+				(list 2 1 1 2 2)
+				(list 3 -30000 1 3 3)
+				(list 3.1 2000 1 3 3)
+			)
+		context_features (list "A" "B" "C")
+		action_features (list "D" "E")
+	))
+
+	;train
+	(map
+		(lambda
+			(call_entity "howso" "train" (assoc
+				features (append context_features action_features)
+				input_cases (list (current_value 2))
+				session "my_session"
+			))
+		)
+		training_data
+	)
+
+
+;VERIFY CONVICTION CALCULATIONS OF FEATURES
+	(declare (assoc
+		expected_feature_convictions
+			(assoc
+				"A" 1146
+				"B" .2
+				"C" .infinity
+				"D" 1094
+				"E" 1094
+			)
+		feature_convictions
+			(get
+				(call_entity "howso" "compute_conviction_of_features" (assoc
+					features (list "A" "B" "C" "D" "E")
+				))
+				(list "payload" "familiarity_conviction_addition")
+			)
+	))
+
+	(print "Conviction of features: ")
+	;C should be infinity or really large, may be not be infinity due to floating point precision errors
+	(call assert_approximate (assoc
+		obs feature_convictions
+		exp expected_feature_convictions
+		infinity_threshold 1e12
+	))
+
+	(call exit_if_failures (assoc msg "Conviction of features"))
+
+	(print "conviction value of new case: "
+		(call_entity "howso" "batch_react_group" (assoc features (append context_features) new_cases (list (list (list 1 2 1)))) ) "\n"
+	)
+
+;VERIFY CONVICTION UPPER THRESHOLD
+	(call_entity "howso" "set_auto_ablation_params" (assoc
+		auto_ablation_enabled (true)
+		conviction_upper_threshold 0.9
+		minimum_model_size 0
+	))
+	(assign (assoc model_size (get (call_entity "howso" "get_num_training_cases") (list "payload" "count")) ))
+
+	;this should not be added to the model b/c conviction of this case is > 0.9
+	(call_entity "howso" "train" (assoc
+		features (list "A" "B" "C")
+		input_cases (list (list 1 2 1))
+		session "my_session"
+	))
+
+	(print "Unchanged model size after threshold filter: ")
+	(call assert_same (assoc
+		exp model_size
+		obs (get (call_entity "howso" "get_num_training_cases") (list "payload" "count"))
+	))
+
+
+	(print "conviction value of new case: "
+		(call_entity "howso" "batch_react_group" (assoc features (append context_features action_features ) new_cases (list (list (list 1 2 1 3 3)))) ) "\n"
+	)
+
+	(call_entity "howso" "set_auto_ablation_params" (assoc
+		auto_ablation_enabled (true)
+		conviction_upper_threshold 2
+		minimum_model_size 0
+	))
+
+	;this should be added to the model b/c conviction of this case is < 2
+	(call_entity "howso" "train" (assoc
+		features (list "A" "B" "C" "D" "E")
+		input_cases (list (list 1 2 1 3 3))
+		session "my_session"
+	))
+	(print "New model size after threshold filter: ")
+	(call assert_same (assoc
+		exp (+ 1 model_size)
+		obs (get (call_entity "howso" "get_num_training_cases") (list "payload" "count"))
+	))
+
+	(call exit_if_failures (assoc msg "Conviction upper threshold"))
+
+;VERIFY ABSOLUTE THRESHOLD
+	(assign (assoc model_size (get (call_entity "howso" "get_num_training_cases") (list "payload" "count")) ))
+
+	(call_entity "howso" "set_auto_ablation_params" (assoc
+		auto_ablation_enabled (true)
+		tolerance_prediction_threshold_map (assoc "D" (list 0.5 0.5))
+		minimum_model_size 0
+	))
+
+	;this should not be added to the model
+	(call_entity "howso" "train" (assoc
+		features (list "A" "B" "C" "D" "E")
+		input_cases (list (list 1 5 2 1 1))
+		session "my_session"
+	))
+	(print "Unchanged model size after absolute threshold filter: ")
+	(call assert_same (assoc
+		exp model_size
+		obs (get (call_entity "howso" "get_num_training_cases") (list "payload" "count"))
+	))
+
+	(call_entity "howso" "set_auto_ablation_params" (assoc
+		auto_ablation_enabled (true)
+		tolerance_prediction_threshold_map (assoc "D" (list 0.01 0.01))
+		minimum_model_size 0
+	))
+
+
+	;this should  be added to the model
+	(call_entity "howso" "train" (assoc
+		features (list "A" "B" "C" "D" "E")
+		input_cases (list (list 1 5 2 1 1))
+		session "my_session"
+	))
+	(print "New model size after absolute threshold filter: ")
+	(call assert_same (assoc
+		exp (+ 1 model_size)
+		obs (get (call_entity "howso" "get_num_training_cases") (list "payload" "count"))
+	))
+
+	(call exit_if_failures (assoc msg "Absolute value threshold"))
+
+
+;VERIFY RELATIVE THRESHOLD
+	(assign (assoc model_size (get (call_entity "howso" "get_num_training_cases") (list "payload" "count")) ))
+
+	(call_entity "howso" "set_auto_ablation_params" (assoc
+		auto_ablation_enabled (true)
+		;reaction is 1, action is 1.1, so: |1 - 1.1| / 1 = 0.1 which is < .2, so this case should be filtered
+		relative_prediction_threshold_map (assoc "E" 0.2)
+		minimum_model_size 0
+	))
+
+	;this should not be added to the model
+	(call_entity "howso" "train" (assoc
+		features (list "A" "B" "C" "D" "E")
+		input_cases (list (list 1 5 3 1.1 1.1))
+		session "my_session"
+	))
+	(print "Unchanged model size after relative threshold filter: ")
+	(call assert_same (assoc
+		exp model_size
+		obs (get (call_entity "howso" "get_num_training_cases") (list "payload" "count"))
+	))
+
+
+	(call_entity "howso" "set_auto_ablation_params" (assoc
+		auto_ablation_enabled (true)
+		;reaction is 1, action is 1.1, so: ; |1 - 1.1| / 1 = 0.1 which is > .02, should be trained on
+		relative_prediction_threshold_map (assoc "E" 0.02)
+		minimum_model_size 0
+	))
+
+	;this should  be added to the model
+	(call_entity "howso" "train" (assoc
+		features (list "A" "B" "C" "D" "E")
+		input_cases (list (list 1 5 3 1.1 1.1))
+		session "my_session"
+	))
+	(print "New model size after relative threshold filter: ")
+	(call assert_same (assoc
+		exp (+ 1 model_size)
+		obs (get (call_entity "howso" "get_num_training_cases") (list "payload" "count"))
+	))
+
+	(call exit_if_failures (assoc msg "Relative value threshold "))
+
+;VERIFY CONVICTION OF NEW CASE DOES NOT MATCH CONVICTION OF CASE USING KNOCKOUT - because the avg entropy is different for new vs in model
+	(declare (assoc cases_without_new (get (call_entity "howso" "get_cases") (list "payload" "cases")) ))
+	(assign (assoc
+		conv1
+			(get
+				(call_entity "howso" "batch_react_group" (assoc
+					features (list "A" "B" "C" "D" "E")
+					new_cases (list (list (list 1 2.5 1 3 3)))
+				))
+				(list "payload" "familiarity_conviction_addition")
+			)
+	))
+
+	(call_entity "howso" "train" (assoc
+		features (append context_features action_features)
+		input_cases (list (list 1 2.5 1 3 3))
+		session "my_session"
+	))
+
+	(declare (assoc cases_with_new (get (call_entity "howso" "get_cases") (list "payload" "cases")) ))
+	(declare (assoc
+		added_case (filter (lambda (not (contains_value cases_without_new (current_value)))) cases_with_new)
+	))
+
+	(assign (assoc
+		conv2
+			(get
+				(call_entity "howso" "batch_react_group" (assoc ;"!ComputeCaseAdditionFamiliarityConviction" (assoc
+					features (list "A" "B" "C" "D" "E")
+					new_cases (list added_case)
+				))
+				(list "payload" "familiarity_conviction_addition")
+			)
+	))
+
+	(print "Conviction of new case v conviction of existing case: ")
+	(call assert_true (assoc obs (!= conv1 conv2)))
+	(print "Conviction of new case: ")
+	(call assert_approximate (assoc obs (first conv1) exp .89354))
+	(print "Conviction of existing case: ")
+	(call assert_approximate (assoc obs (first conv2) exp .90499))
+
+	(call exit_if_failures (assoc msg "Conviction of new case vs knockout"))
+
+	(call exit_if_failures (assoc msg unit_test_name))
+)

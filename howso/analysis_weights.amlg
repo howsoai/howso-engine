@@ -1,0 +1,487 @@
+;Contains methods for hyperparameter analysis of feature and case weights and feature deviation calculations.
+(null
+
+	;updates baseline_hyperparameter_map
+	;calculate feature residuals several times to converge on stable deviation values
+	#!ConvergeResiduals
+	(declare
+		(assoc
+			num_samples 100
+			num_iterations 3
+			use_deviations (false)
+
+			;not a parameter
+			iteration 0
+			resdiuals (assoc)
+		)
+
+		(declare (assoc
+			features
+				(if (= targeted_model "targetless")
+					context_features
+
+					(values (append context_features action_features) (true))
+				)
+			;pair of: residuals_map and ordinal_residuals_map
+			residuals_map (list)
+		))
+
+		(while (< iteration num_iterations)
+			(assign (assoc
+				residuals_map
+					(call !ExpandResidualValuesToUncertainty  (assoc
+						feature_residuals_map
+							(call !CalculateFeatureResiduals (assoc
+								features features
+								robust_residuals (= robust_mode "robust")
+								hyperparameter_feature action_feature
+								num_samples
+									;for robust the first iteration needs just enough to run a few samples for each feature to establish some reasonable value
+									(if (and robust_residuals (= 0 iteration))
+										(min num_samples (* 10 (size features)))
+
+										;on the last iteration use the larger of 1000 or the specified samples to attain more accurate residuals
+										(= 2 iteration)
+										(max num_samples 1000)
+
+										num_samples
+									)
+								custom_hyperparam_map baseline_hyperparameter_map
+							))
+					))
+			))
+
+			(call !UpdateHyperparameters (assoc
+				feature_deviations (get residuals_map "residual_map")
+				ordinal_feature_deviations (get residuals_map "ordinal_residual_map")
+				null_deviations (get residuals_map (list "hyperparam_map" "!nullUncertaintyMap"))
+				use_deviations use_deviations
+			))
+
+			(accum (assoc iteration 1))
+
+			(if (= 1 iteration)
+				(if (= (sort !trainedFeatures) (sort features))
+					(accum (assoc baseline_hyperparameter_map (assoc "allFeatureResidualsCached" (true))))
+				)
+			)
+		)
+	)
+
+	;updates baseline_hyperparameter_map
+	;wrapper method to compute context feature weights for a specified action_feature and update baseline_hyperparameter_map with those weights
+	#!ComputeAndUseWeights
+	(let
+		;compute an assoc of feature -> weight for the action_feature
+		(assoc
+			weights_map
+				(call !ComputeActionFeatureWeights (assoc
+					action_feature action_feature
+					context_features
+						;ensure context_features don't have the action_feature in it
+						(filter
+							(lambda (!= action_feature (current_value)) )
+							context_features
+						)
+					use_case_weights use_case_weights
+					weight_feature weight_feature
+					hyperparam_map baseline_hyperparameter_map
+				))
+		)
+
+		;store the computed feature weights into baseline_hyperparameter_map
+		(accum (assoc baseline_hyperparameter_map (assoc "featureWeights" weights_map) ))
+	)
+
+	;outputs weights_map for as action_feature for specified context_features
+	#!ComputeActionFeatureWeights
+	(declare
+		(assoc
+			action_feature (null)
+			context_features (list)
+			weight_feature ".case_weight"
+			use_case_weights (false)
+			hyperparam_map (null)
+		)
+
+		;if user doesn't want to use case weights, change weight_feature to '.none'
+		(if (not use_case_weights)
+			(assign (assoc weight_feature ".none"))
+		)
+
+		;mda for each context feature as a ratio of error_with_feature_removed / baseline_error (where baseline uses all the context features)
+		(declare (assoc
+			context_features_mda_map
+				(call !DecreaseInAccuracy (assoc
+					context_features context_features
+					action_features (list action_feature)
+					output_ratio (true)
+					use_case_weights use_case_weights
+					weight_feature weight_feature
+					hyperparam_map hyperparam_map
+				))
+		))
+
+		;if baseline accuracy was 100% (MAE was 0), the ratios will be infinities (divided by 0), so set all weights to 1
+		(if (contains_value context_features_mda_map .infinity)
+			(conclude
+				;if MDA was calculated using feature weights, return those exact weights since they result in a perfect score
+				(if (get hyperparam_map "featureWeights")
+					;only return the weights for the requested context_features
+					(keep (get hyperparam_map "featureWeights") context_features)
+
+					;else return 1 for all weights since we can't get any better score using all the context fetaures
+					(map
+						(lambda 1)
+						context_features_mda_map
+					)
+				)
+			)
+		)
+
+		(declare (assoc
+			good_features_mda_map (filter (lambda (> (current_value) 1)) context_features_mda_map)
+			weights_map (filter (lambda (<= (current_value) 1)) context_features_mda_map)
+		))
+
+		;find the max and the range for the max mda values
+		(declare (assoc mda_max (apply "max" (values context_features_mda_map))))
+		(declare (assoc
+			mda_good_range (- mda_max 1)
+			;if the MDA ratio for a feature happens to be higher than the number of features, we use that, otherwise
+			;the maximum value for a feature weight will be set to the number of features (i.e. if there are 5 features, the largest weight will
+			;be 5.  Since the normalized good values are 0-based, we subtract 1 because it'll be added on later
+			num_features (- (max mda_max (size context_features_mda_map)) 1)
+		))
+
+		(declare (assoc
+			normalized_map
+				;handle extreme edge case of all ratio values being 1, resulting in a range of 0
+				(if (= 0 mda_good_range)
+					(map (lambda 1) good_features_mda_map)
+
+					;else normalize all positive values
+					(map
+						(lambda
+							(/ (- (current_value) 1) mda_good_range)
+						)
+						good_features_mda_map
+					)
+				)
+		))
+
+		;transform normalized values to be relative to max(value, num_features) + 1 (add 1 since normalized values are 0-based)
+		(accum (assoc
+			weights_map
+				(append
+					(associate action_feature 1)
+					(map
+						(lambda
+							(+ 1 (* (current_value) num_features))
+						)
+						normalized_map
+					)
+				)
+		))
+
+		(if !inactiveFeaturesMap
+			(accum (assoc weights_map !inactiveFeaturesMap))
+		)
+
+		;output weights map
+		weights_map
+	)
+
+	;output initial deviations to be the smallest gaps for each feature scaled by the number of features
+	#!ComputeInitialDeviations
+	(let
+		(assoc all_features (values (append context_features action_features) (true)))
+		(map
+			(lambda (/ (current_value) (size all_features)))
+			(call !CalculateSmallestFeatureGap (assoc features all_features))
+		)
+	)
+
+	;updates analyzed_hp_map
+	;run multiple iterations of grid search and resdiuals to either use with the inverse_residuals_as_weights flow
+	#!ConvergeIRW
+	(declare
+		(assoc
+			use_deviations (false)
+			num_iterations 3
+			num_samples_converge 2000
+
+			;local method variables, not parameters
+			iteration 0
+			hyperparam_map (assoc)
+		)
+
+		(set_rand_seed sampling_random_seed)
+
+		(call !UpdateHyperparameters (assoc use_deviations use_deviations))
+
+		(declare (assoc
+			features
+				(if (= targeted_model "targetless")
+					context_features
+
+					(values (append context_features action_features) (true))
+				)
+			residuals_map (list)
+		))
+
+		;when calculating IRW and LK deviations, compute the initial residual values if necessary
+		(if (= (null) initial_residual_values_map)
+			(assign (assoc
+				initial_residual_values_map
+					(map
+						(lambda
+							;gap is always 1 for nominals, set initial value to gap / 2
+							(if (contains_index !nominalsMap (current_index))
+								0.5
+
+								;else continuous values
+								(let
+									(assoc
+										max_gap
+											;edit distance features, use max length: size for strings, or total_size for code
+											(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
+												(let
+													(assoc edit_dist_feature (current_index 2) )
+													(declare (assoc
+														feature_values
+															(filter (map
+																(lambda (retrieve_from_entity (current_value) edit_dist_feature))
+																(call !AllCases)
+															))
+													))
+
+													(if (or
+															(= "string" (get !editDistanceFeatureTypesMap edit_dist_feature))
+															(= "string_mixable" (get !editDistanceFeatureTypesMap edit_dist_feature))
+														)
+														(apply "max" (map (lambda (size (current_value))) feature_values))
+
+														(apply "max" (map (lambda (total_size (current_value))) feature_values))
+													)
+												)
+
+												;else normal continuous feature, compute max gap
+												(compute_on_contained_entities (list
+													(query_max_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
+												))
+											)
+										min_gap
+											(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
+												0
+
+												(compute_on_contained_entities (list
+													(query_min_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
+												))
+											)
+									)
+
+
+									;infinity means there was no gap, and nan means all values are null and can't compute gap
+									(if (or (= .nan min_gap) (= .infinity min_gap) (= .infinity max_gap))
+										1
+										;use average of max_gap/2 and min_gap/2
+										(/ (+ (/ max_gap 2) (/ min_gap 2)) 2)
+									)
+								)
+							)
+
+						)
+						(zip features)
+					)
+			))
+		)
+
+		;First pass uses inverse feature gap/2 values as weights to compute hyperparameters that should provide decent results.
+		;Second pass uses these decent residuals to finds even better hyperparmeters and improved residuals.
+		;Last pass finds usable hyperparams using the improved residuals and then calculates usable residuals for weights.
+		;At this point the hyperparameters and residuals and weights are stable enough for use.
+		(while (< iteration num_iterations)
+			(assign (assoc
+				residuals_map
+					(if (= 0 iteration)
+						(assoc
+							"residual_map" (get_value initial_residual_values_map)
+							"ordinal_residual_map"
+								(if (size !ordinalFeatures)
+									(filter
+										(lambda (contains_index !ordinalFeaturesRangesMap (current_index)))
+										(get_value initial_residual_values_map)
+									)
+								)
+						)
+
+						(call !ExpandResidualValuesToUncertainty  (assoc
+							feature_residuals_map
+								(call !CalculateFeatureResiduals (assoc
+									features features
+									robust_residuals (= robust_mode "robust")
+									num_samples
+										(if (or (< iteration (- num_iterations 1)) (!= targeted_model "targetless"))
+											residual_num_samples
+
+											;else on the last iteration, use
+											(max residual_num_samples num_samples_converge)
+										)
+									custom_hyperparam_map baseline_hyperparameter_map
+								))
+						))
+					)
+			))
+
+			(call !UpdateHyperparameters (assoc
+				feature_deviations (get residuals_map "residual_map")
+				ordinal_feature_deviations (get residuals_map "ordinal_residual_map")
+				null_deviations (get residuals_map (list "hyperparam_map" "!nullUncertaintyMap"))
+				use_deviations use_deviations
+				feature_weights
+					(map
+						(lambda
+							;ensure that inactive features always maintain a feature weight of 0
+							(if (contains_index !inactiveFeaturesMap (current_index))
+								0
+
+								(call !ConvertDeviationToFeatureWeight (assoc
+									feature_deviation (current_value 1)
+									p_value (get baseline_hyperparameter_map "p")
+								))
+							)
+						)
+						(get residuals_map "residual_map")
+					)
+			))
+
+			(assign (assoc
+				analyzed_hp_map
+					(call !ComputeResidualsAcrossParametersAndSelectOptimal (assoc
+						context_features context_features
+						action_features action_features
+						k_folds k_folds
+						k_values k_values
+						p_values (filter (lambda (!= 0 (current_value))) p_values)
+						dt_values dt_values
+						k_folds_by_indices k_folds_by_indices
+						num_analysis_samples num_analysis_samples
+						targetless (= targeted_model "targetless")
+						baseline_hyperparameter_map baseline_hyperparameter_map
+						;this flag sets the weights to be inverse of the residuals and outputs them
+						use_inverse_weights (true)
+					))
+			))
+			(accum (assoc iteration 1))
+		)
+
+		(if (= (sort !trainedFeatures) (sort features))
+			(accum (assoc analyzed_hp_map (assoc "allFeatureResidualsCached" (true))))
+		)
+	)
+
+	;Compute and store case weights for all cases if there are any features with the id_feature attribute set to true
+	;Each case weights as the reciprocal of the count of the id feature value in the dataset.  If there are multiple
+	;id features, the product of the weights of all the id features is the case weight, which is stored
+	;in each case into the .case_weight feature
+	#!ComputeAndStoreIdFeatureCaseWeights
+	(let
+		(assoc
+			;accumulate a list of id features that are explicitly not unique, since uniqueness preserves id-based weighting
+			id_features
+				(filter
+					(lambda
+						(and
+							(get !featureAttributes (list (current_value 1) "id_feature"))
+							(not (contains_index !uniqueNominalsSet (current_value)))
+						)
+					)
+					(indices !categoricalFeaturesSet)
+				)
+		)
+
+		(if (= 0 (size id_features))
+			(conclude)
+		)
+
+		;if model has ID features, set the !hasPopulatedCaseWeight flag
+		(assign_to_entities (assoc !hasPopulatedCaseWeight (true)))
+
+		(declare (assoc
+			all_cases_map (zip (call !AllCases))
+			;assoc of { feature -> { value -> weight } }
+			feature_case_weight_map
+				(map
+					(lambda (let
+						(assoc feature (current_index 1))
+						;store class counts as weights (reciprocal of count) for all cases for each id feature
+						(map
+							(lambda (/ 1 (current_value)))
+
+							;grab the un-weighted count of each class
+							(compute_on_contained_entities (list
+								(query_value_masses
+									feature
+									(null)
+									;as numeric value
+									(or
+										(not (contains_index !nominalsMap feature))
+										(contains_index !numericNominalFeaturesMap feature)
+									)
+								)
+							))
+						)
+					))
+					(zip id_features)
+				)
+		))
+
+		(if (= 1 (size id_features))
+			(let
+				(assoc feature (first id_features))
+				;store .case_weight to be same as the weight for the one id feature
+				(call !StoreCaseValues (assoc
+					case_values_map
+						(map
+							(lambda
+								(get
+									feature_case_weight_map
+									(list feature (retrieve_from_entity (current_index 1) feature))
+								)
+							)
+							all_cases_map
+						)
+					label_name ".case_weight"
+				))
+			)
+
+			;else there are several id features, compute and store .case_weight
+			;as the product of all id feature case weights for each case
+			(call !StoreCaseValues (assoc
+				case_values_map
+					(map
+						(lambda (let
+							(assoc case_id (current_index 1))
+
+							;multiply all the case weights for all the id features
+							(apply "*"
+								;list of all the case weights for all the id features
+								(map
+									(lambda
+										(get
+											feature_case_weight_map
+											(list (current_value 1) (retrieve_from_entity case_id (current_value 1)))
+										)
+									)
+									id_features
+								)
+							)
+						))
+						all_cases_map
+					)
+				label_name ".case_weight"
+			))
+		)
+	)
+)

@@ -1,0 +1,226 @@
+;Contains methods for un/substituting feature values and retrieving substituted feature values.
+(null
+
+	;replaces feature values with their corresponding substitution for the provided list of features and values, returns the substituted list of values
+	;parameters
+	; features: list of features
+	; feature_values: corresponding list of values for each features
+	#!SubstituteFeatureValues
+	(declare
+		(assoc
+			features (list)
+			feature_values (list)
+		)
+
+		(map
+			(lambda
+				;if this has a substitution, return that
+				(if (and (contains_index !substitutionValueMap (current_value)) (!= (null) (get feature_values (current_index))))
+					;walk the map via feature and the value to get the substitution value
+					(if (contains_index !substitutionValueMap (list (current_value 1) (get feature_values (current_index 1))))
+						(get !substitutionValueMap (list (current_value 1) (get feature_values (current_index 1))))
+
+						;else no substitution is stored for this value, create one and return that
+						(let (assoc
+								;random new substitution that is almost a full signed 64 bit integer
+								new_sub (call !GenerateInt64String)
+							)
+
+							;ensure the value is unique; if it's not, generate a new value
+							(while (contains_index !substitutionValueMap new_sub)
+								(assign (assoc new_sub (call !GenerateInt64String)))
+							)
+
+							new_sub
+						)
+					)
+
+					;else this feature has no substitutions or value is null, just return the raw value
+					(get feature_values (current_index))
+				)
+			)
+			features
+		)
+	)
+
+	;replaces substituted feature values with their corresponding actual nominal values, returns the list of un-substituted values
+	;parameters
+	; features: list of features
+	; feature_values: list of values for each features
+	#!UnsubstituteFeatureValues
+	(declare
+		(assoc
+			features (list)
+			feature_valuse (list)
+		)
+
+		(map
+			(lambda
+				;if this has a substitution, return that
+				(if (and (contains_index !unSubstituteValueMap (current_value)) (!= (null) (get feature_values (current_index))))
+					;walk the map via feature and the value to get the substitution value
+					(if (contains_index !unSubstituteValueMap (list (current_value 1) (get feature_values (current_index 1))))
+						(get !unSubstituteValueMap (list (current_value 1) (get feature_values (current_index 1))))
+
+						;else no substitution is stored for this value, return raw value
+						(get feature_values (current_index))
+					)
+
+					;else this feature has no substitutions or value is null, just return the raw value
+					(get feature_values (current_index))
+				)
+			)
+			features
+		)
+	)
+
+	;sets substitution feature values used in case generation
+	;
+	;parameters:
+	; substitution_value_map: assoc of feature -> assoc of value -> substitution.
+	;	If this map is null, all substitutions will be disabled and cleared
+	;	If any feature in the substitution_value_map has a missing or empty assoc of substitutions, substitution values will immeditally be generated
+	#set_substitute_feature_values
+	(seq
+		(assign_to_entities (assoc
+			!hasSubstituteFeatureValues (> (size substitution_value_map) 0)
+			!substitutionValueMap
+				(map
+					(lambda
+						(let
+							(assoc
+								sub_feature_map (current_value 1)
+								sub_feature (current_index 1)
+								generated_substitutions_map (assoc)
+							)
+
+							;if the substitution map has no substitution values specified for a feature, generate them here
+							(if (or (= sub_feature_map (null)) (= sub_feature_map (assoc)))
+								(let
+									(assoc
+										all_unique_feature_values
+											(indices
+												(compute_on_contained_entities (list
+													(query_value_masses sub_feature (null) (contains_index !numericNominalFeaturesMap sub_feature))
+												))
+											)
+									)
+
+									(assign (assoc
+										;quickly populate the substitions map
+										generated_substitutions_map
+											(zip (range
+												(lambda (call !GenerateInt64String))
+												1 (size all_unique_feature_values) 1
+											))
+									))
+
+									;if by some small chance any duplicates were generated, accumulate enough new uniques to replace the dupes
+									(while (< (size generated_substitutions_map) (size all_unique_feature_values))
+										;accumulate-append new generated subsitutions to the map, dupclicates will be clobbered
+										(accum (assoc
+											generated_substitutions_map
+												;random new substitution that is almost a full signed 64 bit integer
+												(associate (call !GenerateInt64String) (null))
+										))
+									)
+
+									;store an assoc of all unique feature values -> unique generated substitution values
+									(zip
+										all_unique_feature_values
+										(indices generated_substitutions_map)
+									)
+								)
+
+								;store the provided substitution map, but first populate any missing substitutions with generated ones
+								(let
+									;pull the list of all the unique nominal classes
+									(assoc
+										missing_values
+											;filter out all nominal values to leave only the missing ones that are not in the user provided map
+											(filter
+												(lambda (not (contains_index sub_feature_map (current_value))))
+												;iterate over all the known nominal values
+												(indices
+													(compute_on_contained_entities (list
+														(query_value_masses sub_feature (null) (contains_index !numericNominalFeaturesMap sub_feature))
+													))
+												)
+											)
+									)
+
+									(if (> (size missing_values) 0)
+										(seq
+											(assign (assoc
+												;quickly populate substitutions map
+												generated_substitutions_map
+													(zip (range
+														(lambda (call !GenerateInt64String))
+														1 (size missing_values) 1
+													))
+											))
+
+											;if by some small chance any duplicates were generated, accumulate enough new uniques to replace the dupes
+											(while (< (size generated_substitutions_map) (size missing_values))
+												;accumulate-append new generated subsitutions to the map, dupclicates will be clobbered
+												(accum (assoc
+													generated_substitutions_map
+														;random new substitution that is almost a full signed 64 bit integer
+														(associate (call !GenerateInt64String) (null))
+												))
+											)
+
+											;append the autogenerated substitutions for the missing values to the provided map
+											(accum (assoc sub_feature_map (zip missing_values (indices generated_substitutions_map))))
+										)
+									)
+
+									sub_feature_map
+								)
+							)
+						)
+					)
+					substitution_value_map
+				)
+		))
+
+		;store the backwards map for each feature as well
+		(assign_to_entities (assoc
+			!unSubstituteValueMap
+				(map
+					(lambda
+						(zip
+							(values (current_value))
+							(indices (current_value))
+						)
+					)
+					!substitutionValueMap
+				)
+			;substituted features are considered encoded, because output needs to be encoded
+			!hasEncodedFeatures
+				(if !hasSubstituteFeatureValues
+					(true)
+					(or
+						!hasRoundedFeatures
+						(size !ordinalOrdinalToStringMap)
+						(size !featureDateTimeMap)
+						;any boolean (non-number) nominals
+						(size (filter (lambda (!= "number" (current_value)) ) !numericNominalFeaturesMap))
+						;any amalgam, json or non-string continuous
+						(size (filter
+							(lambda (and (!= "string" (current_value)) (!= "string_mixable" (current_value))))
+							!editDistanceFeatureTypesMap
+						))
+					)
+				)
+		))
+
+		(accum_to_entities (assoc !revision 1))
+
+		(call !Return)
+	)
+
+	;returns the substitution map
+	#get_substitute_feature_values
+	(call !Return (assoc payload (retrieve_from_entity "!substitutionValueMap") ))
+)

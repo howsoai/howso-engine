@@ -1,0 +1,1123 @@
+;Contains methods for computing and outputting residuals.
+(null
+
+	;iterate over the specified deviation_features_map and output maximum knwown residuals for each feature
+	#!ComputeMaxResiduals
+	(map
+		(lambda
+			;if a bounds map is defined, use the max delta for the bounds if min and max are specified
+			(if (contains_index !featureBoundsMap (current_index))
+				;nominals max residual is 1
+				(if (contains_index !nominalsMap (current_index))
+					1
+
+					;datetime features with bounds will have epoch bounds defined
+					(get !featureBoundsMap "has_epoch_bounds")
+					(-
+						(get !featureBoundsMap "epoch_max_value")
+						(get !featureBoundsMap "epoch_min_value")
+					)
+
+					;continuous, non-datetime features
+					(and
+						(not (contains_index !featureDateTimeMap (current_index)))
+						(contains_index !featureBoundsMap "min")
+						(contains_index !featureBoundsMap "max")
+					)
+					(-
+						(get !featureBoundsMap "max")
+						(get !featureBoundsMap "min")
+					)
+
+					;if cyclical, output cycle length
+					(contains_index !cyclicFeaturesMap (current_index))
+					(get !cyclicFeaturesMap (current_index))
+
+					;if defined numeric ordinal, output the total cardinality
+					(contains_index !ordinalOrdinalToStringMap (current_index))
+					(size (get !ordinalOrdinalToStringMap (current_index)))
+
+					;else unspecified min/max for feature, return maximum residual
+					.infinity
+				)
+
+				;no bounds specified, return maximum residual
+				.infinity
+			)
+		)
+		deviation_features_map
+	)
+
+	;helper method for CalculateFeatureResiduals to compute and cache min gaps and min residuals
+	#!CacheFeatureMinGapAndResidual
+	(seq
+		(assign_to_entities (assoc
+			!cachedFeatureHalfMinGapMap
+				(map
+					(lambda (let
+						(assoc
+							smallest_gap
+								;gap is always 1 for nominals or strings
+								(if (or
+										(contains_index !nominalsMap (current_index 1))
+										(contains_value (list "string" "string_mixable") (get !editDistanceFeatureTypesMap (current_index 1)))
+									)
+									1
+
+									;else compute the gap
+									(compute_on_contained_entities (list
+										(query_min_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
+									))
+								)
+						)
+
+						;infinity means there was no gap, set value to zero
+						(if (= .infinity smallest_gap)
+							0
+
+							;nan means that all values are nulls and a gap couldn't be computed
+							;set it to be 0.1 for edit distance feature, and zero for all other continuous
+							(= .nan smallest_gap)
+							(if (contains_index !editDistanceFeatureTypesMap (current_index))
+								0.1
+								0
+							)
+
+							;else set the smallest gap to gap / 2
+							(/ smallest_gap 2)
+						)
+					))
+					(zip features)
+				)
+		))
+		(assign_to_entities (assoc
+			!cachedFeatureMinResidualMap
+				(map
+					(lambda
+						;unique features don't have a residual
+						(if (contains_index !uniqueNominalsSet (current_index))
+							0
+
+							;empty datasets set minimal residual to be half a gap
+							(= 0 num_training_cases)
+							0.5
+
+							;else set nominal lower residual bound to:  gap / (num_cases + 1)
+							(contains_index !nominalsMap (current_index))
+							(/ (* 2 (current_value)) (+ 1 num_training_cases))
+
+							;else set continuous lower residual bound to:  gap / ln(num_cases + 1)
+							(/ (* 2 (current_value)) (log (+ 1 num_training_cases)) )
+						)
+					)
+					!cachedFeatureHalfMinGapMap
+				)
+		))
+	)
+
+
+	;Limit computed residuals from feature_residuals_map to be the max of cached minimum residual, computed residual, and user-specified error
+	;outputs the passed in feature_residuals_map with limited values.
+	;
+	;parameters:
+	; feature_residuals_map: output assoc from CalculateFeatureResiduals containing a map of feature -> residual value in the 'residual_map' key
+	;					i.e.: { "residual_map" : { "featureA" : 3.4... } }
+	#!ExpandResidualValuesToUncertainty
+	(set
+		feature_residuals_map
+		"residual_map"
+		(map
+			(lambda
+				;update direct value
+				(max
+					(get !cachedFeatureMinResidualMap (current_index))
+					(current_value)
+					(get !userSpecifiedFeatureErrorsMap (current_index))
+				)
+			)
+			(get feature_residuals_map "residual_map")
+		)
+	)
+
+	;Wrapper method for computing regional model residuals that doesn't run the full method if the regional model is only of size 1.
+	;Computes regional residuals for the specified target_residual_feature provided a 'regional_model_cases_map' and 'features' to use as contexts.
+	;returns an assoc of target_residual_feature -> residual value
+	#!ComputeRegionalResiduals
+	(if (= 1 (size regional_model_cases_map))
+
+		;if regional model is of size of 1, residual cannot be calculated, therefore for continuous features
+		;set the residual to: boundary_max - boundary_min (if boundaries are specified)
+		(map
+			(lambda (let
+				(assoc feature (current_index))
+
+				(declare (assoc
+					boundaries_tuple
+						(call !ConstrainBoundariesForFeature (assoc
+							bounds_map (get feature_bounds_map feature)
+							feature feature
+							is_datetime (and !hasDateTimeFeatures (contains_index !featureDateTimeMap feature))
+							cycle_length cycle_length
+						))
+				))
+
+				;residual is: feature range / 4 to average out residual in each direction
+
+				;if a boundary value is not specified, residual is unknown, set it to 0
+				(if (contains_value boundaries_tuple (null))
+					0
+
+					;for cyclics with exclusionary bounds where the min is larger than the max,
+					;e.g., to allow +/- 60 degrees, boundary_min=300, boundary_max=60
+					;therefore the range is: boundary_max + (cycle_length - boundary_min)
+					(and cycle_length (> (first boundaries_tuple) (last boundaries_tuple)))
+					(/
+						(+ (last boundaries_tuple) (- cycle_length (first boundaries_tuple)))
+						4
+					)
+
+					;else residual is simply the range: (boundary_max - boundary_min)
+					(/ (- (last boundaries_tuple) (first boundaries_tuple)) 4)
+				)
+			))
+			(zip (list target_residual_feature))
+		)
+
+		;else return the regional residuals for the target_residual_feature
+		(call !CalculateFeatureResiduals (assoc
+			features features
+			target_residual_feature target_residual_feature
+			case_ids (indices regional_model_cases_map)
+			regional_model_only (true)
+			use_case_weights use_case_weights
+			weight_feature weight_feature
+			focal_case ignore_case
+
+			;if only one feature provided, attempt to use its parameters, otherwise use targetless
+			hyperparameter_feature (if (= 1 (size feature)) feature ".targetless")
+
+			;all the context features are specified
+			robust_residuals (false)
+		))
+	)
+
+	;helper method for CalculateFeatureResiduals to initialize variables and sample case_ids
+	#!InitResiduals
+	(seq
+		;need 2x as many default robust samples since on average half the features won't have computations
+		(if (= (null) num_samples)
+			(assign (assoc
+				num_samples (if robust_residuals 2000 1000)
+			))
+		)
+
+		;if not using case weights, change weight_feature to '.none'
+		(if (not use_case_weights)
+			(assign (assoc weight_feature ".none"))
+
+			(assign (assoc valid_weight_feature (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight")) ))
+		)
+
+		;if features aren't specified, assume all !trainedFeatures will need to have their mae calculated
+		(if (= (null) features)
+			(assign (assoc features !trainedFeatures))
+		)
+
+		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
+
+		;if expected values haven't been cached (i.e., analyze was skipped), do that here
+		(if (= 0 (size !expectedValuesMap))
+			(call !CacheExpectedValuesAndProbabilities (assoc
+				features features
+				weight_feature weight_feature
+				use_case_weights use_case_weights
+			))
+		)
+
+		;set the passed in one as the hyperparam map to use if specified
+		(assign (assoc hyperparam_map custom_hyperparam_map))
+
+		(if (= (null) hyperparam_map)
+			(assign (assoc
+				hyperparam_map
+					(call !GetHyperparameters (assoc
+						context_features features
+						feature hyperparameter_feature
+						mode (if (!= ".targetless" hyperparameter_feature) "full" "robust")
+						weight_feature weight_feature
+					))
+			))
+		)
+
+		(assign (assoc
+			k_parameter (get hyperparam_map "k")
+			p_parameter (get hyperparam_map "p")
+			dt_parameter (get hyperparam_map "dt")
+			num_context_features (size features)
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+		))
+
+		;if case_ids weren't specified either, use a random num_samples sampling of cases from the whole model
+		(if (= 0 (size case_ids))
+			(assign (assoc
+				case_ids
+					;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
+					(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
+						(if robust_residuals
+							(call !SampleCases (assoc
+								num num_samples
+								rand_seed (rand)
+								case_weight_feature (if valid_weight_feature weight_feature)
+							))
+							;grab samples from the model
+							(call !AllCases (assoc num num_samples rand_seed (rand)))
+						)
+
+						;else the model is small, use the smaller of num_samples or (num_cases * 2^f) because that's the amount of all possible combinations
+						(if robust_residuals
+							(call !SampleCases (assoc
+								num (min num_samples (* num_training_cases (pow 2 (size features))))
+								case_weight_feature (if valid_weight_feature weight_feature)
+							))
+							;else just use all the case ids because the model size is <= num_samples or the model is small
+							(call !AllCases)
+						)
+					)
+			))
+		)
+
+		;ensure features with nulls have cases that have values for computation but only if the selected cases were not conditioned
+		(if (and (not robust_residuals) (= (null) condition))
+			(let
+				(assoc not_null_feature_output_map (call !SelectNonNullCases) )
+
+				(if (size (get not_null_feature_output_map "skip_features_map"))
+					(assign (assoc skip_features_map (get not_null_feature_output_map "skip_features_map") ))
+				)
+
+				(if (size (get not_null_feature_output_map "non_null_cases"))
+					(accum (assoc case_ids (get not_null_feature_output_map "non_null_cases") ))
+				)
+			)
+		)
+
+		;when calculating residuals for the entire model, cache the heuristic residual values if they haven't been cached yet
+		(if	(!=
+				(list)
+				;filter out all the features that are already in !cachedFeatureMinResidualMap. if any remain,
+				;that means we need to cache values, may as well recalculate them all since something in the model probalby changed
+				(filter
+					(lambda (not (contains_index !cachedFeatureMinResidualMap (current_value))))
+					features
+				)
+			)
+			(call !CacheFeatureMinGapAndResidual)
+		)
+
+		;since residuals cannot be computed, return the max uncertainty for each feature
+		;do this check here, after possibly having cached min gaps and residuals above
+		(if (< num_training_cases 2)
+			(conclude
+				(assoc
+					"residual_map" (null)
+					"ordinal_residual_map" (null)
+					"hyperparam_map"
+						(accum (assoc
+							hyperparam_map
+								(assoc
+									"featureDeviations"
+									(call !ComputeMaxResiduals (assoc
+										deviation_features_map  (if target_residual_feature (zip target_residual_feature) (zip features))
+									))
+								)
+						))
+				)
+			)
+		)
+
+		;compute null deviations during analysis (when specifying custom hp) or when computing and caching all residuals
+		(if (or compute_all_statistics (and (!= (null) custom_hyperparam_map) (= (null) target_residual_feature) ))
+			(seq
+				;list of features that have 2 or more nulls (can't predict a single null value)
+				(assign (assoc
+					features_with_nulls
+						(filter
+							(lambda
+								(> (compute_on_contained_entities (list (query_equals (current_value 1) (null)) (query_count) )) 1)
+							)
+							(if target_residual_feature
+								(list target_residual_feature)
+								features
+							)
+						)
+				))
+
+				;if there are features that have nulls, pull only cases with nulls for those features
+				(if (size features_with_nulls)
+					;populate map of feature -> list of case ids with nulls
+					(assign (assoc
+						null_feature_cases_map
+							(map
+								(lambda
+									(contained_entities (list
+										(query_equals (current_index 1) (null))
+										(query_sample 200)
+									))
+								)
+								(zip features_with_nulls)
+							)
+					))
+				)
+			)
+		)
+	)
+
+	;helper method for CalculateFeatureResiduals to calculate robust residuals
+	#!RunRobustResiduals
+	(seq
+		;keep a copy of all originally specified features
+		(assign (assoc case_features features))
+
+		;if computing for one target_residual_feature, remove it from features so it's never in the context
+		(if target_residual_feature
+			(assign (assoc
+				features (filter (lambda (!= (current_value) target_residual_feature)) features)
+			))
+		)
+
+		;create a map of feature -> flag, set to true if the feature has any null values
+		;that way there's no need to explicitly filter nulls out when querying for a feature that no nulls
+		(declare (assoc
+			feature_may_have_nulls_map
+				(map
+					(lambda (!= (false) (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) ) )
+					(zip
+						(if target_residual_feature
+							(list target_residual_feature)
+							features
+						)
+					)
+				)
+		))
+
+		;iterate over each case and accumulate residuals for all the feature(s)
+		#!AccumulateFeatureResiduals
+		(assign (assoc
+			case_residuals_lists
+				||(map
+					(lambda (let
+						(assoc
+							;list of bits for each remaining (non-removed) feature
+							remaining_feature_flags (list)
+							all_flags_set (true)
+							;list of remaining context features
+							react_context_features (list)
+							;assoc of all removed features to their residual values
+							removed_features_map (assoc)
+							local_cases_map (assoc)
+							case_id (current_value 1)
+							;map of feature -> value for all the case values
+							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+							time_series_filter_query (list)
+						)
+
+						;for robust computation we randomly (50/50) decide whether to remove a feature from the context
+						;by creating a random flag list to match each of the context features
+						;ensure that at least one feature is removed
+						;this while statement should only loop in rare edge cases
+						(while all_flags_set
+							(assign (assoc remaining_feature_flags (map (lambda (< (rand) 0.5)) features) ))
+							(assign (assoc all_flags_set (apply "and" remaining_feature_flags) ))
+						)
+						;filter out context features based on the bitmask and also create a set of all the removed features
+						(assign (assoc
+							react_context_features (filter (lambda (get remaining_feature_flags (current_index))) features)
+							removed_features_map
+								(if target_residual_feature
+									(zip (list target_residual_feature))
+
+									(zip (filter (lambda (not (get remaining_feature_flags (current_index)) )) features) )
+								)
+						))
+
+						(if !tsTimeFeature
+							(let
+								(assoc context_map (zip react_context_features (unzip case_values_map react_context_features)) )
+								(if (contains_index context_map !tsTimeFeature)
+									(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
+								)
+							)
+						)
+
+						(assign (assoc
+							local_cases_map
+								;if empty context set, use global expected values for all features, set local_cases_map to null
+								(if (= 0 (size react_context_features))
+									(null)
+
+									;else compute the local model around the case using the robust set of react_context_features
+									(compute_on_contained_entities (append
+										(if focal_case
+											(query_not_in_entity_list (list case_id focal_case))
+											(query_not_in_entity_list (list case_id))
+										)
+										time_series_filter_query
+										(query_nearest_generalized_distance
+											k_parameter
+											react_context_features
+											(unzip case_values_map react_context_features)
+											(get hyperparam_map "featureWeights")
+											!queryDistanceTypeMap
+											query_feature_attributes_map
+											(get hyperparam_map "featureDeviations")
+											p_parameter
+											dt_parameter
+											(if valid_weight_feature weight_feature (null))
+											tie_break_random_seed
+											(null) ;radius
+											!numericalPrecision
+										)
+									))
+								)
+						))
+
+						;create a map of removed feature -> residual value for each removed feature
+						(assign (assoc
+							removed_features_map
+								(map
+									(lambda (let
+										(assoc
+											feature (current_index 1)
+											case_feature_value (get case_values_map (current_index 1))
+											feature_is_nominal (contains_index !nominalsMap (current_index 1))
+											interpolated_value 0
+											diff 0
+											output_categorical_action_probabilities (true)
+											categorical_action_probabilities_map (assoc)
+										)
+
+										;create the feature-specific candidate_cases_lists tuple for intepolation
+										(declare (assoc
+											candidate_cases_lists
+												(if (!= (null) local_cases_map)
+													(list
+														(indices local_cases_map)
+														(values local_cases_map)
+														(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
+													)
+												)
+										))
+										(if (get feature_may_have_nulls_map feature)
+											(let
+												(assoc
+													null_indices
+														(filter
+															(lambda (= (null) (get candidate_cases_lists (list 2 (current_value 1))) ) )
+															(indices (last candidate_cases_lists))
+														)
+												)
+												(if (size null_indices)
+													(assign (assoc
+														candidate_cases_lists
+															;only remove cases with null values if there are going to be some remaining
+															(if (< (size null_indices) (size (first candidate_cases_lists)))
+																(list
+																	(remove (first candidate_cases_lists) null_indices)
+																	(remove (get candidate_cases_lists 1) null_indices)
+																	(remove (last candidate_cases_lists) null_indices)
+																)
+															)
+													))
+												)
+											)
+										)
+
+										(call !InterpolateAndComputeDiffToCase)
+									))
+									removed_features_map
+								)
+						))
+
+						;return the computed value for this one feature as a list
+						(if target_residual_feature
+							(values removed_features_map)
+
+							;else output list of: residual value for each removed feature and null for each feature used as a context
+							(unzip
+								(append removed_features_map (zip react_context_features))
+								features
+							)
+						)
+					))
+					case_ids
+				)
+		))
+
+		;if we only collected residuals for this one feature, set the residuals features list to have only target_residual_feature
+		(if target_residual_feature
+			(assign (assoc features (list target_residual_feature) ))
+		)
+
+		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
+		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
+		(assign (assoc
+			feature_residuals_lists
+				#!TransposeResidualLists
+				(map
+					(lambda (let
+						(assoc feature_index (current_index 1) )
+						;get each column and filter out all the nulls
+						(filter (map
+							(lambda (get (current_value) feature_index) )
+							case_residuals_lists
+						))
+					))
+					features
+				)
+			;need to have at least 2.5% (that's a value of 50 using default sample of 2000) non-null values for a feature
+			min_value_count (ceil (* 0.025 (size case_ids)))
+		))
+
+		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
+		;applicable only to global models (i.e. not regional_model_only)
+		(if (not regional_model_only)
+			(let
+				(assoc
+					num_valid_values_per_feature_map
+						(filter
+							(lambda (< (current_value) min_value_count) )
+							(zip
+								features
+								(map (lambda (size (current_value))) feature_residuals_lists)
+							)
+						)
+				)
+
+				;some features did not have 50 values, accrue case_ids, then call !the main method agan
+				(if (size num_valid_values_per_feature_map)
+					(seq
+						;create the resampled case_ids list that contains cases with enough necessary non-null feature values
+						(assign  (assoc
+							case_ids
+								;append all the lists of cases ids for each feature into one list
+								(apply "append"
+									;for each (current_index) feature, need to find 50 - (current_value) cases to have enough values for those features
+									(values (map
+										(lambda (contained_entities
+											(query_not_equals (current_index) (null))
+
+											(if valid_weight_feature
+												(query_weighted_sample weight_feature (- min_value_count (current_value)) (rand))
+												(query_sample (- min_value_count (current_value)) (rand))
+											)
+										))
+										num_valid_values_per_feature_map
+									))
+								)
+						))
+
+						;re-compute residuals on these case_ids, store into case_residuals_lists
+						(call !AccumulateFeatureResiduals)
+
+						;transpose case_residuals_lists into a list the length of features and append the results into feature_residuals_lists
+						(assign (assoc
+							feature_residuals_lists
+								(map
+									(lambda (append (first (current_value)) (last (current_value))))
+									feature_residuals_lists
+									(call !TransposeResidualLists)
+								)
+						))
+					)
+				)
+			)
+		)
+	)
+
+	;helper method for CalculateFeatureResiduals to calculate full residuals
+	#!RunFullResiduals
+	(seq
+
+		(declare (assoc features_map (zip features) ))
+
+		(assign (assoc
+			feature_residuals_lists
+				||(map
+					(lambda (let
+						(assoc
+							feature (get_value (current_value 1))
+							feature_is_nominal (contains_index !nominalsMap (current_value 1))
+							feature_is_ordinal (contains_index ordinal_features_map (current_value 1))
+							react_context_features (indices (remove features_map (current_value 1)))
+							feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_value 1))
+							feature_is_non_string_edit_distance (false)
+						)
+
+						(if (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap feature)) )
+							(assign (assoc feature_is_non_string_edit_distance (true)))
+						)
+
+						(declare (assoc
+							;if feature has no nulls, no need to ignore it, if it has nulls or nulls are unknown, explicitly ignore nulls in the query
+							ignore_null_action_feature (!= (false) (get !featureNullRatiosMap (list feature "has_nulls")))
+							has_time_series_filter_query (and !tsTimeFeature (contains_value react_context_features !tsTimeFeature) )
+							time_series_filter_query (list)
+						))
+
+						(if (contains_index skip_features_map feature)
+							(list)
+
+							;else compute residuals for feature
+							(map
+								(lambda (let
+									(assoc
+										local_cases_map (assoc)
+										case_id (current_value 1)
+										case_values_map (zip features (retrieve_from_entity (current_value 1) features))
+
+										interpolated_value 0
+										diff 0
+										output_categorical_action_probabilities (true)
+										categorical_action_probabilities_map (assoc)
+									)
+
+									;set the filter query if has_time_series_filter already checked that time feature is in context features
+									(if has_time_series_filter_query
+										(assign (assoc
+											time_series_filter_query
+												(call !ComputeTimeSeriesFilterQuery (assoc
+													context_map (zip react_context_features (unzip case_values_map react_context_features))
+												))
+										))
+									)
+
+									(declare (assoc
+										candidate_cases_lists
+											(compute_on_contained_entities (append
+												(if focal_case
+													(query_not_in_entity_list (list case_id focal_case))
+													(query_not_in_entity_list (list case_id))
+												)
+												(if ignore_null_action_feature
+													(query_not_equals feature (null))
+													(list)
+												)
+												time_series_filter_query
+												(query_nearest_generalized_distance
+													k_parameter
+													react_context_features
+													(unzip case_values_map react_context_features)
+													(get hyperparam_map "featureWeights")
+													!queryDistanceTypeMap
+													query_feature_attributes_map
+													(get hyperparam_map "featureDeviations")
+													p_parameter
+													dt_parameter
+													(if valid_weight_feature weight_feature (null))
+													tie_break_random_seed
+													(null) ;radius
+													!numericalPrecision
+													feature
+												)
+											))
+										case_feature_value (get case_values_map feature)
+									))
+
+									(call !InterpolateAndComputeDiffToCase)
+								))
+								case_ids
+							)
+						)
+					))
+					(if target_residual_feature
+						(list target_residual_feature)
+
+						(!= details_features (null))
+						;if details_features is present, compute for these.
+						details_features
+
+						;else
+						features
+					)
+				)
+		))
+
+		;if we only collected residuals for this one feature, set the residuals features list to have only target_residual_feature
+		(if target_residual_feature
+			(assign (assoc features (list target_residual_feature) ))
+
+			details_features
+			(assign (assoc features details_features))
+		)
+
+		;filter out nulls
+		(assign (assoc
+			feature_residuals_lists (map (lambda (filter (current_value)) ) feature_residuals_lists )
+		))
+
+	)
+
+
+	;helper method for RunRobustResiduals and RunFullResiduals to compute difference between interpolated value and actual case value
+	#!InterpolateAndComputeDiffToCase
+	(seq
+		(assign (assoc
+			interpolated_value
+				;no candidate cases means we use expected feature value
+				(if (= 0 (size (first candidate_cases_lists)))
+					;global nominal probabilities will pulled below
+					(if feature_is_nominal
+						(null)
+						;else get continuous expected value
+						(call !CalculateFeatureExpectedValue (assoc
+							feature feature
+							allow_nulls (false)
+						))
+					)
+
+					;else interpolate the feature value from the local model
+					(call !InterpolateActionValues (assoc
+						action_feature feature
+						candidate_case_ids (first candidate_cases_lists)
+						candidate_case_weights (get candidate_cases_lists 1)
+						candidate_case_values (last candidate_cases_lists)
+						allow_nulls (false)
+						output_influence_weights (false)
+					))
+				)
+		))
+
+		(if (= (null) case_feature_value)
+			(null)
+
+			compute_all_statistics
+			(if feature_is_nominal
+				;output [diff, actual, predicted, categorical_probabilities] for computing MAE, accuracy, precision, recall
+				(list
+					(call !ComputeFeatureMAEDiff)
+					case_feature_value
+					interpolated_value
+					(if (= 0 (size (first candidate_cases_lists)))
+						;use global, else use local
+						(call !ComputeModelNominalClassProbabilities (assoc feature feature))
+						;store empty assoc instead of null if there are no probabilities
+						(or (get categorical_action_probabilities_map feature) (assoc))
+					)
+				)
+
+				;else continuous, output [diff, ordinal_diff, actual, predicted] for computing MAE, RSME, R^2
+				(and
+					(= .nan (- case_feature_value interpolated_value))
+					(not feature_is_edit_distance)
+				)
+				(null)
+
+				;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
+				(if feature_is_non_string_edit_distance
+					(append (call !ComputeFeatureMAEDiff) (list case_feature_value) (list interpolated_value))
+
+					(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
+				)
+			)
+
+			;else just output diff (Mean Absolute Error)
+			#!ComputeFeatureMAEDiff
+			(seq
+				(assign (assoc
+					diff
+						(if feature_is_nominal
+							(- 1
+								(if (size (first candidate_cases_lists))
+									(get categorical_action_probabilities_map (list feature case_feature_value))
+
+									;else return expected value
+									(get
+										(call !ComputeModelNominalClassProbabilities (assoc feature feature))
+										case_feature_value
+									)
+								)
+							)
+
+							;else continuous
+							(if (contains_index !editDistanceFeatureTypesMap  feature)
+								;use string edit distance only if it's a string
+								(edit_distance case_feature_value interpolated_value
+									(or
+										(= "string" (get !editDistanceFeatureTypesMap  feature))
+										(= "string_mixable" (get !editDistanceFeatureTypesMap  feature))
+									)
+								)
+
+								(abs (- case_feature_value interpolated_value))
+							)
+						)
+				))
+
+				;output the residual. if it's .nan, output null for non-nominals, and 1 (or case weight) for nominals
+				(if (= .nan diff)
+					(if feature_is_nominal 1)
+
+					;else output tuple [diff, ordinal_diff] for ordinals, and diff for continuous if applicable
+					(contains_index ordinal_features_map feature)
+					(let
+						(assoc
+							ordinal_diff
+								(if (!= (null) (get !ordinalFeaturesRangesMap feature))
+									(if diff
+										(/ diff (get !ordinalFeaturesRangesMap feature))
+										0
+									)
+								)
+						)
+
+						;output the tuple
+						(list diff ordinal_diff)
+					)
+
+					;else output it as-is
+					diff
+				)
+			)
+		)
+	)
+
+	;output assoc of 1-based ranks for specified values. duplicates are averaged out
+	;parameters:
+	;  values: list of values
+	#!GetRankMapForValues
+	(declare
+		(assoc
+			values (list)
+
+			;not parameters
+			num_dupe 0
+			dupe_val (null)
+		)
+
+		(zip
+			(lambda (seq
+				;encountered a new duplicate value, set the initial number of dupes to 1
+				(if (!= (current_index) dupe_val)
+					(assign (assoc
+						num_dupe 1
+						dupe_val (current_index 1)
+					))
+					;else same value is a dupe again, increase number of dupes for this particular value
+					(accum (assoc num_dupe 1))
+				)
+
+				;average out rank based on number of dupes and round up to nearest integer
+				;e.g. if a value has ranks 4 5 6, average out its rank to be 5
+				(round (- (current_value) (/ num_dupe 2)) 1)
+			))
+
+			(sort values)
+			(range 1 (size values))
+		)
+	)
+
+	;Helper method to compute null deviations
+	#!ComputeAndCacheNullResiduals
+	(seq
+		(declare (assoc
+			features_map (zip features)
+			null_prediction_map (null)
+		))
+
+		;ComputeNullAccuracies requires null_features_cases_map, features_map, features_with_nulls, and hyperparam_map
+		#!ComputeNullAccuracies
+		(seq
+			;iterate over all the features with nulls, and predict each feature's case's list
+			(assign (assoc
+				feature_residuals_lists
+					||(map
+						(lambda (let
+							(assoc
+								feature (get_value (current_value 1))
+								feature_is_nominal (contains_index !nominalsMap (current_value 1))
+								react_context_features (indices (remove features_map (current_value 1)))
+								all_react_context_features (list)
+								null_case_ids (get null_feature_cases_map (current_value 1))
+							)
+
+							(if robust_residuals
+								(assign (assoc all_react_context_features react_context_features))
+							)
+
+							;iterate over list of cases that have nulls for this feature and predict each one,
+							;output a list of 1s and 0s where every correctly predicted null is a 1
+							(map
+								(lambda (let
+									(assoc
+										case_id (current_value 1)
+										case_values_map (zip features (retrieve_from_entity (current_value 1) features))
+										interpolated_value 0
+									)
+
+									;grab a random set of context features when computing robust residuals
+									(if robust_residuals
+										(assign (assoc react_context_features (filter (lambda (< (rand) 0.5)) all_react_context_features) ))
+									)
+
+									(if !tsTimeFeature
+										(let
+											(assoc context_map (zip react_context_features (unzip case_values_map react_context_features)) )
+											(if (contains_index context_map !tsTimeFeature)
+												(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
+											)
+										)
+									)
+
+									(declare (assoc
+										candidate_cases_lists
+											(compute_on_contained_entities (append
+												(if focal_case
+													(query_not_in_entity_list (list case_id focal_case))
+													(query_not_in_entity_list (list case_id))
+												)
+												time_series_filter_query
+												(query_nearest_generalized_distance
+													(get hyperparam_map "k")
+													react_context_features
+													(unzip case_values_map react_context_features)
+													(get hyperparam_map "featureWeights")
+													!queryDistanceTypeMap
+													(get hyperparam_map "featureDomainAttributes")
+													(get hyperparam_map "featureDeviations")
+													(get hyperparam_map "p")
+													(get hyperparam_map "dt")
+													(if valid_weight_feature weight_feature (null))
+													tie_break_random_seed
+													(null) ;radius
+													!numericalPrecision
+													feature
+												)
+											))
+									))
+
+									(assign (assoc
+										interpolated_value
+											;no local_cases_map means we use expected feature value
+											(if (size (first candidate_cases_lists))
+												(call !InterpolateActionValues (assoc
+													action_feature feature
+													candidate_case_ids (first candidate_cases_lists)
+													candidate_case_weights (get candidate_cases_lists 1)
+													candidate_case_values (last candidate_cases_lists)
+													allow_nulls (true)
+													output_influence_weights (false)
+												))
+
+												;else there's no local model, return expected values
+												(if feature_is_nominal
+													;pull global probability for feature
+													(get (call !ComputeModelNominalClassProbabilities (assoc feature feature)) feature)
+
+													;else get continuous expected value
+													(call !CalculateFeatureExpectedValue (assoc feature feature allow_nulls (true) ))
+												)
+											)
+									))
+
+									;output a 1 if predicted a null correctly, else a 0
+									(+ (= (null) interpolated_value))
+								))
+								null_case_ids
+							)
+						))
+
+						features_with_nulls
+					)
+			))
+
+			;create a map of feature -> null prediction probability by averaging out all the correctly predicted nulls for each feature
+			(assign (assoc
+				null_prediction_map
+					(zip
+						features_with_nulls
+						(map
+							(lambda (/ (apply "+" (current_value)) (size (current_value)) ) )
+							feature_residuals_lists
+						)
+					)
+			))
+		)
+
+		(accum_to_entities (assoc
+			!featureNullAccuracyMap
+				(associate
+					(apply "concat" (append (if robust_residuals "robust" "full") (remove (get hyperparam_map "paramPath") 1) ))
+					(append
+						null_prediction_map
+						(assoc
+							".robust" robust_residuals
+							".hyperparam_path" (get hyperparam_map "paramPath")
+						)
+					)
+				)
+		))
+
+		;compute and cache all min-max values for all features
+		(if (= 0 (size !featureMarginalStatsMap))
+			(call !CalculateMarginalStats (assoc
+				weight_feature (if use_case_weights weight_feature)
+			))
+		)
+
+		;assoc of feature -> null uncertainty pair of [known-null distance, null-null distance]
+		(assign (assoc
+			null_prediction_map
+				(map
+					(lambda (let
+						(assoc
+							feature (current_index 1)
+
+							;null deviation is: 1 - null prediction probability
+							null_prediction_deviation (- 1 (current_value 1))
+						)
+						(if (contains_index !nominalsMap feature)
+							;for nominals output a list of: null_mismatch, null_prediction_deviation
+							(list 1.0 null_prediction_deviation)
+
+							(contains_index !cyclicFeaturesMap feature)
+							(list
+								(get !cyclicFeaturesMap feature)
+								(* (get !cyclicFeaturesMap feature) null_prediction_deviation)
+							)
+
+							;for continuous output a list of: max_uncertainty_delta, null_null_uncertainty_delta
+							(let
+								(assoc
+									max_uncertainty
+										;compute from the existing feature max-min value or bounds if provided
+										(max
+											(-
+												(get !featureMarginalStatsMap (list weight_feature feature "max"))
+												(get !featureMarginalStatsMap (list weight_feature feature "min"))
+											)
+											(-
+												(get !featureBoundsMap (list feature "max"))
+												(get !featureBoundsMap (list feature "min"))
+											)
+										)
+								)
+								;don't allow nulls, nan or 0 as the max_uncertainty, return null in those situations
+								(if max_uncertainty
+									(list max_uncertainty (* max_uncertainty null_prediction_deviation))
+								)
+							)
+						)
+					))
+					null_prediction_map
+				)
+		))
+
+		(assign
+			"hyperparam_map"
+			(list "!nullUncertaintyMap")
+			null_prediction_map
+		)
+
+		null_prediction_map
+	)
+)
