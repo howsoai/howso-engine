@@ -1,0 +1,902 @@
+;Contains methods for calculating details and explanations output during react flow.
+(null
+
+	;Returns details and explanations for a given reaction for the specified audit data flags. Details for actions are applicable only for the
+	;first action feature.
+	;
+	;	Local and regional models are used to determine details:
+	;		Local model -  only the most similar cases used to directly determine the prediction value, used to compute affects of cases directly
+	;						responsible for the predicted output.
+	;		Regional model - the most similar cases to the prediction, represented by the maximum of either 30 or the local model size. Used in
+	;						situations where relying on a small local model may produce noisy results.
+
+	; details: an assoc of flags for which type of audit data to return, and corresponding values to return (if applicable) in the format of:
+	;	(assoc
+	;		"influential_cases" true or false. If true outputs the most influential cases and their influence weights
+	;						based on the surprisal of each case relative to the context being predicted among the
+	;						cases. Uses only the context features of the reacted case.
+	;
+	;		"influential_cases_familiarity_convictions" true or false. If true outputs familiarity conviction of
+	;						addition for each of the influential cases.
+	;
+	;		 "influential_cases_raw_weights" true or false. If true outputs the surprisal for each of the influential cases.
+	;						Not applicable to generative reacts.
+	;
+	;		 "derivation_parameters" true or false. If true outputs the parameters used during the react. These parameters
+	;						include k, p, distance_transform, feature_weights, feature_deviations, nominal_class_counts, and flags to indicate
+	; 						if deviations or inverse residual weighting were used.
+	;
+	;		 "hypothetical_values"  assoc context feature -> values. If specified, shows how a prediction could change
+	;						in a what-if scenario where the influential cases' context feature values are replaced with
+	;						the specified values.  Iterates over all influential cases, predicting the action features
+	;						for each one using the updated hypothetical values. Outputs the predicted arithmetic
+	;						average over the influential cases for each action feature.
+	;
+	;		 "most_similar_cases" true or false. If true outputs an automatically determined (when
+	;						'num_most_similar_cases' is not specified) relevant number of similar cases, which will
+	;						first include the influential cases. Uses only the context features of the reacted case.
+	;
+	;		 "num_most_similar_cases" integer. Outputs this manually specified number of most similar cases, which will
+	;						first include the influential cases.
+	;
+	;		 "num_most_similar_case_indices" integer. Outputs the specified number of most similar case indices when
+	;						'distance_ratio' is also set to true.
+	;
+	;		 "boundary_cases" true or false. If true outputs an automatically determined (when 'num_boundary_cases' is
+	;						not specified) relevant number of boundary cases. Uses both context and action features
+	;						of the reacted case to determine the counterfactual boundary based on action features,
+	;						which maximize the dissimilarity of action features while maximizing the similarity of
+	;						context features. If action features aren't specified, uses familarity conviction to
+	;						determine the boundary instead.
+	;
+	;		 "num_boundary_cases" integer. Outputs this manually specified number of boundary cases.
+	;
+	;		 'boundary_cases_familiarity_convictions" true or false. If true outputs familiarity conviction of addition for
+	;						each of the boundary cases when 'boundary_cases' is also set to true.
+	;
+	;		 "distance_ratio" true or false. If true outputs the ratio of distance (relative surprisal) between this
+	;						reacted case and its nearest case to the minimum distance (relative surprisal) in between
+	;						the closest two cases in the local area. All distances are computed using only the
+	;						specified context features.
+	;
+	;		 "distance_contribution" true of false. If true outputs the distance contribution (expected total surprisal
+	;						contribution) for the reacted case. Uses both context and action feature values.
+	;
+	;		 "similarity_conviction" true or false. If true outputs similarity conviction for the reacted case.
+	;						Uses both context and action feature values as the case values for all computations. This is
+	;						defined as expected (weighted-local) distance contribution / reacted case distance contribution.
+	;
+	;		 "outlying_feature_values" true or false. If true outputs the reacted case's context feature values that are
+	;						outside the min or max of the corresponding feature values of all the cases in the local
+	;						model area. Uses only the context features of the reacted case to determine that area.
+	;
+	;		 "categorical_action_probabilities" true or false. If true outputs probabilities for each class for the action
+	;						features. Applicable only to categorical action features. react_series() calls additionally
+	;						output "aggregate_categorical_action_probabilities" for each series.
+	;
+	;		 "observational_errors" true or false. If true outputs observational errors for all features as defined
+	;						in feature attributes.
+	;
+	;		 "robust_residuals" true or false. Default is false, uses leave-one-out for features (or cases, as needed)
+	;						for all residual computations. When true, uses uniform sampling from the power set of all
+	;						combinations of features (or cases, as needed) instead.
+	;
+	;		 "robust_influences" true or false. Default is true, uses leave-one-out for features (or cases, as needed)
+	;						for all MDA and contribution computations. When true, uses uniform sampling from the power
+	;						set of all combinations of features (or cases, as needed) instead.
+	;
+	;		 "feature_residuals" true or false. If true outputs feature residuals for all (context and action) features
+	;						locally around the prediction. Uses only the context features of the reacted case to
+	;						determine that area. Relies on 'robust_residuals' flag.
+	;
+	;		 "feature_mda" true or false. If true outputs each context feature's mean decrease in accuracy of predicting
+	;						the action feature given the context. Uses only the context features of the reacted
+	;						case to determine that area. Relies on 'robust_influences' flag.
+	;
+	;		 "feature_mda_ex_post" true or false. If true outputs each context feature's mean decrease in accuracy of
+	;						predicting the action feature as a detail given that the specified prediction was
+	;						already made as specified by the action value. Uses both context and action features of
+	;						the reacted case to determine that area. Relies on 'robust_influences' flag.
+	;
+	;		 "feature_contributions" true or false. If true outputs each context feature's differences between the
+	;						predicted action feature value and the predicted action feature value if each context
+	;						feature were not in the model for all context features in the local model area. Outputs
+	;						both 'feature_contributions' and non-absolute 'directional_feature_contributions'.
+	;						Relies on 'robust_influences' flag.
+	;
+	;		 "case_mda" true or false. If true outputs each influential case's mean decrease in accuracy of predicting
+	;						the action feature in the local model area, as if each individual case were included
+	;						versus not included. Uses only the context features of the reacted case to determine
+	;						that area. Relies on 'robust_influences' flag for case holdouts.
+	;
+	;		 "case_contributions" true or false. If true outputs each influential case's differences between the
+	;						predicted action feature value and the predicted action feature value if each
+	;						individual case were not included. Uses only the context features of the reacted case
+	;						to determine that area. Relies on 'robust_influences' flag for case holdouts.
+	;
+	;		 "case_feature_residuals"  true or false. If true outputs feature residuals for all (context and action)
+	;						features for just the specified case. Uses leave-one-out for each feature, while
+	;						using the others to predict the left out feature with their corresponding values
+	;						from this case. Relies on 'robust_residuals' flag.
+	;
+	;		 "case_feature_contributions" true or false. If true outputs each context feature's differences between the
+	;						predicted action feature value and the predicted action feature value if each context
+	;						feature were not in the model for all context features in this case, using only the
+	;						values from this specific case. Relies on 'robust_influences' flag.
+	;
+	;		 "num_robust_influence_samples_per_case" integer. Specifies the number of robust samples to use for each case.
+	;						Applicable only for computing robust feature contributions or robust case feature contributions.
+	;						When unspecified, defaults to 2000. Higher values will take longer but provide more stable results.
+	;
+	;		 "local_case_feature_residual_convictions" true or false. If true outputs this case's feature residual
+	;						convictions for the region around the prediction. Uses only the context features of
+	;						the reacted case to determine that region.
+	;						Computed as: region feature residual / case feature residual. Relies on
+	;						'robust_residuals' flag.
+	;
+	;		 "global_case_feature_residual_convictions" true or false. If true outputs this case's feature residual
+	;						convictions for the global model.
+	;						Computed as: global model feature residual / case feature residual. Relies on
+	;						'robust_residuals' flag.
+	;
+	;        "features" list of features that specifies what features to calculate per-feature details for. (contributions, mda, residuals, etc)
+	; 						when robust computations are False. This should generally preserve compute, but will not when computing details robustly.
+	;
+	;        "generate_attempts" true or false. If true, outputs the total number of attempts to generate the unique case. Only applicable for generative
+	;                       reacts where generate_new_cases is "always" or "attempt". When used with ReactSeries, "series_generate_attempts" is also returned.
+	;
+	;	)
+	; provided_details: optional assoc of details that have already been pre-computed and don't need to be computed here
+	; action_features: list of action features
+	; action_values: list of values for each action feature
+	; context_features: list of context features
+	; context_values: current values of the world state
+	; extra_features: list of additional features to return with audit data
+	; num_features_returned: if return audit data, will return up to this many specified features in the details
+		; ignore_case: case_id, if set will ignore the this case during details calculations, however if details assoc has ignore_case as a key in it, its value will override this parameter
+	; force_targetless: flag, if set to true forces use of targetless hyperparameters if available
+	;returns:
+	; an assoc with keys:
+	;	"action_features"
+	;  	"action_values"
+	;  	"context_values"
+	; and the following keys as appropriately requested:
+	;	"influential_cases"
+	;	"most_similar_cases"
+	;	"boundary_cases"
+	;	"categorical_action_probabilities"
+	;	"aggregate_categorical_action_probabilities"
+	;	"similarity_conviction"
+	;	"residual_conviction"
+	;	"residual_dissimilarity_conviction"
+	;	"feature_residuals"
+	;	"observational_errors"
+	;	"outlying_feature_values"
+	;	"feature_mda"
+	;	"feature_mda_ex_post"
+	;	"feature_contributions"
+	;	"directional_feature_contributions"
+	;	"case_mda"
+	;	"case_contributions"
+	;	"case_feature_residuals"
+	;	"local_case_feature_residual_convictions"
+	;	"global_case_feature_residual_convictions"
+	;	"hypothetical_values"
+	;	"distance_contribution"
+	#!RetrieveAuditData
+	(declare
+		(assoc
+			provided_details (assoc)
+			details	(assoc)
+			action_values (list)
+			context_features (list)
+			context_values (list)
+			action_features (list)
+			extra_features (list)
+			num_features_returned (null)
+			ignore_case (null)
+			force_targetless (false)
+			hyperparam_map (null)
+		)
+
+		;override the ignore_case parameter if it's specified in the details instead
+		(if (contains_index details "ignore_case")
+			(assign (assoc ignore_case (get details "ignore_case" )))
+		)
+
+		(if (contains_index details "features")
+			(declare (assoc
+				details_features (get details "features")
+				;need a subset of details features that does not contain action features, for targeted details  (contributions, mda, etc)
+				details_context_features
+					(filter
+						(lambda (not (contains_value action_features (current_value))) )
+						(get details "features")
+					)
+			))
+		)
+
+		(declare (assoc
+			has_rounded_features !hasRoundedFeatures
+			has_datetime_features !hasDateTimeFeatures
+			model_size (call !GetNumTrainingCases)
+		))
+
+		(if (= (null) hyperparam_map)
+			(assign (assoc
+				hyperparam_map
+					(call !GetHyperparameters (assoc
+						feature (last action_features)
+						context_features context_features
+						mode (if force_targetless "robust" "full")
+						weight_feature weight_feature
+					))
+			))
+		)
+
+		;must be an empty list if not specified as to not break queries
+		(if (= (null) filtering_queries)
+			(assign (assoc filtering_queries (list)))
+		)
+
+		(declare (assoc
+			;make a combined features list
+			features (append context_features action_features)
+			;output audit object
+			output
+				(append
+					provided_details
+					(assoc
+						;decode nominals if necessary
+						"action_values"
+							(if (and !hasEncodedFeatures (not skip_decoding))
+								;decode nominal features
+								(call !ConvertToOutput (assoc
+									features action_features
+									feature_values action_values
+									has_rounded_features has_rounded_features
+									has_datetime_features has_datetime_features
+								))
+
+								;else round if needed
+								has_rounded_features
+								(call !RoundContinuousFeatures (assoc
+									features action_features
+									feature_values action_values
+								))
+
+								;else just return the values
+								action_values
+							)
+					)
+				)
+			;the smallest allowable regional model size is the model_size * the defined regional model minimum percent,
+			;but can't be smaller than closest k or less than 3 cases
+			min_regional_model_size_by_percent  (max 3 (get hyperparam_map "k") (* model_size !regionalModelMinPercent))
+
+			context_deviations (get hyperparam_map "featureDeviations")
+			feature_weights (get hyperparam_map "featureWeights")
+			k_parameter (get hyperparam_map "k")
+			p_parameter (get hyperparam_map "p")
+			dt_parameter (get hyperparam_map "dt")
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+			;robust_influences defaults to true, so only set to false if explicitly passed in as false
+			robust_influences (not (= (false) (get details "robust_influences")))
+			robust_residuals (get details "robust_residuals")
+		))
+
+		(if (get details "derivation_parameters")
+			(accum (assoc
+				output
+					(assoc
+						"derivation_parameters"
+							(assoc
+								"feature_weights"
+									(or
+										feature_weights
+										(zip (append context_features action_features) 1)
+									)
+								"feature_deviations"
+									(or
+										context_deviations
+										(zip (append context_features action_features) 0)
+									)
+								"use_irw" (= ".targetless" (get hyperparam_map (list "paramPath" 0)))
+								"k" k_parameter
+								"p" p_parameter
+								"distance_transform" dt_parameter
+								"nominal_class_counts" !nominalsMap
+							)
+					)
+			))
+		)
+
+		(if (or
+				(get details "influential_cases")
+				(get details "hypothetical_values")
+				(get details "influential_cases_raw_weights")
+				(get details "influential_cases_familiarity_convictions")
+			)
+			(call !ComputeInfluentialCases)
+		)
+
+		(if (get details "hypothetical_values")
+			(call !ComputeHypotheticalValues)
+		)
+
+		(declare (assoc
+			most_similar_cases_parameter
+				(if (> (get details "num_most_similar_cases") 0)
+					(get details "num_most_similar_cases")
+
+					(get details "most_similar_cases")
+				)
+		))
+		(if
+			(and (!= (null) most_similar_cases_parameter) (!= (false) most_similar_cases_parameter))
+			(call !ComputeMostSimilarCases)
+		)
+
+		(if (or
+				(get details "case_feature_residuals")
+				(get details "local_case_feature_residual_convictions")
+				(get details "global_case_feature_residual_convictions")
+			)
+			(call !CalculateResidualsForCase (assoc
+				features features
+				case_values
+					(append
+						context_values
+						;use original case values instead of predicted if computing for an existing case
+						(if ignore_case
+							(retrieve_from_entity ignore_case action_features)
+							action_values
+						)
+					)
+				ignore_case ignore_case
+			))
+		)
+
+		(if (get details "similarity_conviction")
+			(accum (assoc
+				output
+					(assoc
+						"similarity_conviction"
+							(call !SimilarityConviction (assoc
+								features features
+								feature_values (append context_values action_values)
+								filtering_queries filtering_queries
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+							))
+					)
+			))
+		)
+
+		(declare (assoc
+			boundary_cases_parameter
+				(if (> (get details "num_boundary_cases") 0)
+					(get details "num_boundary_cases")
+
+					(get details "boundary_cases")
+				)
+		))
+		(if (and (!= (null) boundary_cases_parameter) (!= (false) boundary_cases_parameter))
+			(call !ComputeBoundaryCases)
+		)
+
+		;a dict of feature -> dict of local_min/local_max and input_case_value for features whose context values are outside the locals' min-max
+		(if (get details "outlying_feature_values")
+			(call !ComputeOutlyingFeatureValues)
+		)
+
+		(if (get details "feature_mda" )
+			(call !ComputeFeatureMDA)
+		)
+
+		(if (get details "feature_mda_ex_post" )
+			(call !ComputeFeatureMDAExPost )
+		)
+
+		(if (get details "feature_contributions")
+			(if (>= model_size 2)
+				(call !ComputeFeatureContributions)
+				;can't compute contributions if model is too small
+				(accum (assoc output (assoc "feature_contributions" (zip context_features 0)) ))
+			)
+		)
+
+		(if (get details "case_feature_contributions")
+			(if (>= model_size 2)
+				(call !ComputeCaseFeatureContributions)
+				;can't compute contributions if model is too small
+				(accum (assoc output (assoc "case_feature_contributions" (zip context_features 0)) ))
+			)
+		)
+
+		(if (get details "case_contributions")
+			(if robust_influences
+				(call !ComputeCaseContributionsRobust)
+
+				(call !ComputeCaseContributions)
+			)
+		)
+
+		(if (get details "case_mda")
+			(call !ComputeCaseMDA)
+		)
+
+		;append feature errors and deviations
+		(if (get details "feature_residuals")
+			(call !ComputeReactFeatureResiduals)
+		)
+
+		(if (get details "observational_errors")
+			(accum (assoc output (assoc "observational_errors" !userSpecifiedFeatureErrorsMap)))
+		)
+
+		(if (get details "categorical_action_probabilities")
+			(call !ComputeCategoricalActionProbabilities)
+		)
+
+		(declare (assoc
+			most_similar_case_indices_parameter
+				;use the manually specified number of most similar case indices when computing distance ratios
+				;but limit it to between 0 and 1000
+				(if (!= (get details "num_most_similar_case_indices") (null))
+					(max (min (get details "num_most_similar_case_indices") 1000) 0)
+
+					; Else default to 5
+					5
+				)
+		))
+
+		(if (get details "distance_ratio")
+			(call !ComputeDistanceRatio)
+		)
+
+		(if (get details "distance_contribution")
+			(accum (assoc
+				output
+					(assoc
+						"distance_contribution"
+							(call !ComputeCandidateCaseDistanceContribution (assoc
+								features (append context_features action_features)
+								feature_values (append context_values action_values)
+								filtering_queries filtering_queries
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+							))
+					)
+			))
+		)
+
+		;return the output audit data
+		output
+	)
+
+	;Helper method to compute and add to output hypothetical values
+	#!ComputeHypotheticalValues
+	(let
+		(assoc
+			hypothetical_map (get details "hypothetical_values")
+			;list of all the summed up action values, one for each action feature
+			summed_action_values (list)
+			;result map of acton feature -> average hypothetical value
+			hypothetical_action_values_map (assoc)
+			;map of nominal action feature -> nominal value -> count
+			nominal_count_map (assoc)
+		)
+
+		(declare (assoc
+			reacts
+				(map
+					(lambda (let
+						(assoc
+							hypothetical_context_values
+								(unzip
+									(append (current_value 1) hypothetical_map)
+									context_features
+								)
+							session_index_tuple
+								(list (get (current_value 2) !internalLabelSession) (get (current_value 2) !internalLabelSessionTrainingIndex) )
+						)
+
+						(call !ReactDiscriminative (assoc
+							context_features context_features
+							context_values hypothetical_context_values
+							action_features action_features
+							case_indices session_index_tuple
+							return_action_values_only (true)
+							;return raw numerical values, enabling easy averaging of date values
+							skip_decoding (true)
+							leave_case_out (true)
+						))
+					))
+					(get output "influential_cases")
+				)
+			mixable_action_features
+				(filter
+					(lambda (!= "string" (current_value)))
+					(indices (keep !editDistanceFeatureTypesMap action_features))
+				)
+		))
+
+		(declare (assoc
+			non_edit_distance_action_features
+				(filter
+					(lambda (not (contains_value mixable_action_features (current_value))))
+					action_features
+				)
+		))
+
+		;reacts will be a list of list of action values.  e.g., (list (list 1 10) (list 2 20) )
+		;find the average for each action feature by summing up (via reduce) all the action values per action feature
+		(assign (assoc
+			summed_action_values
+				(reduce
+					(lambda (let
+						(assoc
+							reduced (previous_result 1)
+							current (current_value 1)
+							index (current_index 1)
+						)
+
+						(map
+							(lambda
+								;nominal features need to count each individual nominal value for each action feature
+								(if (contains_index !nominalsMap (current_value))
+									(let
+										(assoc
+											feature (current_value 1)
+											;convert numeric enum value into a sting (eg 110 -> "110") so it can be used as a lookup key
+											nominal_value (unparse (get current (current_index 1)))
+										)
+										;the first react to should accumulate the 'reduced' value
+										(if (= 1 index)
+											(accum
+												"nominal_count_map"
+												(list feature (unparse (get reduced (current_index 1))) )
+												1
+											)
+										)
+
+										;increase the count for this feature for this nominal_value by 1
+										(accum "nominal_count_map" (list feature nominal_value) 1)
+
+										;output 0, it'll be overwritten by the appropriate nominal value determined from counts below
+										0
+									)
+
+									;else continuous, simply add
+									(+ (get reduced (current_index)) (get current (current_index)))
+								)
+							)
+							non_edit_distance_action_features
+						)
+					))
+					reacts
+				)
+		))
+
+		;take the average of the summed values
+		(assign (assoc
+			hypothetical_action_values_map
+				(zip
+					non_edit_distance_action_features
+					(map
+						(lambda (/ (current_value) (size reacts)))
+						summed_action_values
+					)
+				)
+		))
+
+		;for mixable edit distance features, mix all the react values using equal weights
+		(if (size mixable_action_features)
+			(let
+				(assoc
+					;weights are evenly distributed among all the reacts so they average out
+					weights (map (/ 1 (size reacts)) reacts)
+				)
+
+				(accum (assoc
+					hypothetical_action_values_map
+						(zip
+							mixable_action_features
+							(map
+								(lambda (let
+									(assoc feature_index (current_index 1) )
+									(declare (assoc
+										neighbor_feature_values
+											(map
+												(lambda (get (current_value) feature_index))
+												reacts
+											)
+									))
+
+									(call !CombineCode (assoc
+										sources neighbor_feature_values
+										weights weights
+									))
+
+								))
+								mixable_action_features
+							)
+						)
+				))
+			)
+		)
+
+		;for each nominal feature, set its value to be the one with the highest count
+		(map
+			(lambda
+				(if (contains_index !nominalsMap (current_value))
+					(let
+						(assoc
+							feature (current_value 1)
+							nominal_value_count_map (get nominal_count_map (current_value 1))
+							output_value (null)
+						)
+
+						(assign (assoc
+							output_value
+								(first
+									(sort
+										(lambda (> (get nominal_value_count_map (current_value 1)) (get nominal_value_count_map (current_value))))
+										(indices nominal_value_count_map)
+									)
+								)
+						))
+
+						;indices of a map are all strings, so convert them to correct types if necessary
+						(assign "hypothetical_action_values_map" (list feature)
+							(if (= .nas output_value)
+								(null)
+
+								(contains_index !numericNominalFeaturesMap action_feature)
+								(+ output_value)
+
+								(contains_index !ordinalNumericFeaturesSet action_feature)
+								(+ output_value)
+
+								output_value
+							)
+						)
+					)
+				)
+			)
+			action_features
+		)
+
+		;add to output, converting to string nominals/dates/rounding as necessary
+		(accum (assoc
+			output
+				(assoc
+					"hypothetical_values"
+						(if (and (not skip_decoding) !hasEncodedFeatures)
+							(zip
+								action_features
+								(call !ConvertToOutput (assoc
+									features action_features
+									feature_values (unzip hypothetical_action_values_map action_features)
+								))
+							)
+
+							;else just output the the assoc as-is
+							hypothetical_action_values_map
+						)
+				)
+		))
+
+		;if influential_cases were not part of the user request, remove them from the details output
+		(if (not (get details "influential_cases"))
+			(assign (assoc output (remove output "influential_cases")))
+		)
+	)
+
+	;Helper method to compute and add to output outlying feature values
+	#!ComputeOutlyingFeatureValues
+	(let
+		(assoc
+			;assoc of this react case
+			react_case (zip features (append context_values action_values))
+
+			local_model_case_ids
+				(if (!= (null) cached_candidate_cases_map)
+					(indices cached_candidate_cases_map)
+
+					(contained_entities (append
+						filtering_queries
+						(query_nearest_generalized_distance
+							k_parameter
+							context_features
+							context_values
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							context_deviations
+							p_parameter
+							dt_parameter
+							(if valid_weight_feature weight_feature (null))
+							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+							"fixed rand seed"
+							(null) ;radius
+							!numericalPrecision
+						)
+					))
+				)
+		)
+
+		(declare (assoc
+			local_model_cases
+				(map
+					(lambda (retrieve_from_entity (current_value) (zip features)) )
+					local_model_case_ids
+				)
+		))
+
+		;for the labeled react case, create a map of feature names and their values for all values that are outside min/max boundaries of
+		;values in the local model
+		;react case values that are beyond the min/max values of the local model's cases for each feature
+		(declare (assoc
+			local_model_outlying_feature_values
+				(map
+					(lambda (let
+						(assoc feature (current_index 1))
+
+						;store the values for this feature for all the local model cases
+						(declare (assoc
+							local_model_feature_values
+								(map (lambda (get (current_value) feature)) local_model_cases)
+						))
+
+						(declare (assoc
+							local_min (apply "min" local_model_feature_values)
+							local_max (apply "max" local_model_feature_values)
+							;convert to number just in case
+							react_value (+ (get react_case feature))
+						))
+
+						;if the feature value from the react case is outside the min/max values of nearby cases,
+						;store this feature as an outlier
+						(if (or
+								(< react_value local_min)
+								(> react_value local_max)
+							)
+							(if (< react_value local_min )
+								(assoc "input_case_value" react_value "local_min" local_min)
+
+								(assoc "input_case_value" react_value "local_max" local_max)
+							)
+
+							;else store null
+							(null)
+						)
+					))
+					(zip context_features)
+				)
+		))
+
+		;filter out any feature values that are null
+		(assign (assoc local_model_outlying_feature_values (filter local_model_outlying_feature_values)))
+
+		(accum (assoc
+			output
+				(assoc "outlying_feature_values" local_model_outlying_feature_values)
+		))
+	)
+
+	;Helper method to compute and add to output categorical action probabilities
+	#!ComputeCategoricalActionProbabilities
+	(seq
+		;since categorical_action_probabilities_map may contain encoded nominal values -> their probability, we want to convert all the
+		;keys in that assoc into their decoded (string) values
+
+		;decode any nominal cotegorical values into their readable strings for output
+		(assign (assoc
+			categorical_action_probabilities_map
+				(map
+					(lambda
+						;if it's a nominal feature, convert the keys of the assoc if needed
+						(if (contains_index !nominalsMap (current_index))
+							(let
+								;pull the nominal values from the map in some determined order
+								(assoc nominal_values (indices (current_value 1)))
+
+								(declare (assoc
+									decoded_nominal_values nominal_values
+									feature (current_index 1)
+								))
+								(if (and !hasSubstituteFeatureValues substitute_output (contains_index !substitutionValueMap feature))
+									(assign (assoc
+										decoded_nominal_values
+											;since we have multiple values for one feature, substitute each value for this one feature one-at-a-time
+											(map
+												(lambda (first
+													(call !SubstituteFeatureValues (assoc
+														features (list feature)
+														feature_values (list (current_value 2))
+													))
+												))
+												decoded_nominal_values
+											)
+									))
+								)
+								;output an assoc of decoded (string) nominal values -> probability
+								(zip decoded_nominal_values (unzip (current_value) nominal_values))
+							)
+
+							;else just return the assoc as-is
+							(current_value)
+						)
+					)
+					categorical_action_probabilities_map
+				)
+		))
+		(accum (assoc output (assoc "categorical_action_probabilities" categorical_action_probabilities_map)))
+	)
+
+	;accumulate categorical action feature probabilities from a react into categorical_action_probabilities_map
+	; action_feature : the categorical action feature
+	; categorical_value_weights_map : an assoc of categorical action feature values -> sum of their weight; if specified will be used for accumulation
+	;											if not specified, will instead use neighbor_id_to_values_map parameter
+	; neighbor_id_to_values_map : optional, an assoc of neighbor case id -> its value; if spceified assumes there are perfect match neighbors
+	#!AccumulateCategoricalActionProbabilties
+	(declare
+		(assoc
+			action_feature (null)
+			neighbor_id_to_values_map (assoc)
+			categorical_value_weights_map (assoc)
+		)
+
+		;accumulate only if they haven't been accumulated yet
+		(if (= (assoc) categorical_action_probabilities_map)
+			;if the probabilities have already been calculated and provided, which happens when neighbors are not perfect matches, accumulate them
+			(if (> (size categorical_value_weights_map) 0)
+				(let
+					(assoc total_categorical_weight (apply "+" (values categorical_value_weights_map)))
+					(accum (assoc
+						categorical_action_probabilities_map
+							(associate
+								;convert the distance (weight) for each value into a probabilities
+								action_feature (map (lambda (/ (current_value) total_categorical_weight)) categorical_value_weights_map)
+							)
+					))
+				)
+
+				;else calculate them for perfect matches with even weights for each neighbor
+				(let
+					;since these are perfect matches, they all have equal weight
+					(assoc value_weight (/ 1 (size neighbor_id_to_values_map)))
+
+					;iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+					;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
+					(assign (assoc
+						categorical_value_weights_map
+							(zip
+								(lambda (+ (current_value 1) (current_value)))
+								(values (get neighbor_id_to_values_map ))
+								value_weight
+							)
+					))
+
+					(accum (assoc categorical_action_probabilities_map (associate action_feature categorical_value_weights_map)))
+				)
+			)
+		)
+	)
+
+	;Create an assoc of (detail -> correct empty data structure) for each detail in details
+	#!InitializeCaseDetailValuesMap
+	(map
+		(lambda
+			(if (= "categorical_action_probabilities" (current_index))
+				(assoc)
+
+				;default to list
+				(list)
+			)
+		)
+		(zip details)
+	)
+)

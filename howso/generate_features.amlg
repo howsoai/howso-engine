@@ -1,0 +1,859 @@
+;Contains methods to generate features or feature values as defined by feature attributes.
+(null
+
+	;creates a nominal start or end time feature for a specified series_id using the specified series_time to determine start and end
+	;
+	;parameters:
+	; feature: name of feature to add and populate
+	; series_id_features: list of feature names that specify the series id for which to derive this feature.
+	;		If more than one specified, a unique 'series id' is then the conjuction of the specified ids.
+	;		E.g., if 'sender' and 'reciever' are specified, a 'series id' is then each unique pair of sender-reciever.
+	; time_feature: name of series id's time feature which to use to determine the start or end flag
+	#!CreateSeriesProgressFeatures
+	(declare
+		(assoc
+			feature ""
+			series_id_features (list)
+
+			;not parameters
+			series_time_feature !tsTimeFeature
+			; default all cases to have a value of 0
+			case_values_map
+				(zip
+					(if (size case_ids)
+						case_ids
+						(call !AllCases)
+					)
+					0
+				)
+		)
+
+		;list of assocs of cases for each series, where each assoc of cases is : case id -> time_feature -> value
+		(declare (assoc
+			series_cases_groups
+				(map
+					(lambda
+						;(current_value) is in the format of (list (query_equals "series_feature_name" value) ... ) for all series_feature_name
+						(compute_on_contained_entities (append
+							(current_value)
+							;output an assoc of series_time_feature -> value for each case
+							(query_exists series_time_feature)
+						))
+					)
+
+					;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
+					(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+				)
+		))
+
+		;iterate over the list of series groups
+		;for each series create an assoc of case id -> pair of progress % , delta_to_previous_time:
+		; a) sort by time feature
+		; b) compute each case's progress and delta
+		(declare (assoc
+			series_cases_group_map
+				;convert list of assocs into a flat assoc
+				(apply "append"
+					||(map
+						(lambda (let
+							(assoc
+								series_cases_map (current_value 1)
+								sorted_case_ids (list)
+								series_size (size (current_value 1))
+							)
+
+							;convert assoc of case_id > time_feature -> value to assoc of case_id -> value
+							(assign (assoc
+								series_cases_map (map (lambda (first (values (current_value)))) series_cases_map)
+							))
+
+							;sort case ids in ascending datetime order (smallest to largest time value)
+							(assign (assoc
+								sorted_case_ids
+									(sort
+										(lambda
+											(>
+												(get series_cases_map (current_value))
+												(get series_cases_map (current_value 1))
+											)
+										)
+										(indices series_cases_map)
+									)
+							))
+
+							(declare (assoc sorted_time_values (unzip series_cases_map sorted_case_ids) ))
+
+							(declare (assoc
+								range (- (last sorted_time_values) (first sorted_time_values))
+								previous_value (first sorted_time_values)
+								first_value (first sorted_time_values)
+								fixed_delta (/ 1 (- (size sorted_time_values) 1))
+							))
+
+							;create an assoc of case_id -> [ progress%, delta_to_previous ]
+							;where progress is: 0-based value / range
+							(zip
+								sorted_case_ids
+								(map
+									(lambda (let
+										(assoc
+											progress (/ (- (current_value 1) first_value) range)
+											;delta is the % change,  don't allow 0, use the fixed delta instead
+											delta (or (/ (- (current_value 1) previous_value) range) fixed_delta)
+										)
+
+										;if the series is of length 1, set progress and delta to be 1 and prevent a divide by 0
+										(if (= 0 range)
+											(assign (assoc
+												progress 1
+												delta 1
+											))
+										)
+										(assign (assoc previous_value (current_value 1)))
+										(list progress delta)
+									))
+									sorted_time_values
+								)
+							)
+						))
+						series_cases_groups
+					)
+				)
+		))
+
+		;store the progress and delta value at the same time into each case
+		;by iterating over assoc of:case_id -> [ progress%, delta_to_previous ]
+		(map
+			(lambda
+				;see whether the entity has the label
+				(if (contains_label (current_index) feature)
+					(assign_to_entities
+						(current_index)
+						(associate
+							feature (first (current_value 1))
+							(concat feature "_delta") (last (current_value 1))
+						)
+					)
+
+					;else need to append the label to the entity
+					(accum_entity_roots
+						(current_index)
+						(list
+							(set_labels (first (current_value 1)) (list feature))
+							(set_labels (last (current_value 1)) (list (concat feature "_delta")) )
+						)
+					)
+			))
+			series_cases_group_map
+		)
+	)
+
+	;generate and output a list of queries for each 'unique' series id, where a unique series id may be a conjuction of several features.
+	; for example, if there are two series features, 'id1' and 'id2', with values of a, b, and c in each, it's possible that there may be six
+	; 'unique' series, i.e., ab, ac, ba, bc, ca, cb, thus the generated output would be this:
+	;		(list
+	;			(list (query_equals "id1" "a") (query_equals "id2" "b"))
+	;			(list (query_equals "id1" "a") (query_equals "id2" "c"))
+	;			(list (query_equals "id1" "b") (query_equals "id2" "a"))
+	;			(list (query_equals "id1" "b") (query_equals "id2" "c"))
+	;			(list (query_equals "id1" "c") (query_equals "id2" "a"))
+	;			(list (query_equals "id1" "c") (query_equals "id2" "b"))
+	;		)
+	;
+	;parameters:
+	; series_id_features: list of feature names that specify the series id for which to generate the list of queries.
+	;		If more than one specified, a unique 'series id' is then the conjuction of the specified ids.
+	;		E.g., if 'sender' and 'reciever' are specified, a 'series id' is then each unique pair of sender-reciever.
+	; case_ids: optional list of case_ids from which to create unique series queries. When not specified uses entire dataset.
+	#!GenerateUniqueSeriesQueries
+	(declare
+		(assoc series_id_features (list))
+
+		;if series_id_features isn't specified, return the entire dataset
+		(if (= 0 (size series_id_features))
+			(list (query_exists !internalLabelSession))
+
+			(= 1 (size series_id_features))
+			(let
+				(assoc series_id_feature (first series_id_features))
+				;output a list of query_equals statements for each unique series id for this one series id feature
+				(map
+					(lambda
+						;indices of assocs are strings, convert back to number if nominal feature is non-string
+						(if (contains_index !numericNominalFeaturesMap series_id_feature)
+							(list (query_equals series_id_feature (+ (current_value 1))))
+							;else leave id as string
+							(list (query_equals series_id_feature (current_value 1)))
+						)
+
+					)
+					;pull all values for each unique series id for this series id feature
+					(indices
+						(compute_on_contained_entities (append
+							(if (size case_ids)
+								(query_in_entity_list case_ids)
+								(list)
+							)
+							(query_value_masses series_id_feature (null) (contains_index !numericNominalFeaturesMap series_id_feature))
+						))
+					)
+				)
+			)
+
+			;else create a list of query_equals statements for all unique series ids (conjuctions of series ids for all the series
+			;id features) and output their respective query parameters
+			(map
+				(lambda
+					;a list of (query_equals "series_feature_name" value) for each unique conjuction
+					;each item in the list if there were two series id features would look like so:
+					;(list (query_equals "id1" 12345) (query_equals "id2" 800))
+					(map
+						(lambda
+							;covnvert value back to number if feature is non-string
+							(if (contains_index !numericNominalFeaturesMap (get series_id_features (current_index)))
+								(query_equals (get series_id_features (current_index)) (+ (current_value)))
+								;else leave id as string
+								(query_equals (get series_id_features (current_index)) (current_value))
+							)
+						)
+						(parse (current_value))
+					)
+				)
+
+				;unique conjuctions of feature values for all the series features in an unparsed list (string) format
+				;each item in the list if there were two series id features would look like so: "(list 12345 800)"
+				(values
+					(map
+						(lambda
+							(unparse (retrieve_from_entity (current_value) series_id_features))
+						)
+						(if (size case_ids)
+							case_ids
+							(call !AllCases)
+						)
+					)
+					(true)
+				)
+			)
+		)
+	)
+
+	;Method to create time series specific continuous features (lags, deltas/rates, etc.) given existing feature attributes
+	;and set model as a time series model
+	#!CreateTimeSeriesFeatures
+	(seq
+		;update feature attributes for existing time-series features
+		(assign_to_entities (assoc
+			!featureAttributes
+				(map
+					(lambda
+						(if ;time-series feature that's continuous and doesn't have defined derived_feature_code and is not an id_feature
+							(and
+								(contains_index (current_value) "time_series")
+								(= "continuous" (get (current_value) "type"))
+								(not (contains_index (current_value) "derived_feature_code"))
+								(not (get (current_value) "id_feature"))
+							)
+							(let
+								(assoc
+									ts_attributes (get (current_value 1) "time_series")
+									order 1
+								)
+								(if (contains_index ts_attributes "order")
+									(assign (assoc order (get ts_attributes "order")))
+								)
+
+								;create derived_feature_code attribute for this feature
+								(set
+									(current_value)
+									"derived_feature_code"
+									(call !GenerateFeatureAttributeDerivation (assoc
+										feature (current_index 1)
+										order order
+										derivation_type
+											(if (= "delta" (get ts_attributes "type"))
+												"delta_accumulation"
+
+												(= "rate" (get ts_attributes "type"))
+												"rate_accumulation"
+											)
+									))
+								)
+							)
+
+							;id features need to have derived code defined to use their previous value for fixed tracking
+							;whether it's used or not is determined by the series_id_tracking parameter in react_series
+							(and
+								(= (null) (get (current_value) "derived_feature_code"))
+								(or
+									(get (current_value) "id_feature")
+									;non time-series features are set to be time invariant (static) as well
+									(not (contains_index (current_value) "time_series"))
+								)
+							)
+							(set
+								(current_value)
+								"derived_feature_code"
+								;format of: "#\"feature_name\" 1" , feature name wrapped in quotes to handle features with spaces
+								(concat "#\"" (current_index) "\" 1")
+							)
+
+							;else leave feature attributes as-is since derived_feature_code is already defined
+							(current_value)
+						)
+					)
+					!featureAttributes
+				)
+
+			!hasTimeSeriesAttrbutes (true)
+			;set the threshold to 0 so that when the first batch of cases is trained, it'll be set accordingly
+			!autoAnalyzeThreshold 0
+			;enable auto analyze in order to have hyperparameters for imputation
+			!autoAnalyzeEnabled (true)
+		))
+
+		;id features are those that have the attribute id_feature=True
+		(declare (assoc
+			id_features
+				(indices (filter
+					(lambda (get (current_value) "id_feature") )
+					!featureAttributes
+				))
+		))
+
+		;creates features attributes for derived rate/delta/etc. features
+		(call !CreateTimeSeriesDerivedFeatures (assoc
+			id_features id_features
+			time_feature !tsTimeFeature
+		))
+	)
+
+	;Generate a feature derivation code string using `derivation_type`, for automtically derived/created time series features
+	;
+	; Example where [0] denotes current value and [1] is previous value:
+	;
+	; if order = 3 and 'delta':
+	; 	delta_1: val[0] - val[1]
+	; 	delta_2: delta_1[0] - delta_1[1]
+	; 	delta_3: delta_2[0] - delta_2[1]
+	; 	delta_accumulation: val[1] + delta_1[1] + delta_2[1] + delta_3[0]
+	; 	# if deriving orders:
+	; 	delta_1_derived: delta_2[0] + delta_1[1]
+	; 	delta_2_derived: delta_3[0] + delta_2[1]
+
+	; if order = 3 and 'rate':
+	; 	time_delta = time[0] - time[1]
+	; 	rate_1: (val[0] - val[1]) / time_delta
+	; 	rate_2: (rate_1[0] - rate_1[1]) / time_delta
+	; 	rate_3: (rate_2[0] - rate_2[1]) / time_delta
+	; 	# Taylor series
+	; 	rate_accumulation: val[1] + rate_1 * time_delta + rate_2 * time_delta^2 / 2 + rate_3 * time_delta^3 / 6
+	; 	# if deriving orders
+	; 	rate_1_derived: rate_2[0] * time_delta + rate_1[1]
+	; 	rate_2_derived: rate_3[0] * time_delta + rate_2[1]
+	;
+	;parameters:
+	; feature: feature name to insert into the derivation.
+	; derivation_type: derivation type to generate, one of 'lag', 'delta', 'rate', 'delta_accumulation', 'rate_accumulation'.
+	; order: optional, number of orders of derivatives for the specified type, if applicable.
+	; lag_amount: optional, number of how far to lag the derived feature, if applicable.
+	#!GenerateFeatureAttributeDerivation
+	(declare
+		(assoc
+			order 1
+			lag_amount 1
+			time_feature !tsTimeFeature
+		)
+		(declare (assoc output_string "" ))
+
+		(if
+			(= "lag" derivation_type)
+			(assign (assoc
+				output_string (concat  "#\"" feature "\" " lag_amount )
+			))
+
+			(= "delta_accumulation" derivation_type)
+			(seq
+				(assign (assoc
+					output_string (concat "(+ #\"." feature "_lag_1\" 0" )
+				))
+				(if (> order 1)
+					(accum (assoc
+						output_string
+							(apply "concat" (range
+								(lambda (concat " #\"." feature "_delta_" (current_index) "\" 1" ))
+								1 (- order 1) 1
+							))
+					))
+				)
+				;last order is the current delta value
+				(accum (assoc
+					output_string (concat " #\"." feature "_delta_" order "\" 0)" )
+				))
+			)
+
+			(= "delta" derivation_type)
+			(assign (assoc
+				output_string
+					(if (> order 1)
+						(concat "(- #\"." feature "_delta_" (- order 1) "\" 0 #\"." feature "_delta_" (- order 1) "\" 1)" )
+
+						;else
+						(concat "(- #\"" feature "\" 0 #\"."feature "_lag_1\" 0)" )
+					)
+			))
+
+			(= "rate_accumulation" derivation_type)
+			(seq
+				(assign (assoc
+					output_string (concat "(+ #\"." feature "_lag_1\" 0 (* #\"." time_feature "_delta_1\" 0 #\"." feature "_rate_1\" 0)" )
+				))
+				(if (> order 1)
+					(accum (assoc
+						output_string
+							;Taylor series: (rate_x * time_delta^x) / x!
+							(apply "concat" (range
+								(lambda (concat
+									" (/ (* (pow #\"." time_feature "_delta_1\" 0 " (current_index) ") #\"." feature "_rate_" (current_index)  "\" 0) " (apply "*" (range 1 (current_index)))  ")"
+								))
+								2 order 1
+							))
+					))
+				)
+				(accum (assoc
+					output_string ")"
+				))
+			)
+
+			(= "rate" derivation_type)
+			(assign (assoc
+				output_string
+					(if (> order 1)
+						;diff between previous order rates / time_delta
+						(concat "(/ (- #\"." feature "_rate_" (- order 1) "\" 0 #\"." feature "_rate_" (- order 1) "\" 1) (max #\"." time_feature "_delta_1\" 0 " !tsMinTimeInterval "))" )
+
+						;else
+						(concat "(/ (- #\"" feature "\" 0 #\"." feature "_lag_1\" 0) (max #\"." time_feature "_delta_1\" 0 " !tsMinTimeInterval "))" )
+					)
+			))
+
+			(= "rate_derived")
+			(assign (assoc
+				; rate_order[1] + rate_next_order[0] * time_delta
+				output_string
+					(concat "(+ #\"." feature "_rate_" order "\" 1 (* #\"." feature "_rate_" (+ order 1) "\" 0 (max #\"." time_feature "_delta_1\" 0 " !tsMinTimeInterval ")))" )
+			))
+
+			(= "delta_derived")
+			(assign (assoc
+				; delta_order[1] + delta_next_order[0]
+				output_string
+					(concat "(+ #\"." feature "_delta_" order "\" 1 #\"." feature "_delta_" (+ order 1) "\" 0)" )
+			))
+		)
+
+		output_string
+	)
+
+	;create all the additional time series feature attribute definitions and append them to feature attributes
+	#!CreateTimeSeriesDerivedFeatures
+	(declare
+		(assoc
+			id_features (list)
+			time_feature ""
+
+			;not parameters
+			derived_feature_attributes (assoc)
+			lag_features (list)
+			delta_features (list)
+			rate_features (list)
+			derived_order_features (list)
+			train_delta_features (list)
+			train_rate_features (list)
+		)
+
+		;TODO: re-implement this flow as Four passes:
+		; pass 1: create an assoc of lists of derived features for every feature, apply "append" to ceate one list of all the to-be-derived feaures
+		; pass 2: create an assoc of to-be derived features  > { feature, type=lag/delta/rate  order/lag_amount, derived_order=true/false }
+		; pass 3: iterate over the assoc and convert to actual derived attributes
+		; pass 4: A) pull time_feature lags/deltas/rates into model lists, B) iterate over all the other feature assocs from pass 1 to create model lists
+
+		;iterate over all existing features, accumulating newly derived features to derived_feature_attributes
+		(map
+			(lambda (if
+				(and
+					(contains_index (current_value) "time_series")
+					(!= (true) (get (current_value) "id_feature"))
+				)
+				(let
+					(assoc
+						attributes (current_value 1)
+						ts_attributes (get (current_value 1) "time_series")
+						feature (current_index 1)
+						;default to making 1 lag feature
+						lags (list 1)
+						date_time_format (get (current_value 1) "date_time_format")
+						lag_sub_feature_names (list)
+					)
+
+					;if user manually specified a different number of lags, set them here
+					(if (contains_index ts_attributes "num_lags")
+						(assign (assoc lags (range 1 (get ts_attributes "num_lags")) ))
+					)
+					;if user instead specified a specific lag list
+					(if (contains_index ts_attributes "lags")
+						(assign (assoc lags (get ts_attributes "lags")))
+					)
+
+					;list of derived lag feature names
+					(assign (assoc
+						lag_sub_feature_names
+							(map
+								(lambda (concat "." feature "_lag_" (current_value)))
+								lags
+							)
+					))
+
+					;all time series features have corresponding lag features
+					(accum (assoc derived_feature_attributes (call !MakeLagFeatureAttributes) ))
+
+					;time feature lags are ordered first
+					(if (= feature time_feature)
+						(assign (assoc lag_features (append lag_sub_feature_names lag_features)))
+						(accum (assoc lag_features lag_sub_feature_names))
+					)
+
+					;Cannot compute rates/deltas for categorical features so only continue for continuous
+					(if (= "continuous" (get attributes "type"))
+						(let
+							(assoc
+								;number of orders that need to be derived instead of synthed
+								derived_orders (if (contains_index ts_attributes "derived_orders") (get ts_attributes "derived_orders") 0)
+								num_orders (if (contains_index ts_attributes "order") (get ts_attributes "order") 1)
+							)
+
+							(if (= "delta" (get ts_attributes "type"))
+								(let
+									(assoc
+										delta_sub_feature_names
+											(range
+												(lambda (concat "." feature "_delta_" (current_index)) )
+												1 num_orders 1
+											)
+									)
+
+									(accum (assoc derived_feature_attributes (call !MakeDeltaFeatureAttributes) ))
+
+									;time feature deltas are ordered first, in descending order
+									(if (= feature time_feature)
+										(assign (assoc
+											delta_features (append (reverse delta_sub_feature_names) delta_features)
+											train_delta_features (append (reverse delta_sub_feature_names) train_delta_features)
+										))
+
+										(seq
+											(accum (assoc
+												train_delta_features delta_sub_feature_names
+												;append all feature names for orders that do not need to be derived, i.e., > derived_orders
+												delta_features (unzip delta_sub_feature_names (range derived_orders (- num_orders 1)))
+											))
+											;prepend features names for orders <= derived_orders to the front of the list in in descending order
+											(assign (assoc
+												derived_order_features
+													(append
+														(reverse (filter (lambda (< (current_index) derived_orders)) delta_sub_feature_names) )
+														derived_order_features
+													)
+											))
+										)
+									)
+								)
+
+								(= "rate" (get ts_attributes "type"))
+								(let
+									(assoc
+										rate_sub_feature_names
+											(range
+												(lambda (concat "." feature "_rate_" (current_index)) )
+												1 num_orders 1
+											)
+									)
+
+									(accum (assoc derived_feature_attributes (call !MakeRateFeatureAttributes) ))
+
+									;time feature rates are ordered first, in descending order
+									(if (= feature time_feature)
+										(assign (assoc
+											rate_features (append (reverse rate_sub_feature_names) rate_features)
+											train_rate_features (append (reverse rate_sub_feature_names) train_rate_features)
+										))
+
+										(seq
+											(accum (assoc
+												train_rate_features rate_sub_feature_names
+												;append all feature names for orders that do not need to be derived, i.e., > derived_orders
+												rate_features (unzip rate_sub_feature_names (range derived_orders (- num_orders 1)))
+											))
+											;prepend features names for orders <= derived_orders to the front of the list in in descending order
+											(assign (assoc
+												derived_order_features
+													(append
+														(reverse (filter (lambda (< (current_index) derived_orders)) rate_sub_feature_names) )
+														derived_order_features
+													)
+											))
+										)
+									)
+								)
+							)
+						)
+
+						;else categorical time series features should be generated (as action_features) like all other delta features
+						ts_attributes
+						(accum (assoc delta_features (current_index 1) ))
+					)
+				)
+			))
+			!featureAttributes
+		)
+
+		;accumulate the progress and progress delta features into derived feature attributes
+		(accum (assoc
+			"derived_feature_attributes"
+				(assoc
+					;progress value for each case in a series, 0.0 for first case and 1.0 for last case
+					".series_progress"
+						(assoc
+							"type" "continuous"
+							"derived_feature_code" "(min 1 (+ #.series_progress 1 #.series_progress_delta 1))"
+							"auto_derive_on_train"
+								(assoc
+									"derive_type" "progress"
+									"series_id_features" id_features
+								)
+							"bounds" (assoc "min" 0.0)
+						)
+					;progress delta for the series, each case's .series_progress value was incremented by this amount
+					".series_progress_delta"
+						(assoc
+							"type" "continuous"
+							"bounds" (assoc "min" 0.0 "max" 1.0)
+						)
+				)
+		))
+
+		;update model feature attributes to include all the derived ones, don't process time series attributes since they are being provided
+		(call set_feature_attributes (assoc
+			features (append !featureAttributes derived_feature_attributes)
+			create_ts_attributes (false)
+		))
+
+		;derived_features = ["".series_progress", ".series_progress_delta"] + lag_features + train_delta_features + train_rate_features
+		(declare (assoc
+			ts_derived_features
+				(append
+					(list ".series_progress" ".series_progress_delta")
+					lag_features
+					train_delta_features
+					train_rate_features
+				)
+			series_has_terminators (false)
+			stop_on_terminator (false)
+		))
+
+		(map
+			(lambda
+				(if (get features (list (current_value 1) "time_series" "series_has_terminators"))
+					(assign (assoc
+						series_has_terminators (true)
+						stop_on_terminator (or stop_on_terminator (get features (list (current_value 2) "time_series" "stop_on_terminator")))
+					))
+				)
+			)
+			id_features
+		)
+
+		;set model time series (lag, delta, rate, start, end, derived order) features for series react
+		;to be used for constructing react_series parameters
+		(accum_to_entities (assoc
+			!tsModelFeaturesMap
+				(assoc
+					"lag_features" lag_features
+					"delta_features" delta_features
+					"rate_features" rate_features
+					"derived_order_features" derived_order_features
+					"ts_derived_features" ts_derived_features
+					"series_id_features" id_features
+					"series_has_terminators" series_has_terminators
+					"stop_on_terminator" stop_on_terminator
+				)
+		))
+
+		;output derived_features
+		ts_derived_features
+	)
+
+	;Helper method to create the specified number of lag features
+	#!MakeLagFeatureAttributes
+	(zip
+		lag_sub_feature_names
+		;list of corresponding derived lag feature attributes
+		(map
+			(lambda (append
+				(assoc
+					"type" (if (contains_index attributes "type") (get attributes "type") "continuous")
+					"derived_feature_code"
+						(call !GenerateFeatureAttributeDerivation (assoc
+							derivation_type "lag"
+							feature feature
+							lag_amount (current_value 2)
+						))
+					"non_sensitive" (if (contains_index attributes "non_sensitive") (get attributes "non_sensitive") (true) )
+					"bounds"
+						(set
+							;only allow null for time feature lags
+							(if (contains_index attributes "bounds") (get attributes "bounds") (assoc "allow_null" (false)) )
+							"allow_null"
+							(= feature time_feature)
+						)
+					"auto_derive_on_train"
+						(assoc
+							"derive_type" "custom"
+							"series_id_features" id_features
+							"ordered_by_features" (list time_feature)
+							"code"
+								(call !GenerateFeatureAttributeDerivation (assoc
+									derivation_type "lag"
+									feature feature
+									lag_amount (current_value 3)
+								))
+						)
+					;internal sub-attribute used to identify lag features
+					"ts_type" "lag"
+					;internal sub-attributed used to identify time series type of parent feature
+					"parent_type" (get attributes (list "time_series" "type"))
+				)
+				(if date_time_format
+					(assoc "date_time_format" date_time_format)
+					(assoc)
+				)
+			))
+			lags
+		)
+	)
+
+	;Helper method to create the specified number of delta features
+	#!MakeDeltaFeatureAttributes
+	(zip
+		delta_sub_feature_names
+		(range
+			(lambda (append
+				(assoc
+					"type" (if (contains_index attributes "type") (get attributes "type") "continuous")
+					"bounds"
+						(set
+							(append
+								(assoc "allow_null" (true))
+								(if (!= (null) (get ts_attributes (list "delta_max" (- (current_index 2) 1))))
+									(assoc "max" (get ts_attributes (list "delta_max" (- (current_index 3) 1))))
+									(assoc)
+								)
+								(if (!= (null) (get ts_attributes (list "delta_min" (- (current_index 2) 1))))
+									(assoc "min" (get ts_attributes (list "delta_min" (- (current_index 3) 1))))
+									;can't go back in time by default
+									(if (= feature time_feature)
+										(assoc "min" 0)
+										(assoc)
+									)
+								)
+							)
+							"allow_null"
+							;time delta feature does not allow null and will be generated or imputed
+							(!= feature time_feature)
+						)
+					"auto_derive_on_train"
+						(assoc
+							"derive_type" "custom"
+							"series_id_features" id_features
+							"ordered_by_features" (list time_feature)
+							"code"
+								(call !GenerateFeatureAttributeDerivation (assoc
+									derivation_type "delta"
+									feature feature
+									order (current_index 3)
+								))
+						)
+					"ts_type" "delta"
+					"ts_order" (current_index 1)
+				)
+
+				;if order <= derived_orders, set the derived_feature_code property
+				(if (<= (current_index) derived_orders)
+					(assoc
+						"derived_feature_code"
+							(call !GenerateFeatureAttributeDerivation (assoc
+								derivation_type "delta_derived"
+								feature feature
+								order (current_index 2)
+							))
+					)
+					(assoc)
+				)
+			))
+			1 num_orders 1
+		)
+	)
+
+	;Helper method to create the specified number of rate features
+	#!MakeRateFeatureAttributes
+	(zip
+		rate_sub_feature_names
+		(range
+			(lambda (append
+				(assoc
+					"type" (if (contains_index attributes "type") (get attributes "type") "continuous")
+					"bounds"
+						(append
+							(assoc "allow_null" (true))
+							(if (!= (null) (get ts_attributes (list "rate_max" (- (current_index 2) 1))))
+								(assoc "max" (get ts_attributes (list "rate_max" (- (current_index 3) 1))))
+								(assoc)
+							)
+							(if (!= (null) (get ts_attributes (list "rate_min" (- (current_index 2) 1))))
+								(assoc "min" (get ts_attributes (list "rate_min" (- (current_index 3) 1))))
+								(assoc)
+							)
+						)
+					"auto_derive_on_train"
+						(assoc
+							"derive_type" "custom"
+							"series_id_features" id_features
+							"ordered_by_features" (list time_feature)
+							"code"
+								(call !GenerateFeatureAttributeDerivation (assoc
+									derivation_type "rate"
+									feature feature
+									order (current_index 3)
+								))
+						)
+					"ts_type" "rate"
+					"ts_order" (current_index 1)
+				)
+
+				;if order <= derived_orders, set the derived_feature_code property
+				(if (<= (current_index) derived_orders)
+					(assoc
+						"derived_feature_code"
+							(call !GenerateFeatureAttributeDerivation (assoc
+								derivation_type "rate_derived"
+								feature feature
+								order (current_index 2)
+							))
+					)
+					(assoc)
+				)
+			))
+			1 num_orders 1
+		)
+	)
+)

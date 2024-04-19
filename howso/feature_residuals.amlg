@@ -1,0 +1,912 @@
+;Contains methods for computing and storing feature residuals.
+(null
+
+	;Wrapper method for CalculateFeatureResiduals that additionally stores the computed residuals and prediction stats into model hyperparameters
+	;parameters:
+	; see #CalculateFeatureResiduals
+	#!CalculateAndStoreFeatureResiduals
+	(declare
+		(assoc
+			features (null)
+			case_ids (null)
+			focal_case (null)
+			num_samples (null)
+			robust_residuals (false)
+			hyperparameter_feature ".targetless"
+			use_case_weights (false)
+			weight_feature ".case_weight"
+			custom_hyperparam_map (null)
+		)
+
+		;if not using case weights, change weight_feature to '.none'
+		(if (not use_case_weights)
+			(assign (assoc weight_feature ".none"))
+		)
+
+		;set the passed in one as the hyperparam map to use if specified
+		(declare (assoc
+			hyperparam_map
+				(if (= (null) custom_hyperparam_map)
+					(call !GetHyperparameters (assoc
+						feature hyperparameter_feature
+						context_features (filter (lambda (!= hyperparameter_feature (current_value))) features)
+						mode (if (!= ".targetless" hyperparameter_feature) "full" "robust")
+						weight_feature weight_feature
+					))
+
+					custom_hyperparam_map
+				)
+		))
+		(declare (assoc
+			param_path
+				;if the param_path is missing, create it here
+				(if (= (null) (get hyperparam_map "paramPath"))
+					(list
+						hyperparameter_feature
+						(call !BuildContextFeaturesKey (assoc context_features features))
+						(if robust_residuals
+							"robust"
+
+							;mode stays "full" only if it's there in the !hyperparameterMetadataMap along with the weight_feature
+							(contains_index !hyperparameterMetadataMap (list hyperparameter_feature "full" weight_feature))
+							"full"
+
+							;defaults back to robust
+							"robust"
+						)
+						weight_feature
+					)
+
+					(get hyperparam_map "paramPath")
+				)
+		))
+
+		;if features aren't specified, assume all !trainedFeatures will need to have their mae calculated
+		(if (= (null) features)
+			(assign (assoc features !trainedFeatures))
+		)
+
+		;if there are ordinals but the hyperparameter map doesn't have a !featureOrdinalDeviations assoc, initialize it
+		(if (and
+				(size ordinal_features_map)
+				(= (null) (get hyperparam_map "!featureOrdinalDeviations"))
+			)
+			(accum (assoc hyperparam_map (assoc "!featureOrdinalDeviations" (assoc))))
+		)
+
+		;if storing deviations ensure that featureDeviations is an assoc instead of (null) for correct accumulation
+		(if (= (null) (get hyperparam_map "featureDeviations" ))
+			(assign (assoc hyperparam_map (set hyperparam_map "featureDeviations" (assoc))))
+		)
+
+		;if calculating and storing or all features, set the allFeatureResidualsCached flag to true
+		(if (= (sort !trainedFeatures) (sort features))
+			(accum (assoc hyperparam_map (assoc "allFeatureResidualsCached" (true))))
+		)
+
+		(declare (assoc
+			output_map
+				(call !CalculateFeatureResiduals (assoc
+					features features
+					case_ids case_ids
+					focal_case focal_case
+					num_samples num_samples
+					robust_residuals robust_residuals
+					hyperparameter_feature hyperparameter_feature
+					use_case_weights use_case_weights
+					weight_feature weight_feature
+					custom_hyperparam_map hyperparam_map
+					compute_all_statistics (true)
+				))
+		))
+
+		(assign (assoc hyperparam_map (get output_map "hyperparam_map") ))
+
+		;reset the flag if there are no residuals
+		(if (and
+				(= (sort !trainedFeatures) (sort features))
+				(= 0 (size (get output_map "residual_map")))
+			)
+			(accum (assoc hyperparam_map (assoc "allFeatureResidualsCached" (false))))
+		)
+
+		;only update !hyperparameterMetadataMap if they have no deviations cached
+		;or the type of residuals computed matches the hyperparameters
+		;or there have been new feature deviations computed that aren't in the hyperparameters
+		(if (or
+				(= 0 (size (get !hyperparameterMetadataMap (append param_path "featureDeviations"))))
+				(> (size (get hyperparam_map "featureDeviations")) (size (get !hyperparameterMetadataMap (append param_path "featureDeviations"))) )
+				(and robust_residuals (= "robust" (get param_path 2)))
+				(and (not robust_residuals) (= "full" (get param_path 2)))
+			)
+			(if (= (first param_path) ".default")
+				;updating default hyperparam set with featuredeviations
+				(assign_to_entities (assoc !defaultHyperparameters hyperparam_map) )
+
+				;update the appropriate hyperparameter set
+				(assign_to_entities (assoc !hyperparameterMetadataMap (set !hyperparameterMetadataMap param_path hyperparam_map)) )
+			)
+		)
+
+		(if (size (get output_map "residual_map"))
+			;always update the !residualsMap if there are deviations to store
+			(assign_to_entities (assoc
+				!residualsMap
+					(set
+						!residualsMap
+						(apply "concat" (append (if robust_residuals "robust" "full") (remove param_path 1)) )
+						(append
+							(get output_map "residual_map")
+							(assoc
+								".robust" (= (true) robust_residuals)
+								".hyperparam_path" param_path
+							)
+						)
+					)
+			))
+		)
+		(accum_to_entities (assoc !revision 1))
+
+		;return the output map with capped residual values
+		(call !ExpandResidualValuesToUncertainty  (assoc feature_residuals_map output_map))
+	)
+
+	;returns cached feature residuals in the format of assoc feature -> residual value
+	;parameters are optional, when not specified will auto-select a cached Residuals set for output, when specified will attempt to
+	;output the cached residuals best matching the requested parameters, null if none match.
+	;
+	;parameters:
+	; robust: flag, optional. if specified will attempt to return residuals that were computed with the specified robust or non-robust type.
+	; action_feature: string, optional. if specified will attempt to return residuals that were computed for this specified action_feature.
+	;				  Note: ".targetless" is the action feature used during targetless analysis.
+	; robust_hyperparameters: flag, optional. if true, will attempt to return residuals that were computed using hyperparameters with the
+	;						  specified robust or non-robust type.
+	; weight_feature: string, optional. if specified, will attempt to return residuals that were computed using this weight_feature.
+	#!GetFeatureResiduals
+	(declare
+		(assoc
+			robust (null)
+			action_feature (null)
+			robust_hyperparameters (null)
+			weight_feature (null)
+		)
+
+		(if (= (null) robust action_feature robust_hyperparameters weight_feature)
+			;if only one residuals set has been computed, return it
+			(if (= 1 (size !residualsMap))
+				(remove
+					(first (values !residualsMap))
+					(list ".hyperparam_path" ".robust")
+				)
+
+				;there are several cached residuals, pick one 'smartly':
+				(remove
+					(call !AutoSelectPredictionStats (assoc original_values_map (retrieve_from_entity "!residualsMap") ))
+					(list ".hyperparam_path" ".robust")
+				)
+			)
+
+			;else specified parameters, try to find the matching one
+			(call !SelectPredictionStats (assoc filtered_values_map (retrieve_from_entity "!residualsMap") ))
+		)
+	)
+
+	;returns cached feature null accuracies in the format of assoc feature -> null_accuracy
+	;parameters are optional, when not specified will auto-select a cached set for output, when specified will attempt to
+	;output the cached null_accuracies best matching the requested parameters, null if none match.
+	;
+	;parameters:
+	; robust: flag, optional. if specified will attempt to return null_accuracies that were computed with the specified robust or non-robust type.
+	; action_feature: string, optional. if specified will attempt to return null_accuracies that were computed for this specified action_feature.
+	;				  Note: ".targetless" is the action feature used during targetless analysis.
+	; robust_hyperparameters: flag, optional. if true, will attempt to return null_accuracies that were computed using hyperparameters with the
+	;						  specified robust or non-robust type.
+	; weight_feature: string, optional. if specified, will attempt to return null_accuracies that were computed using this weight_feature.
+	#!GetFeatureNullAccuracies
+	(declare
+		(assoc
+			robust (null)
+			action_feature (null)
+			robust_hyperparameters (null)
+			weight_feature (null)
+		)
+
+		(if (= (null) robust action_feature robust_hyperparameters weight_feature)
+			;if only one residuals set has been computed, return it
+			(if (= 1 (size !featureNullAccuracyMap))
+				(remove
+					(first (values !featureNullAccuracyMap))
+					(list ".hyperparam_path" ".robust")
+				)
+
+				;there are several cached residuals, pick one 'smartly':
+				(remove
+					(call !AutoSelectPredictionStats (assoc original_values_map (retrieve_from_entity "!featureNullAccuracyMap") ))
+					(list ".hyperparam_path" ".robust")
+				)
+			)
+
+			;else specified parameters, try to find the matching one
+			(call !SelectPredictionStats (assoc filtered_values_map (retrieve_from_entity "!featureNullAccuracyMap") ))
+		)
+	)
+
+	;calculate feature residual values, i.e. the mae (mean absolute error of predictions on a sample of the model) for each of the specified features
+	;returns an assoc containing feature residuals, feature ordinal residuals and the hyperparam_map used for computations
+	;
+	;parameters:
+	; features: optional list of all features used during computation. If not specified will use !trainedFeatures.
+	; target_residual_feature: optional feature for which to calculate the (MAE) residual. If not specified, will compute for all features.
+	; case_ids: optional list of case ids to compute residuals.
+	; focal_case: optional case id of case for which to compute residuals for  is to be ignored during computation
+	; num_samples: optional case sample size to use in calculation, will be ignored if the case_ids parameter is specified
+	; regional_model_only: flag, default to false. when set to true will only explicitly use the specified case_ids for computation.
+	; robust_residuals: flag, default to false. when true calculates residuals robust with respect to the set of contexts used (across the power set of contexts)
+	; hyperparameter_feature: optional  default '.targetless'.  feature whose hyperparameters to use
+	; use_case_weights: flag, if set to true will scale influence weights by each case's weight_feature weight
+	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
+	; custom_hyperparam_map: optional, hyperparameters to use for residuals computation
+	; compute_all_statistics: flag, optional. if set to true will compute other statistics (precision, recall, r^2, rmse, etc.) in addition to MAE
+	; store_values: flag, optional. if set to true will store the statistics in trainee-level caches, if set to false will return the set of values
+	#!CalculateFeatureResiduals
+	(declare
+		(assoc
+			features (null)
+			target_residual_feature (null)
+			regional_model_only (false)
+			case_ids (list)
+			focal_case (null)
+			num_samples (null)
+			robust_residuals (false)
+
+			hyperparameter_feature ".targetless"
+			use_case_weights (false)
+			weight_feature ".case_weight"
+			custom_hyperparam_map (null)
+			compute_all_statistics (false)
+			store_values (true)
+		)
+
+		(declare (assoc
+			k_parameter (null)
+			p_parameter (null)
+			dt_parameter (null)
+			query_feature_attributes_map (null)
+			case_features (null)
+			num_context_features 0
+			ordinal_features_map (zip !ordinalFeatures)
+			hyperparam_map (assoc)
+			residuals_map (assoc)
+			ordinal_residuals_map (assoc)
+			;assoc of features to skip computing non-robust residuals for if they don't have enough non-null values
+			skip_features_map (assoc)
+			;list, length of case_ids, each item will be a list of residual values, one per feature
+			case_residuals_lists (list)
+			;list, length of features, each item will be a list of residuals, one per case
+			feature_residuals_lists (list)
+
+			num_training_cases (call !GetNumTrainingCases)
+			valid_weight_feature (false)
+
+			rmse_map (assoc)
+			r2_map (assoc)
+			spearman_coeff_map (assoc)
+			precision_recall_map (assoc)
+
+			features_with_nulls (list)
+			null_feature_cases_map (assoc)
+		))
+
+		(call !InitResiduals)
+
+		(if robust_residuals
+			(call !RunRobustResiduals)
+			;else
+			(call !RunFullResiduals)
+		)
+
+		(declare (assoc
+			prediction_stats
+				(if compute_all_statistics
+					(call !PrepAllStatisticsResidualOutput)
+
+					(call !PrepResidualOutput)
+				))
+		)
+
+		;all feature residuals are always computed when using robust computation
+		(if (and robust_residuals details_features)
+			(assign (assoc
+				residuals_map (keep residuals_map details_features)
+				ordinal_residuals_map (keep ordinal_residuals_map details_features)
+			))
+		)
+
+		(assoc
+			"residual_map" residuals_map
+			"ordinal_residual_map" ordinal_residuals_map
+			"hyperparam_map" hyperparam_map
+			"prediction_stats" prediction_stats
+		)
+	)
+
+	;Helper method for CalculateFeatureResiduals to compute and output all basic prediction stats from the residuals
+	#!PrepAllStatisticsResidualOutput
+	(let
+		(assoc
+			feature_indices_map (zip features (indices features))
+			continuous_features (filter (lambda (not (contains_index !nominalsMap (current_value)))) features)
+			continuous_indices (list)
+			nominal_features (filter (lambda (contains_index !nominalsMap (current_value))) features)
+			nominal_indices (list)
+			numeric_continuous_features (null)
+			numeric_continuous_indices (null)
+		)
+
+		;feature_residuals_lists is in the format of:
+		; (list
+		; 	(list react1 react2 ... react n) ; feature A reacts
+		; 	(list react1 react2 ... react_n) ; feature B reacts
+		; 	...
+		; 	(list react1 react2 ... react n) ; feature N reacts
+		; )
+		;
+		;where each react is a list of either:
+		; [diff, actual_value, categorical_probabilities] for nominals or
+		; [diff, ordinal_diff, actual_value, predicted_value] for continuous (ordinal_diff is not there for non-ordinal features)
+
+		(assign (assoc
+			continuous_indices (unzip feature_indices_map continuous_features)
+			nominal_indices (unzip feature_indices_map nominal_features)
+			has_ordinals (> (size ordinal_features_map) 0)
+			;default index offset of where the actual case value is in each output react
+			actual_offset 1
+		))
+
+		;if some of the features are edit distance types, r2 and spearman coefficient don't apply since there's no mean or relative sorting
+		;filter out those out of the lists of continuous fetaures and not compute those stats for them
+		(if (size !editDistanceFeatureTypesMap)
+			(seq
+				(assign (assoc
+					numeric_continuous_features
+						(filter (lambda (not (contains_index !editDistanceFeatureTypesMap (current_value)))) continuous_features)
+				))
+				(assign (assoc numeric_continuous_indices (unzip feature_indices_map numeric_continuous_features) ))
+			)
+
+			(assign (assoc
+				numeric_continuous_features continuous_features
+				numeric_continuous_indices continuous_indices
+			))
+		)
+
+		(if has_ordinals
+			(assign (assoc
+				;for continuous features, each react output is stored as [diff, actual_value, predicted_value]
+				;but if there are ordinals, it's stored as [diff, ordinal_diff, actual_value, predicted_value]
+				;if there are ardinals, the index offest for actual_value is 2 instead of 1
+				actual_offset 2
+
+				ordinal_residuals_map
+					(filter (zip
+						continuous_features
+						(map
+							(lambda
+								(if (contains_index ordinal_features_map (get continuous_features (current_index)))
+									(if (size (current_value))
+										;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
+										(/
+											(apply "+" (map (lambda (get (current_value) 1)) (current_value)) )
+											;compute average by dividing by the number of values
+											(size (current_value))
+										)
+
+										;else if there were no values for this feature, return global feature residual
+										(get hyperparam_map (list "featureDeviations" (get continuous_features (current_index 1))))
+									)
+								)
+							)
+							(unzip feature_residuals_lists continuous_indices)
+						)
+					))
+			))
+		)
+
+		;iterate over each continuous feature's list of reacts and compute the MAE, RMSE, R^2, and spearman coefficient
+		(assign (assoc
+			;MAE - mean absolute error = sum(|actual-predicted|) / num_cases
+			residuals_map
+				(zip
+					continuous_features
+					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda (if
+							(size (current_value))
+							(/
+								(apply "+" (map (lambda (first (current_value))) (current_value)) )
+								;compute average by dividing by the number of values
+								(size (current_value))
+							)
+
+							;else if there were no values for this feature, return global feature residual
+							(get hyperparam_map (list "featureDeviations" (get continuous_features (current_index 1))))
+						))
+						(unzip feature_residuals_lists continuous_indices)
+					)
+				)
+			;RMSE - root mean squared error = sqrt( sum( |actual-predicted|^2 ) / num_cases )
+			rmse_map
+				(zip
+					continuous_features
+					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda (if
+							(size (current_value))
+							(sqrt (/
+								(apply "+" (map (lambda (pow (first (current_value)) 2)) (current_value)) )
+								;compute average by dividing by the number of values
+								(size (current_value))
+							))
+						))
+						(unzip feature_residuals_lists continuous_indices)
+					)
+				)
+			;spearman coefficient = 1 - 6 * sum(|actual_rank-predicted_rank|^2) / (num_cases^3 - num_cases)
+			;where actual_rank and predicted_rank are the 1-based sorted rank of values for each
+			spearman_coeff_map
+				(zip
+					numeric_continuous_features
+					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda (if
+							;must have at least 2 values to compute spearman coefficient
+							(> (size (current_value)) 1)
+							(let
+								(assoc
+									actual_ranks_map
+										(call !GetRankMapForValues (assoc
+											values (map (lambda (get (current_value) actual_offset)) (current_value 2))
+										))
+									predicted_ranks_map
+										(call !GetRankMapForValues (assoc
+											values (map (lambda (last (current_value))) (current_value 2))
+										))
+								)
+								(- 1
+									(* 6 (/
+										(apply "+"
+											(map
+												(lambda
+													(pow
+														(-
+															(get actual_ranks_map (get (current_value) actual_offset))
+															(get predicted_ranks_map (last (current_value)))
+														)
+														2
+													)
+												)
+												(current_value)
+											)
+										)
+
+										(- (pow (size (current_value)) 3) (size (current_value)))
+									))
+								)
+							)
+						))
+						(unzip feature_residuals_lists numeric_continuous_indices)
+					)
+				)
+			;R squared = 1 - sum(|actual-predicted|^2) / sum(|actual-mean|^2)
+			r2_map
+				(zip
+					numeric_continuous_features
+					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda (if
+							;must have at least 2 values to compute r^2
+							(> (size (current_value)) 1)
+							(let
+								(assoc
+									mean_value
+										;average of all actual values
+										(/
+											(apply "+" (map (lambda (get (current_value) actual_offset)) (current_value 1)) )
+											(size (current_value 1))
+										)
+									sum_res_squared
+										(apply "+" (map (lambda (pow (first (current_value)) 2)) (current_value 1)) )
+									sum_tot_squared 0
+								)
+
+								(assign (assoc
+									sum_tot_squared
+										(apply "+"
+											(map
+												(lambda
+													;(mean - actual)^2
+													(pow (- mean_value (get (current_value) actual_offset)) 2)
+												)
+												(current_value 1)
+											)
+										)
+								))
+
+								;output r^2 value:  1 - SSres / SStot
+								;cap the smallest allowed r2 value to the float min value of -3.4028234663852886e+38
+								(max
+									(- 1 (/ sum_res_squared sum_tot_squared))
+									-340282346638528859811704183484516925440
+								)
+							)
+						))
+						(unzip feature_residuals_lists numeric_continuous_indices)
+					)
+				)
+		))
+
+		(accum (assoc
+			residuals_map
+				(zip
+					nominal_features
+					;iterate over nominal features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda (if
+							(size (current_value))
+							(/
+								(apply "+" (map (lambda (first (current_value))) (current_value)) )
+								;compute average by dividing by the number of values
+								(size (current_value))
+							)
+
+							;else if there were no values for this feature, return global feature residual
+							(get hyperparam_map (list "featureDeviations" (get nominal_features (current_index 1))))
+						))
+						(unzip feature_residuals_lists nominal_indices)
+					)
+				)
+		))
+
+		;map of nominal feature -> tuple of [accuracy, precision, recall, confusion_matrix]
+		(assign (assoc
+			precision_recall_map
+				(zip
+					nominal_features
+					;iterate over nominal features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda (if
+							(size (current_value))
+							(let
+								(assoc
+									confusion_matrix (assoc)
+									predicted_classes_map (assoc)
+									precision (null)
+									recall (null)
+									accuracy (null)
+								)
+
+								(assign (assoc
+									;iterate over all the classes and create an assoc of lists of predictions for each class in the format of:
+									; (assoc
+									;	"small" (list "small" "small" "medium")
+									;	"medium" (list "medium" "medium" "medium" "small" "small")
+									; 	"large" (list "large" "large" "medium")
+									; )
+									predicted_classes_map
+										(zip
+											(lambda
+												(append (current_value 1) (list (current_value 1)))
+											)
+											;(get (current_value) 1) refers to the actual case value in each react tuple
+											(map (lambda (get (current_value) 1)) (current_value 1))
+											;and (get (current_value) 2) refers to the interpolated/predicted case value in
+											; each react tuple
+											(map (lambda (get (current_value) 2)) (current_value 1))
+										)
+								))
+
+								;create a sparse confusion matrix for each class
+								(assign (assoc
+									confusion_matrix
+										(map
+											(lambda
+												(zip
+													;all collisions will increase the count value
+													;e.g. zipping (list small medium small) will create (assoc small 1 medium 1)
+													;then accumulate a 1 for the second 'small' in the list since it's a key collision, resulting in (assoc small 2 medium 1)
+													(lambda (+ 1 (current_value 1)) )
+													;ensure to zip a list of classes by prepending an empty list
+													(append (list) (current_value))
+													;zip all classes with a value of 1 so that all clases in the predicted list are assigned a value of 1
+													1
+												)
+											)
+											predicted_classes_map
+										)
+								))
+
+								(assign (assoc
+									;accuracy is: num correct predictions / all predictions
+									accuracy
+										(/
+											;correct predictions count
+											(apply "+" (values
+												;get correct prediction count for each class
+												(map (lambda (or (get (current_value) (current_index))) ) confusion_matrix)
+											))
+
+											;total predictions count
+											(apply "+" (values
+												;add up all prediction counts for all classes
+												(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
+											))
+										)
+
+									;precision for a single class is = TruePositives / (TruePositives + FalsePositives)
+									precision
+										;for each row in confusion matrix, average out: correct / total of row
+										(/
+											(apply "+"
+													(values (map
+														(lambda (let
+															(assoc row_total (apply "+" (values (current_value 1))) )
+															;if there were no  predictions at all for this class, prevent divide by zero
+															(if (> row_total 0)
+																(/ (or (get (current_value) (current_index)) 0) row_total)
+																0
+															)
+														))
+														confusion_matrix
+													))
+											)
+											;filter out any empty rows
+											(size
+												(filter (lambda (size (current_value))) confusion_matrix)
+											)
+										)
+									;recall !for a single class is = TruePositives / (TruePositives + FalseNegatives)
+									recall
+										;for each column in confusion matrix, average out: correct / total of column
+										(/
+											(apply "+"
+													(values (map
+														(lambda (let
+															(assoc
+																class (current_index 1)
+																column_total (null)
+															)
+															(assign (assoc
+																column_total
+																	(apply "+"
+																		(values (map
+																			(lambda (or (get (current_value) class) 0) )
+																			confusion_matrix
+																		))
+																	)
+															))
+															;if there were no guesses for this class at all, prevent divide by zero
+															(if (> column_total 0)
+																(/ (or (get (current_value) class) 0) column_total)
+																0
+															)
+														))
+														confusion_matrix
+													))
+											)
+											(size confusion_matrix)
+										)
+								))
+
+								;output the tuple
+								(list accuracy precision recall confusion_matrix)
+							)
+						))
+						(unzip feature_residuals_lists nominal_indices)
+					)
+				)
+		))
+
+		(declare (assoc
+			prediction_stats
+				(assoc
+					".robust" (= (true) robust_residuals)
+					".hyperparam_path" param_path
+					"accuracy"
+						(map
+							(lambda
+								(if (!= (null) (get precision_recall_map (current_index)) )
+									(get precision_recall_map (list (current_index 1) 0))
+								)
+							)
+							(zip nominal_features)
+						)
+					"precision"
+						(map
+							(lambda
+								(if (!= (null) (get precision_recall_map (current_index)) )
+									(get precision_recall_map (list (current_index 1) 1))
+								)
+							)
+							(zip nominal_features)
+						)
+					"recall"
+						(map
+							(lambda
+								(if (!= (null) (get precision_recall_map (current_index)) )
+									(get precision_recall_map (list (current_index 1) 2))
+								)
+							)
+							(zip nominal_features)
+						)
+					"r2" r2_map
+					"rmse" rmse_map
+					"spearman_coeff" spearman_coeff_map
+					"confusion_matrix"
+						(map
+							(lambda
+								(if (!= (null) (get precision_recall_map (current_index)) )
+									(get precision_recall_map (list (current_index 1) 3))
+								)
+							)
+							(zip nominal_features)
+						)
+				)
+		))
+
+		(if store_values
+			(seq
+				(accum_to_entities (assoc
+					!featurePredictionStatsMap
+						(associate
+							(apply "concat" (append (if robust_residuals "robust" "full") (remove param_path 1) ))
+							prediction_stats
+						)
+				))
+				(call !UpdateHyperparametersWithResiduals)
+			)
+
+			;else return values
+			prediction_stats
+		)
+	)
+
+	;helper method for CalculateFeatureResiduals to average out the list(s) of residual values into individual value(s)
+	;and prepare output payloads
+	#!PrepResidualOutput
+	(seq
+		;feature_residuals_lists is in the format of:
+		; (list
+		; 	(list react1 react2 ... react n) ; feature A reacts
+		; 	(list react1 react2 ... react_n) ; feature B reacts
+		; 	...
+		; 	(list react1 react2 ... react n) ; feature N reacts
+		; )
+		;
+		;where each react is either:
+		; the diff value, for nominals and continuous, or a list of [diff, ordinal_diff] for continuous ordinal features
+
+		;for each feature, collapse each list of residuals into a single value by averaging them out
+		;for ordinals we need to split out the ordinal residuals from the rest
+		(if (size ordinal_features_map)
+			(seq
+				(assign (assoc
+					residuals_map
+						(zip
+							features
+							(map
+								(lambda (if
+									(size (current_value))
+									;feature_residuals_lists is of length of features, and corresponds 1-1 to features
+									;thus 'feature' is (get features (current_index))
+									(if (contains_index ordinal_features_map (get features (current_index)))
+										;ordinal feature, (current_value) is a list of tuples [diff, ordinal_diff]
+										;create a list of diffs by pulling diff from each tuple
+										(/
+											(apply "+" (map (lambda (first (current_value))) (current_value)) )
+											;compute average by dividing by the number of values
+											(size (current_value))
+										)
+
+										;else simply compute avg of all diffs
+										(/
+											(apply "+" (current_value))
+											;compute average by dividing by the number of values
+											(size (current_value))
+										)
+									)
+
+									;else if there were no values for this feature, return global feature residual
+									(get hyperparam_map (list "featureDeviations" (get features (current_index 1))))
+								))
+								feature_residuals_lists
+							)
+						)
+					ordinal_residuals_map
+						(filter (zip
+							features
+							(map
+								(lambda
+									(if (contains_index ordinal_features_map (get features (current_index)))
+										(if (size (current_value))
+											;ordinal feature, (current_value) is a list of tuples [diff, ordinal_diff]
+											;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
+											(/
+												(apply "+" (map (lambda (last (current_value))) (current_value)) )
+												;compute average by dividing by the number of values
+												(size (current_value))
+											)
+
+											;else if there were no values for this feature, return global feature residual
+											(get hyperparam_map (list "featureDeviations" (get features (current_index 1))))
+										)
+									)
+								)
+								feature_residuals_lists
+							)
+						))
+				))
+			)
+
+			;else simply compute all residuals
+			(assign (assoc
+				residuals_map
+					(zip
+						features
+						(map
+							(lambda (if
+								(size (current_value))
+								;compute average by dividing by the number of values
+								(/ (apply "+" (current_value)) (size (current_value)) )
+
+								;else if there were no values for this feature, return global feature residual
+								(get hyperparam_map (list "featureDeviations" (get features (current_index 1))))
+							))
+							feature_residuals_lists
+						)
+					)
+			))
+		)
+
+		;when using custom hyperparameters for all features, update  hyperparam_map with the newly calculated values for output
+		#!UpdateHyperparametersWithResiduals
+		(if (and (!= (null) custom_hyperparam_map) (= (null) target_residual_feature) )
+			(seq
+				;compute null deviations and update hyperparam_map with them
+				(if (size features_with_nulls)
+					(let
+						(assoc null_uncertainties_map (call !ComputeAndCacheNullResiduals) )
+
+						(assign
+							"hyperparam_map"
+							(list "featureDeviations")
+							(map
+								(lambda
+									;update deviation value with null uncertainies
+									(if (contains_index null_uncertainties_map (current_index))
+										(if (= (list) (get_type (current_value)))
+											(append (first (current_value)) (get null_uncertainties_map (current_index)) )
+											(append (list (current_value 1)) (get null_uncertainties_map (current_index)) )
+										)
+
+										;leave deviation value as-is
+										(current_value)
+									)
+								)
+								(if (= 0 (size (get hyperparam_map "featureDeviations")) )
+									(zip (indices null_uncertainties_map))
+									(get hyperparam_map "featureDeviations")
+								)
+							)
+						)
+					)
+				)
+
+				(assign
+					"hyperparam_map"
+					(list "!featureOrdinalDeviations")
+					ordinal_residuals_map
+				)
+			)
+		)
+	)
+)

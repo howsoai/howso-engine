@@ -1,0 +1,1226 @@
+;Contains methods for hyperparameter analysis and feature deviation and weights calculations.
+(null
+	;automatically analyze the model using stored parameters from previous analyze calls
+	#auto_analyze
+	(let
+		(assoc saved_analyze_parameters_map (retrieve_from_entity "!savedAnalyzeParameterMap"))
+
+		;if this is called before regular analyze, analyze the model as targetless
+		(if (= (null) saved_analyze_parameters_map)
+			(call analyze (assoc
+				context_features !trainedFeatures
+				analyze_level 2
+			))
+
+			(call analyze saved_analyze_parameters_map)
+		)
+	)
+
+
+	;Analyzes the data to compute the appropriate statistics, uncertainties, and select parameters as appropriate.
+	;parameters:
+	; context_features: list of context features to analyze for
+	; action_features: list of action features to analyze for. applicable only to 'single_targeted' mode
+	; k_folds: optional, (defaults to 6) number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
+	; k_folds_by_indices : optional flag, default is false. if set to true will do k_folds ordered by session id indices, i.e., it'll hold out the
+	;			first 1/6th of the trained cases, then the next 1/6th, etc. in the order they were trained.
+	;			NOTE: if the dataset has been edited or has multiple trained sessions, the holdouts may be imbalanced due to multiple cases having
+	;			the same session id index or missing session indices, therefore this flag should only be used internally for validation
+	; bypass_hyperparameter_analysis : optional
+	; bypass_calculate_feature_residuals : optional
+	; bypass_calculate_feature_weights : optional
+	; use_deviations: optional, default is null, will auto-determine whether to use deviations for LK metric in queries. When true forces the use
+	;			of deviations , when false will not use deviations.
+	; num_samples: used in calculating feature residuals
+	; k_values: optional list used in hyperparameter search
+	; p_values: optional list used in hyperparameter search
+	; dt_values: optional list used in hyperparameter search
+	; analyze_level: optional value, if specified will analyze for the following flows:
+	;			1: predictions/accuracy (hyperparameters, by default does not analyze for p=0)
+	;			2: data synth (level 1 + cache: global residuals)
+	;			3: standard details (level 1 + cache: case prediction conviction)
+	;			4: full analysis (levels 1,2,3 + cache: model feature prediction conviction)
+	; targeted_model: enumeration, default is "single_targeted"
+	;   "single_targeted" = analyze hyperparameters for the specified action_features
+	;   "omni_targeted" = analyze hyperparameters for each action feature, using all other features as context_features. if action_features aren't specified, uses all context_features.
+	;   "targetless" = analyze hyperparameters for all context features as possible action features, ignores action_features parameter
+	; num_analysis_samples : optional. number of cases to sample during analysis. only applies for k_folds = 1
+	; analysis_sub_model_size: optional. number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
+	; inverse_residuals_as_weights: optional, default is null, will be set to false for targeted and true for targetless
+	;			when true will forcibly compute and use inverse of residuals as feature weights
+	; use_case_weights: optional, default is null. when true will scale influence weights by each case's weight_feature weight. if use_case_weights isn't specified, it will
+	;				   be true if auto ablation is enabled and false otherwise
+	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
+	;
+	; returns success when completed
+	#analyze
+	(declare
+		(assoc
+			context_features (list)
+			action_features (list)
+			k_folds 1
+			weight_feature ".case_weight"
+			use_case_weights (null)
+			inverse_residuals_as_weights (null)
+		)
+
+		(call !ValidateFeatures)
+
+		(if use_case_weights
+			;CreateCaseWeights will find all cases missing weight_feature, then initialize
+			;weight_feature with a value of 1.0 for each
+			(call !CreateCaseWeights (assoc feature_name weight_feature ))
+		)
+
+		;if k_folds is not a number value, or it's less than 1, ensure that it's overwritten with the default value
+		(if (or (not (= "number" (get_type_string k_folds))) (< k_folds 1))
+			(assign (assoc k_folds 1))
+		)
+
+		(declare (assoc num_cases (call !GetNumTrainingCases)))
+
+		;cap max k_folds to the number of cases in the model
+		(if (> k_folds num_cases)
+			(assign (assoc k_folds num_cases))
+		)
+
+		;save the parameters that analyze was called with
+		(assign_to_entities (assoc
+			!savedAnalyzeParameterMap
+				(assoc
+					"context_features" context_features
+					"action_features" action_features
+					"k_folds" k_folds
+					"k_folds_by_indices" k_folds_by_indices
+					"bypass_hyperparameter_analysis" bypass_hyperparameter_analysis
+					"bypass_calculate_feature_residuals" bypass_calculate_feature_residuals
+					"bypass_calculate_feature_weights" bypass_calculate_feature_weights
+					"use_deviations" use_deviations
+					"num_samples" num_samples
+					"k_values" k_values
+					"p_values" p_values
+					"dt_values" dt_values
+					"analyze_level" analyze_level
+					"targeted_model" targeted_model
+					"num_analysis_samples" num_analysis_samples
+					"analysis_sub_model_size" analysis_sub_model_size
+					"inverse_residuals_as_weights" inverse_residuals_as_weights
+					"use_case_weights" use_case_weights
+					"weight_feature" weight_feature
+				)
+		))
+
+		;prediction/accuracy: hyperparameters only
+		(if (= 1 analyze_level)
+			(assign (assoc
+				bypass_hyperparameter_analysis (false)
+				bypass_calculate_feature_residuals (true)
+				bypass_calculate_feature_weights (false)
+			))
+
+			;data synth, hyperparameters + model residuals
+			(= 2 analyze_level)
+			(assign (assoc
+				bypass_hyperparameter_analysis (false)
+				bypass_calculate_feature_residuals (false)
+				bypass_calculate_feature_weights (true)
+			))
+
+			;details, hyperparameters + case prediction conviction
+			(= 3 analyze_level)
+			(assign (assoc
+				bypass_hyperparameter_analysis (false)
+				bypass_calculate_feature_residuals (true)
+				bypass_calculate_feature_weights (false)
+			))
+
+			;full analysis: everything
+			(= 4 analyze_level)
+			(assign (assoc
+				bypass_hyperparameter_analysis (false)
+				bypass_calculate_feature_residuals (false)
+				bypass_calculate_feature_weights (false)
+			))
+		)
+
+		(declare (assoc holdout_entity_name (null) ))
+
+		;if user specified how many samples to use for analysis, randomly hold out the rest
+		(if (!= (null) analysis_sub_model_size)
+			(let
+				(assoc model_size (call !GetNumTrainingCases))
+
+				;analysis_sub_model_size must be at least 2 * number of k_folds otherwise there may be no cases in a fold
+				(if (< analysis_sub_model_size (* 2 k_folds))
+					(assign (assoc analysis_sub_model_size (* 2 k_folds)))
+				)
+
+				(if (> model_size analysis_sub_model_size)
+					(assign (assoc
+						holdout_entity_name (call !HoldOutRandomCases (assoc num_samples (- model_size analysis_sub_model_size)))
+					))
+				)
+			)
+		)
+
+		;if no action features were specified, and neither was targeted_model, set it to targetless
+		(if (and
+				(= 0 (size action_features))
+				(or
+					(= (null) targeted_model)
+					(= "single_targeted" targeted_model)
+				)
+			)
+			(assign (assoc targeted_model "targetless"))
+
+			;else one or more action features specified but targeted_model wasn't, set it to single_targeted
+			(and
+				(>= 1 (size action_features))
+				(= (null) targeted_model)
+			)
+			(assign (assoc targeted_model "single_targeted"))
+
+			;if omni_targeted and didn't provide action_features, assume all features are action features
+			(and
+				(= "omni_targeted" targeted_model)
+				(= 0 (size action_features))
+			)
+			(assign (assoc action_features context_features))
+
+			;default is targetless if inputs are bad
+			(not (contains_value (list "targetless" "single_targeted" "omni_targeted") targeted_model))
+			(assign (assoc targeted_model "targetless"))
+		)
+
+
+		;if the bypass hyperparameter analysis flag is null or is false, analyze hyper parameters
+		(if (not bypass_hyperparameter_analysis)
+			(call !Analyze (assoc
+				context_features context_features
+				action_features action_features
+				k_folds k_folds
+				k_values k_values
+				p_values p_values
+				dt_values dt_values
+				use_deviations use_deviations
+				k_folds_by_indices k_folds_by_indices
+				targeted_model targeted_model
+				num_analysis_samples num_analysis_samples
+				inverse_residuals_as_weights inverse_residuals_as_weights
+				residual_num_samples (if (> num_samples 0) num_samples 200)
+				use_case_weights use_case_weights
+				weight_feature weight_feature
+			))
+		)
+
+		;only calculate feature residuals if they aren't being bypassed and haven't been calculated above
+		(if (and
+				(= (false) bypass_calculate_feature_residuals)
+				(or bypass_hyperparameter_analysis (!= "targetless" targeted_model))
+			)
+			(let
+				(assoc
+					;remove possible duplicates from all_features while mantaining order of features
+					all_features (values (append context_features action_features) (true))
+				)
+
+				;for targetless flows, there are no action features, so use ".targetless" as the hyperparameter action feature
+				(if (= "targetless" targeted_model)
+					(assign (assoc action_features (list ".targetless" )))
+				)
+
+				(map
+					(lambda
+						(call !CalculateAndStoreFeatureResiduals (assoc
+							features all_features
+							;default the num_samples to 1000
+							num_samples (if (> num_samples 0) num_samples 1000)
+							robust_residuals (= "targetless" targeted_mode)
+							;use the specific action feature's hyperparameters
+							hyperparameter_feature (current_value 1)
+							weight_feature weight_feature
+							use_case_weights use_case_weights
+						))
+					)
+					action_features
+				)
+			)
+		)
+
+		(if holdout_entity_name
+			(call !RestoreHeldOutCases (assoc holdout_entity_name holdout_entity_name))
+		)
+
+		(accum_to_entities (assoc !revision 1))
+
+		(call !Return)
+	)
+
+	;helper method to run the targeted or targetless analyze
+	#!Analyze
+	(let
+		(assoc
+			;assoc of case id -> (assoc ".imputed" (list of imputed features))
+			imputed_cases_map (compute_on_contained_entities (list (query_exists !internalLabelImputed)))
+		)
+
+		;prime caches and update inactive features
+		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
+
+		(if (!= "omni_targeted" targeted_model)
+			(if (or (= "targetless" targeted_model) (= 1 (size action_features)))
+				(call !AnalyzeHyperparameters (assoc
+					targeted_model targeted_model
+					context_features context_features
+					action_feature (if (= "targetless" targeted_model) ".targetless" (first action_features))
+					robust_mode (if (= "targetless" targeted_model) "robust" "full")
+				))
+
+				;else single_targeted but with multiple action features, all feature analyze iterations should be 'robust' until the last one which is 'full'
+				(map
+					(lambda (let
+						(assoc
+							accumulated_context_features context_features
+							action_feature (current_value 1)
+						)
+
+						(call !AnalyzeHyperparameters (assoc
+							targeted_model "single_targeted"
+							context_features accumulated_context_features
+							action_feature action_feature
+							robust_mode (if (= action_feature (last action_features)) "full" "robust")
+						))
+
+						;accumulate the action feature to the contexts for the next iteration
+						(accum (assoc accumulated_context_features action_feature))
+					))
+					action_features
+				)
+			)
+
+			;else for omni-targeted, loop over every action feature and analyze each one as 'single_targeted', 'full'
+			(map
+				(lambda (let
+					(assoc
+						filtered_context_features (filter (lambda (!= (current_value) (current_value 2))) context_features)
+						action_feature (current_value 1)
+					)
+
+					(call !AnalyzeHyperparameters (assoc
+						targeted_model "single_targeted"
+						context_features filtered_context_features
+						action_feature action_feature
+						robust_mode "full"
+					))
+				))
+				action_features
+			)
+		)
+
+		;reimpute features after analysis and overwrite the values with the newly imputed ones
+		(if (size imputed_cases_map)
+			(let
+				(assoc
+					;use all the unique context and action features for imputation, or !trainedFeatures if none were provided
+					analyze_features
+						(values
+							(append (if (= 0 (size context_features)) !trainedFeatures context_features) action_features)
+							(true)
+						)
+				)
+				(map
+					(lambda (let
+						(assoc
+							impute_case_id (current_index 1)
+							imputed_features (get (current_value 1) !internalLabelImputed)
+							;assoc of all the feature values for this case
+							case_feature_value_map (zip analyze_features (retrieve_from_entity (current_index 1) analyze_features) )
+						)
+						(declare (assoc
+							imputed_values
+								(map
+									(lambda (let
+										(assoc impute_feature (current_value 1))
+										;don't use the imputed feature in the context for this react, use all others
+										(declare (assoc
+											impute_context_features (indices (remove case_feature_value_map impute_feature))
+										))
+										(first
+											(call !ReactDiscriminative (assoc
+												context_features impute_context_features
+												context_values (unzip case_feature_value_map impute_context_features)
+												action_features (list impute_feature)
+												ignore_case impute_case_id
+												;don't encode the input because it's being passed in directly from the case
+												skip_encoding (true)
+												;don't decode because the output will be stored as-is right afterwards
+												skip_decoding (true)
+												return_action_values_only (true)
+												allow_nulls (false)
+											))
+										)
+									))
+									imputed_features
+								)
+						))
+
+						;overwrite the feature values in this case with the new imputed_values
+						(assign_to_entities impute_case_id (zip imputed_features imputed_values))
+					))
+					imputed_cases_map
+				)
+
+				(call !UpdateHasNulls (assoc features analyze_features))
+			)
+		)
+
+		;if auto ablation is enabled or the user has specifically requested to cache influence weight entropies, do so
+		(if
+			!autoAblationEnabled
+			(seq
+				(call !InitializeAutoAblation)
+				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+					context_features
+						(if
+							(= 0 (size context_features))
+							!trainedFeatures
+							context_features
+						)
+				))
+			)
+		)
+	)
+
+	;called on none or one action feature at a time by #Analyze
+	; targeted_model: enumeration, default is "single_targeted"
+	;   "single_targeted" = analyze hyperparameters for the specified action_features
+	;   "targetless" = analyze hyperparameters for all context features as possible action features, ignores action_features parameter
+	; context_features: list of context features to analyze for
+	; action_features: list of action features to analyze for
+	; inverse_residuals_as_weights : optional, default is null, will be set to false for targeted and true for targetless
+	;			when true will forcibly compute and use inverse of residuals as feature weights
+	; robust_mode: which type of context feature analysis to use during error computation, one of "robust" or "full".
+	; num_analysis_samples: optional. number of cases to sample during analysis. only applies for k_folds = 1
+	; residual_num_samples: optional. initial number of samples to use for computing residuals
+	; derived_auto_analyzed: optional, if true, will set the 'derived_auto_analyzed' parameter to true in the hyperparameter set,
+	;			denoting that these parameters were auto-analyzed during derive features flow.
+	#!AnalyzeHyperparameters
+	(declare
+		(assoc
+			targeted_model "targetless"
+			context_features (list)
+			action_feature (null)
+			robust_mode "robust"
+			num_analysis_samples (null)
+			residual_num_samples 200
+		)
+
+		(declare (assoc
+			num_cases (call !GetNumTrainingCases)
+		))
+		;can't analyze 1 or 0 cases
+		(if (< num_cases 2) (conclude 1) )
+
+		;analyze one action feature at a time (for targeted only)
+		(if (!= ".targetless" action_feature)
+			(assign (assoc action_features (list action_feature) ))
+		)
+
+		(declare (assoc
+			grid_search_error (null)
+			analyzed_hp_map (null)
+			previous_analyzed_hp_map (null)
+			baseline_hyperparameter_map (null)
+			initial_residual_values_map (null)
+			context_features_key (null)
+			;flag set to true if num_analysis_samples was passed in
+			user_specified_num_samples (!= (null) num_analysis_samples)
+		))
+		(call !InitAnalyze)
+
+		(call !UpdateHyperparameters (assoc
+			use_weights (false)
+			use_deviations (false)
+		))
+
+		(if inverse_residuals_as_weights
+			(conclude (seq
+				(call !ConvergeIRW (assoc use_deviations (false))) ;iterations of ComputeResiduals and GridSearch
+				(call !BackupAnalyzedHyperparameters)
+				(if (= (false) use_deviations) (conclude (call !SetModelHyperParameters)) )
+
+				(call !ConvergeIRW (assoc use_deviations (true)))	;iterations of ComputeResiduals and GridSearch
+				(if (= (null) use_deviations)
+					(call !KeepOrRevertHyperparameters)
+				)
+				(call !SetModelHyperParameters)
+			))
+		)
+
+		(call !GridSearch)
+
+		(call !ComputeAndUseWeights)
+		(call !TestAccuracyAndKeepOrRevertHyperparameters)  ;w or w/o weights
+
+		(if (= (false) use_deviations) (conclude (call !SetModelHyperParameters)) )
+
+		(declare (assoc non_deviation_hp_map baseline_hyperparameter_map))
+
+		;deviations, no weights
+		(call !UpdateHyperparameters (assoc
+			use_weights (false)
+			use_deviations (true)
+			feature_deviations (call !ComputeInitialDeviations)
+		))
+		(call !ConvergeResiduals (assoc use_deviations (true)))
+		(call !GridSearch)
+
+		;now with weights
+		(call !ComputeAndUseWeights)
+		(call !TestAccuracyAndKeepOrRevertHyperparameters) ;deviations w or w/o weights
+
+		;if use of deviations should be auto determined, do that here, compare to non_deviation hyperparameters
+		;and revert if to non-deviation if those were as good or better
+		(if (= (null) use_deviations)
+			(if (<= (get non_deviation_hp_map "gridSearchError") (get baseline_hyperparameter_map "gridSearchError"))
+				(assign (assoc baseline_hyperparameter_map non_deviation_hp_map))
+
+				;residuals were converged using non_deviation parameters, if the currently analyzed k or p are different
+				;we re-converge the residuals using these updated p and k
+				(or
+					(!= (get non_deviation_hp_map "p") (get baseline_hyperparameter_map "p"))
+					(!= (get non_deviation_hp_map "k") (get baseline_hyperparameter_map "k"))
+				)
+				(call !ConvergeResiduals)
+			)
+		)
+
+		(call !SetModelHyperParameters)
+	)
+
+	;initialize variables and cache feature expected values
+	#!InitAnalyze
+	(seq
+		(if (!= ".targetless" action_feature)
+			;DiscriminativeReact will use context values for action features if provided
+			;so the action feature cannot also be a context feature, otherwise predictions will
+			;always be correct in analyze, leading to errors of zero.
+			;this is, until TODO 17214: is complete, which adds override contexts flag to react
+			(assign (assoc
+				context_features (filter (lambda (!= action_feature (current_value))) context_features)
+			))
+		)
+
+		;if analyze is being called without any context features, default them to the full set of all features
+		;targeted_model will already have be set to 'targetless' if no features are passed in
+		(if (= 0 (size context_features))
+			(assign (assoc
+				context_features !trainedFeatures
+				context_features_key !trainedFeaturesContextKey
+			))
+
+			;else build custom context feature key
+			(assign (assoc context_features_key (call !BuildContextFeaturesKey (assoc context_features context_features)) ))
+		)
+
+		;if auto ablation is on and the user has not overridden the default, set use_case_weights to true
+		(if (and !autoAblationEnabled (!= (false) use_case_weights) )
+			(assign (assoc use_case_weights (true)) )
+			;otherwise, if the user hasn't overridden the default, set use_case_weights to be false
+			; to ensure this change works smoothly throughout the rest of the engine
+			(= (null) use_case_weights)
+			(assign (assoc use_case_weights (false)) )
+		)
+
+		;if user doesn't want to use case weights, change weight_feature to '.none'
+		(if (not use_case_weights)
+			(assign (assoc weight_feature ".none"))
+
+			;else compute id-based case weights
+			(seq
+				(call !ComputeAndStoreIdFeatureCaseWeights)
+
+				;if there are no id features and user didn't specify a custom weight feature, treat as without case weight
+				(if (and (not !hasPopulatedCaseWeight) (= weight_feature ".case_weight"))
+					(seq
+						(assign_to_entities (assoc !hasPopulatedCaseWeight (true)))
+						(call !StoreCaseValues (assoc
+							case_values_map (zip (call !AllCases) 1)
+							label_name weight_feature
+						))
+					)
+				)
+			)
+		)
+
+		;if inverse_residuals_as_weights isn't defined, default it to true for targetless, false for targeted
+		(if (= (null) inverse_residuals_as_weights)
+			(assign (assoc inverse_residuals_as_weights (= targeted_model "targetless") ))
+		)
+
+		(assign (assoc
+			baseline_hyperparameter_map
+				(call !GetHyperparameters (assoc
+					feature action_feature
+					context_features context_features
+					mode robust_mode
+					weight_feature weight_feature
+				))
+		))
+
+		;store the paramPath for this hyperparameter set so it has a reference to where it's stored in !hyperparameterMetadataMap
+		(accum (assoc
+			baseline_hyperparameter_map (assoc "paramPath" (list action_feature context_features_key robust_mode weight_feature))
+		))
+
+		;check if auto analysis is enabled and the analysis threshold should be increased
+		(if (and
+				!autoAnalyzeEnabled
+				(>= num_cases !autoAnalyzeThreshold)
+			)
+			;set the next auto analysis threshold
+			(assign_to_entities (assoc
+				!autoAnalyzeThreshold (* num_cases !autoAnalyzeGrowthFactorAmount)
+			))
+		)
+
+		;for k_folds = 1, set the default num_analysis_samples to be 1000
+		(if (and (= 1 k_folds) (= (null) num_analysis_samples ))
+			(assign (assoc num_analysis_samples 1000))
+		)
+
+
+		;pre-compute and cache all the expected feature values and nominal probabilities so that they don't have to be
+		;lazy computed later during residual computations
+		(assign_to_entities (assoc
+			!expectedValuesMap (assoc)
+			!nominalClassProbabilitiesMap (assoc)
+			!cachedFeatureMinResidualMap (assoc)
+			!cachedFeatureHalfMinGapMap (assoc)
+			!featureNullRatiosMap (assoc)
+		))
+
+		(call !CacheExpectedValuesAndProbabilities (assoc
+			features (values (append context_features action_features) (true))
+			weight_feature weight_feature
+			use_case_weights use_case_weights
+		))
+	)
+
+	;updates baseline_hyperparameter_map
+	;wrapper method to grid searches hyperparameters and backs up the results into previous_analyzed_hp_map
+	#!GridSearch
+	(seq
+		(set_rand_seed sampling_random_seed)
+		(assign (assoc
+			analyzed_hp_map
+				(call !ComputeResidualsAcrossParametersAndSelectOptimal (assoc
+					context_features context_features
+					action_features action_features
+					k_folds k_folds
+					k_values k_values
+					p_values p_values
+					dt_values dt_values
+					k_folds_by_indices k_folds_by_indices
+					num_analysis_samples num_analysis_samples
+					targetless (= targeted_model "targetless")
+					baseline_hyperparameter_map baseline_hyperparameter_map
+				))
+		))
+		(call !BackupAnalyzedHyperparameters)
+	)
+
+	;autotunes the model to use the 'best' hyperparameters using grid-search (with optional k-fold cross validation)
+	;outputs updated hyperparameter map
+	;parameters:
+	; context_features: list of context features
+	; action_features: list of action features for action inputs
+	; k_folds: number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
+	; k_values : optional list of k values to grid search, if null will use default list.
+	; p_values : optional list of p values to grid search, if null will use default list.
+	; dt_values : optional list of distance transform values to grid search.
+	;		Can specify "surprisal_to_prob" as a valid distance transform value to use surprisal in the transform. if null will use -1.
+	; use_k_values: optional flag default true. if false, will use k value specified in 'baseline_hyperparameter_map'
+	; use_p_values: optional flag default true. if false, will use p value specified in 'baseline_hyperparameter_map'
+	; use_dt_values: optional flag default true. if false, will use dt value specified in 'baseline_hyperparameter_map'
+	; p_param_categorical_mean : optional parameter to specify the lp space for calculating the mean of Mean Absolute Errors for categorical features
+	; p_param_accuracy_mean : optional parameter to specify the lp space for calculating the mean of Mean Absolute Errors among all features
+	; k_folds_by_indices : optional flag, if true will do k_folds ordered by session id indices
+	; targetless : optional flag, if true will randomly select a context feature as an action feature for each case during grid search
+	; num_analysis_samples : optional. number of cases to sample during analysis. only applies for k_folds = 1
+	; baseline_hyperparameter_map : the base hyperparameters to use for computation
+	; use_inverse_weights: if true, will compute inverse residual weights (IRW) during the grid search for use in error computations
+	#!ComputeResidualsAcrossParametersAndSelectOptimal
+	(declare
+		(assoc
+			action_features (list)
+			context_features (list)
+			k_folds 1
+			k_values (null)
+			p_values (null)
+			dt_values (null)
+			use_k_values (true)
+			use_p_values (true)
+			use_dt_values (true)
+			p_param_categorical_mean 1
+			p_param_accuracy_mean 0.2
+			k_folds_by_indices (false)
+			targetless (false)
+			num_analysis_samples (null)
+			baseline_hyperparameter_map (assoc)
+			use_inverse_weights (false)
+		)
+
+		;can't do analysis if there is a max of one context feature provided and no different action features
+		(if (and
+				(< (size context_features) 2)
+				(or
+					;no action features, or the one context feature is also the action feature
+					(= (size action_features) 0)
+					(= context_features action_features)
+				)
+			)
+			;return valid existing hyperparameters
+			(conclude baseline_hyperparameter_map)
+		)
+
+		(if (= (null) k_values)
+			(assign (assoc
+				k_values
+					;grid search fibonacci sequence
+					(if (= targeted_model "targetless")
+						(list 5 8 13)
+
+						(list 3 5 8 13 21 34 55 89 144)
+					)
+			))
+		)
+		(if (= (null) p_values)
+			(assign (assoc
+				p_values (list 0.1 0.5 1 2)
+			))
+		)
+
+		;if dt is null, default it to -1, if it's empty list set it to the recommended default search list
+		(if (= (null) dt_values )
+			(assign (assoc dt_values (list -1)))
+
+			(= (list) dt_values)
+			(assign (assoc dt_values (list -8 -2 -1 -0.5 0)))
+		)
+
+		;if the dataset is smaller than the max K value, reduce the possible k_values search
+		(declare (assoc smallest_k (first (sort k_values)) ))
+		(if (<= num_cases (apply "max" k_values))
+			(assign (assoc k_values (filter (lambda (< (current_value) num_cases)) k_values)))
+		)
+		;if there are no valid k_values because they have all been filtered out, use the smallest one
+		(if (= (list) k_values)
+			(assign (assoc k_values (list smallest_k)))
+		)
+
+		;ensure the k_values are sorted largest to smallest,(ie there's a knn cache internally, when the largest K value is processed and cached
+		;subsequent calls with smaller Ks will be fast)
+		(assign (assoc k_values (sort (lambda (> (current_value 1) (current_value))) k_values)))
+
+		(if (not use_k_values)
+			(assign (assoc k_values (list (get baseline_hyperparameter_map "k"))))
+		)
+		(if (not use_p_values)
+			(assign (assoc p_values (list (get baseline_hyperparameter_map "p"))))
+		)
+		(if (not use_dt_values)
+			(assign (assoc dt_values (list (get baseline_hyperparameter_map "dt"))))
+		)
+
+		(declare (assoc
+			;a map of   { k_p_dt : {  k: K, p: P, dt: DT, dist: [ ...] } }
+			accumulated_results_map (assoc)
+			p_k_dt_key (null)
+			;if k-folds == 1 and num_analysis_samples is provided, randomly sample those cases here
+			sample_case_ids
+				(if (!= (null) num_analysis_samples)
+					(call !AllCases (assoc num num_analysis_samples rand_seed (rand)))
+					(null)
+				)
+			best_accuracy_distance .infinity
+			best_params_key (null)
+			output_map (assoc)
+			;list of features to match each case, specific for targetless flow
+			case_feature_list (list)
+		))
+
+		;targetless flow
+		(if targetless
+			(seq
+				;only consider active features that have > 1 non-null value and aren't 'unique'
+				;can't compute error for features with only unique values or features with < 2 values
+				(assign (assoc
+					action_features
+						(filter
+							(lambda (and
+								(not (contains_index !inactiveFeaturesMap (current_value)))
+								(not (contains_index !uniqueNominalsSet (current_value)))
+								(>
+									;count of all the non-null cases
+									(compute_on_contained_entities (list (query_not_equals (current_value 1) (null)) (query_count) ))
+									1
+								)
+							))
+							;action_features are empty for targetless, select them from the set of context features
+							context_features
+						)
+				))
+
+				(if (size action_features)
+					(seq
+						;select features at random, num_analysis_samples worth (or num_cases/2 * sqrt(num_features) for smaller datasets)
+						;to be more sensitive to the number for features instead of the number of cases for smaller datasets
+						(assign (assoc
+							case_feature_list
+								(range
+									(lambda (rand action_features))
+									1
+									(if user_specified_num_samples
+										num_analysis_samples
+
+										(max
+											;statistical minimum for tiny datasets
+											30
+											(min
+												(* 0.5 num_cases (sqrt (size action_features)))
+												num_analysis_samples
+											)
+										)
+									)
+									1
+								)
+							valid_weight_feature (and use_case_weights (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight")) )
+						))
+
+						;pick a case at random for every randomly selected feature with a non-null value
+						(assign (assoc
+							sample_case_ids
+								(map
+									(lambda
+										(first
+											(contained_entities (list
+												(query_not_equals (current_value 1) (null))
+												(if valid_weight_feature
+													(query_weighted_sample weight_feature 1)
+													(query_sample 1)
+												)
+											))
+										)
+									)
+									case_feature_list
+								)
+						))
+					)
+
+					;else dataset has no valid features to test
+					(assign (assoc
+						sample_case_ids (list)
+						case_feature_list (list)
+					))
+				)
+			)
+		)
+
+		;grid search over the P, K and DT values
+		;
+		;foreach p:
+		;	foreach k:
+		;		foreach dt:
+		;			calculate MAE for each action feature
+		;	best = choose the one with the best validation error (lowest MAE among all features)
+		(if (= k_folds 1)
+			(call !AccumulateErrorsViaGridSearch)
+
+			;else do k-fold validation, where each fold iterates over p k and dt and accumulates errors
+			(call !AccumulateErrorsViaKFoldsGridSearch)
+		)
+
+		;convert the list of distances for each hyperparameter tuple into an avg distance
+		;and while iterating store the best (smallest) distance and corresponding key
+		(assign (assoc
+			accumulated_results_map
+				(map
+					(lambda (let
+						(assoc avg_distance (/ (apply "+" (get (current_value 1) "distances")) k_folds))
+
+						(if (< avg_distance best_accuracy_distance)
+							(assign (assoc
+								best_accuracy_distance avg_distance
+								best_params_key (current_index 1)
+							))
+						)
+
+						;overwrite 'distances' with the average of the distances
+						(set (current_value) "distances"
+							avg_distance
+						)
+					))
+					accumulated_results_map
+				)
+		))
+
+		;sort the best params that all have the same 'best' accuracy distance by their P value
+		(declare (assoc
+			best_params
+				(sort
+					(lambda (< (get (current_value 1) "p") (get (current_value) "p")))
+					(filter (lambda (= (get (current_value) "distances") best_accuracy_distance)) (values accumulated_results_map))
+				)
+			best_p (get accumulated_results_map (list best_params_key "p"))
+		))
+
+		;sort the best remaining params that have all the same 'best' p and accuracy distance by their K value
+		(assign (assoc
+			best_params
+				(sort
+					(lambda (< (get (current_value 1) "k") (get (current_value) "k")))
+					;filter out all params that did not have a matching p
+					(filter (lambda (= (get (current_value) "p") best_p)) best_params)
+				)
+		))
+
+		;at this point best_params should either have one set, that we can use, or it's sorted by K values, take the median in that case
+		(assign (assoc
+			best
+				(if (= (size best_params) 0)
+					(first best_params)
+
+					;take the median value
+					(get best_params (floor (/ (size best_params) 2)))
+				)
+
+		))
+
+		(assign (assoc
+			output_map
+				(assoc
+					"k" (get best "k")
+					"p" (get best "p")
+					"dt" (get best "dt")
+					;store the accuracy of this grid search
+					"gridSearchError" (get best "distances")
+				)
+		))
+
+		;output updated hyperparam map
+		(append
+			baseline_hyperparameter_map
+
+			;overwrite with the autotuned k and p values
+			(if (not use_inverse_weights)
+				output_map
+
+				;else compute and output the corresponding IRW with the parameters
+				(append
+					output_map
+					(assoc
+						"featureWeights"
+							;set inverted residuals to be 1 / (residual^p), unless it's 0 (or within floating point error of 0)
+							(map
+								(lambda
+									;ensure that inactive features always maintain a feature weight of 0
+									(if (contains_index !inactiveFeaturesMap (current_index))
+										0
+
+										(call !ConvertDeviationToFeatureWeight (assoc
+											feature_deviation (current_value 1)
+											p_value (get output_map "p")
+										))
+									)
+
+								)
+								(get baseline_hyperparameter_map "!analyzeFeatureDeviations")
+							)
+					)
+				)
+			)
+		)
+	)
+
+	;helper method to convert deviation value to feature weight given a deviation and p value
+	;parameters:
+	; feature_deviation: value or tuple as passed in from the hyperparameter map
+	; p_value: p value from the hyperarameter map
+	#!ConvertDeviationToFeatureWeight
+	(let
+		(assoc
+			deviation_value
+				;deviation may be a tuple if it contains null uncertainties
+				(if (= (list) (get_type feature_deviation))
+					(first feature_deviation)
+					feature_deviation
+				)
+		)
+
+		;tiny values < 1e13 mean it's a floating point percision error, set IRW to 1 / residual ^ p
+		(if (> deviation_value 1e-13)
+			(/ 1 (pow deviation_value p_value))
+
+			;else set it to 1 because there is no residual
+			1
+		)
+	)
+
+	;output model Mean Absolute Error (MAE) for the provided baseline_hyperparameter_map
+	#!ComputeModelResidualForParameters
+	(seq
+		(if targetless (assign (assoc action_features context_features)))
+
+		(declare (assoc
+			sample_case_ids
+				(if (!= (null) num_analysis_samples)
+					(call !AllCases (assoc num num_analysis_samples rand_seed (rand)))
+				)
+			accumulated_kfold_errors (list)
+		))
+
+		(if (= k_folds 1)
+			(call !CalculateModelMAE (assoc
+				action_features action_features
+				context_features context_features
+				case_ids sample_case_ids
+				ignore_exact_cases (true)
+				;TODO: make a passthrough flag from api, story 7421
+				robust_residuals (false)
+				custom_hyperparam_map baseline_hyperparameter_map
+				use_case_weights use_case_weights
+				weight_feature weight_feature
+			))
+
+			;else do k-fold, average out the value across the k-folds
+			(seq
+				;The method ComputeAndAccumulateKFoldsMAE accumulates all k_fold maes into 'accumulated_kfold_errors'
+				(call !AccumulateErrorsViaKFoldsGridSearch (assoc accumulate_error_method "!ComputeAndAccumulateKFoldsMAE"))
+				(/ (apply "+" accumulated_kfold_errors) k_folds)
+			)
+		)
+	)
+
+	;accumulate model MAE during kfold validation using provided baseline_hyperparameter_map
+	#!ComputeAndAccumulateKFoldsMAE
+	(accum (assoc
+		accumulated_kfold_errors
+			(call !CalculateModelMAE (assoc
+				action_features action_features
+				context_features context_features
+				case_ids validation_case_ids
+				cases_already_removed (true)
+				;TODO: make a passthrough flag from api, story 7421
+				robust_residuals (false)
+				custom_hyperparam_map baseline_hyperparameter_map
+				use_case_weights use_case_weights
+				weight_feature weight_feature
+			))
+	))
+
+	;doing k-fold validation, so each validation block is 1/k_folds of all the cases
+	#!AccumulateErrorsViaKFoldsGridSearch
+	(declare
+		(assoc
+			validation_size
+				(if (> k_folds 1)
+					(/ num_cases k_folds)
+					.infinity
+				)
+			;name of method to use for accumulating MAE, default to use accumulation during grid search
+			accumulate_error_method "!AccumulateErrorsViaGridSearch"
+		)
+
+		;temporary entity storage for the validation cases
+		(create_entities "_temp_" (null))
+
+		;do k-fold cross validation by taking out k even chunks of all the cases and then validating on each one
+		(map
+			(lambda (let
+				(assoc
+					;as we iterate over values of 0 through (k_folds - 1), grab the corresponding 1st, 2nd, etc chunk of all cases by their indices
+					;generate a list of indices that's validation_size in length, and starts at the correct offset based on
+					;which k-folk "chunk" is being tested as specified by (current_value)
+					validation_case_ids
+						(if k_folds_by_indices
+							(contained_entities (list
+								(query_exists !internalLabelSession)
+								(query_between !internalLabelSessionTrainingIndex
+									(* (current_value 2) validation_size)
+									(- (+ validation_size (* (current_value 2) validation_size)) 1)
+								)
+							))
+
+							(call !AllCases (assoc
+								num validation_size
+								start_offset (* (current_value 2) validation_size)
+							))
+						)
+					p_k_dt_key (null)
+				)
+
+				;move this chunk of validation cases into _temp_ so that they aren't in the model during the reaction/validation process
+				(map
+					(lambda (move_entities (current_value) (list "_temp_" (current_value 1))) )
+					validation_case_ids
+				)
+
+				;call !the method to compute the error
+				(call (retrieve_from_entity accumulate_error_method))
+
+				;restore the validation cases from backup
+				(map
+					(lambda (move_entities (list "_temp_" (current_value 1)) (current_value)) )
+					validation_case_ids
+				)
+			))
+			;k-fold, 0-based indexing
+			(range 0 (- k_folds 1))
+		)
+
+		;no longer need the temporary entity container
+		(destroy_entities "_temp_")
+	)
+
+	#!AccumulateErrorsViaGridSearch
+	(map
+		(lambda (let
+			(assoc
+				p_value (current_value 1)
+				inverted_residuals_map (null)
+			)
+
+			;compute IRW if residuals for IRW map was provided
+			(if use_inverse_weights
+				(assign (assoc
+					;set inverted residuals to be 1 / (residual^p), unless it's 0 (or within floating point error of 0)
+					;in which case set it to 1 as to not affect the feature since it's already accurate
+					;each feature's residual value will be on the same scale as the feature itself, e.g., for large feature values
+					;like billions, a residual of a few percent will be in the tens of millions, for tiny feature values, the
+					;residual values will also be tiny.  Thus deviding each feature by its residual scales the large values down
+					;and small values up.  If the residual is within an order or two of magnitude, this weighing still
+					;effectively normalizes the data.  Relatively large residuals also scale the values smaller,
+					;decreasing the effect of features that are noisy and hard to predict.
+					inverted_residuals_map
+						(map
+							(lambda
+								;ensure that inactive features always maintain a feature weight of 0
+								(if (contains_index !inactiveFeaturesMap (current_index))
+									0
+
+									(call !ConvertDeviationToFeatureWeight (assoc
+										feature_deviation (current_value 1)
+										p_value p_value
+									))
+								)
+							)
+							(get baseline_hyperparameter_map "!analyzeFeatureDeviations")
+						)
+				))
+			)
+
+			(map
+				(lambda (let
+					(assoc  k_value (current_value 1))
+					(map
+						(lambda (let
+							(assoc
+								dt_value (current_value 1)
+								mae_hyperparam_map baseline_hyperparameter_map
+							)
+
+							;overwrite the k/p/dt and inverse weights and deviations if appropriate
+							(accum (assoc
+								mae_hyperparam_map
+									(append
+										(assoc "p" p_value "k" k_value "dt" dt_value)
+
+										;if using inverse weights, overwrite existing weights in baseline_hyperparameter_map
+										(if use_inverse_weights
+											(assoc
+												"featureWeights" inverted_residuals_map
+												"featureDeviations" (get baseline_hyperparameter_map "featureDeviations")
+											)
+
+											(assoc)
+										)
+									)
+							))
+
+							;accumulate the accuracy distance for each set of parameters
+							(declare (assoc
+								accuracy_distance
+									;else do k-fold cross validation if K is specified, otherwise do 1-by-1 knockout
+									(if (> k_folds 1)
+										;iterate over all the validation_case_ids and react to each one
+										;returning the mean absolute error (MAE) for each action feature
+										(call !CalculateModelMAE (assoc
+											action_features action_features
+											context_features context_features
+											p_param_categorical_mean p_param_categorical_mean
+											p_param_accuracy_mean p_param_accuracy_mean
+											case_ids validation_case_ids
+											cases_already_removed (true)
+											;TODO: make a passthrough flag from api, story 7421
+											robust_residuals (false)
+											custom_hyperparam_map mae_hyperparam_map
+											use_case_weights use_case_weights
+											weight_feature weight_feature
+										))
+
+										;else do hold-one-out validation
+										(call !CalculateModelMAE (assoc
+											action_features action_features
+											context_features context_features
+											case_ids sample_case_ids
+											case_feature_list case_feature_list
+											ignore_exact_cases (true)
+											;TODO: make a passthrough flag from api, story 7421
+											robust_residuals (false)
+											custom_hyperparam_map mae_hyperparam_map
+											use_case_weights use_case_weights
+											weight_feature weight_feature
+										))
+									)
+							))
+
+							(assign (assoc p_k_dt_key (concat p_value k_value dt_value)))
+
+							;a map of   { k_p_dt_key : {  k: K, p: P, dt: DT, dist: [ ...] } }
+							(assign (assoc
+								accumulated_distances
+									(if (= (null) (get accumulated_results_map (list p_k_dt_key "distances")))
+										(list accuracy_distance)
+
+										(append
+											(get accumulated_results_map (list p_k_dt_key "distances"))
+											accuracy_distance
+										)
+									)
+							))
+
+							;store both the distance calculated using the p value and the geometric mean
+							(accum (assoc
+								accumulated_results_map
+									(associate
+										p_k_dt_key
+											(assoc
+												"k" k_value
+												"p" p_value
+												"dt" dt_value
+												"distances" accumulated_distances
+											)
+									)
+							))
+						))
+						dt_values
+					)
+				))
+				k_values
+			)
+		))
+		p_values
+	)
+
+)
