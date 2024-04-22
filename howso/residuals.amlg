@@ -128,11 +128,57 @@
 		"residual_map"
 		(map
 			(lambda
-				;update direct value
-				(max
-					(get !cachedFeatureMinResidualMap (current_index))
-					(current_value)
-					(get !userSpecifiedFeatureErrorsMap (current_index))
+				;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
+				(if (contains_index !nominalsMap (current_index))
+					(let
+						(assoc
+							;map of class -> count
+							class_counts_map
+								(compute_on_contained_entities (list
+									(query_value_masses (current_index 2) (null) (contains_index !numericNominalFeaturesMap (current_index 2)) )
+								))
+						)
+
+						;do not max cap nominal deviations if less than 2 classes have been trained
+						(if (<= (size class_counts_map) 1)
+							(max
+								(get !cachedFeatureMinResidualMap (current_index))
+								(current_value)
+								(get !userSpecifiedFeatureErrorsMap (current_index))
+							)
+
+							;else cap the max nominal deviation
+							(let
+								(assoc total_count (apply "+" (values class_counts_map)) )
+
+								(min
+									;nominal max deviation is the sum of: each class's probability multiplied by probability of getting it wrong
+									(apply "+"
+										(map
+											(lambda (let
+												(assoc class_prob (* (/ (current_value 1) total_count)) )
+												(* class_prob (- 1 class_prob))
+											))
+											(values class_counts_map)
+										)
+									)
+
+									(max
+										(get !cachedFeatureMinResidualMap (current_index))
+										(current_value)
+										(get !userSpecifiedFeatureErrorsMap (current_index))
+									)
+								)
+							)
+						)
+					)
+
+					;else continuous value don't have upper bounds, set the lower bound
+					(max
+						(get !cachedFeatureMinResidualMap (current_index))
+						(current_value)
+						(get !userSpecifiedFeatureErrorsMap (current_index))
+					)
 				)
 			)
 			(get feature_residuals_map "residual_map")
@@ -144,43 +190,50 @@
 	;returns an assoc of target_residual_feature -> residual value
 	#!ComputeRegionalResiduals
 	(if (= 1 (size regional_model_cases_map))
+		(assoc
+			"residual_map"
+				;if regional model is of size of 1, residual cannot be calculated, therefore
+				;for nominal features set it to 0.5
+				(if (contains_index !nominalsMap target_residual_feature)
+					(associate target_residual_feature 0.5)
 
-		;if regional model is of size of 1, residual cannot be calculated, therefore for continuous features
-		;set the residual to: boundary_max - boundary_min (if boundaries are specified)
-		(map
-			(lambda (let
-				(assoc feature (current_index))
+					;for continuous features set the residual to: boundary_max - boundary_min (if boundaries are specified)
+					(map
+						(lambda (let
+							(assoc feature (current_index))
 
-				(declare (assoc
-					boundaries_tuple
-						(call !ConstrainBoundariesForFeature (assoc
-							bounds_map (get feature_bounds_map feature)
-							feature feature
-							is_datetime (and !hasDateTimeFeatures (contains_index !featureDateTimeMap feature))
-							cycle_length cycle_length
+							(declare (assoc
+								boundaries_tuple
+									(call !ConstrainBoundariesForFeature (assoc
+										bounds_map (get feature_bounds_map feature)
+										feature feature
+										is_datetime (and !hasDateTimeFeatures (contains_index !featureDateTimeMap feature))
+										cycle_length cycle_length
+									))
+							))
+
+							;residual is: feature range / 4 to average out residual in each direction
+
+							;if a boundary value is not specified, residual is unknown, set it to 0
+							(if (contains_value boundaries_tuple (null))
+								0
+
+								;for cyclics with exclusionary bounds where the min is larger than the max,
+								;e.g., to allow +/- 60 degrees, boundary_min=300, boundary_max=60
+								;therefore the range is: boundary_max + (cycle_length - boundary_min)
+								(and cycle_length (> (first boundaries_tuple) (last boundaries_tuple)))
+								(/
+									(+ (last boundaries_tuple) (- cycle_length (first boundaries_tuple)))
+									4
+								)
+
+								;else residual is simply the range: (boundary_max - boundary_min)
+								(/ (- (last boundaries_tuple) (first boundaries_tuple)) 4)
+							)
 						))
-				))
-
-				;residual is: feature range / 4 to average out residual in each direction
-
-				;if a boundary value is not specified, residual is unknown, set it to 0
-				(if (contains_value boundaries_tuple (null))
-					0
-
-					;for cyclics with exclusionary bounds where the min is larger than the max,
-					;e.g., to allow +/- 60 degrees, boundary_min=300, boundary_max=60
-					;therefore the range is: boundary_max + (cycle_length - boundary_min)
-					(and cycle_length (> (first boundaries_tuple) (last boundaries_tuple)))
-					(/
-						(+ (last boundaries_tuple) (- cycle_length (first boundaries_tuple)))
-						4
+						(zip (list target_residual_feature))
 					)
-
-					;else residual is simply the range: (boundary_max - boundary_min)
-					(/ (- (last boundaries_tuple) (first boundaries_tuple)) 4)
 				)
-			))
-			(zip (list target_residual_feature))
 		)
 
 		;else return the regional residuals for the target_residual_feature
