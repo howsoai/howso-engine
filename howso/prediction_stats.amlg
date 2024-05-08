@@ -1,0 +1,881 @@
+;Contains methods for computing prediction stats residuals.
+(null
+
+	;returns cached feature prediction stats for all features in the format of feature -> assoc stat -> value
+	;parameters are optional, when not specified will output all stats, when specified will attempt to
+	;output the cached stats best matching the requested parameters, null if none match.
+	;
+	;parameters:
+	; stats: list of strings, optional.  Allowed values are:
+	;	"mda" : mean decrease in accuracy when each feature is dropped from the model, applies to all features.
+	;	"contribution": feature contribution to predicted value when each feature is dropped from the model, applies to all features.
+	;	"mda_permutation": mean decrease in accuracy that used scrambling of feature values instead of dropping each feature, applies to all features.
+	;	"mae" : Mean absolute error. For continuous features, this is calculated as the mean of absolute values of the difference
+	;		between the actual and predicted values. For nominal features, this is 1 - the average categorical action probability of each case's
+	;		correct classes. Categorical action probabilities are the probabilities for each class for the action feature.
+	;	"r2": r-squared coefficient of determination, for continuous features only.
+	;	"rmse": root mean squared error, for continuous features only.
+	;	"spearman_coeff": Spearman's rank correlation coefficient, for continuous features only.
+	;	"precision": precision (positive predictive) value for nominal features only.
+	;	"recall": recall (sensitivity) value for nominal features only.
+	;	"accuracy": The number of correct predictions divided by the total number of predictions.
+	;	"missing_value_accuracy": The number of correct predictions on cases with missing values values divided by the total number of cases with missing
+	;							  values for a specified feature.
+	;   "confusion_matrix": A matrix showing the number of predicted values of each class
+	;					   for each unique value of the predicted feature. Outputs the sparse confusion matrix.
+	;
+	; robust: flag, optional. if specified will attempt to return stats that were computed with the specified robust or non-robust type.
+	; action_feature: string, optional. if specified will attempt to return stats that were computed for this specified action_feature.
+	;				  Note: ".targetless" is the action feature used during targetless analysis.
+	; robust_hyperparameters: flag, optional. if specified, will attempt to return stats that were computed using hyperpparameters with the
+	;						  specified robust or non-robust type.
+	; weight_feature: string, optional. if specified, will attempt to return stats that were computed using this weight_feature.
+	; condition: assoc of feature->value(s)
+	;		no value = must have feature
+	;   	- for continuous or numeric ordinal features:
+	;			one value = must equal exactly the value or be close to it for fuzzy match
+	;			two values = inclusive between
+	;   	- for nominal or string ordinal features:
+	;			n values = must match any of these values exactly
+	; precision: optional string,  default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
+	; num_cases: optional, limit on the number of cases to use in calculating conditional prediction stats; If set to zero there will be no limit.
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
+	; num_robust_influence_samples_per_case: optional, Specifies the number of robust samples to use for each case for robust contribution computations.
+	;				  Defaults to 300 + 2 * (number of features).
+	#get_prediction_stats
+	(declare
+		(assoc
+			stats (list)
+			robust (null)
+			action_feature (null)
+			robust_hyperparameters (null)
+			weight_feature (null)
+			condition (null)
+			precision "exact"
+			num_cases (null)
+		)
+
+		;if there are specified stats remaining after all the supported stats have been removed, that means unsupported ones were provided
+		(if (> (size (remove (zip stats) !supportedPredictionStats)) 0)
+			(conclude
+				(call !Return (assoc
+					errors
+						(list (concat
+							"Specified an unsupported stat. Supported stats are: "
+							(apply "concat" (trunc (weave !supportedPredictionStats ", ")))
+						))
+				))
+			)
+		)
+
+		(call !Return
+			(if (= condition (null))
+				(call !GetFeaturePredictionStats (assoc
+					stats stats
+					robust robust
+					action_feature action_feature
+					robust_hyperparameters robust_hyperparameters
+					weight_feature weight_feature
+				))
+
+				;else condition is present
+				(call !CalculateConditionalPredictionStats (assoc
+					stats stats
+					robust robust
+					action_feature action_feature
+					robust_hyperparameters robust_hyperparameters
+					weight_feature weight_feature
+					condition condition
+					precision precision
+					num_cases num_cases
+					num_robust_influence_samples_per_case num_robust_influence_samples_per_case
+				))
+			)
+		)
+	)
+
+	;returns cached feature residuals in the format of assoc feature -> residual value
+	;parameters are optional, when not specified will auto-select a cached Residuals set for output, when specified will attempt to
+	;output the cached residuals best matching the requested parameters, null if none match.
+	;
+	;parameters:
+	; robust: flag, optional. if specified will attempt to return residuals that were computed with the specified robust or non-robust type.
+	; action_feature: string, optional. if specified will attempt to return residuals that were computed for this specified action_feature.
+	;				  Note: ".targetless" is the action feature used during targetless analysis.
+	; robust_hyperparameters: flag, optional. if specified, will attempt to return residuals that were computed using hyperpparameters with the
+	;						  specified robust or non-robust type.
+	; weight_feature: string, optional. if specified, will attempt to return residuals that were computed using this weight_feature.
+	#get_feature_residuals
+	(declare
+		(assoc
+			robust (null)
+			action_feature (null)
+			robust_hyperparameters (null)
+			weight_feature (null)
+		)
+
+		(if (= 0 (size !residualsMap) )
+			(conclude
+				(call !Return (assoc
+					errors
+						(list "Feature Residuals have not been computed for this trainee. Please call 'react_into_trainee' with appropriate parameters to compute and store residuals prior to calling this method.")
+				))
+			)
+		)
+
+		(declare (assoc
+			output
+				(call !GetFeatureResiduals (assoc
+					robust robust
+					action_feature action_feature
+					robust_hyperparameters robust_hyperparameters
+					weight_feature weight_feature
+				))
+		))
+
+		(if (= (null) output)
+			(call !Return (assoc
+				errors (list "Feature Residuals for the specified parameters has not been computed.  Please call 'react_into_trainee' with appropriate parameters to compute and store residuals prior to calling this method.")
+			))
+
+			(call !Return (assoc payload output))
+		)
+	)
+
+	;returns cached feature prediction stats  residuals in the format of assoc feature -> assoc stat -> value
+	;parameters are optional, when not specified will output all stats,  when specified will attempt to
+	;output the cached stats best matching the requested parameters, null if none match.
+	;
+	;parameters:
+	; stats: list of strings, optional.  Allowed values are:
+	;		"mae", "mda", "contribution", "mda_permutation", "r2", "rmse", "spearman_coeff", "precision", "recall", "accuracy", "mcc", "confusion_matrix"
+	; robust: flag, optional. if specified will attempt to return residuals that were computed with the specified robust or non-robust type.
+	; action_feature: string, optional. if specified will attempt to return residuals that were computed for this specified action_feature.
+	;				  Note: ".targetless" is the action feature used during targetless analysis.
+	; robust_hyperparameters: flag, optional. if true, will attempt to return residuals that were computed using hyperparameters with the
+	;						  specified robust or non-robust type.
+	; weight_feature: string, optional. if specified, will attempt to return residuals that were computed using this weight_feature.
+	#!GetFeaturePredictionStats
+	(declare
+		(assoc
+			stats (list)
+			robust (null)
+			action_feature (null)
+			robust_hyperparameters (null)
+			weight_feature (null)
+		)
+
+		(declare (assoc
+			output_map (assoc)
+			warnings (assoc)
+		))
+
+		;if no stats were specified, return all of them (except for confusion_matrix) by default
+		; the confusion_matrix is an object and not a number so can interfere with smooth math operations
+		; done on the result, so we exclude it unless it's asked for explicitly.
+		(if (= 0 (size stats))
+			(assign (assoc
+				stats
+					;if no action_feature was specified, don't bother returning stats that need action_feature
+					(if (= (null) action_feature)
+						(filter (lambda (not (contains_value (list "contribution" "confusion_matrix" "mda" "mda_permutation" ) (current_value)))) !supportedPredictionStats)
+						(filter (lambda (!= "confusion_matrix" (current_value))) !supportedPredictionStats)
+					)
+
+			))
+		)
+
+		(if (contains_value stats "mae")
+			(if (= 0 (size !residualsMap))
+				(accum (assoc warnings "Feature residuals have not been computed for this trainee. Please call 'react_into_trainee' with appropriate parameters to compute and store residuals prior to calling this method." ))
+
+				(accum (assoc
+					output_map
+						(assoc
+							"mae"
+								(map
+									;GetFeatureResiduals returns the values in !residualsMap, which contains a list of values for features containing nulls.
+									;In the case where !residualsMap holds a list of values for a feature, the first value is the MAE.
+									(lambda
+										(if (= (get_type_string (current_value)) "list")
+											(first (current_value))
+
+											(current_value)
+										)
+									)
+									(call !GetFeatureResiduals (assoc
+										robust robust
+										action_feature action_feature
+										robust_hyperparameters robust_hyperparameters
+										weight_feature weight_feature
+									))
+								)
+						)
+				))
+			)
+		)
+
+		(if (contains_value stats "missing_value_accuracy")
+			(if (= 0 (size !featureNullAccuracyMap))
+				(accum (assoc warnings "Feature missing value accuracies have not been computed for this trainee. Please call 'react_into_trainee' with appropriate parameters to compute and store missing value accuracies prior to calling this method." ))
+
+				(accum (assoc
+					output_map
+						(assoc
+							"missing_value_accuracy"
+								(call !GetFeatureNullAccuracies (assoc
+									robust robust
+									action_feature action_feature
+									robust_hyperparameters robust_hyperparameters
+									weight_feature weight_feature
+								))
+						)
+				))
+			)
+		)
+
+		(if (contains_value stats "contribution")
+			(seq
+				(if (= (null) action_feature)
+					(accum (assoc warnings "Must specify action_feature when getting feature contributions." ))
+				)
+
+				(if (= 0 (size !contributionsMap))
+					(accum (assoc warnings "Feature contributions have not been computed for this trainee. Please call 'react_into_trainee' with appropriate parameters to compute and store contributions prior to calling this method."))
+					(accum (assoc
+						output_map
+							(assoc
+								"contribution"
+									(call !GetFeatureContributions (assoc
+										robust robust
+										action_feature action_feature
+										weight_feature weight_feature
+									))
+							)
+					))
+				)
+			)
+		)
+
+		(if (or (contains_value stats "mda") (contains_value stats "mda_permutation"))
+			(seq
+				(if (= (null) action_feature)
+					(accum (assoc warnings "Must specify action_feature when getting MDA." ))
+				)
+
+				(if (contains_value stats "mda")
+					(seq
+						(if (= 0 (size !mdaMap))
+							(accum (assoc warnings "Feature MDA has not been computed for this trainee. Please call 'react_into_trainee' with appropriate parameters to compute and store MDA prior to calling this method."))
+						)
+						(accum (assoc
+							output_map
+								(assoc
+									"mda"
+										(call !GetFeatureMDA (assoc
+											robust robust
+											action_feature action_feature
+											weight_feature weight_feature
+										))
+								)
+						))
+					)
+				)
+				(if (contains_value stats "mda_permutation")
+					(seq
+						(if (= 0 (size !mdaPermutationMap))
+							(accum (assoc warnings "Feature permutation MDA has not been computed for this trainee. Please call 'react_into_trainee' with appropriate parameters to compute and store MDA prior to calling this method."))
+						)
+						(accum (assoc
+							output_map
+								(assoc
+									"mda_permutation"
+										(call !GetFeatureMDA (assoc
+											robust robust
+											permutation (true)
+											action_feature action_feature
+											weight_feature weight_feature
+										))
+								)
+						))
+					)
+				)
+			)
+		)
+
+		(declare (assoc
+			basic_stats
+				(filter
+					(lambda (contains_value (list "r2" "rmse" "spearman_coeff" "precision" "recall" "accuracy" "confusion_matrix" "mcc") (current_value)))
+					stats
+				)
+		))
+
+		(if (> (size basic_stats) 0)
+			(if (= 0 (size !featurePredictionStatsMap))
+				(accum (assoc warnings "Feature Residuals have not been computed for this trainee. Please call 'react_into_trainee' with appropriate parameters to compute and store residuals prior to calling this method." ))
+
+				;else add the available basic prediction stats to output
+				(accum (assoc
+					output_map
+						(keep
+							(if (= (null) robust action_feature robust_hyperparameters weight_feature)
+								;if only one residuals set has been computed, return it
+								(if (= 1 (size !featurePredictionStatsMap))
+									(remove
+										(first (values !featurePredictionStatsMap))
+										(list ".hyperparam_path" ".robust")
+									)
+
+									;there are several cached residuals, pick one 'smartly':
+									(remove
+										(call !AutoSelectPredictionStats (assoc original_values_map (retrieve_from_entity "!featurePredictionStatsMap") ))
+										(list ".hyperparam_path" ".robust")
+									)
+								)
+
+								;else specified parameters, try to find the matching one
+								(call !SelectPredictionStats (assoc filtered_values_map (retrieve_from_entity "!featurePredictionStatsMap") ))
+							)
+							basic_stats
+						)
+				))
+			)
+		)
+
+		;transform stats to be per-feature for output and filter out any empty assocs
+		(assign (assoc
+			output_map
+				(filter
+					(lambda (and (!= (assoc) (current_value)) (!= (null) (current_value)) ))
+					(map
+						(lambda (let
+							(assoc feature (current_index 1))
+							(filter (map
+								(lambda (get (current_value) feature))
+								output_map
+							))
+						))
+						(zip !trainedFeatures)
+					)
+				)
+		))
+
+		;output payload and warnings
+		(assoc
+			"payload" output_map
+			"warnings" (if (size warnings) (indices warnings) )
+		)
+	)
+
+	;calculates feature prediction stats/residuals on a subset of cases matching a condition in the format of assoc feature -> assoc stat -> value
+	;parameters are optional, when not specified will output all stats,  when specified will attempt to
+	;output the cached stats best matching the requested parameters, null if none match.
+	;
+	;parameters:
+	; stats: list of strings, optional.  Allow values are:
+	;		"mae", "mda", "contribution", "mda_permutation", "r2", "rmse", "spearman_coeff", "precision", "recall", "accuracy"
+	; robust: flag, optional. if specified will attempt to return residuals that were computed with the specified robust or non-robust type.
+	; action_feature: string, optional. if specified will attempt to return residuals that were computed for this specified action_feature.
+	;				  Note: ".targetless" is the action feature used during targetless optimization.
+	; robust_hyperparameters: flag, optional. if true, will attempt to return residuals that were computed using hyperparameters with the
+	;						  specified robust or non-robust type.
+	; weight_feature: string, optional. if specified, will attempt to return residuals that were computed using this weight_feature.
+	; condition: assoc of feature->value(s)
+	;		no value = must have feature
+	;   	- for continuous or numeric ordinal features:
+	;			one value = must equal exactly the value or be close to it for fuzzy match
+	;			two values = inclusive between
+	;   	- for nominal or string ordinal features:
+	;			n values = must match any of these values exactly
+	; precision: optional string,  default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
+	; num_cases: optional, limit on the number of cases to use in calculating conditional prediction stats; If set to zero there will be no limit.
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
+	; num_robust_influence_samples_per_case: optional integer. Specifies the number of robust samples to use for each case.
+	;				  Applicable only for computing feature contributions. When unspecified, defaults to 200 + 2 * number of features.
+	;				  Higher values will take longer but provide more stable results.
+	#!CalculateConditionalPredictionStats
+	(declare
+		(assoc
+			stats (list)
+			action_feature (null)
+			robust_hyperparameters (null)
+			weight_feature (null)
+			condition (null)
+			precision "exact"
+			num_cases (null)
+			num_robust_influence_samples_per_case (null)
+		)
+
+		(if (= num_cases (null))
+			(if (= precision "similar")
+				(assign (assoc
+					num_cases (get hyperparam_map "k")
+				))
+
+				;else precision is exact
+				(assign (assoc
+					num_cases 1000
+				))
+			)
+		)
+
+		(declare (assoc
+			output_map (assoc)
+			warnings (assoc)
+			case_ids
+				(call !GetCasesByCondition (assoc
+					condition condition
+					condition_session (null)
+					precision precision
+					num_cases num_cases
+				))
+			context_features (filter (lambda (!= action_feature (current_value))) !trainedFeatures)
+			use_case_weights (!= (null) weight_feature)
+		))
+
+		(declare (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					feature action_feature
+					context_features context_features
+					mode (if (= robust_hyperparameters (true)) "robust" "full")
+					weight_feature (if (= weight_feature (null)) ".none" weight_feature)
+				))
+			features (if (!= action_feature (null)) (append context_features action_feature) context_features)
+		))
+
+		;if no stats were specified, return all of them by default
+		(if (= 0 (size stats))
+			(assign (assoc
+				stats
+					;if no action_feature was specified, don't bother returning stats that need action_feature
+					(if (= (null) action_feature)
+						(filter (lambda (not (contains_value (list "contribution" "mda" "mda_permutation") (current_value)))) !supportedPredictionStats)
+						!supportedPredictionStats
+					)
+
+			))
+		)
+
+		(declare (assoc
+			basic_stats
+				(filter
+					(lambda (contains_value (list "r2" "rmse" "spearman_coeff" "precision" "recall" "mcc" "accuracy") (current_value)))
+					stats
+				)
+		))
+
+		(if (or (contains_value stats "mae") (!= basic_stats (list) ) )
+			(let
+				(assoc
+					temp_output
+						(call !CalculateFeatureResiduals (assoc
+							features features
+							case_ids case_ids
+							robust_residuals robust_hyperparameters
+							use_case_weights use_case_weights
+							weight_feature weight_feature
+							custom_hyperparam_map hyperparam_map
+							compute_all_statistics (!= basic_stats (list))
+							store_values (false)
+						))
+				)
+				(if (contains_value stats "mae")
+					(accum (assoc
+						output_map
+							(assoc
+								"mae" (get temp_output "residual_map")
+							)
+					))
+				)
+
+				(map
+					(lambda
+						(accum (assoc
+							output_map
+								(associate
+									(current_value 2) (get temp_output (list "prediction_stats" (current_value 3)) )
+								)
+						))
+					)
+					basic_stats
+				)
+			)
+		)
+
+		(if (contains_value stats "missing_value_accuracy")
+			(let
+				(assoc
+					features_map (zip features)
+					null_prediction_map (null)
+					feature_residuals_lists (null)
+					robust_residuals (= robust (true))
+				)
+
+				;map of feature_name -> list of case ids with null values for the specified feature
+				(declare (assoc
+					null_feature_cases_map
+						(map
+							(lambda
+								(contained_entities (list
+									(query_in_entity_list case_ids)
+									(query_equals (current_index 1) (null))
+								))
+							)
+
+							;the assoc of features that have nulls or may have nulls, since nulls function as true
+							(zip (filter
+								(lambda (!= (false) (get !featureNullRatiosMap (list (current_value 1) "has_nulls"))) )
+								features
+							))
+						)
+				))
+
+				;filter out the features that did not have any nulls in case_ids
+				(assign (assoc
+					null_feature_cases_map
+						(filter
+							(lambda (size (current_value)) )
+							null_feature_cases_map
+						)
+				))
+
+				;if doing robust_residuals, supersample the null cases
+				(if robust_residuals
+					(assign (assoc
+						null_feature_cases_map
+							(map
+								(lambda
+									(rand (current_value) 200 (false))
+								)
+								null_feature_cases_map
+							)
+					))
+				)
+				(declare (assoc features_with_nulls (indices null_feature_cases_map) ))
+
+				(call !ComputeNullAccuracies)
+
+				(accum (assoc
+					output_map (assoc "missing_value_accuracy" null_prediction_map)
+				))
+			)
+		)
+
+		(if (contains_value stats "contribution")
+			(seq
+				(if (= (null) action_feature)
+					(accum (assoc warnings "Must specify action_feature when getting feature contributions." ))
+
+					;else add results
+					(let
+						(assoc
+							feature_contributions_pair
+								(call !CalculateFeatureContributions (assoc
+									context_features context_features
+									action_feature action_feature
+									robust robust_hyperparameters
+									case_ids case_ids
+									weight_feature weight_feature
+									custom_hyperparam_map hyperparam_map
+									run_on_local_model (false)
+									store_values (false)
+									num_robust_influence_samples_per_case num_robust_influence_samples_per_case
+								))
+						)
+						(accum (assoc
+							output_map
+								(assoc
+									"contribution" (first feature_contributions_pair)
+									"directional_contribution" (last feature_contributions_pair)
+								)
+						))
+					)
+				)
+			)
+		)
+
+		(if (or (contains_value stats "mda") (contains_value stats "mda_permutation"))
+			(seq
+				(if (= (null) action_feature)
+					(accum (assoc warnings "Must specify action_feature when getting MDA." ))
+
+					;else add results
+					(seq
+						(if (contains_value stats "mda")
+							(accum (assoc
+								output_map
+									(assoc
+										"mda"
+											(call !CalculateMDA (assoc
+												context_features context_features
+												action_feature action_feature
+												sensitivity_to_randomization (false)
+												robust robust_hyperparameters
+												case_ids case_ids
+												use_case_weights use_case_weights
+												weight_feature weight_feature
+												custom_hyperparam_map hyperparam_map
+												store_values (false)
+											))
+									)
+							))
+						)
+						(if (contains_value stats "mda_permutation")
+							(accum (assoc
+								output_map
+									(assoc
+										"mda_permutation"
+											(call !CalculateMDA (assoc
+												context_features context_features
+												action_feature action_feature
+												sensitivity_to_randomization (true)
+												robust robust_hyperparameters
+												case_ids case_ids
+												use_case_weights use_case_weights
+												weight_feature weight_feature
+												custom_hyperparam_map hyperparam_map
+												store_values (false)
+										))
+									)
+							))
+						)
+					)
+				)
+			)
+		)
+
+		;transform stats to be per-feature for output and filter out any empty assocs
+		(assign (assoc
+			output_map
+				(filter
+					(lambda (and (!= (assoc) (current_value)) (!= (null) (current_value)) ))
+					(map
+						(lambda (let
+							(assoc feature (current_index 1))
+							(filter (map
+								(lambda (get (current_value) feature))
+								output_map
+							))
+						))
+						(zip !trainedFeatures)
+					)
+				)
+		))
+
+		;output payload and warnings
+		(assoc
+			"payload" output_map
+			"warnings" (if (size warnings) (indices warnings) )
+		)
+	)
+
+	;Helper method for GetFeatureResiduals or GetFeatureStats, attempts to find a set from the cached map that matches any of the
+	;optionaly specified parameters of robust, action_feature robust_hyperparameters and/or weight_feature
+	#!SelectPredictionStats
+	(seq
+
+		;leave only those matching specified robust flag
+		(if (!= (null) robust)
+			(assign (assoc
+				filtered_values_map
+					(filter
+						(lambda (= (get (current_value) ".robust") robust) )
+						filtered_values_map
+					)
+			))
+		)
+
+		;leave only those matching specified action_feature
+		(if (!= (null) action_feature)
+			(assign (assoc
+				filtered_values_map
+					(filter
+						(lambda (= (get (current_value) (list ".hyperparam_path" 0)) action_feature)  )
+						filtered_values_map
+					)
+			))
+		)
+
+		;leave only those matching specified robust_hyperparameters
+		(if (!= (null) robust_hyperparameters)
+			(assign (assoc
+				filtered_values_map
+					(filter
+						(lambda (= (get (current_value) (list ".hyperparam_path" 2)) robust_hyperparameters)  )
+						filtered_values_map
+					)
+			))
+		)
+
+		;leave only those matching specified weight_feature
+		(if (!= (null) weight_feature)
+			(assign (assoc
+				filtered_values_map
+					(filter
+						(lambda (= (get (current_value) (list ".hyperparam_path" 3)) weight_feature) )
+						filtered_values_map
+					)
+			))
+		)
+
+		(if (= 0 (size filtered_values_map))
+			(conclude (null))
+
+
+			(= 1 (size filtered_values_map))
+			(conclude
+				(remove
+					(first (values filtered_values_map))
+					(list ".hyperparam_path" ".robust")
+				)
+			)
+		)
+
+		;else if there are still multiple choices and no selected action_feature, attempt to output .targetless residuals
+		(if (= (null) action_feature)
+			(let
+				(assoc backup_map filtered_values_map)
+				(assign (assoc
+					filtered_values_map
+						(filter
+							(lambda (= (get (current_value) (list ".hyperparam_path" 0)) ".targetless")  )
+							filtered_values_map
+						)
+				))
+				;revert if we filtered out all residuals
+				(if (= 0 filtered_values_map)
+					(assign (assoc filtered_values_map backup_map))
+				)
+			)
+		)
+
+		;did not specify weight_feature but there are multiple weight features cached, filter out non default weight_features
+		(if (and (= (null) weight_feature) (> (size filtered_mda_map) 1))
+			(let
+				(assoc backup_map filtered_values_map)
+				(assign (assoc
+					filtered_values_map
+						(filter
+							(lambda (= (get (current_value) (list ".hyperparam_path" 3)) ".none") )
+							filtered_values_map
+						)
+				))
+
+				;revert if all residuals were filtered out
+				(if (= 0 (size filtered_values_map))
+					(assign (assoc filtered_values_map backup_map))
+				)
+			)
+		)
+
+		;at this point output the first one, whatever it happens to be
+		(remove
+			(first (values filtered_values_map))
+			(list ".hyperparam_path" ".robust")
+		)
+	)
+
+	;Helper method for GetFeatureResiduals or GetFeatureStats, attempts to find the most appropriate set from the cached map
+	#!AutoSelectPredictionStats
+	(let
+		(assoc
+			;leave only ".targetless"
+			filtered_values_map
+				(filter
+					(lambda (= (get (current_value) (list ".hyperparam_path" 0)) ".targetless") )
+					original_values_map
+				)
+		)
+		(if (= 1 (size filtered_values_map))
+			(conclude (first (values filtered_values_map)))
+
+			;revert because all were filtered out
+			(= 0 (size filtered_values_map))
+			(assign (assoc filtered_values_map original_values_map))
+
+			;else backup the filtered residuals map for further filtering below
+			(assign (assoc original_values_map filtered_values_map))
+		)
+
+		;leave only 'robust' residuals
+		(assign (assoc
+			filtered_values_map
+				(filter
+					(lambda (= (get (current_value) ".robust") (true)) )
+					filtered_values_map
+				)
+		))
+		(if (= 1 (size filtered_values_map))
+			(conclude (first (values filtered_values_map)))
+
+			;revert because all were filtered out
+			(= 0 (size filtered_values_map))
+			(assign (assoc filtered_values_map original_values_map))
+
+			;else backup the filtered residuals map for further filtering below
+			(assign (assoc original_values_map filtered_values_map))
+		)
+
+		;leave only 'robust' hyperparam residuals
+		(assign (assoc
+			filtered_values_map
+				(filter
+					(lambda (= (get (current_value) (list ".hyperparam_path" 2)) "robust") )
+					filtered_values_map
+				)
+		))
+		(if (= 1 (size filtered_values_map))
+			(conclude (first (values filtered_values_map)))
+
+			;revert because all were filtered out
+			(= 0 (size filtered_values_map))
+			(assign (assoc filtered_values_map original_values_map))
+
+			;else backup the filtered residuals map for further filtering below
+			(assign (assoc original_values_map filtered_values_map))
+		)
+
+		;leave only case weight of .none
+		(assign (assoc
+			filtered_values_map
+				(filter
+					(lambda (= (get (current_value) (list ".hyperparam_path" 3)) ".none") )
+					filtered_values_map
+				)
+		))
+		(if (= 1 (size filtered_values_map))
+			(conclude (first (values filtered_values_map)))
+
+			;revert because all were filtered out
+			(= 0 (size filtered_values_map))
+			(assign (assoc filtered_values_map original_values_map))
+
+			;else backup the filtered residuals map for further filtering below
+			(assign (assoc original_values_map filtered_values_map))
+		)
+
+		;leave only case weight of .case_weight
+		(assign (assoc
+			filtered_values_map
+				(filter
+					(lambda (= (get (current_value) (list ".hyperparam_path" 3)) ".case_weight") )
+					filtered_values_map
+				)
+		))
+		(if (= 1 (size filtered_values_map))
+			(conclude (first (values filtered_values_map)))
+
+			;revert because all were filtered out
+			(= 0 (size filtered_values_map))
+			(assign (assoc filtered_values_map original_values_map))
+
+			;else backup the filtered residuals map for further filtering below
+			(assign (assoc original_values_map filtered_values_map))
+		)
+
+		;at this point output the first one, whatever it happens to be
+		(first (values filtered_values_map))
+	)
+)

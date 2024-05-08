@@ -1,0 +1,654 @@
+;Contains methods for adding, editing and removal of cases and session data.
+(null
+
+
+	;Cleans up trainee data, removing unused sessions, cases or actions missing data, etc. given the following optional parameters.  If a parameter is not specified, it will look to this entity's own label of the same name.  See label for parameter details.
+	;parameters:
+	; context_features: list of context features
+	; action_features: list of action features
+	; remove_duplicates: optional flag, if set to true will remove duplicate cases (cases with identical values)
+	#clean_data
+	(declare
+		(assoc
+			context_features (list)
+			action_features (list)
+		)
+		;removes entities that aren't cases or sessions
+		(call !RemoveIrrelevantEntities)
+
+		;removes any cases that don't have both the specified context and action features
+		(call !RemoveIncompleteCases (assoc context_features context_features action_features action_features))
+
+		;removes any non-existent cases from session replay steps
+		(call !RemoveInvalidCasesFromSessionReplay)
+
+		;removes duplicate (identical) cases
+		(if remove_duplicates
+			(call !MergeDuplicateCases (assoc features (append context_features action_features)))
+		)
+
+		;removes cases with null or invalid sessions
+		(call !RemoveCasesWithoutSessionReferences)
+
+		;removes empty sessions
+		(call !RemoveUnreferencedSessions)
+
+		(accum_to_entities (assoc !revision 1))
+
+		;return true that completed
+		(call !Return)
+	)
+
+	;removes any entities that are not a fully valid case, or replay (e.g., partially merged / broken entities)
+	#!RemoveIrrelevantEntities
+	(let
+		(assoc entities_to_keep_map (null))
+
+		;populate entities_to_keep with a list of all contained session and case entities
+		(assign (assoc
+			entities_to_keep_map
+				(zip
+					(append
+						(call !GetSessionIds)
+						(call !AllCases)
+					)
+				)
+		))
+
+		;destroy any cases that aren't in entities_to_keep_map
+		(map
+			;destroy any entities
+			(lambda (destroy_entities (current_value)))
+
+			;that have empty lists of empty replay references
+			(filter
+				(lambda
+					(not (contains_index entities_to_keep_map (current_value)))
+				)
+
+				(contained_entities)
+			)
+		)
+
+		(true)
+	)
+
+	;removes any replay sessions that are empty or have no cases pointing to them
+	#!RemoveUnreferencedSessions
+	(map
+		(lambda (let
+			(assoc session (current_value 1))
+			;if no references, then destroy
+			(if
+				(or
+					;if the session replay is empty
+					(= 0 (size (retrieve_from_entity (current_value) ".replay_steps")))
+
+					;or there are no cases that have this session
+					(= 0 (size
+						(contained_entities (list
+							(query_exists !internalLabelSession)
+							(query_equals !internalLabelSession session)
+						))
+					))
+				)
+				(destroy_entities (current_value))
+			)
+		))
+
+		(call !GetSessionIds)
+	)
+
+	;removes replay specified by session and any references within cases
+	;
+	;parameters:
+	; session: session to remove
+	#remove_session
+	(seq
+		(destroy_entities session)
+
+		;if any case references this session, remove the session id
+		(map
+			(lambda
+				(if (= session (retrieve_from_entity (current_value) !internalLabelSession))
+					(assign_to_entities (current_value) (associate !internalLabelSession (null)))
+				)
+			)
+
+			(call !AllCases)
+		)
+
+		;call !the method to remove all cases without session references
+		(call !RemoveCasesWithoutSessionReferences)
+
+		(accum_to_entities (assoc !revision 1))
+
+		(call !Return)
+	)
+
+	;removes the specified feature on all cases for a trainee that match the specified condition
+	;if conditions are not specified, removes feature for all cases and from the model, if condition is an empty assoc, leaves the feature metadata in the model.
+	;
+	;parameters:
+	; feature: the feature name to remove
+	; condition: assoc of feature->value(s).
+	;	  no value = must have feature
+	;	- for continuous or numeric ordinal features:
+	;	  one value = must equal exactly the value or be close to it for fuzzy match
+	;	  values = inclusive between
+	;	- for nominal or string ordinal features:
+	;	  n values = must match any of these values exactly
+	; session: the session id when this call is being made
+	; condition_session: optional, if specified ignores condition and operates on cases for the specified session id
+	#remove_feature
+	(declare
+		(assoc
+			condition (null)
+			condition_session (null)
+			feature ""
+			session "none"
+		)
+
+		;model has changed so clear out these cached value
+		(assign_to_entities (assoc
+			!averageModelCaseEntropyAddition (null)
+			!averageModelCaseEntropyRemoval (null)
+			!averageModelCaseDistanceContribution (null)
+			!storedCaseConvictionsFeatureAddition (null)
+			!nominalClassProbabilitiesMap
+				(if (contains_index !nominalClassProbabilitiesMap feature)
+					(assoc)
+					!nominalClassProbabilitiesMap
+				)
+		))
+
+		;remove feature from model if no conditions are specified
+		(declare (assoc
+			remove_feature_from_model (and (= (null) condition) (= (null) condition_session))
+		))
+
+		;get the list of cases to operate on, if condition isn't specified, operate on all cases
+		(declare (assoc
+			entities
+				(if (not remove_feature_from_model)
+					;specify no limit for how many to match as long as they match the condition
+					(call !GetCasesByCondition (assoc
+						condition condition
+						condition_session condition_session
+						precision "exact"
+						num_cases 0
+					))
+
+					(call !AllCases)
+				)
+			;prepend a # to the feature name, because retrieve_entity_root will add one on
+			feature_with_label (concat "#" feature)
+		))
+
+		;record edit history for each case
+		(map
+			(lambda
+				(call !AddCaseEditHistory (assoc
+					edit_type "remove"
+					case (current_value 1)
+					feature feature
+					session session
+				))
+			)
+			entities
+		)
+
+		;remove the feature
+		(map
+			(lambda (assign_entity_roots
+				(current_value)
+				(filter
+					(lambda
+						(and
+							(!= (current_index) feature_with_label)
+							(not (contains_value (get_labels (current_value)) feature_with_label))
+						)
+					)
+					(retrieve_entity_root (current_value))
+				)
+			))
+			entities
+		)
+
+		(if remove_feature_from_model
+			(seq
+				(if (contains_index !nominalsMap feature)
+					(assign_to_entities (assoc
+						!nominalsMap (remove !nominalsMap feature)
+						!uniqueNominalsSet (remove !uniqueNominalsSet feature)
+						!numericNominalFeaturesMap (remove !numericNominalFeaturesMap feature)
+						!stringNominalFeaturesSet (remove !stringNominalFeaturesSet feature)
+					))
+				)
+
+				(if (contains_value !ordinalFeatures feature)
+					(seq
+						(assign_to_entities (assoc
+							!ordinalFeatures (filter (lambda (!= feature (current_value))) !ordinalFeatures)
+							!ordinalFeaturesValuesMap (remove !ordinalFeaturesValuesMap feature)
+							!ordinalFeaturesRangesMap (remove !ordinalFeaturesRangesMap feature)
+							!ordinalStringToOrdinalMap (remove !ordinalStringToOrdinalMap feature)
+							!ordinalOrdinalToStringMap (remove !ordinalOrdinalToStringMap feature)
+						))
+						(if (= 0 (size !ordinalStringToOrdinalMap))
+							(assign_to_entities (assoc !hasStringOrdinals (false)))
+						)
+					)
+				)
+
+				(if (contains_index !editDistanceFeatureTypesMap  feature)
+					(assign_to_entities (assoc !editDistanceFeatureTypesMap  (remove !editDistanceFeatureTypesMap  feature) ))
+				)
+
+				(if (contains_index !cyclicFeaturesMap feature)
+					(seq
+						(assign_to_entities (assoc !cyclicFeaturesMap (remove !cyclicFeaturesMap feature) ))
+						(if (= 0 (size !cyclicFeaturesMap))
+							(assign_to_entities (assoc !hasCyclicFeatures (false)))
+						)
+					)
+				)
+
+				(if (contains_index !featureRoundingMap feature)
+					(seq
+						(assign_to_entities (assoc !featureRoundingMap (remove !featureRoundingMap feature) ))
+						(if (= 0 (size !featureRoundingMap))
+							(assign_to_entities (assoc !hasRoundedFeatures (false)))
+						)
+					)
+				)
+
+				(if (contains_index !featureDateTimeMap feature)
+					(seq
+						(assign_to_entities (assoc !featureDateTimeMap (remove !featureDateTimeMap feature) ))
+						(if (= 0 (size !featureDateTimeMap))
+							(assign_to_entities (assoc !hasDateTimeFeatures (false)))
+						)
+					)
+				)
+
+				(assign_to_entities (assoc
+					!trainedFeatures (filter (lambda (!= feature (current_value))) !trainedFeatures)
+					!trainedFeaturesContextKey (call !BuildContextFeaturesKey (assoc context_features (filter (lambda (!= feature (current_value))) !trainedFeatures) ))
+					!reactIntoFeaturesList (filter (lambda (!= feature (current_value))) !reactIntoFeaturesList)
+					!categoricalFeaturesSet (remove !categoricalFeaturesSet feature)
+					!cachedFeatureMinResidualMap (remove !cachedFeatureMinResidualMap feature)
+					!cachedFeatureHalfMinGapMap (remove !cachedFeatureHalfMinGapMap feature)
+					!substitutionValueMap (remove !substitutionValueMap feature)
+					!unSubstituteValueMap (remove !unSubstituteValueMap feature)
+					!featureAttributes (remove !featureAttributes feature)
+					!featureBoundsMap (remove !featureBoundsMap feature)
+					!derivedFeaturesSet (remove !derivedFeaturesSet feature)
+					!sourceToDerivedFeatureMap (remove !sourceToDerivedFeatureMap feature)
+					!featureCustomDerivedMethods (remove !featureCustomDerivedMethods feature)
+					!featureNullRatiosMap (remove !featureNullRatiosMap feature)
+					!queryDistanceTypeMap (remove !queryDistanceTypeMap feature)
+
+					;use rewrite to remove all instances of feature in the !hyperparameterMetadataMap
+					!hyperparameterMetadataMap
+						(rewrite
+							(lambda
+								(if (contains_index (current_value) feature)
+									(remove (current_value) feature)
+									(current_value)
+								)
+							)
+							!hyperparameterMetadataMap
+						)
+
+					!expectedValuesMap
+						(rewrite
+							(lambda
+								(if (contains_index (current_value) feature)
+									(remove (current_value) feature)
+									(current_value)
+								)
+							)
+							!expectedValuesMap
+						)
+				))
+
+				(if !inactiveFeaturesNeedCaching
+					(call !UpdateInactiveFeatures)
+
+					(contains_index !inactiveFeaturesMap feature)
+					(if (> (size !inactiveFeaturesMap) 1)
+						(assign_to_entities (assoc
+							!inactiveFeaturesMap (remove !inactiveFeaturesMap feature)
+						))
+
+						;else removing the only inactive feature, clear out the properties
+						(assign_to_entities (assoc !inactiveFeaturesMap (null) ))
+					)
+				)
+			)
+		)
+
+		(accum_to_entities (assoc !revision 1))
+
+		;return completion
+		(call !Return)
+	)
+
+	;creates a new case given a list of features and their values in feature_values
+	; assigning its session and session_training_index
+	;returns the id of the case created
+	;parameters:
+	; feature_values: list of feature values
+	; features: list of feature names
+	; session: session ID string
+	; session_training_index: 0-based index of the case, ordered by training during the session;  is not changed
+	#!CreateCase
+	(first (create_entities
+		(set_type
+			(append
+				;bring in context
+				(zip_labels features feature_values)
+
+				;add session info
+				(zip_labels
+					(list !internalLabelSession !internalLabelSessionTrainingIndex)
+					(list session session_training_index)
+				)
+			)
+			(null)
+		)
+	))
+
+	;Adds the specified feature on all cases for a trainee that match the specified condition. overwrites features that
+	;If condition are not specified, adds feature for all cases and to the model.  If condition is an empty assoc, will not modify feature metadata in the model.
+	;If feature attributes are passed in, will also set the model's featurue attributes.
+	;
+	;parameters:
+	; feature: name of feature to odd
+	; feature_value: optional value for the feature
+	; ovewrite: flag, whether to overwrite values for features that already exist
+	; condition: assoc of feature->value(s) (no value = must have feature, one value = must equal exactly the value, two values = inclusive between)
+	; session: the session id when this call !is being made
+	; condition: assoc of feature->value(s).
+	;	  no value = must have feature
+	;	- for continuous or numeric ordinal features:
+	;	  one value = must equal exactly the value or be close to it for fuzzy match
+	;	  values = inclusive between
+	;	- for nominal or string ordinal features:
+	;	  n values = must match any of these values exactly
+	; entities: list of case ids to operate on. if specified, conditions will be ignored
+	; internal_feature: flag, if set to true, will not update hyperparameter metadata map
+	; feature_attributes: optional, dict of feature specific attributes for this feature. If unspecified and conditions are not specified, will assume feature type as 'continuous'.
+	#add_feature
+	(declare
+		(assoc
+			feature ""
+			feature_value (null)
+			condition (null)
+			condition_session (null)
+			overwrite (true)
+			session "none"
+			entities (null)
+			internal_feature (false)
+			feature_attributes (null)
+		)
+
+		(if (contains_index !untrainableFeatureCharacterSet (first feature))
+			(conclude
+				(call !Return (assoc errors (list "Failed to add feature: ensure it does not start with an invalid character.")  ))
+			)
+		)
+
+		(if (and feature_attributes (contains_index !featureAttributes feature))
+			(conclude
+				(call !Return (assoc errors (list "Feature already defined, either call add_feature without specifying feature_attributes or call set_feature_attributes to update existing feature attributes.")  ))
+			)
+		)
+
+		;add feature to model if no conditions are specified
+		(declare (assoc
+			add_feature_to_model (and (= (null) condition) (= (null) condition_session))
+		))
+
+		;get all cases that need to be updated
+		(if (= (null) entities)
+			(assign (assoc
+				entities
+					(if (not add_feature_to_model)
+						;specify no limit for how many to match as long as they match the condition
+						(call !GetCasesByCondition (assoc
+							condition condition
+							condition_session condition_session
+							precision "exact"
+							num_cases 0
+						))
+
+						(call !AllCases)
+					)
+			))
+		)
+
+		;only add feature to model if it is not an internal feature (e.g., .imputed) or if feature_attributes were provided or feature isn't defined
+		(assign (assoc
+			add_feature_to_model
+				(and
+					(not internal_feature)
+					(not (contains_index !featureAttributes feature))
+					(or
+						feature_attributes
+						add_feature_to_model
+						(not (contains_index !featureAttributes feature))
+					)
+				)
+		))
+
+		(if add_feature_to_model
+			(let
+				(assoc
+					min_deviation_value (/ 1 (call !GetNumTrainingCases))
+					null_feature (= (null) feature_value)
+				)
+
+				(if null_feature
+					(if !inactiveFeaturesMap
+						(accum_to_entities (assoc !inactiveFeaturesMap (associate feature 0)))
+
+						(assign_to_entities (assoc !inactiveFeaturesMap (associate feature 0) ))
+					)
+				)
+
+				;update hyperparameters and clear the cached residuals flags
+				(assign_to_entities (assoc
+					!hyperparameterMetadataMap (call !UpdateHyperparametersWithNewFeature (assoc hp_map !hyperparameterMetadataMap))
+					!defaultHyperparameters (call !UpdateHyperparametersWithNewFeature (assoc hp_map !defaultHyperparameters))
+
+					!trainedFeatures
+						(if (not (contains_value !trainedFeatures feature))
+							(sort (append !trainedFeatures feature))
+							!trainedFeatures
+						)
+					!trainedFeaturesContextKey
+						(call !BuildContextFeaturesKey (assoc
+							context_features
+								(if (not (contains_value !trainedFeatures feature))
+									(append !trainedFeatures feature)
+									!trainedFeatures
+								)
+						))
+				))
+
+				;if attributes were not provided, default to continuous
+				(if (= (null) feature_attributes)
+					(assign (assoc
+						feature_attributes
+							(assoc
+								"type" "continuous"
+								"bounds" (assoc "allow_null" (true))
+							)
+					))
+				)
+				;append attributes to the existing ones and re-set attributes
+				(assign (assoc
+					feature_attributes
+						(append
+							(get (call get_feature_attributes) "payload")
+							(associate feature feature_attributes)
+						)
+				))
+
+				(call set_feature_attributes (assoc features feature_attributes))
+			)
+		)
+
+		;store the originally passed in value as-is for history tracking
+		(declare (assoc unencoded_feature_value (get_value feature_value)))
+
+		;encode feature values if necessary
+		(if !hasFeaturesNeedEncodingFromInput
+			(assign (assoc
+				feature_value
+					(first
+						(call !ConvertFromInput (assoc
+							feature_values (list feature_value)
+							features (list feature)
+						))
+					)
+			))
+		)
+
+		;create at assoc of case id -> value
+		(declare (assoc
+			case_values_map
+				(if (= (null) feature_value)
+					(zip entities)
+
+					(zip
+						entities
+						(map feature_value entities)
+					)
+				)
+		))
+
+		;record edit history for each case
+		(map
+			(lambda (let
+				(assoc case_id (current_value 1))
+
+				(call !AddCaseEditHistory (assoc
+					edit_type "set"
+					case case_id
+					feature feature
+					feature_value unencoded_feature_value
+					session session
+				))
+
+				;make a map of all the imputed features (if there are any) for fast lookup and deletion
+				(declare (assoc imputed_map (zip (retrieve_from_entity case_id !internalLabelImputed))))
+
+				;check if this case has this feature on its imputed list, and if so remove it from there since its value was just overwritten
+				(if (contains_index imputed_map feature)
+					;remove this feature from the imputed_map and overwrite the stored imputed features using the resulting list
+					(call !StoreCaseValues (assoc
+						label_name !internalLabelImputed
+						case_values_map (associate case_id (indices (remove imputed_map feature)))
+						overwrite 1
+					))
+				)
+			))
+			entities
+		)
+
+		(call !StoreCaseValues (assoc
+			case_values_map case_values_map
+			label_name feature
+			overwrite overwrite
+		))
+
+		(accum_to_entities (assoc !revision 1))
+
+		;return completion
+		(call !Return)
+	)
+
+	;stores the associated value with each entity id (the keys of case_values_map) to the respective entity
+	; using the label_name specified
+	;if the entity does not have the label, but its root node is a null, then it will add the label and store the data
+	; parameters:
+	; ovewrite: flag, whether to overwrite values for features that already exist
+	; case_values_map : assoc of case id -> value
+	; label_name : name of label for the feature to be stored
+	#!StoreCaseValues
+	(declare
+		(assoc
+			case_values_map (assoc)
+			label_name ""
+			overwrite 1
+		)
+		(map
+			(lambda (if
+				;see whether the entity has the label
+				(contains_label (current_index) label_name)
+
+				;entity has label, overwite if overwrite flag is set, otherwise do nothing
+				(if overwrite
+					(assign_to_entities (current_index) (associate label_name (get case_values_map (current_index 1))))
+				)
+
+				;else need to append the label to the entity
+				(accum_entity_roots (current_index) (list (set_labels (get case_values_map (current_index 1)) (list label_name))))
+
+			))
+			case_values_map
+		)
+	)
+
+	;automatically creates a feature with a default value for a set of cases
+	; parameters:
+	; feature_name: name of the case_weight feature to add to all cases, defaults to ".case_weight"
+	; entities: the list of case entities to add the case_weight feature to. if (null), all cases missing feature_name are found
+	; default_value: the default value for the feature in each case, defaults to 1.0
+	#!CreateCaseWeights
+	(declare
+		(assoc
+			feature_name ".case_weight"
+			entities (null)
+			default_value 1.0
+		)
+
+		;query for at least one case without feature_name
+		;to check if any operations are necessary
+		(declare (assoc
+			random_case
+				(first
+					(contained_entities (list
+						(query_exists !internalLabelSession)
+						(query_not_exists feature_name)
+						(query_select 1 0)
+					))
+				)
+		))
+
+		(if (= random_case (null))
+			;conclude if no case is found without feature_name
+			(conclude)
+		)
+
+		;if no entitites were supplied, all cases without feature_name are found
+		(if (= (null) entities)
+			(assign (assoc
+				entities
+					(contained_entities (list
+						(query_exists !internalLabelSession)
+						(query_not_exists feature_name)
+					))
+			))
+		)
+
+		(call !StoreCaseValues (assoc
+			case_values_map (zip entities default_value)
+			label_name feature_name
+			overwrite 1 ;already checked if this feature exists (for first case from AllCases)
+		))
+	)
+)

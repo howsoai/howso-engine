@@ -1,0 +1,686 @@
+;Contains methods for retrieving cases.
+(null
+
+	;returns array of ids of all cases that exist in this trained model
+	;by finding all the entities that have a reference to replay sessions
+	#!AllCases
+	(declare
+		(assoc
+			num (null)
+			start_offset 0
+			rand_seed (null)
+		)
+		(if (!= (null) num)
+			(if (!= (null) rand_seed)
+				(contained_entities (list
+					(query_exists !internalLabelSession)
+					(query_select num start_offset rand_seed)
+				))
+
+				(contained_entities (list
+					(query_exists !internalLabelSession)
+					(query_select num start_offset )
+				))
+			)
+
+
+			;else return all
+			(contained_entities (list
+				(query_exists !internalLabelSession)
+			))
+		)
+	)
+
+	;returns list of ids of sampled cases with replacement
+	;parameters:
+	; num: number of samples to return
+	; rand_seed: optional random seed
+	; case_weight_feature: optional, if provided will use this feature to do case weighted sampling
+	#!SampleCases
+	(declare
+		(assoc
+			num (null)
+			rand_seed (null)
+			case_weight_feature (null)
+		)
+		(if (!= (null) num)
+			(if (!= (null) rand_seed)
+				(contained_entities (list
+					(query_exists !internalLabelSession)
+					(if case_weight_feature
+						(query_weighted_sample case_weight_feature num rand_seed)
+						(query_sample num rand_seed)
+					)
+				))
+
+				(contained_entities (list
+					(query_exists !internalLabelSession)
+					(if case_weight_feature
+						(query_weighted_sample case_weight_feature num (rand))
+						(query_sample num (rand))
+					)
+				))
+			)
+
+			;else return samples with replacement on all cases
+			(contained_entities (list
+				(query_exists !internalLabelSession)
+				(if case_weight_feature
+					(query_weighted_sample case_weight_feature (call !GetNumTrainingCases) (rand))
+					(query_sample (call !GetNumTrainingCases) (rand))
+				)
+			))
+		)
+	)
+
+	;returns the total number of training cases for trainee
+	#get_num_training_cases
+	(call !Return (assoc payload (assoc "count" (call !GetNumTrainingCases) ) ))
+
+	;returns the total number of training cases
+	#!GetNumTrainingCases
+	(compute_on_contained_entities (list (query_exists !internalLabelSession) (query_count)))
+
+	;parameters: session and session_index
+	#!GetCaseGivenReplaySession
+	(get (retrieve_from_entity session ".replay_steps") session_index)
+
+	;returns assoc with features and cases - a list of lists of all feature values. Retrieves all feature values for cases for
+	;all (unordered) sessions in the order they were trained within each session. If a session is specified, only that session's
+	;cases wil be output.
+	;
+	;parameters:
+	; features: list of features to retrieve.
+	; indicate_imputed: if set to 1 will return the audit data of which features for each row were imputed (auto-filled)
+	; session: optional session from which to get cases (even if by condition).
+	; case_indices: optional, list of pair (list) of session id and index, where index is the original 0-based session_training_index of the
+	;		case as it was trained. If specified, ignores session and condition/precision parameters.
+	; condition: optional a query condition describing the cases to return.
+	; num_cases: optional, limit on the number of cases to retrieve; If set to zero there will be no limit.
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
+	; precision: optional string. default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
+	; output_ids: optional, flag. When true only returns an assoc of caseds and no features
+	; skip_decoding: set flag to skip decoding feature values into their nominal values for output.
+	#get_cases
+	(declare
+		(assoc
+			features (list)
+			skip_decoding 0
+			session (null)
+			case_indices (null)
+			condition (null)
+			num_cases (null)
+			precision "exact"
+			indicate_imputed (false)
+			output_ids (false)
+		)
+
+		(if indicate_imputed
+			(accum (assoc features !internalLabelImputed))
+		)
+
+		(if (and (= 0 (size features)) (> (size !trainedFeatures) 0))
+			(assign (assoc features !trainedFeatures))
+		)
+
+		;if the features list is only 'imputed', pre-pend default fetaures to it if that list is defined
+		(if (and (= (size features) 1) (= !internalLabelImputed (first features)) (> (size !trainedFeatures) 0))
+			(assign (assoc features (append !trainedFeatures features)))
+		)
+
+		;map of accumulated session -> case index id map
+		(declare (assoc session_indices_map (assoc)))
+
+		(declare (assoc
+			cases
+				(if (>= (size case_indices) 1)
+					(map
+						(lambda (let
+							(assoc
+								session_id (first (current_value 1))
+								case_index (last (current_value 1))
+							)
+
+							;if session_indices_map doesn't have this session, add it
+							(if (not (contains_index session_indices_map session_id))
+								(accum (assoc session_indices_map (associate session_id (retrieve_from_entity session_id ".indices_map")) ))
+							)
+							;get case id from the session's .indices_map
+							(get session_indices_map (list session_id case_index))
+						))
+						case_indices
+					)
+
+					(or (size condition) session (> num_cases 0))
+					(seq
+						(declare (assoc condition_session_value session))
+
+						;if both session and condition supplied, add the session as an additional condition and unset the `condition_session`
+						(if (and (size condition) session)
+							(assign (assoc
+								condition_session_value (null)
+								condition (append condition (assoc ".session" session))
+							))
+						)
+
+						;specify no limit for how many to match as long as they match the condition
+						(call !GetCasesByCondition (assoc
+							condition condition
+							condition_session condition_session_value
+							precision precision
+							num_cases num_cases
+						))
+					)
+
+					;else get all the cases from all the sessions
+					(apply "append"
+						(map
+							(lambda (retrieve_from_entity (current_value) ".replay_steps"))
+							(call !GetSessionIds)
+						)
+
+					)
+				)
+			has_rounded_features !hasRoundedFeatures
+			has_datetime_features !hasDateTimeFeatures
+		))
+
+		(if output_ids
+			(conclude (call !Return (assoc payload (assoc cases cases))))
+		)
+
+		(declare (assoc
+			case_values_list
+				(weave
+					(lambda (let
+						(assoc case_feature_values (retrieve_from_entity (first (current_value 1)) features))
+
+						(if (= (size case_feature_values ) (size features))
+							(list case_feature_values)
+							;else don't output anything, filtering out any values that don't match features
+							(list)
+						)
+					))
+					cases
+					;use weave as a map-filter by specifying null as the second list
+					(null)
+				)
+		))
+
+		;output a map with features and cases
+		(call !Return (assoc
+			payload
+				(assoc
+					features features
+					cases
+						(if (and !hasEncodedFeatures (not skip_decoding))
+							;decode nominal features if necessary
+							(map
+								(lambda
+									(call !ConvertToOutput (assoc
+										features features
+										feature_values (current_value 1)
+										has_rounded_features has_rounded_features
+										has_datetime_features has_datetime_features
+									))
+								)
+								case_values_list
+							)
+
+							;else round if needed
+							has_rounded_features
+							(map
+								(lambda (call !RoundContinuousFeatures (assoc features features feature_values (current_value 1) )))
+								case_values_list
+							)
+
+							;else just return the values
+							case_values_list
+						)
+				)
+		))
+	)
+
+
+	;return the case id for a case given its session and original session training index
+	;
+	;parameters:
+	; session: session id for the case
+	; session_training_index: the index of the case in the original order that it was trained for the specified session
+	#!GetCaseId
+	(first
+		;return the one entity that was trained in this session at this session_training_index
+		(contained_entities (list
+			(query_equals !internalLabelSession session)
+			(query_equals !internalLabelSessionTrainingIndex session_training_index)
+		))
+	)
+
+	;return the list of case ids given a list of session and session training index tuples
+	;
+	;parameters:
+	; case_indices: a list of session and session training index tuples
+	#!GetCaseIds
+	(let
+		(assoc
+			;getting the list of unique session IDs, to then get the .indices_map for each session
+			; (zip on a list gives an assoc with only the unique values as keys)
+			unique_session_ids (indices (zip (map (lambda (first (current_value)) ) case_indices) ))
+		)
+
+		(declare (assoc
+			session_indices_map
+				(map (lambda (retrieve_from_entity (current_index) ".indices_map")) (zip unique_session_ids))
+		))
+
+		(map
+			(lambda (let
+				(assoc
+					session (first (current_value 1))
+					case_index (last (current_value 1))
+				)
+
+				(get session_indices_map (list session case_index))
+			))
+			case_indices
+		)
+	)
+
+	;return all cases that match the specified condition
+	;parameters:
+	; precision: flag, whether to query for 'exact' matches; if set to 'similar' will query for similar values intead of 'exact'
+	; condition_session: optional, if specified ignores condition and returns cases for the specified session id
+	; condition: assoc of feature->value(s)
+	;	no value = must have feature
+	;	- for continuous or numeric ordinal features:
+	;	one value = must equal exactly the value or be close to it for fuzzy match
+	;	two values = inclusive between
+	;	- for nominal or string ordinal features:
+	;	n values = must match any of these values exactly
+	; num_cases: optional, limit on the number of cases to get; If set to zero there will be no limit.
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
+	#!GetCasesByCondition
+	(declare (assoc
+			condition (assoc)
+			condition_session (null)
+			precision "exact"
+			num_cases (null)
+		)
+
+		;set num_cases appropriately if null
+		(if (= (null) num_cases)
+			(if (= precision "similar")
+				(assign (assoc
+					num_cases
+						(get
+							(call !GetHyperparameters (assoc
+								feature ".targetless"
+								mode "robust"
+								weight_feature ".none"
+							))
+							"k"
+						)
+				))
+
+				;precision = 'exact'
+				(assign (assoc num_cases 0))
+			)
+		)
+
+		(if (!= (null) condition_session)
+			;get all the case ids in the order they were stored for the specified session
+			(retrieve_from_entity condition_session ".replay_steps")
+
+			;else return cases that match the condition
+			(seq
+				(if !hasStringOrdinals
+					(assign (assoc
+						condition
+							(map
+								(lambda
+									;if the features in the condition are string ordinals, look up the encoded value and overwrite it in the condition statement
+									;since querying is done on numeric (encoded) values
+									(if (and (contains_index !ordinalStringToOrdinalMap (current_index)) (!= (null) (current_value)))
+										(let
+											(assoc
+												feature (current_index 1)
+												cond_value (current_value 1)
+											)
+											;get the enum value for the value(s) for this feature
+											(if (~ (list) cond_value)
+												(map
+													(lambda (get !ordinalStringToOrdinalMap (list feature (current_value 1))) )
+													cond_value
+												)
+												;else get the one single value
+												(get !ordinalStringToOrdinalMap (list feature cond_value))
+											)
+										)
+
+										;else return the value without encoding
+										(current_value)
+									)
+								)
+								condition
+							)
+					))
+				)
+
+				(if (= "exact" precision)
+					;limit the list to the number of specified cases
+					(trunc
+						;iterate over each condition and create a conjunctive filter to return only the matching cases
+						(contained_entities (append
+							(query_exists !internalLabelSession)
+							(map
+								(lambda (let
+									(assoc
+										feature (current_value 1)
+										cond_value (get condition (current_value 1))
+									)
+									(if
+										;feature must exist
+										(= cond_value (null))
+										(query_exists feature)
+
+										;else then feature value must equal
+										(contains_value (list "number" "string") (get_type_string cond_value))
+										(query_equals feature cond_value)
+
+										;else this is a list of values, for nominals use query_among, for continuous use query_between
+										(if (or (contains_index !nominalsMap feature) (contains_index !ordinalStringToOrdinalMap feature))
+											(query_among feature cond_value)
+											;else continuous, inclusive query between the two provided values
+											(query_between feature (first cond_value) (last cond_value))
+										)
+									)
+								))
+								(indices condition)
+							)
+						))
+						num_cases
+					)
+
+					;else do a fuzzy query
+					(let
+						(assoc
+							;list of features where the condition is an 'equals'
+							equals_features (list)
+							;list of features where the condition is a range or null
+							other_features (list)
+							hyperparam_map
+								(call !GetHyperparameters (assoc
+									feature ".targetless"
+									mode "robust"
+									weight_feature ".none"
+								))
+						)
+						;iterate over condition and populate the equals and other lists
+						(map
+							(lambda (if
+								;if the condition for this feature is an equals, add it to the equals_features list
+								(contains_value (list "string" "number") (get_type_string (get condition (current_value))))
+								(accum (assoc equals_features (current_value 1)))
+								;else add it to the other list
+								(accum (assoc other_features (current_value 1)))
+							))
+							(indices condition)
+						)
+
+						;pull corresponding feature values and flags for the equals features to be used in the generalized_distance query below
+						(declare (assoc equals_features_values (unzip condition equals_features) ))
+
+						;build the fuzzy query condition, appending the generalized norm query to the other conditions
+						(declare (assoc
+							query_conditions
+								(append
+									(query_exists !internalLabelSession)
+									(map
+										(lambda (let
+											(assoc
+												feature (current_value 1)
+												cond_value (get condition (current_value 1))
+											)
+											(if
+												;feature must exist
+												(= cond_value (null))
+												(query_exists feature)
+
+												;else this is a list of values, for nominals use query_among, for continuous use query_between
+												(if (or (contains_index !nominalsMap feature) (contains_index !ordinalStringToOrdinalMap feature))
+													(query_among feature cond_value)
+													;else continuous, inclusive query between the two provided values
+													(query_between feature (first cond_value) (last cond_value))
+												)
+											)
+										))
+										other_features
+									)
+									(if (> num_cases 0)
+										(query_nearest_generalized_distance
+											num_cases
+											equals_features
+											equals_features_values
+											(get hyperparam_map "featureWeights")
+											!queryDistanceTypeMap
+											(get hyperparam_map "featureDomainAttributes")
+											(get hyperparam_map "featureDeviations")
+											(get hyperparam_map "p")
+											(get hyperparam_map "dt")
+											(null) ;weight
+											;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+											"fixed rand seed"
+											(null) ;radius
+											;the distance values are not needed, so this could in theory be
+											; (if (= "precise" !numericalPrecision) "precise" "fast")), however, that incurs overhead as well
+											;left as is to be simple, but could be modified for performance if large numbers of cases are being retrieved this way
+											!numericalPrecision
+										)
+
+										(list)
+									)
+								)
+						))
+
+						;run query conditions only if they exist, otherwise return all cases
+						(if (> (size query_conditions) 0)
+							(contained_entities query_conditions)
+
+							;else return all
+							(contained_entities (list (query_exists !internalLabelSession)))
+						)
+					)
+				)
+			)
+		)
+	)
+
+	;retrieve the top or bottom number of cases for a specified feature, sorted top to bottom for top, and bottom to top for bottom
+	;parmeters:
+	; sort_feature: the feature for which to sort the cases by
+	; num: number of cases to return, positive value will return the top (largest value), negative will return smallest
+	; features : the features for which values should be returned
+	#retrieve_extreme_cases_for_feature
+	(declare
+		(assoc
+			features (null)
+			sort_feature (null)
+			num 0
+		)
+
+		(if (= (null) features)
+			(assign (assoc features !trainedFeatures))
+		)
+
+		(declare (assoc
+			case_ids
+				(if (!= (null) sort_feature)
+					(if (> num 0)
+						(contained_entities (list
+							(query_exists !internalLabelSession)
+							(query_max sort_feature num)
+						))
+
+						(< num 0)
+						(contained_entities (list
+							(query_exists !internalLabelSession)
+							(query_min sort_feature (- num))
+						))
+
+						(null)
+					)
+				)
+		))
+
+		;store the case values into a list
+		(declare (assoc
+			case_values_list
+				(map
+					(lambda (retrieve_from_entity (current_value) features) )
+					case_ids
+				)
+		))
+
+		;determine the index of the feature to be sorted on from the list of all features so that we can sort by it
+		(declare (assoc
+			feature_index
+				(first (filter (lambda (= sort_feature (get features (current_value)))) (indices features)))
+
+			;define the sort by function, sorts high to low when getting the max, and low to high when getting the min
+			sort_by_feature_value
+				(if (> num 0)
+					(lambda (> (get (current_value 1) feature_index) (get (current_value) feature_index)))
+
+					(lambda (< (get (current_value 1) feature_index) (get (current_value) feature_index)))
+				)
+			has_rounded_features !hasRoundedFeatures
+			has_datetime_features !hasDateTimeFeatures
+		))
+
+		;sort the list of case values
+		(assign (assoc case_values_list (sort sort_by_feature_value case_values_list) ))
+
+		(call !Return (assoc
+			payload
+				(associate
+					"features" features
+					"cases"
+						(if (and !hasEncodedFeatures (not skip_decoding))
+							;decode nominal features if necessary
+							(map
+								(lambda
+									(call !ConvertToOutput (assoc
+										features features
+										feature_values (current_value 1)
+										has_rounded_features has_rounded_features
+										has_datetime_features has_datetime_features
+									))
+								)
+								case_values_list
+							)
+
+							;else round if needed
+							has_rounded_features
+							(map
+								(lambda (call !RoundContinuousFeatures (assoc features features feature_values (current_value 1) )))
+								case_values_list
+							)
+
+							;else just return the values
+							case_values_list
+						)
+				)
+		))
+	)
+
+	;Method to return an assoc with features that should be skipped due to not having enough non-null values
+	;and a list of cases with non-null values for each feature when there are features that have only a few non-null values
+	;parameters:
+	; features: list of all features to check
+	#!SelectNonNullCases
+	(let
+		(assoc
+			;iterate over features output an assoc for each feature:
+			;if a feature has nulls, output at least 2 case ids with non-null values
+			;if a feature has no nulls, output null
+			;if a feature doesn't have enough non-null values, output an empty list
+			non_null_cases_features_map
+				(map
+					(lambda (let
+						(assoc feature (current_index 1))
+						(declare (assoc
+							num_nulls (compute_on_contained_entities (list (query_equals feature (null)) (query_count) ))
+						))
+
+						;there are only one or zero non-null values, skip computing for this feature
+						(if (and num_nulls (<= (- num_cases num_nulls) 1))
+							(list)
+
+							;else there is more than one non-null value, select at least 2 non-null cases
+							num_nulls
+							(let
+								(assoc
+									;assoc of case id -> assoc feature -> value
+									not_null_cases_map
+										(compute_on_contained_entities (list
+											(query_not_equals feature (null))
+											;randomly select 2 different cases that don't have nulls
+											(query_select 2 (null) (rand))
+											;output an assoc of feature -> value for every case
+											(query_exists feature)
+										))
+								)
+
+								;continuous features must have at least two different values to compute r^2
+								(if (not (contains_index !nominalsMap feature))
+									(let
+										(assoc
+											unique_values (values not_null_cases_map (true))
+										)
+
+										(if (= 1 (size unique_values))
+											(let
+												(assoc
+													;select a non-null case with a different value
+													different_case
+														(first
+															(contained_entities (list
+																(query_not_equals feature (null))
+																(query_not_equals feature (get unique_values (list 0 feature)) )
+																(query_sample 1)
+															))
+														)
+												)
+
+												;if there is a case with a different value, append it to the output
+												;else output empty list to skip computing values for this feature
+												(if different_case
+													(append (indices not_null_cases_map) different_case)
+													(list)
+												)
+											)
+
+											;else more than one unique value, output the selected case ids
+											(indices not_null_cases_map)
+										)
+									)
+
+									;else nominal feature, output the selected case ids
+									(indices not_null_cases_map)
+								)
+							)
+
+							;else there are no nulls, output a null
+						)
+					))
+					(zip features)
+				)
+		)
+
+		(assoc
+			"skip_features_map" (filter (lambda (= (list) (current_value))) non_null_cases_features_map)
+			"non_null_cases" (values (apply "append" (filter (values non_null_cases_features_map))) (true))
+		)
+	)
+
+)

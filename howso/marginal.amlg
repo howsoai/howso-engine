@@ -1,0 +1,824 @@
+;Contains methods related to computing and caching marginal feature statistics.
+(null
+
+	;calculate the expected value for a feature, using caching as appropriate (which is cleared when train is called)
+	; for nominal features returns the feature value with the most occurences
+	; for continuous features, returns the average value
+	;parameters:
+	; feature : the feature for which to calculate the expected value
+	; output_nominal_class_counts : optional flag, if true will output the nominal feature count map instead of the max count value
+	; case_ids : optional list of case ids from which to consider expected values, if not specified uses all cases in the model
+	;			 when case_ids are passed in, that means the expected value is for a local model, which will never be cached
+	; output_instead_of_store : flag, if set to true will output the computed expected values and counts assoc instead of storing into model
+	#!CalculateFeatureExpectedValue
+		(declare
+			(assoc
+				feature (null)
+				output_nominal_class_counts (false)
+				case_ids (null)
+				output_instead_of_store (false)
+			)
+
+			;only use and store cached values when this method is called on the whole model (whole model wouldn't have case_ids specified)
+			(declare (assoc
+				use_and_store_cached_value (= (null) case_ids)
+				;set the weight feature for stat queries to be null if it's not specified or the .case_weight feature isn't populated
+				query_weight_feature
+					(if
+						(or
+							;make sure that the query weight feature is null if weight feature is not valid
+							(not
+								;weight feature is valid if it's custom (not .case_weight) or !hasPopulatedCaseWeight
+								(or !hasPopulatedCaseWeight (!= weight_feature ".case_weight"))
+							)
+							(= ".none" weight_feature)
+						)
+						(null)
+
+						weight_feature
+					)
+			))
+
+			(declare (assoc
+				weight_feature_key (if (= (null) weight_feature) ".none" weight_feature)
+			))
+
+			;pull from cache if possible
+			(if (and
+					use_and_store_cached_value
+					(contains_index !expectedValuesMap (list weight_feature_key feature))
+				)
+				;nominal features cache both the class_counts and the expected value
+				;wheras continuous just cache the value
+				(let
+					(assoc
+						cached_values
+							(if output_nominal_class_counts
+								(get !expectedValuesMap (list weight_feature_key feature "class_counts"))
+
+								(contains_index !nominalsMap feature)
+								(get !expectedValuesMap (list weight_feature_key feature "expected_value"))
+
+								;continuous feature, return the cached expected value
+								(get !expectedValuesMap (list weight_feature_key feature "expected_value"))
+							)
+					)
+
+					;if cached values exist, return them, else need to compute and cache them below
+					(if (!= (null) cached_values)
+						(conclude cached_values)
+					)
+				)
+			)
+
+			;case ids may be explicitly passed in as nulls from ComputeModelNominalClassProbabilities, in which case overwrite with AllCases
+			(if (= (null) case_ids)
+				(assign (assoc case_ids (call !AllCases)))
+			)
+
+			;if feature is nominal, the expected value is the feature value that has the most instances for this feature
+			(if (or
+					output_nominal_class_counts
+					(contains_index !nominalsMap feature)
+				)
+				(let
+					;assoc of feature value -> how many times it's encountered
+					(assoc
+						;iterate over all feature values for this feature, storing the number of times each feature value has been encountered
+						feature_value_count_map
+							(compute_on_contained_entities (list
+								(query_in_entity_list case_ids)
+								(query_value_masses feature query_weight_feature (contains_index !numericNominalFeaturesMap feature))
+							))
+						feature_mode (null)
+						feature_null_count
+							(compute_on_contained_entities (list
+								(query_in_entity_list case_ids)
+								(query_equals feature (null))
+								(query_count)
+							))
+					)
+
+					;store count of nulls as .nas into the map
+					(if feature_null_count
+						(accum (assoc feature_value_count_map (assoc .nas feature_null_count)))
+					)
+
+					;store the value into cache if needed, specifically every time this method is called on the whole model,
+					;we calculate and store into cache the expected value for this feature
+					;note, this cache will be cleared out any time a new case is trained into or removed from the model
+					(if use_and_store_cached_value
+						(seq
+							(assign (assoc
+								feature_mode
+									(compute_on_contained_entities (list
+										(query_in_entity_list case_ids)
+										(query_mode feature query_weight_feature (contains_index !numericNominalFeaturesMap feature))
+									))
+							))
+
+							;value maybe .nan if model is empty, prevent output by converting to null
+							(if (= feature_mode .nan)
+								(assign (assoc feature_mode (null)))
+							)
+
+							(if (not output_instead_of_store)
+								(assign_to_entities (assoc
+									!expectedValuesMap
+										(set
+											!expectedValuesMap
+											(list weight_feature_key feature)
+											(assoc
+												"class_counts" feature_value_count_map
+												"expected_value" feature_mode
+											)
+										)
+								))
+							)
+						)
+					)
+
+					(if output_instead_of_store
+						(conclude
+							(assoc
+								"class_counts" feature_value_count_map
+								"expected_value" feature_mode
+							)
+						)
+					)
+
+					;if the output is just the counts of each nominal class, then output that map
+					(if output_nominal_class_counts
+						feature_value_count_map
+
+						;else, figure out which nominal value has the highest count and output that one as the expected
+						(if (= (null) feature_mode)
+							(seq
+								(assign (assoc
+									feature_mode
+										(compute_on_contained_entities (list
+											(query_in_entity_list case_ids)
+											(query_mode feature query_weight_feature (contains_index !numericNominalFeaturesMap feature))
+										))
+								))
+								;value maybe .nan if model is empty, prevent output by converting to null
+								(if (= feature_mode .nan)
+									(null)
+									feature_mode
+								)
+							)
+
+							;else output the feature value with the max count that was already already calculated above
+							feature_mode
+						)
+					)
+				)
+
+				;else feature is continuous, take the average of all the encountered values
+				(let
+					(assoc
+						avg_feature_value
+							(compute_on_contained_entities (list
+								(query_in_entity_list case_ids)
+								(query_not_equals feature (null))
+								;calculate arithmetic average
+								(query_generalized_mean feature 1 query_weight_feature)
+							))
+					)
+
+					;value maybe .nan if model is empty, prevent output by converting to null
+					(if (= avg_feature_value .nan)
+						(assign (assoc avg_feature_value (null)))
+					)
+
+					(if output_instead_of_store
+						(conclude (assoc "expected_value" avg_feature_value) )
+					)
+
+					;store the value into cache if needed
+					(if use_and_store_cached_value
+						(assign_to_entities (assoc
+							!expectedValuesMap
+								(set
+									!expectedValuesMap
+									(list weight_feature_key feature)
+									(assoc "expected_value" avg_feature_value)
+								)
+						))
+					)
+
+					avg_feature_value
+				)
+			)
+
+		)
+
+
+	;compute and return class probabilities (distribution of feature values) for a specified nominal feature.
+	;note: allowed classes will be given an observation of 1, as being allowed counts as an observation
+	; toward the counts used for the probabilities
+	;
+	;parameters:
+	; feature : name of feature
+	; case_ids : optional list of case ids from which to consider expected values, if not specified uses all cases in the model
+	; store_global_probabilities : flag, will default to storing computed global nominal probabilities. if false, will only output them
+	#!ComputeModelNominalClassProbabilities
+		(declare
+			(assoc
+				feature (null)
+				case_ids (null)
+				nominal_class_probabilities_map (null)
+				store_global_probabilities (true)
+			)
+
+			(declare (assoc
+				weight_feature_key
+					(if (= (null) weight_feature)
+						".none"
+
+						weight_feature
+					)
+			))
+			;if the probabilities are not cached, compute and cache them
+			;or if a local/regional model is specified via case_ids
+			(if (or
+					(!= (null) case_ids)
+					(not (contains_index !nominalClassProbabilitiesMap (list weight_feature_key feature)))
+				)
+				(let
+					(assoc
+						;map of class -> weight (if not using case weights, will be a simple count of nominals)
+						nominal_class_weight_map
+							(call !CalculateFeatureExpectedValue (assoc
+								feature feature
+								output_nominal_class_counts (true)
+								case_ids case_ids
+							))
+					)
+
+					;when computing for the whole model, if there are globally allowed values for this features that haven't
+					;been trained yet add them to the list of class counts with a count of '1'.
+					(if (and
+							(= (null) case_ids)
+							(> (size (get !featureBoundsMap (list feature "allowed"))) (size nominal_class_weight_map))
+						)
+						(let
+							(assoc
+								;create a map of all allowed classes, given an observation of 1
+								allowed_classes_map
+									(zip
+										(get !featureBoundsMap (list feature "allowed"))
+										1
+									)
+							)
+
+							;add the allowed observation to nominal_class_weight_map
+							(assign (assoc
+								nominal_class_weight_map
+									(map
+										(lambda (+ (or (first (current_value))) (or (last (current_value)))) )
+										allowed_classes_map
+										nominal_class_weight_map
+									)
+							))
+						)
+					)
+
+					(declare (assoc total_weight (apply "+" (values nominal_class_weight_map))))
+
+					;output the normalized counts of each class by converting them to probabilities
+					(assign (assoc
+						nominal_class_probabilities_map
+							(map
+								(lambda (/ (current_value) total_weight))
+								nominal_class_weight_map
+							)
+					))
+
+					;only cache probabilities for the global model, meaning no local/regional case_ids were specified
+					(if (and (= (null) case_ids) store_global_probabilities)
+						(assign_to_entities (assoc
+							!nominalClassProbabilitiesMap
+								(set
+									!nominalClassProbabilitiesMap
+									(list weight_feature_key feature)
+									nominal_class_probabilities_map
+								)
+						))
+					)
+				)
+			)
+
+			;output probabilities for the specified feature
+			(if (and (= (null) case_ids) store_global_probabilities)
+				(get !nominalClassProbabilitiesMap (list weight_feature_key feature))
+				;else
+				nominal_class_probabilities_map
+			)
+		)
+
+
+	;compute and cache all the expected values for all the features
+	; parameters:
+	; features: list of features
+	; use_case_weights: flag, if true will also compute cache values using the specified weight_feature
+	#!CacheExpectedValuesAndProbabilities
+		(declare
+			(assoc
+				features (list)
+				use_case_weights (false)
+			)
+
+			(accum_to_entities (assoc
+				!expectedValuesMap
+					(assoc
+						".none"
+							||(map
+								(lambda (let
+									(assoc feature (current_index 1))
+									(call !CalculateFeatureExpectedValue (assoc
+										feature feature
+										weight_feature ".none"
+										output_instead_of_store (true)
+										;force all categoricals to compute counts
+										output_nominal_class_counts (contains_index !categoricalFeaturesSet feature)
+									))
+								))
+								;iterate over all unique provided context and action features
+								(zip features)
+							)
+					)
+			))
+
+			(if use_case_weights
+				(accum_to_entities (assoc
+					!expectedValuesMap
+						(associate
+							weight_feature
+								||(map
+									(lambda (let
+										(assoc feature (current_index 1))
+										(call !CalculateFeatureExpectedValue (assoc
+											feature feature
+											weight_feature weight_feature
+											output_instead_of_store (true)
+											;force all categoricals to compute counts
+											output_nominal_class_counts (contains_index !categoricalFeaturesSet feature)
+										))
+									))
+									;iterate over all unique provided context and action features
+									(zip features)
+								)
+						)
+				))
+			)
+
+			(accum_to_entities (assoc
+				!nominalClassProbabilitiesMap
+					(assoc
+						".none"
+							||(map
+								(lambda (let
+									(assoc feature (current_index 1))
+									(call !ComputeModelNominalClassProbabilities (assoc
+										feature feature
+										weight_feature ".none"
+										store_global_probabilities (false)
+									))
+								))
+
+								;iterate over all unique provided context and action features that are categorical
+								(zip
+									(filter
+										(lambda (contains_index !categoricalFeaturesSet (current_value)))
+										features
+									)
+								)
+							)
+					)
+			))
+
+			(if use_case_weights
+				(accum_to_entities (assoc
+					!nominalClassProbabilitiesMap
+						(associate
+							weight_feature
+								||(map
+									(lambda (let
+										(assoc feature (current_index 1))
+										(call !ComputeModelNominalClassProbabilities (assoc
+											feature feature
+											weight_feature weight_feature
+											store_global_probabilities (false)
+										))
+
+									))
+
+									;iterate over all unique provided context and action features that are categorical
+									(zip
+										(filter
+											(lambda (contains_index !categoricalFeaturesSet (current_value)))
+											features
+										)
+									)
+								)
+						)
+				))
+			)
+
+			(declare (assoc num_cases (call !GetNumTrainingCases)))
+			(if (= (assoc) !featureMarginalStatsMap)
+				(call !CalculateMarginalStats)
+			)
+
+			;process all features, caching their min, max values as well as how many nulls there are and the ratio of cases / non-nulls
+			(accum_to_entities (assoc
+				!featureNullRatiosMap
+					(map
+						(lambda (let
+							(assoc
+								feature (current_index 1)
+							)
+
+							(declare
+								(if (contains_index !nominalsMap feature)
+									;nominal features have max uncertainty of 1
+									(assoc
+										min 0
+										max 1
+									)
+
+									;cyclic features get max num_values / 2
+									(contains_index !cyclicFeaturesMap feature)
+									(assoc
+										min 0
+										max (/ (get !cyclicFeaturesMap feature) 2)
+									)
+
+									;else continuous, use max value - min value
+									(assoc
+										max
+											(if (!= (null) (get !featureBoundsMap (list feature "max")) )
+												(if (contains_index !featureDateTimeMap feature)
+													(get !featureBoundsMap (list feature "epoch_max_value"))
+													(get !featureBoundsMap (list feature "max"))
+												)
+
+												;else feature bounds map doesn't have max, use cached marginal stats
+												(get !featureMarginalStatsMap (list weight_feature feature "max"))
+											)
+										min
+											(if (!= (null) (get !featureBoundsMap (list feature "min")) )
+												(if (contains_index !featureDateTimeMap feature)
+													(get !featureBoundsMap (list feature "epoch_min_value"))
+													(get !featureBoundsMap (list feature "min"))
+												)
+
+												;else feature bounds map doesn't have min, use cached marginal stats
+												(get !featureMarginalStatsMap (list weight_feature feature "min"))
+											)
+									)
+								)
+							)
+
+							(declare (assoc
+								num_nulls (compute_on_contained_entities (list (query_equals feature (null)) (query_count) ))
+							))
+
+							(assoc
+								;true means there are nulls, false means no nulls, null means unknown whether there are nulls
+								"has_nulls" (> num_nulls 0)
+								"null_residual"
+									(if (!= .nan (- max min))
+										(- max min)
+										0
+									)
+								"non_null_ratio" (/ num_cases (- num_cases num_nulls) )
+							)
+						))
+						(zip features)
+					)
+			))
+
+			;cache counts of ordinal features
+			(if (and (> (size !ordinalFeatures) 0) !staleOrdinalValuesCount)
+				(call !UpdateOrdinalFeaturesMap)
+			)
+		)
+
+	;updates has_nulls in !featureNullRatiosMap
+	;parameters:
+	; features: list of features for which to update count of nulls
+	#!UpdateHasNulls
+		(accum_to_entities (assoc
+			!featureNullRatiosMap
+				(map
+					(lambda (let
+						(assoc feature (current_index 1))
+						(set
+							;if it hasn't been computed yet, create an assoc of has_nulls -> true/false  for the feature
+							(or (get !featureNullRatiosMap feature) (assoc))
+							"has_nulls"
+							(> (compute_on_contained_entities (list (query_equals feature (null)) (query_count) )) 0)
+						)
+					))
+					(zip features)
+				)
+		))
+
+
+	;return an assoc of feature -> the smallest gap value for the feature
+	;parameters:
+	; features: list of features for which to return gap values
+	#!CalculateSmallestFeatureGap
+		(declare
+			(assoc features (list) )
+
+			(map
+				(lambda
+					(let
+						(assoc
+							smallest_gap
+								;gap is always 1 for nominals
+								(if (contains_index !nominalsMap (current_index 1))
+									1
+
+									;else compute the gap
+									(compute_on_contained_entities (list
+										(query_min_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
+									))
+								)
+						)
+
+						;gap / 2, unless it's infinity in which case set it to 0.5
+						;smallest_gap of infinity that means all the feature values are exactly the same,  for nominals and most normal numbers,
+						;the gap is 1, therefore 0.5 is a reasonable gap/2 value
+						(if (= .infinity smallest_gap )
+							0.5
+
+							smallest_gap
+						)
+					)
+				)
+				(zip features)
+			)
+		)
+
+	;outputs all marginal stats (min, max, median, mean, mode, count, uniques, mean_absdev, variance, stddev, skew, kurtosis, entropy)
+	;for all features in the format of feature -> assoc stat -> value. The marginal stats can be computed for a subset of the data using condition, precision, and num_cases
+	;
+	;parameters:
+	; weight_feature: optional, name of case weight feature
+	; condition: assoc of feature->value(s)
+	;		no value = must have feature
+	;   	- for continuous or numeric ordinal features:
+	;			one value = must equal exactly the value or be close to it for fuzzy match
+	;			two values = inclusive between
+	;   	- for nominal or string ordinal features:
+	;			n values = must match any of these values exactly
+	; precision: optional string,  default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
+	; num_cases: optional, limit on the number of cases to use in calculating conditional prediction stats; If set to zero there will be no limit.
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
+	#get_marginal_stats
+	(declare
+		(assoc
+			weight_feature (null)
+			condition (null)
+			precision "exact"
+			num_cases (null)
+		)
+
+		(if (= (null) weight_feature)
+			(assign (assoc weight_feature ".none"))
+		)
+
+		(call !Return (assoc
+			payload
+				(if (= (null) condition)
+					(seq
+						;if marginal stats haven't been computed yet, compute them here
+						(if (not (contains_index !featureMarginalStatsMap weight_feature))
+							(call !CalculateMarginalStats (assoc
+								weight_feature (if (!= ".none" weight_feature) weight_feature)
+							))
+						)
+
+						;get the stats for the specified weight_feature
+						(get !featureMarginalStatsMap weight_feature)
+					)
+
+					;else we have a condition
+					(let
+						(assoc
+							case_ids
+								(call !GetCasesByCondition (assoc
+									condition condition
+									num_cases num_cases
+									prevision precision
+								))
+						)
+
+						(call !CalculateMarginalStats (assoc
+							weight_feature weight_feature
+							filtering_queries (list (query_in_entity_list case_ids))
+						))
+					)
+				)
+		))
+	)
+
+
+	;calculates and caches all marginal stats (min, max, median, mean, mode, count, uniques,  mean_absdev, variance, stddev, skew, kurtosis, entropy)
+	;for all features
+	;
+	;parameters:
+	; weight_feature: optional, name of case weight feature
+	#!CalculateMarginalStats
+		(declare
+			(assoc
+				weight_feature (null)
+				filtering_queries (list)
+			)
+
+			(declare (assoc
+				stats
+					||(map
+						(lambda (let
+							(assoc
+								feature (current_index 1)
+
+								min (null)
+								max (null)
+								mean (null)
+								median (null)
+								percentile_25 (null)
+								percentile_75 (null)
+								mode (null)
+								count 0
+								uniques 0
+								mean_absdev (null)
+								variance (null)
+								stddev (null)
+								skew (null)
+								kurtosis (null)
+								entropy (null)
+								feature_is_numeric
+									(or
+										(not (contains_index !nominalsMap (current_index 1)))
+										(contains_index !numericNominalFeaturesMap (current_index 1))
+									)
+								feature_is_continuous (not (contains_index !nominalsMap (current_index 1)))
+							)
+
+							(if feature_is_continuous
+								(seq
+									(assign (assoc
+										min
+											(retrieve_from_entity
+												(first (contained_entities
+													(append filtering_queries (query_min feature 1))
+												))
+												feature
+											)
+										max
+											(retrieve_from_entity
+												(first (contained_entities
+													(append filtering_queries (query_max feature 1))
+												))
+												feature
+											)
+										mean
+											(compute_on_contained_entities (append
+												filtering_queries
+												(query_not_equals feature (null))
+												;calculate arithmetic average
+												(query_generalized_mean feature 1 weight_feature)
+											))
+										median
+											(compute_on_contained_entities (append filtering_queries (query_quantile feature 0.5 weight_feature)))
+										percentile_25
+											(compute_on_contained_entities (append filtering_queries (query_quantile feature 0.25 weight_feature)))
+										percentile_75
+											(compute_on_contained_entities (append filtering_queries (query_quantile feature 0.75 weight_feature)))
+									))
+
+									(assign (assoc
+										mean_absdev
+											(compute_on_contained_entities (append
+												filtering_queries
+												(query_not_equals feature (null))
+												(query_generalized_mean feature 1 weight_feature mean (true) (true))
+											))
+										variance
+											(compute_on_contained_entities (append
+												filtering_queries
+												(query_not_equals feature (null))
+												(query_generalized_mean feature 2 weight_feature mean (true))
+											))
+									))
+
+									(assign (assoc
+										stddev (sqrt variance)
+										skew
+											(/
+												(compute_on_contained_entities (append
+													filtering_queries
+													(query_not_equals feature (null))
+													(query_generalized_mean feature 3 weight_feature mean (true))
+												))
+												(pow variance 1.5)
+											)
+										kurtosis
+											(-
+												(/
+													(compute_on_contained_entities (append
+														filtering_queries
+														(query_not_equals feature (null))
+														(query_generalized_mean feature 4 weight_feature mean (true))
+													))
+													(pow variance 2)
+												)
+												3
+											)
+									))
+								)
+							)
+
+							(assign (assoc
+								mode
+									(compute_on_contained_entities (append
+										filtering_queries
+										(query_mode feature weight_feature feature_is_numeric)
+									))
+								count
+									(compute_on_contained_entities (append
+										filtering_queries
+										(query_not_equals feature (null))
+										(query_count)
+									))
+								uniques
+									(size
+										(compute_on_contained_entities (append
+											filtering_queries
+											(query_value_masses feature (null) feature_is_numeric)
+										))
+									)
+							))
+
+							(if (not feature_is_continuous)
+								(assign (assoc
+									entropy
+										(let
+											(assoc
+												class_counts_map
+													(compute_on_contained_entities (append
+														filtering_queries
+														(query_value_masses feature weight_feature feature_is_numeric)
+													))
+												total 0
+											)
+											(assign (assoc total (apply "+" (values class_counts_map)) ))
+											(entropy
+												(map (lambda (/ (current_value) total)) (values class_counts_map))
+											)
+										)
+								))
+							)
+
+							;output assoc of marginal stats for the feature, replace .nan with null if needed
+							(assoc
+								min (if (!= .nan min) min)
+								max (if (!= .nan max) max)
+								mean (if (!= .nan mean) mean)
+								median (if (!= .nan median) median)
+								percentile_25 (if (!= .nan percentile_25) percentile_25)
+								percentile_75 (if (!= .nan percentile_75) percentile_75)
+								mode (if (!= .nan mode) mode)
+								count count
+								uniques uniques
+								mean_absdev (if (!= .nan mean_absdev) mean_absdev)
+								variance (if (!= .nan variance) variance)
+								stddev (if (!= .nan stddev) stddev)
+								skew (if (!= .nan skew) skew)
+								kurtosis (if (!= .nan kurtosis) kurtosis)
+								entropy (if (!= .nan entropy) entropy)
+							)
+						))
+						(zip !trainedFeatures)
+					)
+			))
+
+			(if (= (null) weight_feature)
+				(assign (assoc weight_feature ".none"))
+			)
+
+			(if (= (list) filtering_queries)
+				(accum_to_entities (assoc
+					!featureMarginalStatsMap (associate weight_feature stats)
+				))
+
+				;else this was conditioned, return the marginal stats
+				stats
+			)
+		)
+)

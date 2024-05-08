@@ -1,0 +1,975 @@
+;Contains helper methods for case generation.
+(null
+
+	;helper method to cache time series filter query for reuse in reacts into 'cached_time_series_filter_query'
+	;parameters:
+	; regional_model_context_features: list of context features
+	; regional_model_context_values: list of corresponding context values
+	#!CreateAndCacheTimeSeriesFilterQuery
+	(if use_time_series_filter_query
+		(if (= 0 (size cached_time_series_filter_query))
+			(let
+				(assoc context_map (zip regional_model_context_features regional_model_context_values) )
+				(if (contains_index context_map !tsTimeFeature)
+					(assign (assoc cached_time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
+				)
+			)
+		)
+	)
+
+	;returns the closest ordinal value for a specified ordinal feature value,
+	;e.g., if an ordinal feature has values of 0,5,10,15  specifying 11.4 would return 10
+	;parameters:
+	; feature : ordinal feature which to return the value
+	; value : the value to snap to the closest ordinal
+	#!FindClosestOrdinalFeatureValue
+	(declare
+		(assoc
+			feature (null)
+			value (null)
+			sorted_feature_values (null)
+		)
+
+		;if empty list is explicitly passed in, pull the values from cache
+		(if (= 0 (size sorted_feature_values))
+			(assign (assoc sorted_feature_values (get !ordinalFeaturesValuesMap feature) ))
+		)
+
+		;if they aren't cached yet, store them into the cache
+		;Note: this should never run if the model has been analyzed and/or all feature values pre-cached properly
+		(if (= (null) sorted_feature_values)
+			(assign (assoc
+				sorted_feature_values
+					(call !UpdateOrdinalFeaturesMapForFeature (assoc
+						feature feature
+						store_values (true)
+					))
+			))
+		)
+
+		;if ordinal value is null, output a random non-null value if nulls are not allowed, else output the null
+		(if (= (null) value)
+			(conclude
+				(if (= (false) (get feature_bounds_map (list feature "allow_null")))
+					(rand (filter sorted_feature_values))
+					;else output the null as-is
+					(null)
+				)
+			)
+		)
+
+		;todo: use binary search instead of linear (filter)
+		;create a list of only the larger values
+		(declare (assoc larger_feature_values (filter (lambda (>= (current_value) value)) sorted_feature_values)))
+
+		;keep the two values that are closest to the number, which will be either the smallest (first) of the larger values
+		;or the larger of all the values, which we know by grabbing the index of where the larger numbers started
+		(declare (assoc
+			smaller (get sorted_feature_values (- (size sorted_feature_values) (size larger_feature_values) 1))
+			larger (if (= (list) larger_feature_values) (last sorted_feature_values) (first larger_feature_values))
+		))
+
+		;output the closest number
+		(if (= smaller (null))
+			larger
+
+			(= larger (null))
+			smaller
+
+			(< (abs (- value smaller)) (abs (- larger value)))
+			smaller
+
+			larger
+		)
+	)
+
+	;helper method of GenerateCase, all parameters passed in implicitly
+	;samples the specified feature value according to a laplace distribution based on the conviction specified and the residual for the feature
+	#!GenerateFeatureValue
+	(seq
+		(if feature_is_nominal
+			(let
+				;calculate probabilities for action given desired conviction and local class probabilities
+				(assoc
+					class_probabilities_map
+						(call !BlendNominalClassProbabilities (assoc
+							feature feature
+							desired_conviction desired_conviction
+							local_class_probabilities_map local_class_probabilities_map
+							action_value action_value
+							allowed_values (get feature_bounds_map (list feature "allowed"))
+							feature_residual feature_residual
+							allow_nulls allow_nulls
+						))
+				)
+
+				;overwrite local_class_probabilities_map with the one that was actually used to select a value
+				(if (and output_details (contains_index case_detail_values_map "categorical_action_probabilities"))
+					(assign (assoc
+						case_detail_values_map
+							(set
+								case_detail_values_map
+								"categorical_action_probabilities"
+								(append
+									(get case_detail_values_map "categorical_action_probabilities")
+									(associate feature class_probabilities_map)
+								)
+							)
+					))
+				)
+
+				(if (= (false) allow_nulls)
+					(seq
+						;if nulls are not allowed, but there are no probabilities to choose from,
+						;output a randomly weighted global value with nulls filtered out
+						(if (= 0 (size class_probabilities_map))
+							(assign (assoc
+								class_probabilities_map
+									;nominals are enumerated, if there happens to be a class value of .nas it will be enumerated in the map and
+									;treated like any other string.  Must use lambda in filter specifically to filter out .nas indices.
+									(filter
+										(lambda (!= (current_index) .nas))
+										(call !ComputeModelNominalClassProbabilities (assoc feature feature))
+									)
+
+							))
+						)
+
+						;output random class based on probability, doesn't contain nulls, non string nominals should be output as numeric
+						(if (contains_index !numericNominalFeaturesMap feature)
+							(+ (weighted_rand class_probabilities_map))
+							(weighted_rand class_probabilities_map)
+						)
+					)
+
+					;else output random class based on probabliity, nulls are allowed
+					(let
+						(assoc output_value (weighted_rand class_probabilities_map))
+
+						;note: nulls stored as .nas, convert any .nas strings to an actual (null)
+						(if (= .nas output_value)
+							(null)
+
+							;non string nominals should be output as numeric
+							(if (contains_index !numericNominalFeaturesMap feature)
+								(+ output_value)
+								output_value
+							)
+						)
+					)
+				)
+			)
+
+			;else continuous feature that uses edit distance
+			(contains_index !editDistanceFeatureTypesMap feature)
+			(let
+				(assoc
+					data_type (get !editDistanceFeatureTypesMap feature)
+					data_size (total_size action_value)
+				)
+
+				(if (= "amalgam" data_type)
+					(mutate
+						action_value
+						;pick a random probability along the exponential distribution scaled by desired conviction
+						(- 1 (exp (- (* (rand) (/ feature_residual data_size desired_conviction))) ) )
+					)
+
+					(or (= "json" data_type) (= "yaml" data_type))
+					;restrict what opcodes can be mutated to, weighted by what's in action_value
+					(mutate
+						action_value
+						;pick a random probability along the exponential distribution scaled by desired conviction
+						(- 1 (exp (- (* (rand) (/ feature_residual data_size desired_conviction))) ) )
+						;restrict allowed mutations to what's currently in the json
+						(call !ComputeJsonWeightsMap (assoc code action_value))
+						;explicitly allow all operations except change_label
+						(assoc
+							"delete" 0.167
+							"insert" 0.167
+							"swap_elements" 0.167
+							"change_type" 0.167
+							"deep_copy_elements" 0.166
+							"delete_elements"0.166
+						)
+					)
+
+					;else it's a string, mutate it based on residual and desired_conviction
+					(apply "concat" (mutate
+						(explode action_value)
+						;pick a random probability along the exponential distribution scaled by desired conviction
+						(- 1 (exp (- (* (rand) (/ feature_residual (size action_value) desired_conviction))) ) )
+						(assoc "string" 1)
+						;restricted allowed operations on strings
+						(assoc "delete" 0.33 "insert" 0.33 "swap_elements" .34)
+					))
+				)
+			)
+
+			(= action_value (null))
+			(null)
+
+			;else use laplace distribution around the action_value to generate the new action value if that value isn't null
+			; AV = reaction feature value
+			; B = feature residual
+			; R = rand(1) - 0.5
+			; F-value = AV - B (sign(R)) * ln(1 - 2 * abs(R))
+			(let
+				(assoc R (- (rand) 0.5))
+				(declare (assoc ln_const (log (- 1 (* 2 (abs R))))))
+
+				;there is no sign opcode in amalgam, so just add or subtract based on sign of R
+				(declare (assoc
+					feature_value
+						(if
+							(> R 0)
+							(- action_value (* feature_residual ln_const (/ 1 desired_conviction)))
+
+							(< R 0)
+							(+ action_value (* feature_residual ln_const (/ 1 desired_conviction)))
+
+							;else keep the action value as-is
+							action_value
+						)
+				))
+
+				;implicitly pass in feature_value and feature to round the value
+				(call !RoundContinuousValue)
+				feature_value
+			)
+		)
+	)
+
+	;blend nominal class probabilities according to the desired conviction, using the feature_residual and categorical action probabilities
+	;
+	; local class probablities correspond to a desired conviction = 1.
+	;
+	; desired conviction >= 1:
+	; global class probabilities are used instead of local ones with a probability of (feature_residual / desired_conviction)
+	;
+	; example for a local model where all classes have a non-0 probability:
+	;
+	; 	 0	 0.5883	 1		inf
+	; 	--------------------------
+	; A* 0	 0		.5		.5
+	; B	 0	 0		.25	   	.25
+	; C .5	.5		.125	.125
+	; D	.5	.5		.125	.125
+	;
+	; infinite conviction:
+	; to mantain distributions probablities don't change for higher convictions
+	;
+	;
+	; desired conviction < 1:
+	;
+	; 0 conviction probability:
+	; step1 = (entropy (list .5 .25 .125 .125)) = 1.2130075659799042
+	; step2 = -ln of lowest probability, -ln(.125) = 2.0794415416798357
+	; step3 = step1/step2 ~ .5833 <- lowest conviction bound, can't go lower.
+	; all non-lowest classes have lowest probabilities of 0, all lowest are 1/N where N is the count of 'all lowest'
+	;
+	; for models where there are classes with 0 probability:
+	;
+	;  	 0		1		inf
+	; 	--------------------------
+	; A* 0		.5		.5
+	; B	 0		.25	   	.25
+	; C	 0		.125	.125
+	; D	 0		.125	.125
+	; E	.333	 0		0
+	; F	.333	 0		0
+	; G	.333	 0		0
+	;
+	; 0 conviction:
+	; all non-0 probability classes have a 0 probability
+	; all 0-probability classes have a 1/N probability where N is the count of all '0-probability' classes
+	;
+	; the probability of each class is linearly interpolated based on the conviction value and that clasess's corresponding probability
+	;
+	; outputs a map of class value and its blended probability
+	;
+	;parameters:
+	;	feature : nominal feature name
+	;	desired_conviction : desired conviction value
+	;	local_class_probabilities_map : assoc of local class -> probability for a given prediction
+	;	action_value : the selected action value
+	;	allowed_values : optional list of allowed class values (boundaries)
+	;	feature_residual: residual for the nominal feature
+	;	allow_nulls : flag, if set to true will allow null to be generated as a valid feature value
+	#!BlendNominalClassProbabilities
+	(declare
+		(assoc
+			feature (null)
+			desired_conviction 1
+			local_class_probabilities_map (assoc)
+			action_value (null)
+			allowed_values (null)
+			allow_nulls (true)
+		)
+
+		(declare (assoc
+			global_class_probabilities_map (call !ComputeModelNominalClassProbabilities (assoc feature feature))
+		))
+
+		(if (>= desired_conviction 1)
+			;if rand < (residual / desired_conviction) , overwrite local probabilities with global or domain ones
+			;do not ovewrite for dependent features because the user has explicitly defined this feature to be dependent on another one in the local model
+			(if (and (not action_feature_is_dependent) (< (rand) (/ feature_residual desired_conviction)))
+				;use domain probabilities with a 1 / num_classes if the dataset is too small or using same probability WRT feature_residual
+				(if (or
+						(< (rand) (/ feature_residual desired_conviction))
+						(< (call !GetNumTrainingCases) (max 30 (get hyperparam_map "k")))
+					)
+					(assign (assoc
+						local_class_probabilities_map
+							(zip
+								(indices global_class_probabilities_map)
+								(/ 1 (size global_class_probabilities_map))
+							)
+					))
+
+					;use global probabilities
+					(assign (assoc local_class_probabilities_map global_class_probabilities_map ))
+				)
+			)
+		)
+
+		;if the case generation starts with a norminal value that's specified by user, there are no local probabilities since there was no
+		;react to get them, so set them to global ones for this initial value
+		(if (= 0 (size local_class_probabilities_map))
+			(assign (assoc local_class_probabilities_map global_class_probabilities_map ))
+
+			;else set all probablities of classes that aren't in the local map to be 0 for low desired conviction, except when generating dependents
+			(and (< desired_conviction 1) (not action_feature_is_dependent))
+			(assign (assoc
+				local_class_probabilities_map
+					(map
+						(lambda
+							(if (contains_index local_class_probabilities_map (current_index))
+								(get local_class_probabilities_map (current_index))
+								0
+							)
+						)
+						global_class_probabilities_map
+					)
+			))
+		)
+
+		(if (= (false) allow_nulls )
+			(assign (assoc
+				;nominals are enumerated, if there happens to be a class value of .nas it will be enumerated in the map and treated
+				;like any other string. Must use lambda in filter specifically to filter out .nas indices.
+				local_class_probabilities_map (filter (lambda (!= (current_index) .nas)) local_class_probabilities_map )
+			))
+		)
+
+		;if allowed list is specified, filter out any values that aren't on the allowed list
+		(if (and (!= (null) allowed_values) (> (size allowed_values) 0))
+			;set probabilities to 0 for those classes in the map that are not on the allowed list
+			(assign (assoc
+				local_class_probabilities_map
+					(map
+						(lambda
+							(if (contains_index local_class_probabilities_map (current_index))
+								(get local_class_probabilities_map (current_index))
+								0
+							)
+						)
+						(zip allowed_values)
+					)
+			))
+		)
+
+		;create an interpolated probabilities map that's interpolated between local and global based on desired_conviction, where
+		;desired_conviction >=1 is local probabilities, 0=all classes except action_value are 1/N (uniform)
+		(declare (assoc
+			residual_blended_probabilities_map
+				(if (>= desired_conviction 1)
+					local_class_probabilities_map
+
+					;else desired_conviction < 1
+					(let
+						(assoc local_model_has_zero_probability_classes (contains_value (values local_class_probabilities_map) 0))
+
+						;lowest conviction boundary is 0, and therefore lowest probabliity for all non-zero classes is 0
+						(if local_model_has_zero_probability_classes
+							(let
+								(assoc zero_probability_classes_map (filter (lambda (= (current_value) 0)) local_class_probabilities_map))
+								(map
+									(lambda (let
+										(assoc
+											;all 0-probability classes have a 1/N probability where N is the count of all '0-probability' classes
+											zero_prob_class_zero_conv_probability_value (/ 1 (size zero_probability_classes_map))
+										)
+
+										(if (not (contains_index zero_probability_classes_map (current_index)))
+											;the selected probability has a zero conviction probability value of 0, so just scale it directly
+											(* (current_value) desired_conviction)
+
+											;probability for classes that had 0 probability approaches 0 as desired_conviction approaches 1
+											;and approaches zero_prob_class_zero_conv_probability_value as desired_conviction approaches 0
+											(- zero_prob_class_zero_conv_probability_value (* zero_prob_class_zero_conv_probability_value desired_conviction))
+										)
+									))
+									local_class_probabilities_map
+								)
+							)
+
+							;else compute entropy to calculate the lowest conviction bound
+							(let
+								(assoc
+									;compute the entropy (expected surprisal) of the current set of probabilities for the action class
+									entropy_of_local_probabilities (entropy (values local_class_probabilities_map))
+									lowest_probability (apply "min" (values local_class_probabilities_map))
+								)
+
+								(declare (assoc
+									lowest_conviction_boundary
+										;entropy is zero if there's only one class in the local probabilities. then just set the boundary
+										;to 1 to just output the probability of this one class
+										(if (= 0 entropy_of_local_probabilities)
+											1
+
+											(/ entropy_of_local_probabilities (- (log lowest_probability )))
+										)
+
+									lowest_probability_classes_map (filter (lambda (= (current_value) lowest_probability )) local_class_probabilities_map)
+								))
+
+								(map
+									(lambda (let
+										(assoc
+											;all non-lowest classes have lowest probabilities of 0, all lowest are 1/N where N is the count of 'all lowest'
+											boundary_probability (/ 1 (size lowest_probability_classes_map))
+										)
+
+										(if (<= desired_conviction lowest_conviction_boundary)
+											(if (contains_index lowest_probability_classes_map (current_index))
+												boundary_probability
+
+												0
+											)
+
+											;else need to linearly interpolate between lowest_conviction_boundary and 1
+											(let
+												(assoc
+													;invert and normalize the conviction value to be between 1 and 0:
+													;value approaches 1 as as conviction approaches the lowest boundary probability
+													;and approaches 0 as conviction approaches 1
+													inverted_one_to_boundary_conviction_value
+														(/ (- 1 desired_conviction) (- 1 lowest_conviction_boundary))
+												)
+
+												(if (contains_index lowest_probability_classes_map (current_index))
+													;lowest probability classes increase their probability as they approach boundary_probability
+													;original_low_prob + (boundary_probability - original_low_prob) * inverted_conv_value
+													(+ (current_value)
+														(* (- boundary_probability  (current_value))
+															inverted_one_to_boundary_conviction_value
+														)
+													)
+
+													;original_prob - original_prob * inverted_conv_value
+													(- (current_value) (* (current_value) inverted_one_to_boundary_conviction_value))
+												)
+											)
+										)
+									))
+									local_class_probabilities_map
+								)
+							)
+						)
+					)
+				)
+		))
+
+		(declare (assoc total_prob_values (apply "+" (values residual_blended_probabilities_map))))
+
+		;in the case of no probabilities, assign even probabilities to all
+		(if (= 0 total_prob_values)
+			(map
+				(lambda (/ 1 (size residual_blended_probabilities_map)))
+				residual_blended_probabilities_map
+			)
+
+			;output normalized probabilities that all add up to 1
+			(map
+				(lambda (/ (current_value) total_prob_values))
+				residual_blended_probabilities_map
+			)
+		)
+	)
+
+	;React to the provided context, querying the local region if necessary, outputting the local/regional cases and local probabilities
+	; For nominal action features: outputs the action_value and the local categorical probabilities
+	; For continuous action features: outputs the list of local case ids and the local model with normalized influence weights, additionally
+	; outputs the regional model case ids if approximating the residual.
+	;
+	; action_feature : feature that is being generated
+	; context_features : list of context features for the react
+	; context_values : list of context values to use in the react
+	; feature_is_nominal : flag, set to true if action_feature is nominal
+	; allow_nulls : flag, if set to true, cases where the action_feature is null will be considered
+	; hyperparam_map: optional assoc of hyperparameters to use (instead of system-determined ones)
+	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
+	; valid_weight_feature : flag, set to true if the provided weight_feature should be used to scale the results
+	; approximate_residual : flag, set to true if approximating RMR and action feature is continuous
+	; ignore_case : optional, case id of case to ignore during the react
+	#!NearestRegionReact
+	(declare
+		(assoc
+			action_feature (null)
+			context_features (list)
+			context_values (list)
+			feature_is_nominal (false)
+			allow_nulls (true)
+			weight_feature ".case_weight"
+			hyperparam_map (null)
+			valid_weight_feature (false)
+			approximate_residual (true)
+			ignore_case (null)
+		)
+
+		(if (= (null) hyperparam_map)
+			(assign (assoc
+				hyperparam_map
+					(call !GetHyperparameters (assoc
+						feature action_feature
+						context_features context_features
+						mode "robust"
+						weight_feature weight_feature
+					))
+			))
+		)
+
+		(declare (assoc
+			local_k (get hyperparam_map "k")
+			local_case_ids (list)
+			regional_case_ids (list)
+			dependent_queries_list
+				(if action_feature_is_dependent
+					(call !ComputeDependentQueries (assoc
+						action_feature action_feature
+						context_features context_features
+						context_values context_values
+					))
+					(list)
+				)
+			;for continuous features, we may need to output feature values to check whether they are all the same
+			;in the local model and then probabilistically output the value as-is, i.e., not add any noise to that value.
+			;Improve performance by only outputting these values when the feature is purely continuous and probability is computed as:
+			;entropy of a Laplace distribution is ln(2*r*e), using r=1 because of LK and IRW scaling, entropy = 1.693147
+			;probability = e^(-surprisal), conviction = entropy/surprisal, solve for probability as e^(-entropy/conviction), so
+			;probability of deciding not to add Laplace noise is: e^(-1.693147/desired_conviction)
+			output_continuous_case_values
+				(and
+					(not feature_is_nominal)
+					(not feature_is_ordinal)
+					(< (rand) (pow 2.718281828 (/ -1.693147181 desired_conviction)))
+				)
+			local_model_cases_map (assoc)
+			local_model_case_values_map (assoc)
+		))
+
+		(declare (assoc
+			local_model_cases_tuple
+				#!NearestRegionalCasesQuery
+				(compute_on_contained_entities
+					(append
+						;if ignoring null action feature, query for cases where action feature is not null
+						(if (not allow_nulls)
+							(query_not_equals action_feature (null))
+							(list)
+						)
+						(if ignore_case
+							(query_not_in_entity_list (list ignore_case))
+							(list)
+						)
+						dependent_queries_list
+						cached_time_series_filter_query
+						(query_nearest_generalized_distance
+							(if approximate_residual
+								;regional is a max of e * k and 30
+								(max (* 2.718281828459045 local_k) 30)
+
+								local_k
+							)
+							context_features
+							context_values
+							(get hyperparam_map "featureWeights")
+							!queryDistanceTypeMap
+							(get hyperparam_map "featureDomainAttributes")
+							(get hyperparam_map "featureDeviations")
+							(get hyperparam_map "p")
+							(get hyperparam_map "dt")
+							(if valid_weight_feature weight_feature (null))
+							(rand)
+							(null) ;radius
+							!numericalPrecision
+							;output sorted list case values along with weights
+							(if output_continuous_case_values
+								action_feature
+								;else output only sorted list of  weights
+								(true)
+							)
+						)
+					)
+				)
+		))
+
+		;if local_model_cases_tuple is too small to be viable, then remove dependent feature queries and recompute
+		;local_model_cases_tuple until sufficiently many cases are returned
+		(if action_feature_is_dependent
+			(if action_feature_is_dependent_and_continuous
+				;continuous values should have at least 3 values for privacy when it should be generating new cases
+				;otherwise it should have at least one value
+				(while
+					(and
+						(<
+							(size (first local_model_cases_tuple))
+							(if (= "no" generate_new_cases) 1 3)
+						)
+						(> (size dependent_queries_list) 0)
+					)
+					(assign (assoc dependent_queries_list (trunc dependent_queries_list)))
+					(assign (assoc local_model_cases_tuple (call !NearestRegionalCasesQuery) ))
+				)
+
+				;nominals need to have at least one value
+				(while
+					(and
+						(= (size (first local_model_cases_tuple)) 0)
+						(> (size dependent_queries_list) 0)
+					)
+					(assign (assoc dependent_queries_list (trunc dependent_queries_list)))
+					(assign (assoc local_model_cases_tuple (call !NearestRegionalCasesQuery) ))
+				)
+			)
+		)
+
+		;if approximating regional residual for continuous, need to truncate the regional model to output probabilities for local only
+		(if approximate_residual
+			(seq
+				(assign (assoc regional_case_ids (first local_model_cases_tuple) ))
+
+				;keep only the local k closest case ids
+				(assign (assoc local_case_ids (trunc regional_case_ids local_k)))
+
+				;keep only the local k cases in the map
+				(if output_continuous_case_values
+					(assign (assoc
+						local_model_cases_map (zip local_case_ids (trunc (get local_model_cases_tuple 1) local_k))
+						local_model_case_values_map (zip local_case_ids (trunc (last local_model_cases_tuple) local_k))
+					))
+
+					(assign (assoc
+						local_model_cases_map (zip local_case_ids (trunc (last local_model_cases_tuple) local_k))
+					))
+				)
+			)
+
+			;else the local case_ids are the same as the indices of local model map
+			(if output_continuous_case_values
+				(assign (assoc
+					local_case_ids (first local_model_cases_tuple)
+					local_model_cases_map (zip (first local_model_cases_tuple) (get local_model_cases_tuple 1))
+					local_model_case_values_map (zip (first local_model_cases_tuple) (last local_model_cases_tuple))
+				))
+
+				(assign (assoc
+					local_case_ids (first local_model_cases_tuple)
+					local_model_cases_map (zip (first local_model_cases_tuple) (last local_model_cases_tuple))
+				))
+			)
+		)
+
+		(declare (assoc local_cases_total_weight (apply "+" (values local_model_cases_map))))
+
+		;normalize the weights in the local model
+		(assign (assoc
+			local_model_cases_map
+				;if has perfect matches, set their weight to 1, others to 0
+				(if (= .infinity local_cases_total_weight)
+					(map
+						(lambda (if (= .infinity (current_value)) 1 0))
+						local_model_cases_map
+					)
+
+					;else just scale the weights
+					(map
+						(lambda (/ (current_value) local_cases_total_weight))
+						local_model_cases_map
+					)
+				)
+		))
+
+		;compute categorical action probabilities for nominal features
+		(if feature_is_nominal
+			(let
+				(assoc
+					categorical_value_weights_map (assoc)
+					action_value (null)
+				)
+
+				(if (= .infinity local_cases_total_weight)
+					(let
+						(assoc
+							neighbor_id_to_values_map
+								(map
+									(lambda (retrieve_from_entity (current_index) action_feature))
+									;only consider perfect match neighbors by filtering out those with a weight of 0
+									(filter (lambda (= 1 (current_value))) local_model_cases_map)
+								)
+						)
+
+						;since these are perfect matches, they all have equal weight
+						(declare (assoc value_weight (/ 1 (size neighbor_id_to_values_map))))
+
+						;iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+						;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
+						(assign (assoc
+							categorical_value_weights_map
+								(zip
+									(lambda (+ (current_value 1) (current_value)))
+									(values neighbor_id_to_values_map)
+									value_weight
+								)
+						))
+					)
+
+					;else iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+					;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
+					(assign (assoc
+						categorical_value_weights_map
+							(zip
+								(lambda (+ (current_value 1) (current_value)))
+								;feature value for each case
+								(map
+									(lambda (retrieve_from_entity (current_value) action_feature))
+									(indices local_model_cases_map)
+								)
+
+								;weights of corresponding case
+								(values local_model_cases_map)
+							)
+					))
+				)
+
+				;sort the assoc of discrete values by their weights from high to low
+				;returns the first (highest weighted) categorical value
+				(assign (assoc
+					action_value
+						(first
+							(sort
+								(lambda (>
+									(get categorical_value_weights_map (current_value 1))
+									(get categorical_value_weights_map (current_value))
+								))
+								(indices categorical_value_weights_map)
+							)
+						)
+				))
+
+				;parse the categorical neighbor value to handle the situation where the value is the string .nas
+				;and convert it to an actual (null), all other numerical or string literals will remain unchanged
+				(if (= .nas action_value)
+					(assign (assoc action_value (null)))
+				)
+
+				;categorical action feature output
+				(assoc
+					"action_value" action_value
+					"categorical_value_weights_map" categorical_value_weights_map
+					"local_model_cases_map" local_model_cases_map
+				)
+			)
+
+			;else continuous action feature output
+			(assoc
+				"local_model_case_values_map" local_model_case_values_map
+				"local_model_cases_map" local_model_cases_map
+				"regional_case_ids" regional_case_ids
+				"local_case_ids" local_case_ids
+			)
+		)
+	)
+
+	;Helper method to compute approximate residual for edit distance features
+	;
+	; To approximate the residual for edit distance features we would need to do O(k^2) edit_distance calls
+	; which would be very costly and slow.  This approach approximates the results using O(k) algorithm instead.
+	; It takes the intersection of all the cases in the regional model.
+	; Then it computes the edit distance between each case and that common intersection.
+	; Then it keeps the min of the average regional edit distance or the average local edit distance.
+
+	; The idea is that if the local code "values" do not have much in common, or even if one of them is drastically
+	; different, the intersection is going to be empty or near empty, meaning that the average edit distance is approximately the
+	; average total size of the code block. Thus the overall approximate residual is simply the average total size of the code blocks,
+	; which is likely over-estimating the residual.
+	; If the local code values are identical or very similar, since we are taking the intersection, it's still going to result
+	; in the smallest most-common code block among all, thus the the average edit distance to all the cases will still be
+	; some fixed constant smaller than the average total size of the code blocks.
+
+	; As mentioned, we are likely over-estimating the residual due to the harshness of using the common intersection, thus
+	; we will take the smaller of the average local or regional edit distances.
+	;
+	;parameters:
+	; feature: action feature
+	; local_case_ids: list of local model case ids, should be a subset of regional_case_ids
+	; regional_case_ids: list of regional model case ids, which is a superset of local_case_ids
+	#!ComputeEditDistanceApproximateResidual
+	(let
+		(assoc
+			feature_type (get !editDistanceFeatureTypesMap feature)
+			regional_feature_values_map
+				(map
+					(lambda (retrieve_from_entity (current_index) feature))
+					(zip regional_case_ids)
+				)
+			case_index 1
+			original_regional_feature_values_map (assoc)
+			is_string_mixable (false)
+		)
+
+		;explode all the strings to treat them as lists
+		(if (= feature_type "string_mixable")
+			(seq
+				(assign (assoc original_regional_feature_values_map regional_feature_values_map))
+				(assign (assoc
+					regional_feature_values_map (map (lambda (explode (current_value))) regional_feature_values_map)
+					is_string_mixable (true)
+				))
+			)
+		)
+
+		(declare (assoc
+			intersected_regional_value (null)
+			intersected_local_value (get regional_feature_values_map (first local_case_ids))
+			regional_only_case_ids_at_end
+				(append
+					local_case_ids
+					(indices (remove regional_feature_values_map local_case_ids))
+				)
+		))
+
+		;since intersect may be an expensive operation, we do not want to do two 'reduce' statements to populate
+		;the intersected local and regional values separately, so we populate both using one iteration pass here
+		(while (< case_index (size regional_feature_values_map))
+
+			;collapse local values first, once that's done, start collapsing into regional values, continuing from the local ones
+			(if (< case_index (size local_case_ids))
+				(assign (assoc
+					intersected_local_value
+						(intersect
+							intersected_local_value
+							(get regional_feature_values_map (get local_case_ids case_index))
+						)
+				))
+
+				(seq
+					(if (= case_index (size local_case_ids))
+						(assign (assoc intersected_regional_value intersected_local_value))
+					)
+					(assign (assoc
+						intersected_regional_value
+							(intersect
+								intersected_regional_value
+								(get regional_feature_values_map (get regional_only_case_ids_at_end case_index))
+							)
+					))
+				)
+			)
+
+			(if (= (null) intersected_regional_value)
+				(assign (assoc intersected_regional_value intersected_local_value))
+			)
+
+			(accum (assoc case_index 1))
+		)
+
+		;concat strings back from lists into strings
+		(if is_string_mixable
+			(seq
+				(assign (assoc
+					regional_feature_values_map original_regional_feature_values_map
+					intersected_local_value (apply "concat" intersected_local_value)
+					intersected_regional_value (apply "concat" intersected_regional_value)
+				))
+			)
+		)
+
+		;create assoc of case id -> edit distance
+		(declare (assoc
+			regional_edit_distances_map
+				(map
+					(lambda (edit_distance (current_value) intersected_regional_value is_string_mixable))
+					regional_feature_values_map
+				)
+		))
+
+		;output the smaller of the average local and regional edit distances
+		;if intersected values are the same, we can reuse the computed edit distance for regional cases for local as well
+		(if (= intersected_local_value intersected_regional_value)
+			(min
+				(/ (apply "+" (values regional_edit_distances_map)) (size regional_edit_distances_map))
+				(/ (apply "+" (unzip regional_edit_distances_map local_case_ids)) (size local_case_ids))
+			)
+
+			;else intersected_local_value is different from regional, need to explicitly compute edit distances for local cases separately
+			(let
+				(assoc
+					local_edit_distances
+						(map
+							(lambda (edit_distance (current_value) intersected_local_value is_string_mixable))
+							(unzip regional_feature_values_map local_case_ids)
+						)
+				)
+				(min
+					(/ (apply "+" (values regional_edit_distances_map)) (size regional_edit_distances_map))
+					(/ (apply "+" local_edit_distances) (size local_edit_distances))
+				)
+			)
+		)
+	)
+
+	 #!CountJsonNodes
+	(declare
+		(assoc skip_append_list_keyword (false))
+
+		(if (= "assoc" (get_type_string code))
+			(append
+				"assoc"
+				(range (lambda "string") 1 (size code) 1)
+				(call !CountJsonNodes (assoc code (values code) skip_append_list_keyword (true)))
+			)
+
+			(append
+				(if skip_append_list_keyword (list) "list")
+				(apply "append" (map
+					(lambda (let
+						(assoc type (get_type_string (current_value 1)) )
+
+						(if (or (= "list" type) (= "assoc" type))
+							(call !CountJsonNodes (assoc code (current_value 1)))
+
+							type
+						)
+					))
+					code
+				))
+			)
+		)
+	)
+
+	#!ComputeJsonWeightsMap
+	(declare
+		(assoc all_json_types_in_code (call !CountJsonNodes (assoc code code)) )
+
+		(zip
+			(lambda (+ (current_value) (current_value 1)) )
+			all_json_types_in_code
+			(range (lambda 1) 1 (size all_json_types_in_code) 1)
+		)
+	)
+
+)

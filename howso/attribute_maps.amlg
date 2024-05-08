@@ -1,0 +1,598 @@
+;Contains methods for composing specific feature attribute maps.
+(null
+
+	#!ComposeCyclicsMap
+	;map-filter weave produces a list of string, assoc combinations, assoc conversion makes the strings keys and values the assoc
+	(apply "assoc"
+		(weave
+			(lambda
+				(if (> (get (last (current_value)) "cycle_length") 0)
+					(list (first (current_value 1)) (get (last (current_value 1)) "cycle_length"))
+					;else don't output anything, map-filtering out any values that don't have cyclics
+					(list)
+				)
+			)
+			(indices features)
+			(values features)
+		)
+	)
+
+	#!ComposeDateTimeMap
+	(apply "assoc"
+		(weave
+			(lambda
+				(if (!= (null) (get (last (current_value)) "date_time_format"))
+					(let
+						(assoc
+							date_time_format (get (last (current_value 1)) "date_time_format")
+							locale (get (last (current_value 1)) "locale")
+						)
+
+						(list
+							(first (current_value 1))
+							(assoc
+								"date_time_format" (concat "date:" date_time_format)
+								;set default of en_US if locale is not specified
+								"locale" locale
+							)
+						)
+					)
+					;else don't output anything, map-filtering out any values that don't have datetimes
+					(list)
+				)
+			)
+			(indices features)
+			(values features)
+		)
+	)
+
+	#!ComposeRoundingMap
+	(apply "assoc"
+		(weave
+			(lambda
+				(if (or
+						(!= (null) (get (last (current_value)) "decimal_places"))
+						(!= (null) (get (last (current_value)) "significant_digits"))
+					)
+					(let
+						(assoc
+							decimal_places (get (last (current_value 1)) "decimal_places")
+							significant_digits (get (last (current_value 1)) "significant_digits")
+							feature (first (current_value 1))
+						)
+
+						(if (and (!= (null) decimal_places) (!= (null) significant_digits))
+							(list feature (list significant_digits decimal_places))
+
+							(!= (null) decimal_places)
+							;ignore the significant digit by setting it to max value of 18
+							(list feature (list 18 decimal_places))
+
+							;else if only the significant digits are specified, store that
+							(!= (null) significant_digits)
+							(list feature (list significant_digits))
+						)
+					)
+
+					;else don't output anything, map-filtering out any values that don't have rounded features
+					(list)
+				)
+			)
+			(indices features)
+			(values features)
+		)
+	)
+
+	#!ComposeUserSpecifiedFeatureErrorsMap
+	;map-filter weave
+	(apply "assoc"
+		(weave
+			(lambda
+				(if (!= (null) (get (last (current_value)) "observational_error" ))
+					(list (first (current_value 1)) (get (last (current_value 1)) "observational_error"))
+					;else don't output anything, map-filtering out any values that don't have cyclics
+					(list)
+				)
+			)
+			(indices features)
+			(values features)
+		)
+	)
+
+	#!ComposeDependentsMap
+	(let
+		(assoc
+			dependents_map
+				;map-filter weave, leaves an assoc of:  feature -> { "dependent_features": [ ... ] } for those that have dependent_features
+				(apply "assoc"
+					(weave
+						(lambda
+							(if (!= (null) (get (last (current_value)) "dependent_features" ))
+								(list
+									(first (current_value 1))
+									(assoc
+										"dependent_features"
+										(get (last (current_value 2)) "dependent_features")
+									)
+								)
+								;else don't output anything, map-filtering out any values that don't have dependent features
+								(list)
+							)
+						)
+						(indices features)
+						(values features)
+					)
+				)
+			full_dependents_map (assoc)
+		)
+		;copy the original dependents_map so that it can be populated if necessary below
+		(assign (assoc full_dependents_map (get_value dependents_map)))
+
+		;ensure that every feature listed as a dependent feature has whatever feature referenced it in their own dependent_features list as well
+		;e.g., if user only provided that  A -> [B, C] ensure that B -> [A] and C -> [A] as well
+		(map
+			(lambda (let
+				(assoc feature (current_index 1) )
+
+				;iterate over all the dependents and ensure they are added to full_dependents_map if they aren't there
+				;e.g., from the example above, for feature A, iterate over [B, C], pulling B's and then C's
+				;dependent_features lists and accumulate A to each if needed
+				(map
+					(lambda
+						(if
+							(not (contains_value
+								(get full_dependents_map (list (current_value 1) "dependent_features"))
+								feature
+							))
+							(accum "full_dependents_map" (list (current_value 1) "dependent_features") (list feature))
+						)
+					)
+					;list of dependent_features for this feature
+					(get (current_value) "dependent_features")
+				)
+
+			))
+			dependents_map
+		)
+
+		;return the filled dependents map
+		full_dependents_map
+	)
+
+	#!ComposeContinuousToNominalDependenciesMap
+	(let
+		(assoc
+			dependent_continuous_features_map
+				;filter out nominal features, leaving only continuous ones
+				(filter
+					(lambda (not (contains_index nominals_map (current_index))) )
+					dependents_map
+				)
+		)
+
+		;output an assoc of continuous feature -> [ list of sorted nominal dependents ]
+		(map
+			(lambda
+				(filter
+					(lambda (contains_index nominals_map (current_value)))
+					(sort (get (current_value) "dependent_features"))
+				)
+			)
+			dependent_continuous_features_map
+		)
+	)
+
+	#!ComposeNonStringNominalsMap
+	;map-filter weave
+	(apply "assoc"
+		(weave
+			(lambda
+				;only allowed data_type values are number, boolean, json and amalgam, all others are ignored
+				(if (and
+						(= "nominal" (get (last (current_value)) "type"))
+						(contains_value (list "number" "boolean" "json" "yaml" "amalgam") (get (last (current_value)) "data_type") )
+					)
+					(list (first (current_value 1)) (get (last (current_value 1)) "data_type"))
+					;else don't output anything, map-filtering out any values that don't have data_type defined
+					(list)
+				)
+			)
+			(indices features)
+			(values features)
+		)
+	)
+
+	#!ComposeNonNumberContinuousMap
+	;map-filter weave
+	(apply "assoc"
+		(weave
+			(lambda
+				;only allowed data_type values are string, json and amalgam, all others are ignored
+				(if (and
+						(= "continuous" (get (last (current_value)) "type"))
+						(contains_value (list "string" "string_mixable" "json" "yaml" "amalgam") (get (last (current_value)) "data_type") )
+					)
+					(list (first (current_value 1)) (get (last (current_value 1)) "data_type"))
+					;else don't output anything, map-filtering out any values that don't have datype defined
+					(list)
+				)
+			)
+			(indices features)
+			(values features)
+		)
+	)
+
+	#!ComposeNovelSubstitionFeatureSet
+	;map-filter weave
+	(apply "assoc"
+		(weave
+			(lambda
+				;only keep nominal features with a defined subtype
+				(if (and
+						(= "nominal" (get (last (current_value)) "type"))
+						(!= (null) (get (last (current_value)) "subtype"))
+					)
+					(list (first (current_value 1)) (get (last (current_value 1)) "subtype"))
+					;else don't output anything, map-filtering out any values that don't have subtype defined
+					(list)
+				)
+			)
+			(indices features)
+			(values features)
+		)
+	)
+
+	#!ComposeBoundariesMap
+	(map
+		(lambda (let
+			(assoc
+				feature (current_index 1)
+				;ensure bounds map is an empty assoc if it wasn't specified
+				bounds_map (or (get (current_value 1) "bounds") (assoc))
+				allow_null_param (get (current_value 1) "allow_null")
+			)
+
+			;cache epoch max and min values so that they don't have to be repeatedly calculated later
+			(if (contains_index feature_datetime_map feature)
+				(let
+					(assoc
+						boundary_min (get bounds_map "min")
+						boundary_max (get bounds_map "max")
+					)
+
+					(accum (assoc
+						bounds_map
+							(assoc
+								"has_epoch_bounds" (true)
+								"epoch_max_value"
+									(if (!= (null) boundary_max)
+										(if (!= "number" (get_type_string boundary_max))
+											(call !ConvertDateToEpoch (assoc
+												date boundary_max
+												feature feature
+												feature_datetime_map feature_datetime_map
+											))
+											;else boundary value was provided in epoch number format already, keep it as-is
+											boundary_max
+										)
+									)
+								"epoch_min_value"
+									(if (!= (null) boundary_min)
+										(if (!= "number" (get_type_string boundary_min))
+											(call !ConvertDateToEpoch (assoc
+												date boundary_min
+												feature feature
+												feature_datetime_map feature_datetime_map
+											))
+											;else boundary value was provided in epoch number format already, keep it as-is
+											boundary_min
+										)
+									)
+							)
+					))
+				)
+			)
+
+			;bounds map contains the min and max from 'bounds' and allow_null parameters
+			(append
+				bounds_map
+				(if (!= (null) allow_null_param)
+					(assoc "allow_null"  allow_null_param)
+					(assoc)
+				)
+			)
+		))
+		boundaries_map
+	)
+
+	#!ComposePostProcessMap
+	(apply "assoc"
+		(weave
+			(lambda
+				(if (!= (null) (get (last (current_value)) "post_process"))
+					(let
+						(assoc
+							post_process_code (get (last (current_value 1)) "post_process")
+							feature (first (current_value 1))
+						)
+						(list feature post_process_code)
+					)
+
+					;else don't output anything, map-filtering out any values that don't have a post_process attribute
+					(list)
+				)
+			)
+			(indices features)
+			(values features)
+		)
+	)
+
+	#!AccumulateSourceToDerivedFeatureMap
+	(map
+		(lambda (let
+			(assoc
+				feature (current_index 1)
+				attributes (current_value 1)
+			)
+
+			(if (contains_index attributes "auto_derive_on_train")
+				(let
+					(assoc derive_type (get attributes (list "auto_derive_on_train" "derive_type")))
+
+					;append this derived feature name to the list of derived features for its matching source feature(s)
+					(if
+						(= "progress" derive_type)
+						(let
+							(assoc
+								source_feature_name (get attributes (list "auto_derive_on_train" "time_feature"))
+								derived_features_list
+									(get source_to_derived_feature_map (get attributes (list "auto_derive_on_train" "time_feature")))
+							)
+							(if (= (null) derived_features_list)
+								(assign (assoc derived_features_list (list)))
+							)
+							(accum (assoc
+								source_to_derived_feature_map (associate source_feature_name (append derived_features_list feature))
+							))
+						)
+
+						(= "custom" derive_type)
+						(let
+							(assoc
+								;create a map of label -> value for all the labels referenced in the code
+								parsed_code_string_labels_map (get_all_labels (parse (get attributes (list "auto_derive_on_train" "code"))))
+								raw_code_string (get attributes (list "auto_derive_on_train" "code"))
+							)
+							(declare (assoc
+								;parse code to determine which features are being sourced from
+								sourced_features (indices parsed_code_string_labels_map)
+							))
+
+							(map
+								(lambda
+									(let
+										(assoc
+											source_feature_name (current_value 1)
+											derived_features_list (get source_to_derived_feature_map (current_value 1))
+										)
+										(if (= (null) derived_features_list)
+											(assign (assoc derived_features_list (list)))
+										)
+										(accum (assoc
+											source_to_derived_feature_map (associate source_feature_name (append derived_features_list feature))
+										))
+									)
+								)
+								sourced_features
+							)
+						)
+					)
+				)
+			)
+
+		))
+		derived_features_map
+	)
+
+	;Helper method to create a map of feature -> distance type for all the features for use in queries
+	#!ComposeDistanceTypeMap
+	(map
+		(lambda
+			(if
+				(contains_index nominals_map (current_index))
+				(if (= "number" (get (current_value) "data_type"))
+					"nominal_numeric"
+
+					(or
+						(= "amalgam" (get (current_value) "data_type"))
+						(= "json" (get (current_value) "data_type"))
+						(= "yaml" (get (current_value) "data_type"))
+					)
+					"nominal_code"
+
+					;default nominals are strings
+					"nominal_string"
+				)
+
+				(contains_index cyclics_map (current_index))
+				"continuous_numeric_cyclic"
+
+				(= "continuous" (get (current_value) "type"))
+				(if
+					(or
+						(= "string" (get (current_value) "data_type"))
+						(= "string_mixable" (get (current_value) "data_type"))
+					)
+					"continuous_string"
+
+					(or
+						(= "amalgam" (get (current_value) "data_type"))
+						(= "json" (get (current_value) "data_type"))
+						(= "yaml" (get (current_value) "data_type"))
+					)
+					"continuous_code"
+
+					"continuous_numeric"
+				)
+
+				;else default value
+				"continuous_numeric"
+			)
+		)
+		features
+	)
+
+	;Helper method to creata  map of feature -> limits, based on the type of feature it is and limits specified in boundaries map
+	#!ComposeFeatureLimitsMap
+	(map
+		(lambda (let
+			(assoc feature (current_index 1))
+			(if
+				;nominal can be (null) because null signifies to use the global unique nominal count for the given label
+				(contains_index !nominalsMap feature)
+				(null)
+
+				;cyclic min/max is 0 - cycle length
+				(contains_index !cyclicFeaturesMap feature)
+				(get !cyclicFeaturesMap feature)
+
+				;max string length
+				(and
+					(= "continuous" (get (current_value) "type"))
+					(= "string" (get (current_value) "data_type"))
+				)
+				(get !featureBoundsMap (list feature "max"))
+
+				;max code size
+				(= "code" (get (current_value) "type"))
+				(get !featureBoundsMap (list feature "max"))
+
+				;else "continuous", and min or max are specified, provide as a delta of max - min
+				(if
+					(and
+						(!= (null) (get !featureBoundsMap (list feature "min")) )
+						(!= (null) (get !featureBoundsMap (list feature "max")) )
+					)
+					(if (contains_index !featureDateTimeMap feature)
+						(-
+							(get !featureBoundsMap (list feature "epoch_max_value"))
+							(get !featureBoundsMap (list feature "epoch_min_value"))
+						)
+
+						;else just take the diff
+						(-
+							(get !featureBoundsMap (list feature "max"))
+							(get !featureBoundsMap (list feature "min"))
+						)
+					)
+				)
+			)
+		))
+		features
+	)
+
+	;update !ordinalFeaturesValuesMap label by storing the sorted list of unique ordinal values for each ordinal feature
+	#!UpdateOrdinalFeaturesMap
+	(seq
+		;for each ordinal feature, pull all the values, make the list unique by zipping it and then sort and store
+		(declare (assoc
+			ordinal_features_values_map
+				(map
+					(lambda (call !UpdateOrdinalFeaturesMapForFeature (assoc feature (current_index 1))) )
+					(zip !ordinalFeatures)
+				)
+		))
+
+		(declare (assoc
+			ordinal_features_ranges_map
+				(map
+					(lambda
+						;if featue is cyclic, the range is the cycle length
+						(if (contains_index !cyclicFeaturesMap (current_index))
+							(get !cyclicFeaturesMap (current_index))
+							;else it's the range of the values
+							(- (last (current_value)) (first (current_value)))
+						)
+					)
+					ordinal_features_values_map
+				)
+		))
+
+		;store both maps and clear the stale flag since !ordinalFeaturesValuesMap is now up-to-date
+		(assign_to_entities (assoc
+			!ordinalFeaturesValuesMap ordinal_features_values_map
+			!ordinalFeaturesRangesMap ordinal_features_ranges_map
+			!staleOrdinalValuesCount (false)
+
+		))
+	)
+
+	;update !ordinalFeaturesValuesMap label for a specified feature if store_values is true
+	;outputs the list of sorted_feature_values for this feature
+	;parameters:
+	; feature: name of feature for which to output sorted feature values
+	; store_values: flag, when true will update the model with the new values as well
+	#!UpdateOrdinalFeaturesMapForFeature
+	(declare
+		(assoc store_values (false))
+
+		;pull all the values for this feature, make the list unique by zipping it and then sort the indices to store as a sorted unique
+		;list of feature values
+		(declare (assoc
+			sorted_feature_values
+				(sort (map
+					;convert the indices to numbers since ordinals are numeric
+					(lambda (+ (current_value)))
+					;indices of the zipped list give us only unique ordinal values
+					(indices
+						;retrieve the list of all unique ordinal values from all the cases
+						(compute_on_contained_entities (list
+							(query_value_masses feature)
+						))
+					)
+				))
+		))
+
+		(if store_values
+			(accum_to_entities (assoc
+				!ordinalFeaturesValuesMap (associate feature sorted_feature_values)
+
+				;store the range of the ordinal feature, using the cycle length if feature is cyclic,
+				;since it's possible that not all cycle values have been trained
+				!ordinalFeaturesRangesMap
+					(associate
+						feature
+							(if (contains_index !cyclicFeaturesMap feature)
+								(get !cyclicFeaturesMap feature)
+
+								(- (last sorted_feature_values) (first sorted_feature_values))
+							)
+					)
+			))
+		)
+
+		;output sorted values for this ordinal feature
+		sorted_feature_values
+	)
+
+	;If a feature's constraint does not reference itself, the constraint check will fail after looping to the max.
+	;To prevent this scenario, error out if any feature has an invalid constraint.
+	;Discover invalid constraints by finding any features that have constraints that do not reference the feature's own value
+	#!ComposeInvalidConstraintFeatures
+	(filter
+		(lambda (let
+			(assoc
+				feature (current_value 1)
+				constraint (get features (list (current_value 2) "bounds" "constraint"))
+			)
+			(if constraint
+				;keep feature if it isn't referenced in the constraint
+				(not (contains_index
+					(get_all_labels (parse constraint))
+					feature
+				))
+			)
+		))
+		(indices features)
+	)
+)
