@@ -1,0 +1,111 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_weighted_residuals_nom.amlg"))
+
+	(declare (assoc
+		input_cases
+			(list
+				(list 0 "blue" 3) ;should always be classified incorrectly, pred red
+				(list 1 "red" 1) ;should get 75% blue, 25% red, pred blue
+                (list 2 "red" 1) ;should get 60% blue, 40% red, pred blue
+                (list 5 "blue" 100) ;should always be classified incorrectly, pred red
+
+                (list 10 "down" 1) ;should always be classified incorrectly, pred up
+                (list 11 "up" 1) ;should get 75% up, 25% down, pred up
+                (list 12 "up" 3) ;should get 66% up, 33% down, pred up
+                (list 15 "down" 100) ;should always be classified incorrectly, pred up
+			)
+		features (list "A" "B" "case_weight")
+	))
+
+    (call_entity "howso" "set_feature_attributes" (assoc
+		features
+			(assoc
+				"B" (assoc "type" "nominal")
+			)
+	))
+
+    (call_entity "howso" "set_internal_parameters" (assoc
+		default_hyperparameter_map (assoc "k" 2 "p" 1 "dt" -1)
+	))
+
+    ;210 total case weight
+    ;204/210 case weight should get 100% CAP towards incorrect class (cases 1, 4, 5, 8)
+    ;3/210 case weight should get ~33% CAP towards incorrect class (case 7)
+    ;1/210 case weight should get 60% CAP towards incorrect class (case 3)
+    ;1/210 case weight should get 75% CAP towards incorrect class (case 2)
+    ;1/210 case weight should get 25% CAP towards incorrect class (case 6)
+    ;
+    ;it follows that only cases 6, 7 should be classified correctly, 5/210 case weight
+    (declare (assoc
+        exp_b_residual
+            (/ (dot_product
+                (list 204 3 1 1 1)
+                (list 1.0 0.3333 0.6 0.75 0.25)
+            ) 210)
+        exp_accuracy (/ 4 210)
+        exp_recall
+            (/
+                (+
+                    (/ 0 1) ;blue
+                    (/ 0 104) ;red
+                    0 ;down (no case should be predicted down)
+                    (/ 4 105) ;up
+                )
+                4 ;4 classes
+            )
+    ))
+
+	(declare (assoc
+		regular_train_payload
+			(call_entity "howso" "train" (assoc
+				features features
+				input_cases input_cases
+				session "unit_test"
+			))
+	))
+
+
+    (call_entity "howso" "react_into_trainee" (assoc
+        residuals (true)
+        use_case_weights (true)
+        weight_feature "case_weight"
+        context_features (list "A" "B")
+        num_samples 5000
+    ))
+
+    (declare (assoc
+        residuals
+            (get
+                (call_entity "howso" "get_prediction_stats" (assoc
+                    stats (list "mae" "accuracy" "recall")
+                    robust (false)
+                    weight_feature "case_weight"
+                ))
+                "payload"
+            )
+    ))
+
+    (print "MAE is as expected: ")
+    (call assert_approximate (assoc
+        exp exp_b_residual
+        obs (get residuals (list "B" "mae"))
+        thresh 0.005
+    ))
+
+    (print "Recall is as expected: ")
+    (call assert_approximate (assoc
+        exp exp_recall
+        obs (get residuals (list "B" "recall"))
+        thresh 0.005
+    ))
+
+    (print "Accuracy is as expected: ")
+    (call assert_approximate (assoc
+        exp exp_accuracy
+        obs (get residuals (list "B" "accuracy"))
+        thresh 0.015
+    ))
+
+    (call exit_if_failures (assoc msg unit_test_name ))
+)
