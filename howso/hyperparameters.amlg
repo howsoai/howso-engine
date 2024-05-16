@@ -42,6 +42,7 @@
 								(list
 									(call !ConfusionMatrixToSDM (assoc
 										confusion_matrix (get confusion_matrix_map (current_index 2))
+										feature (current_index 2)
 									))
 									(current_value 1)
 								)
@@ -942,9 +943,10 @@
 	;Convert confusion matrix (assoc of assoc of counts) to sparse deviation matrix (assoc of assoc of deviation)
 	;parameters:
 	; confusion_matrix:  assoc of class -> assoc of class -> predicted count for each class.
+	; feature: name of nominal feature
 	; smallest_count_threshold: number of predictions a class should have for it to count. If the count is less than this value, it'll be ignored.
 	;    default value is 10
-	#ConfusionMatrixToSDM
+	#!ConfusionMatrixToSDM
 	(declare
 		(assoc
 			confusion_matrix (assoc)
@@ -959,8 +961,65 @@
 						confusion_matrix
 					)
 				))
-			num_classes
-				(size
+		))
+
+		(if (< total_predictions smallest_count_threshold)
+			(conclude (null))
+		)
+
+		(declare (assoc
+			smallest_prob (/ 1 (+ 2 total_predictions))
+			max_accuracy (- 1 (/ 1 (+ 2 total_predictions)))
+			predictions_per_class_map
+				(map
+					(lambda (apply "+" (values (current_value))) )
+					confusion_matrix
+				)
+		))
+
+		;filter out counts below threshold and store as sparse probability correct
+		;leaving only those predicted classes that had enough predictions
+		(assign (assoc
+			confusion_matrix
+				;current_index is the class being predicted
+				;current_value is an assoc of class -> number predictions
+				(map
+					(lambda (let
+						(assoc
+							total_class_predictions (apply "+" (values (current_value 1)))
+							predicted_class (current_index 1)
+						)
+						;convert counts to percent accuracy by dividing each count by total_class_predictions
+						;filter out any entries where there weren't enough counts
+						(filter (map
+							(lambda
+								(if (>= (current_value) smallest_count_threshold)
+									(/ (current_value) total_class_predictions)
+
+									;if the predicted class (diagonal) doesn't have enough, represent it with a 0 instead of filtering it out
+									(= (current_index) predicted_class)
+									0
+								)
+							)
+							;ensure the predicted class is represented in the row even if it has no counts
+							;since the values on the diagonal should all be present
+							(if (contains_index (current_value) predicted_class)
+								(current_value)
+								(append (current_value) (associate predicted_class 0))
+							)
+						))
+					))
+					confusion_matrix
+				)
+		))
+
+		(if (= 0 (size confusion_matrix))
+			(conclude (null))
+		)
+
+		(declare (assoc
+			all_classes
+				(indices
 					(compute_on_contained_entities (list
 						(query_value_masses
 							feature
@@ -973,82 +1032,32 @@
 					))
 				)
 		))
-		(declare (assoc
-			smallest_prob (/ 1 (+ 2 total_predictions))
-			max_accuracy (- 1 (/ 1 (+ 2 total_predictions)))
-			predictions_per_class_map
-				(map
-					(lambda (apply "+" (values (current_value))) )
-					confusion_matrix
-				)
-		))
-
-		;filter out counts below threshold and store as sparse probability correct
-		(assign (assoc
-			confusion_matrix
-				;current_index is the class being predicted
-				;current_value is an assoc of class -> number predictions
-				(map
-					(lambda (let
-						(assoc total_class_predictions (apply "+" (values (current_value 1))) )
-						;convert counts to percent accuracy by dividing each count by total_class_predictions
-						;filter out any entries where there weren't enough counts
-						(filter (map
-							(lambda
-								(if (>= (current_value) smallest_count_threshold)
-									(/ (current_value) total_class_predictions)
-								)
-							)
-							(current_value)
-						))
-					))
-					confusion_matrix
-				)
-		))
+		(declare (assoc num_classes (size all_classes) ))
 
 		;average all probabilities for a class that are same as or more than the predicted class probability
 		(declare (assoc
 			prob_match_or_indistinguishable_map
 				(map
 					(lambda (let
-						(assoc predicted_class_prob (get (current_value 1) (current_index 1)))
+						(assoc predicted_class_prob (+ (or (get (current_value 1) (current_index 1)))) )
 						(declare (assoc
 							avg_probs_same_or_larger_than_predicted
 								(filter
 									(lambda (>= (current_value) predicted_class_prob))
-									(values (current_value 1))
+									(values
+										(append (zip all_classes 0) (current_value 1))
+									)
 								)
 						))
 						(/ (apply "+" avg_probs_same_or_larger_than_predicted) (size avg_probs_same_or_larger_than_predicted))
 					))
 					confusion_matrix
 				)
+			;map of class -> accuracy of random guessing
 			rand_guess_accuracy_map (map (lambda (/ (current_value) total_predictions)) predictions_per_class_map)
 		))
 
-		(declare (assoc
-			weighted_accuracy_map
-				(map
-					(lambda (let
-						(assoc predicted_class_prob (get (current_value 1) (current_index 1)))
-						(* predicted_class_prob (get rand_guess_accuracy_map (current_index)) )
-					))
-					confusion_matrix
-				)
-
-		))
-
-		(declare (assoc
-			avg_accuracy (apply "+" (values weighted_accuracy_map))
-			min_accuracy
-				(apply "+"
-					(map
-						(lambda (pow (/ (current_value) total_predictions) 2) )
-						(values predictions_per_class_map)
-					)
-				)
-		))
-
+		;indistinguishable accuracy
 		(declare (assoc
 			guessing_accuracy_matrix
 				(map
@@ -1060,7 +1069,7 @@
 						(map
 							(lambda
 								(if (= predicted_class (current_index))
-									(current_value)
+									(get prob_match_or_indistinguishable_map (current_index))
 
 									(min
 										(get prob_match_or_indistinguishable_map predicted_class)
@@ -1068,14 +1077,15 @@
 									)
 								)
 							)
-							prob_match_or_indistinguishable_map
+							;iterate over all_classes since every row needs to have a value for every class even if it's 0
+							(zip all_classes)
 						)
 					))
 					confusion_matrix
 				)
 		))
 
-		;clamp accuracies
+		;guessing clamped accuracy
 		(assign (assoc
 			guessing_accuracy_matrix
 				(map
