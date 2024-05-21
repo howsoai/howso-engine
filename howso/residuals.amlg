@@ -310,8 +310,8 @@
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
 		))
 
-		;if case_ids weren't specified either, use a random num_samples sampling of cases from the whole model
-		(if (= 0 (size case_ids))
+		;if 'case_id' and 'action_condition_filter_query' are not specified either, use a random 'num_samples' sampling of cases from the whole model
+		(if (and (= 0 (size case_ids)) (= 0 (size action_condition_filter_query)))
 			(assign (assoc
 				case_ids
 					;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
@@ -340,7 +340,7 @@
 		)
 
 		;ensure features with nulls have cases that have values for computation but only if the selected cases were not conditioned
-		(if (and (not robust_residuals) (= (null) condition))
+		(if (and (not robust_residuals) (= 0 (size action_condition_filter_query)))
 			(let
 				(assoc not_null_feature_output_map (call !SelectNonNullCases) )
 
@@ -431,6 +431,28 @@
 		;keep a copy of all originally specified features
 		(assign (assoc case_features features))
 
+		;if 'case_ids' are not set, then use 'action_condition_filter_query' to get the case ids of the action set, otherwise
+		;flag that 'case_ids' were provided so 'action_condition_filter_query' is ignored. 'case_ids' supercedes 'action_condition_filter_query'.
+		(if (= (size case_ids) 0)
+			(assign (assoc
+				case_ids
+					(call !GetCasesByCondition (assoc
+						condition_filter_query action_condition_filter_query
+						num_cases num_samples
+					))
+			))
+			(declare (assoc
+				provided_case_id_flag (true)
+			))
+		)
+
+		;Ensure enough cases
+		(if (< (size case_ids) 2000) 
+			(assign (assoc 
+				case_ids (rand case_ids 2000)
+			))
+		)
+
 		;if computing for one target_residual_feature, remove it from features so it's never in the context
 		(if target_residual_feature
 			(assign (assoc
@@ -514,6 +536,25 @@
 											(query_not_in_entity_list (list case_id focal_case))
 											(query_not_in_entity_list (list case_id))
 										)
+										;Only query the cases filtered by the 'context_condition_filter_query' if both action and context filter queries are provided and 'case_ids' 
+										;were not provided at the beginning of the function, or if only the 'context_condition_filter_query' is provided. Otherwise query everything.
+										;This is due to the performance issues when using 'query_not_in_entity_list' from a large list of 'case_ids'.
+										(if 
+											(or
+												(and 
+													(not provided_case_id_flag)
+													(!= (size action_condition_filter_query) 0)
+													(!= (size context_condition_filter_query) 0)
+												)
+												(and
+													(not provided_case_id_flag)
+													(!= (size context_condition_filter_query) 0)
+													(= (size action_condition_filter_query) 0)
+												)
+											)
+											context_condition_filter_query
+											(list)
+										)		
 										time_series_filter_query
 										(query_nearest_generalized_distance
 											k_parameter
@@ -699,6 +740,21 @@
 
 		(declare (assoc features_map (zip features) ))
 
+		;if 'case_ids' are not set, then use 'action_condition_filter_query' to get the case ids of the action set, otherwise
+		;flag that 'case_ids' were provided so 'action_condition_filter_query' is ignored.
+		(if (= (size case_ids) 0)
+			(assign (assoc
+				case_ids
+					(call !GetCasesByCondition (assoc
+						condition_filter_query action_condition_filter_query
+						num_cases num_samples
+					))
+			))
+			(declare (assoc
+				provided_case_id_flag (true)
+			))
+		)
+
 		(assign (assoc
 			feature_residuals_lists
 				||(map
@@ -756,11 +812,30 @@
 												(if focal_case
 													(query_not_in_entity_list (list case_id focal_case))
 													(query_not_in_entity_list (list case_id))
-												)
+												)									
 												(if ignore_null_action_feature
 													(query_not_equals feature (null))
 													(list)
 												)
+												;Only query the cases filtered by the 'context_condition_filter_query' if both action and context filter queries are provided and 'case_ids' 
+												;were not provided at the beginning of the function, or if only the 'context_condition_filter_query' is provided. Otherwise query everything.
+												;This is due to the performance issues when using 'query_not_in_entity_list' from a large list of 'case_ids'.
+												(if 
+													(or
+														(and 
+															(not provided_case_id_flag)
+															(!= (size action_condition_filter_query) 0)
+															(!= (size context_condition_filter_query) 0)
+														)
+														(and
+															(not provided_case_id_flag)
+															(!= (size context_condition_filter_query) 0)
+															(= (size action_condition_filter_query) 0)
+														)
+													)
+													context_condition_filter_query
+													(list)
+												)	
 												time_series_filter_query
 												(query_nearest_generalized_distance
 													k_parameter

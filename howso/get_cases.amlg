@@ -286,9 +286,65 @@
 		)
 	)
 
+
 	;return all cases that match the specified condition
 	;parameters:
-	; precision: flag, whether to query for 'exact' matches; if set to 'similar' will query for similar values intead of 'exact'
+	; condition_session: optional, if specified ignores 'condition' and 'condition_filter_query' and returns cases for the specified session id
+	; condition_filter_query: optional, list of query conditions. If specified ignores 'condition' and returns cases for the specified fitery query
+	; condition: optional assoc of feature->value(s). Condition for the returned cases. If 'condition_filter_query' is provided, then this parameter is ignored.
+	;	no value = must have feature
+	;	- for continuous or numeric ordinal features:
+	;	one value = must equal exactly the value or be close to it for fuzzy match
+	;	two values = inclusive between
+	;	- for nominal or string ordinal features:
+	;	n values = must match any of these values exactly
+	; precision: flag, default is "exact". Whether to query for 'exact' matches when using the 'condition' parameter; if set to 'similar' will query for similar values intead of 'exact'
+	;	If 'condition_filter_query' is provided, then this parameter is ignored.
+	; num_cases: optional, limit on the number of cases to get when using the 'condition' parameter. Works with or without 'condition_filter_query'. default is null.
+	;	If 'condition_filter_query' is specified:
+	;		If null there will be no limit.
+	;	If 'condition_filter_query' is not specified:
+	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact".
+	#!GetCasesByCondition
+	(declare 
+		(assoc
+			condition (assoc)
+			condition_filter_query (list)
+			condition_session (null)
+			precision "exact"
+			num_cases (null)
+		)
+	
+		(if (!= (null) condition_session)
+			;get all the case ids in the order they were stored for the specified session
+			(retrieve_from_entity condition_session ".replay_steps")
+
+			(seq
+				;if 'condition_filter_query' is not provided, get the 'condition_filter_query'
+				(if (= (size condition_filter_query) 0)
+					(assign (assoc
+						condition_filter_query
+							(call !GetQueryByCondition (assoc 
+								condition condition
+								condition_session condition_session
+								precision precision
+								num_cases num_cases
+							))
+					))
+				)
+
+				;retrieve cases with the 'condition_filter_query'
+				(if num_cases
+					(trunc (contained_entities condition_filter_query) num_cases)
+					(contained_entities condition_filter_query)
+				)
+			)
+		)
+	)
+
+
+	;return the query conditions for cases that match the specified condition
+	;parameters:
 	; condition_session: optional, if specified ignores condition and returns cases for the specified session id
 	; condition: assoc of feature->value(s)
 	;	no value = must have feature
@@ -297,10 +353,11 @@
 	;	two values = inclusive between
 	;	- for nominal or string ordinal features:
 	;	n values = must match any of these values exactly
-	; num_cases: optional, limit on the number of cases to get; If set to zero there will be no limit.
-	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
-	#!GetCasesByCondition
-	(declare (assoc
+	; precision: flag, default is "exact". Whether to query for 'exact' matches; if set to 'similar' will query for similar values intead of 'exact'
+	; num_cases: optional, default is null. The number of "similar" cases to get if 'precision' is "similar" or no limit if precision is "exact".
+	#!GetQueryByCondition
+	(declare 
+		(assoc
 			condition (assoc)
 			condition_session (null)
 			precision "exact"
@@ -327,173 +384,153 @@
 			)
 		)
 
-		(if (!= (null) condition_session)
-			;get all the case ids in the order they were stored for the specified session
-			(retrieve_from_entity condition_session ".replay_steps")
 
-			;else return cases that match the condition
-			(seq
-				(if !hasStringOrdinals
-					(assign (assoc
-						condition
-							(map
-								(lambda
-									;if the features in the condition are string ordinals, look up the encoded value and overwrite it in the condition statement
-									;since querying is done on numeric (encoded) values
-									(if (and (contains_index !ordinalStringToOrdinalMap (current_index)) (!= (null) (current_value)))
-										(let
-											(assoc
-												feature (current_index 1)
-												cond_value (current_value 1)
-											)
-											;get the enum value for the value(s) for this feature
-											(if (~ (list) cond_value)
-												(map
-													(lambda (get !ordinalStringToOrdinalMap (list feature (current_value 1))) )
-													cond_value
-												)
-												;else get the one single value
-												(get !ordinalStringToOrdinalMap (list feature cond_value))
-											)
+		(if !hasStringOrdinals
+			(assign (assoc
+				condition
+					(map
+						(lambda
+							;if the features in the condition are string ordinals, look up the encoded value and overwrite it in the condition statement
+							;since querying is done on numeric (encoded) values
+							(if (and (contains_index !ordinalStringToOrdinalMap (current_index)) (!= (null) (current_value)))
+								(let
+									(assoc
+										feature (current_index 1)
+										cond_value (current_value 1)
+									)
+									;get the enum value for the value(s) for this feature
+									(if (~ (list) cond_value)
+										(map
+											(lambda (get !ordinalStringToOrdinalMap (list feature (current_value 1))) )
+											cond_value
 										)
-
-										;else return the value without encoding
-										(current_value)
+										;else get the one single value
+										(get !ordinalStringToOrdinalMap (list feature cond_value))
 									)
 								)
-								condition
+
+								;else return the value without encoding
+								(current_value)
 							)
+						)
+						condition
+					)
+			))
+		)
+
+		(if (= "exact" precision)
+			;limit the list to the number of specified cases
+				;iterate over each condition and create a conjunctive filter to return only the matching cases
+			(append
+				(query_exists !internalLabelSession)
+				(map
+					(lambda (let
+						(assoc
+							feature (current_value 1)
+							cond_value (get condition (current_value 1))
+						)
+						(if
+							;feature must exist
+							(= cond_value (null))
+							(query_exists feature)
+
+							;else then feature value must equal
+							(contains_value (list "number" "string") (get_type_string cond_value))
+							(query_equals feature cond_value)
+
+							;else this is a list of values, for nominals use query_among, for continuous use query_between
+							(if (or (contains_index !nominalsMap feature) (contains_index !ordinalStringToOrdinalMap feature))
+								(query_among feature cond_value)
+								;else continuous, inclusive query between the two provided values
+								(query_between feature (first cond_value) (last cond_value))
+							)
+						)
 					))
+					(indices condition)
+				)
+			)
+
+			;else do a fuzzy query
+			(let
+				(assoc
+					;list of features where the condition is an 'equals'
+					equals_features (list)
+					;list of features where the condition is a range or null
+					other_features (list)
+					hyperparam_map
+						(call !GetHyperparameters (assoc
+							feature ".targetless"
+							mode "robust"
+							weight_feature ".none"
+						))
+				)
+				;iterate over condition and populate the equals and other lists
+				(map
+					(lambda (if
+						;if the condition for this feature is an equals, add it to the equals_features list
+						(contains_value (list "string" "number") (get_type_string (get condition (current_value))))
+						(accum (assoc equals_features (current_value 1)))
+						;else add it to the other list
+						(accum (assoc other_features (current_value 1)))
+					))
+					(indices condition)
 				)
 
-				(if (= "exact" precision)
-					;limit the list to the number of specified cases
-					(trunc
-						;iterate over each condition and create a conjunctive filter to return only the matching cases
-						(contained_entities (append
-							(query_exists !internalLabelSession)
-							(map
-								(lambda (let
-									(assoc
-										feature (current_value 1)
-										cond_value (get condition (current_value 1))
-									)
-									(if
-										;feature must exist
-										(= cond_value (null))
-										(query_exists feature)
+				;pull corresponding feature values and flags for the equals features to be used in the generalized_distance query below
+				(declare (assoc equals_features_values (unzip condition equals_features) ))
 
-										;else then feature value must equal
-										(contains_value (list "number" "string") (get_type_string cond_value))
-										(query_equals feature cond_value)
+				;build the fuzzy query condition, appending the generalized norm query to the other conditions
+				(append
+					(query_exists !internalLabelSession)
+					(map
+						(lambda (let
+							(assoc
+								feature (current_value 1)
+								cond_value (get condition (current_value 1))
+							)
+							(if
+								;feature must exist
+								(= cond_value (null))
+								(query_exists feature)
 
-										;else this is a list of values, for nominals use query_among, for continuous use query_between
-										(if (or (contains_index !nominalsMap feature) (contains_index !ordinalStringToOrdinalMap feature))
-											(query_among feature cond_value)
-											;else continuous, inclusive query between the two provided values
-											(query_between feature (first cond_value) (last cond_value))
-										)
-									)
-								))
-								(indices condition)
+								;else this is a list of values, for nominals use query_among, for continuous use query_between
+								(if (or (contains_index !nominalsMap feature) (contains_index !ordinalStringToOrdinalMap feature))
+									(query_among feature cond_value)
+									;else continuous, inclusive query between the two provided values
+									(query_between feature (first cond_value) (last cond_value))
+								)
 							)
 						))
-						num_cases
+						other_features
 					)
-
-					;else do a fuzzy query
-					(let
-						(assoc
-							;list of features where the condition is an 'equals'
-							equals_features (list)
-							;list of features where the condition is a range or null
-							other_features (list)
-							hyperparam_map
-								(call !GetHyperparameters (assoc
-									feature ".targetless"
-									mode "robust"
-									weight_feature ".none"
-								))
-						)
-						;iterate over condition and populate the equals and other lists
-						(map
-							(lambda (if
-								;if the condition for this feature is an equals, add it to the equals_features list
-								(contains_value (list "string" "number") (get_type_string (get condition (current_value))))
-								(accum (assoc equals_features (current_value 1)))
-								;else add it to the other list
-								(accum (assoc other_features (current_value 1)))
-							))
-							(indices condition)
+					(if (> num_cases 0)
+						(query_nearest_generalized_distance
+							num_cases
+							equals_features
+							equals_features_values
+							(get hyperparam_map "featureWeights")
+							!queryDistanceTypeMap
+							(get hyperparam_map "featureDomainAttributes")
+							(get hyperparam_map "featureDeviations")
+							(get hyperparam_map "p")
+							(get hyperparam_map "dt")
+							(null) ;weight
+							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+							"fixed rand seed"
+							(null) ;radius
+							;the distance values are not needed, so this could in theory be
+							; (if (= "precise" !numericalPrecision) "precise" "fast")), however, that incurs overhead as well
+							;left as is to be simple, but could be modified for performance if large numbers of cases are being retrieved this way
+							!numericalPrecision
 						)
 
-						;pull corresponding feature values and flags for the equals features to be used in the generalized_distance query below
-						(declare (assoc equals_features_values (unzip condition equals_features) ))
-
-						;build the fuzzy query condition, appending the generalized norm query to the other conditions
-						(declare (assoc
-							query_conditions
-								(append
-									(query_exists !internalLabelSession)
-									(map
-										(lambda (let
-											(assoc
-												feature (current_value 1)
-												cond_value (get condition (current_value 1))
-											)
-											(if
-												;feature must exist
-												(= cond_value (null))
-												(query_exists feature)
-
-												;else this is a list of values, for nominals use query_among, for continuous use query_between
-												(if (or (contains_index !nominalsMap feature) (contains_index !ordinalStringToOrdinalMap feature))
-													(query_among feature cond_value)
-													;else continuous, inclusive query between the two provided values
-													(query_between feature (first cond_value) (last cond_value))
-												)
-											)
-										))
-										other_features
-									)
-									(if (> num_cases 0)
-										(query_nearest_generalized_distance
-											num_cases
-											equals_features
-											equals_features_values
-											(get hyperparam_map "featureWeights")
-											!queryDistanceTypeMap
-											(get hyperparam_map "featureDomainAttributes")
-											(get hyperparam_map "featureDeviations")
-											(get hyperparam_map "p")
-											(get hyperparam_map "dt")
-											(null) ;weight
-											;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-											"fixed rand seed"
-											(null) ;radius
-											;the distance values are not needed, so this could in theory be
-											; (if (= "precise" !numericalPrecision) "precise" "fast")), however, that incurs overhead as well
-											;left as is to be simple, but could be modified for performance if large numbers of cases are being retrieved this way
-											!numericalPrecision
-										)
-
-										(list)
-									)
-								)
-						))
-
-						;run query conditions only if they exist, otherwise return all cases
-						(if (> (size query_conditions) 0)
-							(contained_entities query_conditions)
-
-							;else return all
-							(contained_entities (list (query_exists !internalLabelSession)))
-						)
+						(list)
 					)
 				)
 			)
 		)
 	)
+
 
 	;retrieve the top or bottom number of cases for a specified feature, sorted top to bottom for top, and bottom to top for bottom
 	;parmeters:
