@@ -998,6 +998,17 @@
 		(declare (assoc
 			;map of class -> accuracy of random guessing
 			rand_guess_accuracy_map (map (lambda (/ (current_value) total_predictions)) predictions_per_class_map)
+			all_classes_map
+				(compute_on_contained_entities (list
+					(query_value_masses
+						feature
+						(null)
+						(or
+							(not (contains_index !nominalsMap feature))
+							(contains_index !numericNominalFeaturesMap feature)
+						)
+					)
+				))
 		))
 
 		;filter out counts below threshold in confusion matrix and store as probabilities correct instead of counts
@@ -1008,22 +1019,7 @@
 			(conclude (null))
 		)
 
-		(declare (assoc
-			all_classes
-				(indices
-					(compute_on_contained_entities (list
-						(query_value_masses
-							feature
-							(null)
-							(or
-								(not (contains_index !nominalsMap feature))
-								(contains_index !numericNominalFeaturesMap feature)
-							)
-						)
-					))
-				)
-		))
-		(declare (assoc num_classes (size all_classes) ))
+		(declare (assoc num_classes (size all_classes_map) ))
 
 		;average all probabilities for a class that are same as or more than the predicted class probability
 		(declare (assoc
@@ -1036,7 +1032,7 @@
 								(filter
 									(lambda (>= (current_value) predicted_class_prob))
 									(values
-										(append (zip all_classes 0) (current_value 1))
+										(append (zip (indices all_classes_map) 0) (current_value 1))
 									)
 								)
 						))
@@ -1196,19 +1192,6 @@
 				)
 		))
 
-	`	;weighted accuracy for each class is its predicted probability * random guess accuracy
-		(declare (assoc
-			weighted_accuracy_map
-				(map
-					(lambda (let
-						(assoc predicted_class_prob (get (current_value 1) (current_index 1)))
-						(* predicted_class_prob (get rand_guess_accuracy_map (current_index)) )
-					))
-					confusion_matrix
-				)
-		))
-		(declare (assoc avg_accuracy (apply "+" (values weighted_accuracy_map)) ))
-
 		(assign (assoc
 			leftover_unknown_class_deviation
 				(if (>= total_leftover_correct_predictions smallest_count_threshold)
@@ -1216,9 +1199,51 @@
 
 					;else don't have enough enough leftover counts to compute unknown class deviation, use weighted random chance
 					(> total_leftover_all_predictions total_leftover_correct_predictions)
-					(- 1 avg_accuracy)
+					(let
+						(assoc
+							non_sdm_classes (indices (remove all_classes_map (indices confusion_matrix)) )
+						)
+						(if (size non_sdm_classes)
+							(let
+								(assoc total_count (apply "+" (values all_classes_map)) )
 
-					;else value remains as  null if there are no leftover counts
+								;rand guess prob of classes not in sdm : 1 - sum of prob^2
+								(- 1
+									(apply "+"
+										(map
+											(lambda
+												(pow
+													(/ (get all_classes_map (current_value)) total_count)
+													2
+												)
+											)
+											non_sdm_classes
+										)
+									)
+								)
+							)
+
+							;else:
+							(let
+								(assoc
+									weighted_accuracy_map
+										;weighted accuracy for each class is its predicted probability * random guess accuracy
+										(map
+											(lambda (let
+												(assoc predicted_class_prob (get (current_value 1) (current_index 1)))
+												(* predicted_class_prob (get rand_guess_accuracy_map (current_index)) )
+											))
+											confusion_matrix
+										)
+								)
+								;1 - average accuracy
+								(- 1 (apply "+" (values weighted_accuracy_map)))
+							)
+						)
+					)
+
+					;else value remains as null if there are no leftover counts
+					;TODO: what if only leftovers are predicted classes?
 					(null)
 				)
 		))
@@ -1255,7 +1280,7 @@
 								)
 							)
 							;iterate over all_classes since every row needs to have a value for every class even if it's 0
-							(zip all_classes)
+							all_classes_map
 						)
 					))
 					confusion_matrix
