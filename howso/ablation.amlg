@@ -30,17 +30,17 @@
 	)
 
 	;compute the entropy of the influence weights of the context's influential cases
-	; context_values: optional list of context values to react to
+	; features: list of features to react to
+	; feature_values: optional list of feature values to react to
 	; case_id: optional case id in the model to react to
-	; context_features: list of context features to react to
 	; use_case_weights: optional flag default true. if false, case weights will not be used during the react
 	; weight_feature: optional, default '.case_weight'. name of feature whose values to use as case weights
 	#!ComputeInfluenceWeightEntropy
 	(declare
 		(assoc
-			context_values (null)
+			features (list)
+			feature_values (null)
 			case_id (null)
-			context_features (list)
 			use_case_weights (true)
 			weight_feature !autoAblationWeightFeature
 
@@ -55,7 +55,7 @@
         (assign (assoc
             react_kwargs
                 (assoc
-                    context_features context_features
+                    context_features features
                     use_case_weights use_case_weights
                     weight_feature weight_feature
                     details (assoc influential_cases (true) )
@@ -64,13 +64,13 @@
 
         (if
             ;if context_values are not null, we are reacting to a new case
-            (!= context_values (null))
-			(accum "react_kwargs" (assoc context_values context_values) )
+            (!= feature_values (null))
+			(accum "react_kwargs" (assoc context_values feature_values) )
 			;elif case_id is not null, we are reacting to an existing case
 			(!= case_id (null))
 			(accum "react_kwargs" (assoc
 				case_indices (retrieve_from_entity case_id (list ".session" ".session_training_index") )
-				preserve_feature_values context_features
+				preserve_feature_values features
 				leave_case_out (true)
 			))
 		)
@@ -80,9 +80,9 @@
 		))
 
         (if
-            ;if context_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
-            (!= context_values (null))
-			(if (= context_values (unzip (first influential_cases) context_features))
+            ;if feature_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
+            (!= feature_values (null))
+			(if (= feature_values (unzip (first influential_cases) features))
 				;this concludes out through #ShouldNewCaseBeAblated directly into #TrainCreateCases.
 				(conclude (conclude (false)))
 			)
@@ -96,7 +96,7 @@
 	)
 
 	;used to compute and store the influence weight entropies for all cases contained in the Trainee in #Analyze
-	; context_features: list of context features to use when determining influential cases.
+	; features: list of features to use when determining influential cases.
 	; label_name: optional name of the feature to store influence weight entropies in.
 	#!ComputeAndStoreInfluenceWeightEntropies
 	(let
@@ -106,7 +106,7 @@
 					(lambda
 						(call !ComputeInfluenceWeightEntropy (assoc
 							case_id (current_index 1)
-							context_features context_features
+							features features
 							use_case_weights use_case_weights
 							weight_feature weight_feature
 						))
@@ -139,16 +139,70 @@
 		(call !CreateCaseWeights (assoc feature_name weight_feature) )
 	)
 
+	;reduce the trained data by removing cases which have an influence weight entropy that falls above
+	; a threshold
+	;
+	;parameters:
+	; features: default !trainedFeatures. a list of features to use when computing influence weight entropies
+	; distribute_weight_feature: optional, default !autoAblationWeightFeature. name of feature whose values to use as case weights
+	; influence_weight_entropy_threshold: optional, default !autoAblationInfluenceWeightEntropyThreshold. cases with
+	; 	influence weight entropy above this quantile will be removed
+	#reduce_data
+	(declare
+		(assoc
+			features !trainedFeatures
+			distribute_weight_feature !autoAblationWeightFeature
+			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+
+			;internal
+			max_influence_weight_entropy_to_keep .infinity
+		)
+
+		(if (not !hasPopulatedCaseWeight)
+			(call !InitializeAutoAblation)
+		)
+		(if (not !hasInfluenceWeightEntropies)
+			(call !ComputeAndStoreInfluenceWeightEntropies)
+		)
+
+		(assign (assoc
+			max_influence_weight_entropy_to_keep
+				(compute_on_contained_entities (list
+					(query_exists !internalLabelInfluenceWeightEntropy)
+					(query_quantile
+						!internalLabelInfluenceWeightEntropy
+						influence_weight_entropy_threshold
+						distribute_weight_feature
+					)
+				))
+		))
+
+		(call !RemoveCases (assoc
+			cases
+				(call !GetCasesByCondition (assoc
+					condition
+						(associate
+							!internalLabelInfluenceWeightEntropy 
+								(list max_influence_weight_entropy_to_keep .infinity)
+						)
+				))
+			distribute_weight_feature distribute_weight_feature
+		))
+
+		(accum_to_entities (assoc !revision 1))
+		(call !Return)
+	)
+
 	;determine whether a new case (one that is not in the Trainee) should be ablated (trained as weights) or kept.
 	; a return value of true indicates that a case should be kept and a return value of false indicates that the case should be ablated.
-	; context_values: list of context values to react to
-	; context_features: list of context features to react to
+	; features: list of features to react to
+	; feature_values: list of feature values to react to
 	; num_cases: number of current cases in the model
 	#!ShouldNewCaseBeAblated
 	(declare
 		(assoc
-			context_features (list)
-			context_values (list)
+			features (list)
+			feature_values (list)
 
 			;internal
 			max_influence_weight_entropy_to_keep .infinity
@@ -178,8 +232,8 @@
 			(or
 				(> max_influence_weight_entropy_to_keep
 					(call !ComputeInfluenceWeightEntropy (assoc
-						context_values context_values
-						context_features context_features
+						features features
+						feature_values feature_values
 					))
 
 				)
