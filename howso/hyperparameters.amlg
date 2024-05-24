@@ -41,6 +41,7 @@
 								;output an assoc of sdm and expected deviation
 								(assoc
 									"sdm"
+										##SparseDeviationMatrix
 										(call !ConfusionMatrixToSDM (assoc
 											confusion_matrix (get confusion_matrix_map (current_index 2))
 											feature (current_index 2)
@@ -108,8 +109,16 @@
 										null_deviations
 									)
 
-									;else just store provided deviations
-									feature_deviations
+									;else just store provided deviations, but pull the sdm out to store as-is
+									(map
+										(lambda
+											(if (~ (assoc) (current_value))
+												(get (current_value) "sdm")
+												(current_value)
+											)
+										)
+										feaure_deviations
+									)
 								)
 						)
 
@@ -1088,25 +1097,33 @@
 				))
 		))
 
-		;output sparse deviation matrix by filtering out deviations that correspond to counts that aren't in the sparse confusion matrix
-		;and return tuples with the default class deviation for classes that have those computed
-		(map
-			(lambda
-				;if there is a default deviation for the class, output a tuple of [sparse deviation map, default class deviation]
-				(if (contains_index leftover_class_deviation_map (current_index))
-					(list
-						(keep (current_value 1) (indices (get confusion_matrix (current_index 1))) )
-						(get leftover_class_deviation_map (current_index 1))
-					)
+		;if there's a leftover_unknown_class_deviation, output the SDM as a list (pair)
+		(if leftover_unknown_class_deviation
+			(list (call !FormatSDMForOutput) leftover_unknown_class_deviation)
 
-					;just output the sdm assoc
-					(keep (current_value) (indices (get confusion_matrix (current_index))) )
-				)
-			)
-			deviation_matrix
+			;else just output the SDM as an assoc
+			(call !FormatSDMForOutput)
 		)
 	)
 
+	;Edits deviation_matrix for output by filtering out deviations that correspond to counts that aren't in the sparse confusion matrix
+	;and return tuples with the default class deviation for classes that have those computed
+	#!FormatSDMForOutput
+	(map
+		(lambda
+			;if there is a default deviation for the class, output a tuple of [sparse deviation map, default class deviation]
+			(if (contains_index leftover_class_deviation_map (current_index))
+				(list
+					(keep (current_value 1) (indices (get confusion_matrix (current_index 1))) )
+					(get leftover_class_deviation_map (current_index 1))
+				)
+
+				;just output the sdm assoc
+				(keep (current_value) (indices (get confusion_matrix (current_index))) )
+			)
+		)
+		deviation_matrix
+	)
 
 	;Helper method for computing SDM, filters out counts below threshold and stores as probabilities correct instead.
 	;leaves only those predicted classes that had enough predictions.
@@ -1192,6 +1209,19 @@
 				)
 		))
 
+		(declare (assoc
+			weighted_accuracy_map
+				;weighted accuracy for each class is its predicted probability * random guess accuracy
+				(map
+					(lambda (let
+						(assoc predicted_class_prob (get (current_value 1) (current_index 1)))
+						(* predicted_class_prob (get rand_guess_accuracy_map (current_index)) )
+					))
+					confusion_matrix
+				)
+		))
+		(declare (assoc avg_random_accuracy (apply "+" (values weighted_accuracy_map)) ))
+
 		(assign (assoc
 			leftover_unknown_class_deviation
 				;fallback #1, if there are enough leftover predictions, deviation is 1 - correct leftovers / total leftovers
@@ -1226,21 +1256,8 @@
 							)
 
 							;else fallback #3, use the average weighted random guess accuracy from the confusion matrix
-							(let
-								(assoc
-									weighted_accuracy_map
-										;weighted accuracy for each class is its predicted probability * random guess accuracy
-										(map
-											(lambda (let
-												(assoc predicted_class_prob (get (current_value 1) (current_index 1)))
-												(* predicted_class_prob (get rand_guess_accuracy_map (current_index)) )
-											))
-											confusion_matrix
-										)
-								)
-								;1 - average accuracy
-								(- 1 (apply "+" (values weighted_accuracy_map)))
-							)
+							;deviation = 1 - average accuracy
+							(- 1 avg_random_accuracy)
 						)
 					)
 
@@ -1256,8 +1273,8 @@
 			))
 		)
 
-		;average accuracy of 0 means there are no (or not significantly enough) counts for any of the predicted classes
-		(if (= 0 avg_accuracy)
+		;average accuracy of 0 means there are no (or not enough significant) counts for any of the predicted classes
+		(if (= 0 avg_random_accuracy)
 			(assign (assoc confusion_matrix (assoc) ))
 		)
 	)
