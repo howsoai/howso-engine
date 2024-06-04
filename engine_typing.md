@@ -7,14 +7,13 @@ Return types of methods should be specified by comments on the assoc with the pa
 
 - All parameters must have at least "type" specified
 - Optionality will be automatically inferred by the default value. Nullable/Optional are the same here.
-- There is no "boolean" type in Amalgam at this point, so flags must list both "true" and "false" as possible types.
 
 
 ## Typing (assoc) keys and their values
 
 | Key    | Values |
 | ------ | ------ |
-| type | If single type, the type as a string. If multiple types, a list of types as strings. The available types are "list", "assoc", "number", "string", "true", "false", "any".
+| type | If single type, the type as a string. If multiple types, a list of types as strings. The available types are "list", "assoc", "number", "string", "boolean", "any".
 | values | Only used when `type` is "list" or "assoc". Values should be similar to the values of `type` and should define the possible types of the values. This value can be an assoc if the type is a data structure/
 | min_size | Only applicable when `type` is "list" or "assoc". Value should be an integer.
 | max_size | Only applicable when `type` is "list" or "assoc". Value should be an integer.
@@ -42,15 +41,15 @@ Train
         session (null)
         ;(assoc type "string")
         series (null)
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         input_is_substituted (false)
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         allow_training_reserved_features (false)
         ;(assoc type "string")
         accumulate_weight_feature (null)
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         train_weights_only (false)
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         skip_auto_analyze (false)
     )
     ...
@@ -68,13 +67,13 @@ Analyze
         action_features (list)
         ;(assoc type "number")
         k_folds 1
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         bypass_hyperparameter_analysis (null)
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         bypass_calculate_feature_residuals (null)
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         bypass_calculate_feature_weights (null)
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         use_deviations (null)
         ;(assoc type "number")
         num_samples (null)
@@ -92,9 +91,9 @@ Analyze
         targeted_model "single_targeted"
         ;(assoc type "string")
         weight_feature ".case_weight"
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         use_case_weights (null)
-        ;(assoc type (list "true" "false"))
+        ;(assoc type "boolean")
         inverse_residuals_as_weights (null)
     )
     ...
