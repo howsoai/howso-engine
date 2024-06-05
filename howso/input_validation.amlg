@@ -249,4 +249,204 @@
 			(assign (assoc invalid_value_message (concat "Incorrect datetime format used in " parameter_name ".") ))
 		)
 	)
+
+	#!BuildParameterValidationMap
+	(declare
+		(assoc
+			api (get (call get_api) (list 1 "payload" "labels"))
+		)
+
+		(assign_to_entities (assoc
+			!parameterValidationMap
+				(map
+					(lambda
+						(let
+							(assoc
+								label (current_index 1)
+								parameters_map (get (current_value 1) "parameters")
+							)
+
+							(map
+								(lambda
+									(parse (current_value))
+								)
+								parameters_map
+							)
+						)
+					)
+					api
+				)
+		))
+	)
+
+	#!ValidateParameters
+	(declare
+		(assoc
+			;this automatically determines the label/method that this method is being called within
+			label_name (first (get_labels (get (opcode_stack) -8)))
+		)
+
+		(declare (assoc
+			parameter_validity_map
+				(map
+					(lambda
+						(let
+							(assoc
+								parameter_name (current_index 1)
+								specification (current_value 1)
+								exp_type (get (current_value 1) "type")
+								given_value (get (args 1) (current_index 1))
+								optional (true) ;lets just assume optional for now
+							)
+
+							(if (and optional (= (null) given_value))
+								(true)
+
+								(~ exp_type (list))
+								;list of possible types logic
+								(apply "or"
+									(map
+										(lambda
+											(call !SingleTypeCheck (assoc
+												exp_type (current_value 1)
+												given_value given_value
+											))
+										)
+										exp_type
+									)
+								)
+
+								;requires exp_type to be the string type. One of number, string, boolean, list, assoc, or any
+								#!SingleTypeCheck
+								(if (= exp_type "number")
+									(and
+										(~ 0 given_value)
+										(if (contains_index specification "max")
+											(<= given_value (get specification "max"))
+											(true)
+										)
+										(if (contains_index specification "min")
+											(>= given_value (get specification "min"))
+											(true)
+										)
+									)
+
+									(= exp_type "string")
+									(if (contains_index specification "enum")
+										(contains_value
+											(get specification "enum")
+											given_value
+										)
+
+										;else just check if string
+										(~ "" given_value)
+									)
+
+									(= exp_type "boolean")
+									(contains_value (list (true) (false)) given_value)
+
+									(= exp_type "list")
+									(and
+										(~ (list) given_value)
+										(if (contains_index specification "values")
+											(apply "and"
+												(map
+													(lambda
+														(call !SingleTypeCheck (append
+															(assoc given_value (current_value 1))
+															(if (~ (assoc) (get specification "values"))
+																(assoc
+																	specification (get specification "values")
+																	exp_type (get specification (list "values" "type"))
+																)
+
+																;otherwise, "values" should just be a string
+																(assoc
+																	specification (assoc)
+																	exp_type (get specification "values")
+																)
+															)
+														))
+													)
+													given_value
+												)
+											)
+											(true)
+										)
+										(if (contains_index specification "max_size")
+											(<= (size given_value) (get specification "max_size"))
+											(true)
+										)
+										(if (contains_index specification "min_size")
+											(>= (size given_value) (get specification "min_size"))
+											(true)
+										)
+									)
+
+									(= exp_type "assoc")
+									(and
+										(~ (assoc) given_value)
+										(if (contains_index specification "values")
+											(apply "and"
+												(map
+													(lambda
+														(call !SingleTypeCheck (append
+															(assoc given_value (current_value 1))
+															(if (~ (assoc) (get specification "values"))
+																(assoc
+																	specification (get specification "values")
+																	exp_type (get specification (list "values" "type"))
+																)
+
+																;otherwise, "values" should just be a string
+																(assoc
+																	specification (assoc)
+																	exp_type (get specification "values")
+																)
+															)
+														))
+													)
+													(values given_value)
+												)
+											)
+											(true)
+										)
+										(if (contains_index specification "max_size")
+											(<= (size given_value) (get specification "max_size"))
+											(true)
+										)
+										(if (contains_index specification "min_size")
+											(>= (size given_value) (get specification "min_size"))
+											(true)
+										)
+									)
+
+									(= exp_type "any")
+									(true)
+								)
+							)
+
+						)
+					)
+					(get !parameterValidationMap label_name)
+				)
+		))
+
+		(declare (assoc
+			invalid_params (filter (lambda (not (get parameter_validity_map (current_value)))) (indices parameter_validity_map))
+		))
+
+		(if (size invalid_params)
+			(conclude
+				(call !Return (assoc
+					errors
+						(list (concat
+							"The following parameters contain invalid values: "
+							(apply "concat" (trunc (weave invalid_params ", ")))
+							"."
+						))
+				))
+			)
+		)
+	)
 )
