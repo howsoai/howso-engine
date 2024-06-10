@@ -60,6 +60,8 @@
 	;		If null, will be set to k. default is null
 	; num_robust_influence_samples_per_case: optional, Specifies the number of robust samples to use for each case for robust contribution computations.
 	;				  Defaults to 300 + 2 * (number of features).
+	; features: list of string, optional. List of features to use when calculating conditional prediction stats. Should contain all action and context features desired. If
+	;		'action_feature' is also provided, that feature will automatically be appended to this list if it is not already in the list
 	#get_prediction_stats
 	(declare
 		(assoc
@@ -85,6 +87,7 @@
 			context_condition_precision "exact"
 			;{type "number"}
 			context_precision_num_cases (null)
+			features (null)
 		)
 		(call !ValidateParameters)
 
@@ -102,7 +105,7 @@
 		)
 
 		(call !Return
-			(if (or context_condition action_condition)
+			(if (or context_condition action_condition features)
 				(call !CalculateConditionalPredictionStats (assoc
 					stats stats
 					robust robust
@@ -116,6 +119,7 @@
 					action_num_cases action_num_cases
 					action_condition_precision action_condition_precision
 					num_robust_influence_samples_per_case num_robust_influence_samples_per_case
+					prediction_stats_features features
 				))
 				;else no condition is present
 				(call !GetFeaturePredictionStats (assoc
@@ -178,7 +182,20 @@
 				errors (list "Feature Residuals for the specified parameters has not been computed.  Please call 'react_into_trainee' with appropriate parameters to compute and store residuals prior to calling this method.")
 			))
 
-			(call !Return (assoc payload output))
+			(call !Return (assoc
+				payload
+					;replace all unique feature residuals with (null)
+					(if (size !uniqueNominalsSet)
+						(map
+							(lambda
+								(if (not (contains_index !uniqueNominalsSet (current_index))) (current_value) )
+							)
+							output
+						)
+						;else return output as-is
+						output
+					)
+			))
 		)
 	)
 
@@ -237,10 +254,14 @@
 									;GetFeatureResiduals returns the values in !residualsMap, which contains a list of values for features containing nulls.
 									;In the case where !residualsMap holds a list of values for a feature, the first value is the MAE.
 									(lambda
-										(if (= (get_type_string (current_value)) "list")
+										(if (~ (list) (current_value))
 											(first (current_value))
 
-											(current_value)
+											;if the residual is an assoc containing a Sparse Deviation Matrix, return just the deviation value
+											(if (~ (assoc) (current_value))
+												(get (current_value) "expected_deviation")
+												(current_value)
+											)
 										)
 									)
 									(call !GetFeatureResiduals (assoc
@@ -391,6 +412,7 @@
 					(map
 						(lambda (let
 							(assoc feature (current_index 1))
+							;filter out nulls, i.e., those stats that don't belong to a feature like rmse for a nominal
 							(filter (map
 								(lambda (get (current_value) feature))
 								output_map
@@ -400,6 +422,20 @@
 					)
 				)
 		))
+
+		;all unique nominals explicitly return any of the requested nominal feature stats as (null)
+		(if (size !uniqueNominalsSet)
+			(accum (assoc
+				output_map
+					(map
+						(lambda (append
+							(keep (zip (list "precision" "recall" "mcc" "accuracy")) basic_stats)
+							(if (contains_value stats "mae") (assoc "mae") (assoc))
+						))
+						!uniqueNominalsSet
+					)
+			))
+		)
 
 		;output payload and warnings
 		(assoc
@@ -452,6 +488,8 @@
 	; num_robust_influence_samples_per_case: optional integer. Specifies the number of robust samples to use for each case.
 	;				  Applicable only for computing feature contributions. When unspecified, defaults to 200 + 2 * number of features.
 	;				  Higher values will take longer but provide more stable results.
+	; prediction_stats_features: list of string, optional. List of features to use when calculating conditional prediction stats. Should contain all action and context features desired. If
+	;		'action_feature' is also provided, that feature will automatically be appended to this list if it is not already in the list.
 	#!CalculateConditionalPredictionStats
 	(declare
 		(assoc
@@ -466,6 +504,7 @@
 			context_precision_num_cases (null)
 			context_condition_precision "exact"
 			num_robust_influence_samples_per_case (null)
+			prediction_stats_features (null)
 		)
 
 		(declare (assoc
@@ -489,7 +528,11 @@
 					))
 					(list)
 				)
-			context_features (filter (lambda (!= action_feature (current_value))) !trainedFeatures)
+			context_features
+				(filter
+					(lambda (!= action_feature (current_value)))
+					(if (!= prediction_stats_features (null)) prediction_stats_features !trainedFeatures)
+				)
 			use_case_weights (!= (null) weight_feature)
 		))
 
@@ -501,7 +544,8 @@
 					mode (if (= robust_hyperparameters (true)) "robust" "full")
 					weight_feature (if (= weight_feature (null)) ".none" weight_feature)
 				))
-			features (if (!= action_feature (null)) (append context_features action_feature) context_features)
+			features
+				(if (!= action_feature (null)) (append context_features action_feature) context_features)
 		))
 
 		;if no stats were specified, return all of them by default
