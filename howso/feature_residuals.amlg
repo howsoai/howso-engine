@@ -856,9 +856,18 @@
 			(declare (assoc param_path (get hyperparam_map "paramPath")))
 		)
 
-		;TODO: sparsify matrix only if running on whole model
-		(if (false)
-			(call !SparsifyConfusionMatrices)
+		;sparsify matrix only if running on enough cases or full model
+		(if (and
+				(size confusion_matrix_map)
+				(> (size case_ids) 200)
+			)
+			(assign (assoc
+				confusion_matrix_map
+					(call !SparsifyConfusionMatrices (assoc
+						smallest_count_threshold 10
+						confusion_matrix_map confusion_matrix_map
+					))
+			))
 		)
 
 		(declare (assoc
@@ -1053,82 +1062,88 @@
 		(null)
 	)
 
-	;confusion_matrix_map
-	;nominal_features
-	;smallest_count_threshold
+	;Helper method to sparsify confusion matrices by removing cells whose counts are less than the specified smallest_count_threshold
+	;and accumulating those leftovers as their own counts.
+	;outputs an assoc of feature -> assoc of
+	;	confusion_matrix: sparsified confusion matrix
+	;	leftover_correct: total number of correct predictions for classes that were not statistically significant
+	;	leftover_incorrect: total number of incorrect predictions for classes with any correct but statistically insignificant predictions
+	;	other_counts: total number of all other statistically insignificant predictions
+	;
+	;parameters:
+	; confusion_matrix_map: assoc of feature -> confusion matrix assoc
+	; smallest_count_threshold: smallest number of predictions for a class to leave in the confusion matrix
 	#!SparsifyConfusionMatrices
-	(assign (assoc
-		confusion_matrix_map
-			(map
-				(lambda	(let
-					(assoc
-						confusion_matrix (current_value 1)
-						leftover_confusion_matrix (assoc)
-					)
-
-					(call !ComputeLeftoverConfusionMatrix)
-
-					;total of all statistically insignificant correct predictions
-					(declare (assoc
-						;create an assoc of class -> row from leftover_confusion_matrix for any rows where the predicted value isn't significant
-						satistically_insignificant_rows_map
-							(filter
-								(lambda (or (get (current_value) (current_index))) )
-								leftover_confusion_matrix
-							)
-					))
-					(declare (assoc
-						;total of all statistically insignificant correct predictions
-						total_leftover_correct_predictions
-							(apply "+" (values
-								(map (lambda (get (current_value) (current_index))) satistically_insignificant_rows_map)
-							))
-						;total of all statistically insignificant incorrect predictions (total row count - correct prediction count)
-						total_leftover_incorrect_predictions
-							(apply "+" (values
-								(map
-									(lambda
-										;subtract predicted count from total of all counts for the row
-										(-
-											(apply "+" (values (current_value)))
-											(get (current_value) (current_index))
-										)
-									)
-									satistically_insignificant_rows_map
-								)
-							))
-					))
-
-					(assoc
-						"confusion_matrix"
-							;filter out any empty rows
-							(filter
-								(lambda (size (current_value)))
-
-								;filter out values below threshold count from confusion_matrix
-								(map
-									(lambda
-										;filter out the row, keeping only those values >= smallest_count_threshold
-										(filter
-											(lambda (>= (current_value) smallest_count_threshold) )
-											(current_value)
-										)
-									)
-									;reduce confusion matrix to only those rows where predicted classes had significant counts
-									(remove confusion_matrix (indices satistically_insignificant_rows_map))
-								)
-							)
-						"leftover_correct" (+ (or total_leftover_correct_predictions))
-						"leftover_incorrect" (+ (or total_leftover_incorrect_predictions))
-						"other_counts"
-							(map
-								(lambda (apply "+" (values (current_value))))
-								;reduce leftover_confusion matrix to only those rows without predicted class counts
-								(remove leftover_confusion_matrix (indices satistically_insignificant_rows_map))
-							)
-					)
-				))
-				confusion_matrix_map
+	(map
+		(lambda	(let
+			(assoc
+				confusion_matrix (current_value 1)
+				leftover_confusion_matrix (assoc)
 			)
-	))
+
+			(call !ComputeLeftoverConfusionMatrix)
+
+			;total of all statistically insignificant correct predictions
+			(declare (assoc
+				;create an assoc of class -> row from leftover_confusion_matrix for any rows where the predicted value isn't significant
+				satistically_insignificant_rows_map
+					(filter
+						(lambda (or (get (current_value) (current_index))) )
+						leftover_confusion_matrix
+					)
+			))
+			(declare (assoc
+				;total of all statistically insignificant correct predictions
+				total_leftover_correct_predictions
+					(apply "+" (values
+						(map (lambda (get (current_value) (current_index))) satistically_insignificant_rows_map)
+					))
+				;total of all statistically insignificant incorrect predictions (total row count - correct prediction count)
+				total_leftover_incorrect_predictions
+					(apply "+" (values
+						(map
+							(lambda
+								;subtract predicted count from total of all counts for the row
+								(-
+									(apply "+" (values (current_value)))
+									(get (current_value) (current_index))
+								)
+							)
+							satistically_insignificant_rows_map
+						)
+					))
+			))
+
+			(assoc
+				"confusion_matrix"
+					;filter out any empty rows
+					(filter
+						(lambda (size (current_value)))
+
+						;filter out values below threshold count from confusion_matrix
+						(map
+							(lambda
+								;filter out the row, keeping only those values >= smallest_count_threshold
+								(filter
+									(lambda (>= (current_value) smallest_count_threshold) )
+									(current_value)
+								)
+							)
+							;reduce confusion matrix to only those rows where predicted classes had significant counts
+							(remove confusion_matrix (indices satistically_insignificant_rows_map))
+						)
+					)
+				"leftover_correct" (+ (or total_leftover_correct_predictions))
+				"leftover_incorrect" (+ (or total_leftover_incorrect_predictions))
+				"other_counts"
+					(map
+						(lambda (apply "+" (values (current_value))))
+						;reduce leftover_confusion matrix to only those rows without predicted class counts
+						(remove leftover_confusion_matrix (indices satistically_insignificant_rows_map))
+					)
+			)
+		))
+		confusion_matrix_map
+	)
+
 )
