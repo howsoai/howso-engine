@@ -92,25 +92,25 @@ Train
 #train
 (declare
     (assoc
-        ;(assoc type "list" values (assoc type "list" values "any"))
+        ;{type "list" values {type "list" values "any"}}
         input_cases (list)
-        ;(assoc type "list" values "string")
+        ;{type "list" values "string"}
         features (list)
-        ;(assoc type "list" values "string")
+        ;{type "list" values "string"}
         derived_features (null)
-        ;(assoc type "string")
+        ;{type "string"}
         session (null)
-        ;(assoc type "string")
+        ;{type "string"}
         series (null)
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         input_is_substituted (false)
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         allow_training_reserved_features (false)
-        ;(assoc type "string")
+        ;{type "string"}
         accumulate_weight_feature (null)
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         train_weights_only (false)
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         skip_auto_analyze (false)
     )
     ...
@@ -122,39 +122,39 @@ Analyze
 #analyze
 (declare
     (assoc
-        ;(assoc type "list" values "string")
+        ;{type "list" values "string"}
         context_features (list)
-        ;(assoc type "list" values "string")
+        ;{type "list" values "string"}
         action_features (list)
-        ;(assoc type "number")
+        ;{type "number"}
         k_folds 1
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         bypass_hyperparameter_analysis (null)
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         bypass_calculate_feature_residuals (null)
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         bypass_calculate_feature_weights (null)
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         use_deviations (null)
-        ;(assoc type "number")
+        ;{type "number"}
         num_samples (null)
-        ;(assoc type "number")
+        ;{type "number"}
         num_analysis_samples (null)
-        ;(assoc type "number")
+        ;{type "number"}
         analysis_sub_model_size (null)
-        ;(assoc type "list" values "number")
+        ;{type "list" values "number"}
         k_values (null)
-        ;(assoc type "list" values "number")
+        ;{type "list" values "number"}
         p_values (null)
-        ;(assoc type "list" values "number")
+        ;{type "list" values "number"}
         dt_values (null)
-        ;(assoc type "string" enum (list "single_targeted" "omni_targeted" "targetless"))
+        ;{type "string" enum {"single_targeted" "omni_targeted" "targetless"}}
         targeted_model "single_targeted"
-        ;(assoc type "string")
+        ;{type "string"}
         weight_feature ".case_weight"
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         use_case_weights (null)
-        ;(assoc type "boolean")
+        ;{type "boolean"}
         inverse_residuals_as_weights (null)
     )
     ...
