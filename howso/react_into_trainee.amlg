@@ -58,8 +58,8 @@
 			sample_model_fraction (null)
 			contributions (null)
 			contributions_robust (null)
-			residuals (null)
-			residuals_robust (null)
+			; residuals (null); delete
+			; residuals_robust (null)
 			mda (null)
 			mda_permutation (null)
 			mda_robust (null)
@@ -70,10 +70,32 @@
 			num_robust_residual_samples (null)
 			num_robust_influence_samples (null)
 			num_robust_influence_samples_per_case (null)
+
+			;begin old GPS parameters
+			selected_prediction_stats (list) ; keep
+			prediction_stats (null)
+			prediction_stats_robust (null)
+			check_cached_residuals (false) ; checks first to see if the metrics already exist, if not then compute. If false, always recomputes
+			; action_feature (null) ; old action_feature
+			robust_hyperparameters (null)
+			; prediction_stats_weight_feature (null) ; old weight_feature
+			action_condition (null)
+			action_num_cases (null)
+			action_condition_precision "exact"
+			context_condition (null)
+			context_condition_precision "exact"
+			context_precision_num_cases (null)
+			prediction_stats_features (null) ; old features
 		)
 
-		(declare (assoc invalid_parameters (false)))
+		(declare (assoc
+			invalid_parameters (false)
+			compute_residuals (true)
+			conditioned_residuals (false)
+			output (null)
+		))
 
+		; FIXME:  warnings if prediciont_stats if off
 		(if hyperparameter_param_path
 			(let
 				(assoc hp_map (get (retrieve_from_entity "!hyperparameterMetadataMap") hyperparameter_param_path) )
@@ -115,12 +137,40 @@
 			warnings (assoc)
 		))
 
+		(if (and
+				(or prediction_stats prediction_stats_robust)
+				(or context_condition action_condition prediction_stats_features)
+			)
+			; if we have conditioned prediction stats, we are neither checking or caching residuals
+			(assign (assoc
+				check_cached_residuals (false)) ; means we are not messing with caches
+				conditioned_residuals (true)
+			)
+		)
+
+		; If we are checking caches, set 'compute_residuals' to determine if a cached residual exists
+		(if check_cached_residuals
+			(if
+				; If the only prediction stat requested is "mae", we check to see if the !residualsMap has been calculated, otherwise if there
+				; are other prediction stats, we check to see if the other prediction stats are calculated and stored in the `!featurePredictionStatsMap`
+				(and (= (size selected_prediction_stats) 1) (= (first selected_prediction_stats) "mae"))
+				; mae only
+				(if (!= 0 (size !residualsMap))
+					(assign (assoc compute_residuals (false)))
+				)
+				; else
+				(if (!= 0 (size !featurePredictionStatsMap))
+					(assign (assoc compute_residuals (false)))
+				)
+			)
+		)
+
 		;provide detailed warning if model hasn't been analyzed for the specified action_feature
 		(if (!= (null) action_feature)
 			(let
 				(assoc robust_mode "full")
 
-				(if (or mda mda_permutation contributions residuals)
+				(if (or mda mda_permutation contributions prediction_stats)
 					#!ReactIntoTraineeMismatchedParametersWarning
 					(let
 						(assoc
@@ -156,7 +206,7 @@
 					)
 				)
 
-				(if (or mda_robust mda_robust_permutation contributions_robust residuals_robust)
+				(if (or mda_robust mda_robust_permutation contributions_robust prediction_stats_robust)
 					(call !ReactIntoTraineeMismatchedParametersWarning (assoc robust_mode "robust"))
 				)
 			)
@@ -243,7 +293,7 @@
 		))
 
 		;if the hyperparameter action feature hasn't been provided, figure it out dynamically when computing residuals
-		(if (or residuals residuals_robust)
+		(if (or prediction_stats prediction_stats_robust)
 			(if (= (null) action_feature)
 				(let
 					(assoc hp_features (indices !hyperparameterMetadataMap))
@@ -274,8 +324,14 @@
 			)
 		)
 
-		;if any of residual sets should be removed
-		(if (contains_value (list residuals residuals_robust) (false))
+		; If we are calculating conditioned residuals, we are not storing new residuals to the cache
+		(if
+			(and
+				(or prediction_stats prediction_stat_robust)
+				(not conditioned_residuals)
+				compute_residuals
+			)
+			; If we calculate residuals non-conditioned residuals, then we are storing the updated residuals, thus we delete the existing ones.
 			(let
 				(assoc
 					residuals_map (retrieve_from_entity "!residualsMap")
@@ -357,28 +413,71 @@
 				)
 		))
 
-		(if residuals
-			(call !CalculateAndStoreFeatureResiduals (assoc
-				features context_features
-				case_ids case_ids
-				robust_residuals (false)
-				hyperparameter_feature action_feature
-				weight_feature weight_feature
-				use_case_weights use_case_weights
-				custom_hyperparam_map custom_hyperparam_map
-			))
-		)
 
-		(if residuals_robust
-			(call !CalculateAndStoreFeatureResiduals (assoc
-				features context_features
-				case_ids robust_residual_case_ids
-				robust_residuals (true)
-				hyperparameter_feature action_feature
-				weight_feature weight_feature
-				use_case_weights use_case_weights
-				custom_hyperparam_map custom_hyperparam_map
-			))
+
+		(if
+			(or prediction_stats prediction_stat_robust)
+			(seq
+				;if there are specified stats remaining after all the supported stats have been removed, that means unsupported ones were provided
+				(if (> (size (remove (zip stats) !supportedPredictionStats)) 0)
+					(conclude
+						(call !Return (assoc
+							errors
+								(list (concat
+									"Specified an unsupported stat. Supported stats are: "
+									(apply "concat" (trunc (weave !supportedPredictionStats ", ")))
+								))
+						))
+					)
+				)
+
+				(assign (assoc output
+					(if (= compute_residuals (false))
+						(call !GetFeaturePredictionStats (assoc
+							stats selected_prediction_stats
+							robust (if prediction_stats (false) (true))
+							action_feature action_feature
+							robust_hyperparameters robust_hyperparameters
+							weight_feature prediction_stats_weight_feature
+						))
+						(if conditioned_residuals
+							(call !CalculateConditionalPredictionStats (assoc
+								stats selected_prediction_stats
+								robust (if prediction_stats (false) (true))
+								action_feature action_feature
+								robust_hyperparameters robust_hyperparameters
+								weight_feature prediction_stats_weight_feature
+								context_condition context_condition
+								context_precision_num_cases context_precision_num_cases
+								context_condition_precision context_condition_precision
+								action_condition action_condition
+								action_num_cases action_num_cases
+								action_condition_precision action_condition_precision
+								num_robust_influence_samples_per_case num_robust_influence_samples_per_case
+								prediction_stats_features prediction_stats_features
+							))
+							(seq
+								(call !CalculateAndStoreFeatureResiduals (assoc
+										features context_features
+										case_ids case_ids
+										robust_residuals (if prediction_stats (false) (true))
+										hyperparameter_feature action_feature
+										weight_feature weight_feature
+										use_case_weights use_case_weights
+										custom_hyperparam_map custom_hyperparam_map
+								))
+								(call !GetFeaturePredictionStats (assoc
+									stats selected_prediction_stats
+									robust (if prediction_stats (false) (true))
+									action_feature action_feature
+									robust_hyperparameters robust_hyperparameters
+									weight_feature weight_feature
+								))
+							)
+						)
+					)
+				))
+			)
 		)
 
 		;doing contributions
@@ -528,6 +627,17 @@
 			(call !RestoreHeldOutCases (assoc holdout_entity_name holdout_entity_name))
 		)
 
-		(call !Return (assoc warnings (if (size warnings) (indices warnings)) ))
+		(call !Return
+			output
+		)
+		; ;output payload and warnings
+		; (assoc
+		; 	"payload" output
+		; 	"warnings" (if (size warnings) (indices warnings) )
+		; )
+		; (call !Return (assoc
+		; 	payload output
+		; 	warnings (if (size warnings) (indices warnings))
+		; ))
 	)
 )
