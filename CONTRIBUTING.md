@@ -71,91 +71,34 @@ Return types of methods should be specified by comments on the assoc with the pa
 
 ### Typing (assoc) keys and their values
 
-| Key    | Values |
-| ------ | ------ |
-| type | If single type, the type as a string. If multiple types, a list of types as strings. The available types are "list", "assoc", "number", "string", "boolean", "any".
-| values | Only used when `type` is "list" or "assoc". Values should be similar to the values of `type` and should define the possible types of the values. This value can be an assoc if the type is a data structure/
-| min_size | Only applicable when `type` is "list" or "assoc". Value should be an integer.
-| max_size | Only applicable when `type` is "list" or "assoc". Value should be an integer.
-| enum | Only applicable when `type` is "string". A list of possible values for the string
-| min | Only applicable when `type` is "number". The minimum value.
-| max | Only applicable when `type` is "number". The maximum value.
-| indices | Only applicable when `type` is "assoc". Value is an assoc of named indices to their expected types.
-| additional_indices | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is specified for indices that were not named in `indices`. This should only be used if `indices` is used as well.
-| optional | The value of this should be a boolean, and this should only be specified for sub-types. This will be automatically added to the top level of type hints based on the default value of the parameter.
+| Key                 | Values |
+| ------------------- | ------ |
+| type                | If single type, the type as a string. If multiple types, a list of types as strings. The available types are "list", "assoc", "number", "string", "boolean", "any".
+| values              | Only used when `type` is "list" or "assoc". Values should be similar to the values of `type` and should define the possible types of the values. This value can be an assoc if the type is a data structure/
+| min_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
+| max_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
+| enum                | Only applicable when `type` is "string". A list of possible values for the string
+| min                 | Only applicable when `type` is "number". The minimum value.
+| max                 | Only applicable when `type` is "number". The maximum value.
+| indices             | Only applicable when `type` is "assoc". Value is an assoc of named indices to their expected types.
+| additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is specified for indices that were not named in `indices`. This should only be used if `indices` is used as well.
+| optional            | The value of this should be a boolean, and this should only be specified for sub-types. This will be automatically added to the top level of type hints based on the default value of the parameter.
 
 
 ### Typing Examples
 
-Train
 ```
-#train
-(declare
-    (assoc
-        ;{type "list" values {type "list" values "any"}}
-        input_cases (list)
-        ;{type "list" values "string"}
-        features (list)
-        ;{type "list" values "string"}
-        derived_features (null)
-        ;{type "string"}
-        session (null)
-        ;{type "string"}
-        series (null)
-        ;{type "boolean"}
-        input_is_substituted (false)
-        ;{type "boolean"}
-        allow_training_reserved_features (false)
-        ;{type "string"}
-        accumulate_weight_feature (null)
-        ;{type "boolean"}
-        train_weights_only (false)
-        ;{type "boolean"}
-        skip_auto_analyze (false)
-    )
-    ...
-)
-```
-
-Analyze
-```
-#analyze
+#foo_bar_method
 (declare
     (assoc
         ;{type "list" values "string"}
-        context_features (list)
-        ;{type "list" values "string"}
-        action_features (list)
-        ;{type "number"}
-        k_folds 1
+        list_of_strs (list)
+        ;{type "number" min 1}
+        optional_positive_number (null)
         ;{type "boolean"}
-        bypass_hyperparameter_analysis (null)
-        ;{type "boolean"}
-        bypass_calculate_feature_residuals (null)
-        ;{type "boolean"}
-        bypass_calculate_feature_weights (null)
-        ;{type "boolean"}
-        use_deviations (null)
-        ;{type "number"}
-        num_samples (null)
-        ;{type "number"}
-        num_analysis_samples (null)
-        ;{type "number"}
-        analysis_sub_model_size (null)
-        ;{type "list" values "number"}
-        k_values (null)
-        ;{type "list" values "number"}
-        p_values (null)
-        ;{type "list" values "number"}
-        dt_values (null)
-        ;{type "string" enum {"single_targeted" "omni_targeted" "targetless"}}
-        targeted_model "single_targeted"
-        ;{type "string"}
-        weight_feature ".case_weight"
-        ;{type "boolean"}
-        use_case_weights (null)
-        ;{type "boolean"}
-        inverse_residuals_as_weights (null)
+        random_flag (false)
+        ;{type "assoc" values "number"}
+        map_of_number_values (assoc)
     )
     ...
 )
