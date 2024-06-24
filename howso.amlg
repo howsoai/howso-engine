@@ -53,10 +53,13 @@
 	;label for loading modules
 	#!loadModulesEndpoint (null)
 
+	;label holding a map of external label names to maps of parameters names to typing specification for each parameter
+	;this label is built and assigned in #!BuildParameterValidationMap, which is called in #initialize[_for_deployment]
+	;and then used within the #!ValidateParameters
+	#!parameterValidationMap (null)
+
 	;value-storing labels, initialized and commented below via the initialize label
 	#!numericalPrecision (null)
-	#!convictionLowerThreshold  (null)
-	#!convictionUpperThreshold  (null)
 	#!trainedFeatures (null)
 	#!trainedFeaturesContextKey (null)
 	#!reactIntoFeaturesList (null)
@@ -218,6 +221,7 @@
 		"synthesis_utilities"
 		"synthesis_validation"
 		"train"
+		"typing"
 		"update_cases"
 		"upgrade"
 	)
@@ -226,12 +230,16 @@
 	;This should be run once by the deployment script.
 	#initialize_for_deployment
 	(declare
-		(assoc file_extension "caml")
+		(assoc
+			;{type "string"}
+			file_extension "caml"
+		)
 		(assign_to_entities (assoc !file_extension file_extension ))
 
 		(call !LoadModules)
 		;clear out this label so that it can't be run again
 		(assign_to_entities (assoc initialize_for_deployment (null)))
+		(call !BuildParameterValidationMap)
 	)
 
 	;load module entities code directly into trainee template only if modules have not been loaded
@@ -255,9 +263,18 @@
 	; trainee_id: optional, unique id for this trainee
 	; filepath: optional, filepath location to where the howso file is stored
 	#initialize
-	(seq
+	(declare
+		(assoc
+			;{type "string"}
+			trainee_id (null)
+			;{type "string"}
+			filepath (null)
+		)
+
 		;load specified modules' code into the trainee if they have not been loaded yet
 		(call !LoadModules)
+
+		(call !BuildParameterValidationMap)
 
 		;can stop initializing if !traineeContainer already exists because this trainee has already been initialized
 		(if (contains_entity !traineeContainer) (conclude))
@@ -314,10 +331,6 @@
 
 			;set of features for which case convictions are stored
 			!storedConvictionsFeatureSet (null)
-
-			;numerical values
-			!convictionLowerThreshold  (null)
-			!convictionUpperThreshold  (null)
 
 			;the default list of features for the model, derived as the sorted indices of !featureAttributes
 			!trainedFeatures (list)
@@ -575,7 +588,7 @@
 			!autoAblationConvictionLowerThreshold (null)
 
 			;the name of the weight feature to use for auto ablation.
-			!autoAblationWeightFeature (null)
+			!autoAblationWeightFeature ".case_weight"
 
 			;whether this Trainee has had influence weight entropies computed and stored for its trained cases.
 			!hasInfluenceWeightEntropies (false)
@@ -703,7 +716,12 @@
 	;parameters:
 	; trainee_id: string, unique identifier
 	#set_trainee_id
-	(seq
+	(declare
+		(assoc
+			;{type "string"}
+			trainee_id (null)
+		)
+		(call !ValidateParameters)
 		(assign_to_entities (assoc !traineeId trainee_id))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -711,9 +729,14 @@
 
 	;set trainee's unique parent id
 	;parameters:
-	; parent-id: string, unique identifier
+	; parent_id: string, unique identifier
 	#set_parent_id
-	(seq
+	(declare
+		(assoc
+			;{type "string"}
+			parent_id (null)
+		)
+		(call !ValidateParameters)
 		(assign_to_entities (assoc !parentId parent_id))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -723,7 +746,12 @@
 	;parameters:
 	; metadata: arbitary metadata to store in a trainee
 	#set_metadata
-	(seq
+	(declare
+		(assoc
+			;{type "assoc"}
+			metadata (null)
+		)
+		(call !ValidateParameters)
 		(assign_to_entities (assoc !metaData metadata))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -738,8 +766,11 @@
 	; seed : optional, the value of the random seed to set on the trainee, defaults to a system-provided 64-bit random number
 	#set_random_seed
 	(declare
-		(assoc seed (system "rand" 16) )
-
+		(assoc
+			;{type "any"}
+			seed (system "rand" 16)
+		)
+		(call !ValidateParameters)
 		(set_entity_rand_seed trainee seed)
 		(accum_to_entities (assoc !revision 1))
 
@@ -753,7 +784,11 @@
 	;	neighbors before stopping (for influential cases)
 	#set_influence_weight_threshold
 	(declare
-		(assoc influence_weight_threshold 0.99)
+		(assoc
+			;{type "number"}
+			influence_weight_threshold 0.99
+		)
+		(call !ValidateParameters)
 		(assign_to_entities (assoc !influenceWeightThreshold influence_weight_threshold))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -777,11 +812,31 @@
 						(lambda
 							(assoc
 								"description" (current_value 1)
-								"parameters" (get_entity_comments (null) (current_index 1) (true))
+								"parameters"
+									;when debugging, comments are injected to all lines, these must be removed
+									;some parameters may have comments other than the type hint as well
+									(map
+										(lambda
+											;(current_value) is a tuple of [comments of parameter, default value]
+											(append
+												;regex to just capture the {} information
+												(or (parse (substr (first (current_value)) "\\{.+\\}")) (assoc) )
+												(assoc
+													default (last (current_value 1))
+													optional (= (last (current_value 1)) (null))
+												)
+											)
+										)
+										;first item is the assoc of parameter names to comments/default value
+										(first (get_entity_comments (null) (current_index 1) (true)))
+									)
 							)
 						)
 						(get_entity_comments (null) (null) (true))
 					)
+
+					"schemas"
+					(retrieve_from_entity "!customTypes")
 				)
 		))
 
