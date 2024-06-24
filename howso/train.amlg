@@ -32,17 +32,29 @@
 	#train
 	(declare
 		(assoc
+			;{type "list" values {type "list" min_size 1} min_size 1}
 			input_cases (list)
+			;{type "list" values "string"}
 			features (list)
+			;{type "list" values "string"}
 			derived_features (null)
+			;{type "string"}
 			session (null)
+			;{type "string"}
 			series (null)
+			;{type "boolean"}
 			input_is_substituted (false)
+			;{type "boolean"}
 			allow_training_reserved_features (false)
+			;{type "string"}
 			accumulate_weight_feature (null)
+			;{type "boolean"}
 			train_weights_only (false)
+			;{type "boolean"}
 			skip_auto_analyze (false)
 		)
+
+		(call !ValidateParameters)
 
 		;unsure that session is set to some string value
 		(if (= (null) session)
@@ -527,86 +539,125 @@
 
 	;private helper method for train that creates the cases in input_cases and returns the case ids
 	#!TrainCreateCases
-	(seq
-		(if (not skip_ablation)
-			(assign (assoc
-				ablated_indices_list
-					(filter (map
-							(lambda (let
-								(assoc feature_values (current_value 1))
+	(if skip_ablation
+		(let
+			(assoc
+				train_features
+					;if auto ablate is enabled, populate the weight feature for this case
+					(if !autoAblationEnabled
+						(append features (list !autoAblationWeightFeature))
+						features
+					)
+			)
 
-								(if encode_features_on_train
-									(assign (assoc
-										feature_values
-											(call !ConvertFromInput (assoc
-												feature_values feature_values
-												features features
-											))
-									))
-								)
+			||(map
+				(lambda (let
+					(assoc
+						feature_values
+							;if auto ablate is enabled, default the weight to 1 for this case
+							(if !autoAblationEnabled
+								(append (current_value 1) (list 1))
+								(current_value 1)
+							)
+					)
 
-								;keep index of case if it should be ablated
-								(if
-									(or
-										(= (null) feature_values)
-										;if one of these ablation checks returns false, the case should be ablated.
-										(not (call !CaseOutsideThresholds))
-										(not
-											(call !ShouldNewCaseBeAblated (assoc
-												features features
-												feature_values feature_values
-												num_cases num_cases
-											))
-										)
-									)
-									(current_index)
-								)
-							))
-							input_cases
+					;create the case and output case id
+					(call !CreateCase (assoc
+						features train_features
+						feature_values
+							(if encode_features_on_train
+								(call !ConvertFromInput (assoc
+									feature_values feature_values
+									features train_features
+								))
+								;else use feature_values as-is
+								feature_values
+							)
+						session (get_value session)
+						session_training_index (+ trained_instance_count (current_index 1))
 					))
-			))
+				))
+				input_cases
+			)
 		)
 
-		(declare (assoc
-			train_features
-				;if auto ablate is enabled, populate the weight feature for this case
-				(if !autoAblationEnabled
-					(append features (list !autoAblationWeightFeature))
-					features
-				)
-		))
+		;else ablating cases
+		(let
+			(assoc
+				train_features
+					;if auto ablate is enabled, populate the weight feature for this case
+					(if !autoAblationEnabled
+						(append features (list !autoAblationWeightFeature))
+						features
+					)
+			)
+			(weave
+				(lambda (let
+					(assoc
+						feature_values (first (current_value 1))
+						case_index (current_index 1)
+					)
 
-		||(map
-			(lambda (let
-				(assoc
-					feature_values
-						;if auto ablate is enabled, default the weight to 1 for this case
-						(if !autoAblationEnabled
-							(append (current_value 1) (list 1))
-							(current_value 1)
-						)
-				)
-
-				;create the case and output case id
-				(call !CreateCase (assoc
-					features train_features
-					feature_values
-						(if encode_features_on_train
-							(call !ConvertFromInput (assoc
-								feature_values feature_values
-								features train_features
-							))
-							;else use feature_values as-is
+					(if encode_features_on_train
+						(assign (assoc
 							feature_values
+								(call !ConvertFromInput (assoc
+									feature_values feature_values
+									features features
+								))
+						))
+					)
+
+					;do not train on this case if it is null or all case values are null or it's within provided thresholds
+					(if (and
+							(!= (null) feature_values)
+							(not (apply "=" (append feature_values (list (null)))))
+							;no thresholds specified or the case is outside of thresholds
+
+							;if one of the ablation methods returns false, then the case should be ablated.
+							(and
+								(call !CaseOutsideThresholds)
+								(call !ShouldNewCaseBeAblated (assoc
+									features features
+									feature_values feature_values
+									num_cases num_cases
+								))
+							)
 						)
-					session (get_value session)
-					session_training_index (+ trained_instance_count (current_index 1))
+						;create the case and store case id
+						(let
+							(assoc
+								new_case_id
+									(call !CreateCase (assoc
+										features train_features
+										feature_values
+											;if auto ablate is enabled, populate the weight feature for this case
+											(if !autoAblationEnabled
+												(append feature_values (list 1))
+												feature_values
+											)
+										session (get_value session)
+										session_training_index (+ trained_instance_count case_index)
+									))
+							)
+
+							;auto analyze if appropriate
+							(if !autoAnalyzeEnabled (call !AutoAnalyzeIfNeeded))
+
+							;output the new case id
+							(list new_case_id)
+						)
+
+						;else don't output anything, filtering out any null case ids
+						(seq
+							(accum (assoc ablated_indices_list case_index))
+							(list)
+						)
+					)
 				))
-			))
-			(if skip_ablation
 				input_cases
-				;else only train on cases that should not be ablated
-				(unzip input_cases (remove (indices input_cases) ablated_indices_list) )
+				;use weave as a map-filter by specifying null as the second list
+				(null)
 			)
 		)
 	)
