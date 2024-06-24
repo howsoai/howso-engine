@@ -99,6 +99,10 @@
 			ablated_indices_list (list)
 			cur_session_case_indices_map (retrieve_from_entity session ".indices_map")
 			warnings (assoc)
+			;don't bother auto analyzing if not training on enough cases
+			run_autoanalyze_check (false)
+			;possible data mass of model if all the specified cases are trained
+			new_possible_data_mass 0
 		))
 
 		;parameter and data checks, returns on error
@@ -229,34 +233,70 @@
 
 		(declare (assoc num_cases (call !GetNumTrainingCases) ))
 
-		(declare (assoc skip_ablation (call !CanTrainAblationBeSkipped) ))
+		(declare (assoc
+			skip_ablation (call !CanTrainAblationBeSkipped)
+			;if accumulating weight feature, store the index of that weight feature
+			weight_feature_index (get (zip features (indices features)) accumulate_weight_feature)
+		))
+
+		(if (or !autoAnalyzeEnabled skip_ablation)
+			(seq
+				(assign (assoc
+					new_possible_data_mass
+						(+
+							!dataMassChangeSinceLastAnalyze
+							(if accumulate_weight_feature
+								(apply "+" (map
+									(lambda (or (get (current_value 1) weight_feature_index) 1))
+									input_cases
+								))
+
+								;else just increase by 1 for each case being trained
+								(size input_cases)
+							)
+						)
+				))
+
+				;if the number of cases will exceed the next autoAnalyzeThreshold, do run the autoanalyze check after training
+				(if
+					(and
+						!autoAnalyzeEnabled
+						;check if the new_possible_data_mass is greater than the threshold
+						(>= new_possible_data_mass !autoAnalyzeThreshold)
+						;but continue to check the number of cases for ensuring the contents are large
+						; enough to warrant re-analyzing.
+						(or (< num_cases !autoAnalyzeLimitSize) (<= !autoAnalyzeLimitSize 0))
+					)
+					(assign (assoc run_autoanalyze_check (true) ))
+				)
+			)
+		)
 
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc new_case_ids (call !TrainCreateCases) ))
 
-		;accumulates the data mass change to !dataMassChangeSinceLastAnalyze, which is either 1.0
-		; or the case weight, if it exists.
-		(declare (assoc
-			weight_feature_index (get (zip features (indices features)))
-		))
-		(accum_to_entities (assoc
-			!dataMassChangeSinceLastAnalyze
-				(apply "+" (map
-					(lambda
-						(if accumulate_weight_feature
-							(or (get (current_value 1) weight_feature_index) 1)
-							1
+		;ablation flow that did not to be autoanalized, accumulate all the data mass in one step here
+		(if (and (not skip_ablation) (not run_autoanalyze_check))
+			;accumulates the data mass change to !dataMassChangeSinceLastAnalyze, which is either 1.0
+			; or the case weight, if it exists.
+			(accum_to_entities (assoc
+				!dataMassChangeSinceLastAnalyze
+					(apply "+" (map
+						(lambda
+							(if accumulate_weight_feature
+								(or (get (current_value 1) weight_feature_index) 1)
+								1
+							)
 						)
-					)
-					;if accumulating the weight feature, accumulate it for all cases, even if they were ablated.
-					(if accumulate_weight_feature
-						input_cases
-						;else only accumulate for cases that were actually trained and not ablated
-						(unzip input_cases (remove (indices input_cases) ablated_indices_list) )
-					)
-				))
-		))
-
+						;if accumulating the weight feature, accumulate it for all cases, even if they were ablated.
+						(if accumulate_weight_feature
+							input_cases
+							;else only accumulate for cases that were actually trained and not ablated
+							(unzip input_cases (remove (indices input_cases) ablated_indices_list) )
+						)
+					))
+			))
+		)
 
 		;set values if there were cases that were trained on
 		(if (> (size new_case_ids ) 0)
@@ -349,10 +389,15 @@
 		)
 
 		;if auto analysis is enabled, check whether this model should be re-analyzed
-		;and return the appropriate status to client so that analysis could be started
-		(if (> (size new_case_ids ) 0)
-			(if (and skip_ablation !autoAnalyzeEnabled)
-				(call !AutoAnalyzeIfNeeded)
+		;and either analyze or return the appropriate status to client so that analysis could be started
+		(if skip_ablation
+			(if (> (size new_case_ids ) 0)
+				(seq
+					;update !dataMassChangeSinceLastAnalyze to the already computed new_possible_data_mass
+					(assign_to_entities (assoc !dataMassChangeSinceLastAnalyze new_possible_data_mass ))
+
+					(if run_autoanalyze_check (call !AutoAnalyzeIfNeeded) )
+				)
 			)
 		)
 
