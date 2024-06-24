@@ -145,7 +145,7 @@
 						(assoc)
 					)
 					(if (size ordinal_feature_deviations)
-						(assoc "!featureOrdinalDeviations" ordinal_feature_deviations)
+						(assoc "featureOrdinalDeviations" ordinal_feature_deviations)
 						(assoc)
 					)
 
@@ -617,11 +617,16 @@
 	#get_internal_parameters
 	(declare
 		(assoc
+			;{type "string"}
 			action_feature (null)
+			;{type "list" values "string"}
 			context_features (null)
+			;{type "string" enum ["robust" "full"]}
 			mode (null)
+			;{type "string"}
 			weight_feature (null)
 		)
+		(call !ValidateParameters)
 
 		(declare (assoc
 			internal_parameters_map
@@ -653,7 +658,7 @@
 			(accum (assoc
 				internal_parameters_map
 					(assoc
-						"auto_analyze" !autoAnalyzeEnabled
+						"auto_analyze_enabled" !autoAnalyzeEnabled
 						"analyze_threshold" !autoAnalyzeThreshold
 						"analyze_growth_factor" !autoAnalyzeGrowthFactorAmount
 						"auto_analyze_limit_size" !autoAnalyzeLimitSize
@@ -683,16 +688,25 @@
 	#set_internal_parameters
 	(declare
 		(assoc
+			;{ref "FullHyperparameterMap"}
 			hyperparameter_map (null)
+			;{ref "HyperparameterMap"}
 			default_hyperparameter_map (null)
+			;{type "boolean"}
 			auto_analyze_enabled (false)
+			;{type "number"}
 			analyze_threshold 100
+			;{type "number"}
 			analyze_growth_factor 7.389056
+			;{type "number"}
 			auto_analyze_limit_size 200000
+		)
+		(call !ValidateParameters)
 
+		(declare (assoc
 			;local var
 			bad_param (false)
-		)
+		))
 
 		(if (!= (null) default_hyperparameter_map)
 			(if (or
@@ -786,8 +800,6 @@
 	(seq
 		(assign_to_entities (assoc
 			!numericalPrecision (null)
-			!convictionLowerThreshold  (null)
-			!convictionUpperThreshold  (null)
 			!defaultNumSamples 100
 			!hyperparameterMetadataMap (assoc)
 			!defaultHyperparameters
@@ -816,15 +828,54 @@
 	#set_auto_analyze_params
 	(declare
 		(assoc
+			;{type "boolean"}
 			auto_analyze_enabled (false)
+			;{type "number"}
 			analyze_threshold 100
+			;{type "number"}
 			analyze_growth_factor 7.389056
+			;{type "number"}
 			auto_analyze_limit_size 200000
 
-			;explicitly default these values to be same as what they are in #analyze
+			;parameter for analyze
+			;{type "list" values "string"}
+			context_features (null)
+			;{type "list" values "string"}
+			action_features (null)
+			;{type "number"}
 			k_folds 1
+			;{type "boolean"}
+			bypass_hyperparameter_analysis (null)
+			;{type "boolean"}
+			bypass_calculate_feature_residuals (null)
+			;{type "boolean"}
+			bypass_calculate_feature_weights (null)
+			;{type "boolean"}
+			use_deviations (null)
+			;{type "number"}
+			num_samples (null)
+			;{type "number"}
+			num_analysis_samples (null)
+			;{type "number"}
+			analysis_sub_model_size (null)
+			;{type "list" values "number"}
+			k_values (null)
+			;{type "list" values "number"}
+			p_values (null)
+			;{type "list" values "number"}
+			dt_values (null)
+			;{type "string" enum ["single_targeted" "omni_targeted" "targetless"]}
+			targeted_model (null)
+			;{type "string"}
 			weight_feature ".case_weight"
+			;{type "boolean"}
+			use_case_weights (null)
+			;{type "boolean"}
+			inverse_residuals_as_weights (null)
+			;{type "boolean"}
+			use_sdm (null)
 		)
+		(call !ValidateParameters)
 
 		;growth factor must be more than 1
 		(if (<= analyze_growth_factor 1)
@@ -932,17 +983,28 @@
 	#set_auto_ablation_params
 	(declare
 		(assoc
+			;{type "boolean"}
 			auto_ablation_enabled (false)
+			;{type "string"}
 			auto_ablation_weight_feature ".case_weight"
+			;{type "number"}
 			minimum_model_size 1000
+			;{type "number"}
 			influence_weight_entropy_threshold 0.6
+			;{type "list" values "string"}
 			exact_prediction_features (null)
+			;{type "assoc" values {type "list" min_size 2 max_size 2}}
 			tolerance_prediction_threshold_map (null)
+			;{type "assoc" values "number"}
 			relative_prediction_threshold_map (null)
+			;{type "list" values "string"}
 			residual_prediction_features (null)
+			;{type "number"}
 			conviction_upper_threshold (null)
+			;{type "number"}
 			conviction_lower_threshold (null)
 		)
+		(call !ValidateParameters)
 
 		(if
 			(or (< influence_weight_entropy_threshold 0) (> influence_weight_entropy_threshold 1))
@@ -981,13 +1043,13 @@
 	;parameters:
 	; confusion_matrix:  assoc of class -> assoc of class -> predicted count for each class.
 	; feature: name of nominal feature
-	; smallest_count_threshold: number of predictions a class should have for it to have an explicit deviation value.
+	; confusion_matrix_min_count: number of predictions a class should have for it to have an explicit deviation value.
 	;	If the count is less than this value, the deviation will be in the combined deviation for the class. default value is 10
 	#!ConfusionMatrixToSDM
 	(declare
 		(assoc
 			confusion_matrix (assoc)
-			smallest_count_threshold 10
+			confusion_matrix_min_count 10
 		)
 
 		(declare (assoc
@@ -1001,7 +1063,7 @@
 		))
 
 		;output null if the total count is too small
-		(if (< total_predictions smallest_count_threshold)
+		(if (< total_predictions confusion_matrix_min_count)
 			(conclude (null))
 		)
 
@@ -1142,12 +1204,9 @@
 		deviation_matrix
 	)
 
-	;Helper method for computing SDM, filters out counts below threshold and stores as probabilities correct instead.
-	;leaves only those predicted classes that had enough predictions.
-	;Also computes the fallback residuals if there are any counts that didn't have enough statistical significance.
-	#!ConvertAndReduceConfusionMatrix
+	;compute the "leftover" confusion matrix of class counts that did not have statistical significance
+	#!ComputeLeftoverConfusionMatrix
 	(seq
-		;compute the "leftover" confusion matrix of class counts that did not have statistical significance
 		(assign (assoc
 			leftover_confusion_matrix
 				(map
@@ -1160,13 +1219,18 @@
 						(if
 							(or
 								(= (null) (get row_map predicted_class))
-								(< (get row_map predicted_class) smallest_count_threshold)
+								(< (get row_map predicted_class) confusion_matrix_min_count)
 							)
 							row_map
 
-							;else only leave those classes that didn't have enough samples
+							;else only leave those classes that have counts but not enough samples
 							(filter
-								(lambda (< (current_value) smallest_count_threshold) )
+								(lambda
+									(and
+										(< (current_value) confusion_matrix_min_count)
+										(!= 0 (current_value))
+									)
+								)
 								row_map
 							)
 						)
@@ -1179,6 +1243,14 @@
 		(assign (assoc
 			leftover_confusion_matrix (filter (lambda (size (current_value))) leftover_confusion_matrix )
 		))
+	)
+
+	;Helper method for computing SDM, called by ConfusionMatrixToSDM, filters out counts below threshold and stores as probabilities correct instead.
+	;leaves only those predicted classes that had enough predictions.
+	;Also computes the fallback residuals if there are any counts that didn't have enough statistical significance.
+	#!ConvertAndReduceConfusionMatrix
+	(seq
+		(call !ComputeLeftoverConfusionMatrix)
 
 		(declare (assoc
 			total_leftover_correct_predictions
@@ -1208,7 +1280,7 @@
 						;filter out any entries where there weren't enough counts
 						(filter (map
 							(lambda
-								(if (>= (current_value) smallest_count_threshold)
+								(if (>= (current_value) confusion_matrix_min_count)
 									(/ (current_value) total_class_predictions)
 
 									;if the predicted class (diagonal) doesn't have enough, represent it with a 0 instead of filtering it out
@@ -1244,7 +1316,7 @@
 		(assign (assoc
 			leftover_unknown_class_deviation
 				;fallback #1, if there are enough leftover predictions, deviation is 1 - correct leftovers / total leftovers
-				(if (>= total_leftover_correct_predictions smallest_count_threshold)
+				(if (>= total_leftover_correct_predictions confusion_matrix_min_count)
 					(- 1 (/ total_leftover_correct_predictions total_leftover_all_predictions) )
 
 					;else if there aren't enough leftover counts to compute unknown class deviation, use weighted random chance
