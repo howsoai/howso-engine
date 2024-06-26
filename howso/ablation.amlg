@@ -107,6 +107,81 @@
 		(call !CreateCaseWeights (assoc feature_name weight_feature) )
 	)
 
+	#!CheckAbsThresholds
+	(declare
+		(assoc
+			abs_threshold_map (assoc)
+
+			;internal
+			prediction_stats_map (first (values !featurePredictionStatsMap))
+		)
+
+		(map
+			(lambda (let
+				(assoc
+					measure (current_index 1)
+					measure_threshold_map (current_value 1)
+				)
+				(map 
+					(lambda (let
+						(assoc
+							feature (current_index 1)
+							feature_threshold (current_value 1)
+						)
+						(if
+							(< 
+								(get prediction_stats_map (list measure feature))
+								feature_threshold
+							)
+							(conclude (conclude (true)))
+						)
+					))
+					measure_threshold_map
+				)
+			))
+			abs_threshold_map
+		)
+
+		(false)
+	)
+
+	#!CheckRelThresholds
+	(declare
+		(assoc
+			rel_threshold_map (assoc)
+			prev_prediction_stats_map (assoc)
+
+			;internal
+			new_prediction_stats_map (first (values !featurePredictionStatsMap))
+		)
+
+		(map
+			(lambda (let
+				(assoc
+					measure (current_index 1)
+					measure_threshold_map (current_value 1)
+				)
+				(map 
+					(lambda (let
+						(assoc
+							feature (current_index 1)
+							feature_threshold (current_value 1)
+						)
+
+						(>= (-
+								(get prev_prediction_stats_map (list measure feature))
+								(get new_prediction_stats_map (list measure feature))
+							)
+							feature_threshold
+						)
+					))
+					measure_threshold_map
+				)
+			))
+			rel_threshold_map
+		)
+	)
+
 	;reduce the trained data by removing cases which have an influence weight entropy that falls above
 	; a threshold.
 	;
@@ -125,6 +200,10 @@
 			features !trainedFeatures
 			;{type "number"}
 			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+			;{type "assoc"}
+			abs_threshold_map (assoc)
+			;{type "assoc"}
+			rel_threshold_map (assoc)
 			;{type "boolean"}
 			skip_auto_analyze (false)
 		)
@@ -134,13 +213,17 @@
 		(declare (assoc
 			max_influence_weight_entropy_to_keep .infinity
 			cases (list)
+			prev_prediction_stats_map (assoc)
+			thresholds_enabled (or (size abs_threshold_map) (size rel_threshold_map) )
 		))
 
+		;ensure the case weight feature is populated
 		(if (not !hasPopulatedCaseWeight)
 			(call !InitializeAutoAblation (assoc
 				weight_feature distribute_weight_feature
 			))
 		)
+		;ensure that we have influence weight entropies to begin with
 		(if (not !hasInfluenceWeightEntropies)
 			(call !ComputeAndStoreInfluenceWeightEntropies (assoc
 				features features
@@ -148,6 +231,17 @@
 				use_case_weights (true)
 			))
 		)
+
+		;if residual-based threholds are enabled, cache that information and set up some
+		; data structures for use later.
+		(if (and thresholds_enabled (= 0 (size !featurePredictionStatsMap)) )
+			(call !CalculateFeatureResiduals (assoc
+				weight_feature distribute_weight_feature
+				use_case_weights (true)
+				compute_all_statistics (true)
+			))
+		)
+
 		(while
 			(<= !autoAblationMinModelSize (call !GetNumTrainingCases))
 
@@ -182,6 +276,32 @@
 				;if there are fewer cases to remove than the auto analyze threshold,
 				; then there is not enough to remove and we should break out of here.
 				(if (< !autoAnalyzeThreshold (size cases)) (conclude) )
+
+				(if thresholds_enabled
+					(seq
+						(print "in thresholds_enabled if\n")
+						(assign (assoc
+							prev_prediction_stats_map (set (first (values !featurePredictionStatsMap)))
+						))
+						(print "recomputing feature residuals\n")
+						(call !CalculateFeatureResiduals (assoc
+							use_case_weights (true)
+							weight_feature distribute_weight_feature
+							compute_all_statistics (true)
+						))
+						(print "checking abs thresholds\n")
+						(if (print (call !CheckAbsThresholds (assoc
+								abs_threshold_map abs_threshold_map
+							)))
+							(conclude (conclude (print "Abs Threshold Failed")))
+							(call !CheckRelThresholds (assoc
+								rel_threshold_map rel_threshold_map
+								prev_prediction_stats_map prev_prediction_stats_map
+							))
+							(conclude (conclude (print "Rel Threshold Failed")))
+						)
+					)
+				)
 			)
 		)
 
