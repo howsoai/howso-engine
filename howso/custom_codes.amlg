@@ -160,18 +160,6 @@
 						))
 				))
 
-				;null out rate and delta features for the initial case in a series so it can be imputed below since those derived values
-				;may be quite inaccurate. Run only on the first 'feature_time_series_order' cases in the series (i.e., 2 cases for rate_2)
-				(if (or (= "rate" feature_time_series_type) (= "delta" feature_time_series_type))
-					(assign (assoc
-						series_data
-							(map
-								(lambda (if (< (current_index) feature_time_series_order) (null)  (current_value)) )
-								series_data
-							)
-					))
-				)
-
 				;do nothing if deriving nominals since they are restricted already
 				(if (contains_index !nominalsMap feature)
 					(null)
@@ -316,38 +304,6 @@
 					label_name feature
 					overwrite (true)
 				))
-
-				;accumulate case ids for imputation after all series are derived
-				(if (and
-						(contains_value series_data (null))
-						(or
-							impute_nulls
-							(= "rate" feature_time_series_type)
-							(= "delta" feature_time_series_type)
-						)
-						;explicitly do not impute the time feature delta feature because it will always be synthed as non-null during case generation anyway because
-						;its bound's allow_null=false, and the only missing values it has are in the initial series cases, so imputing them here won't make a difference
-						;also not requiring it to be imputed here will prevent unnecessary analyzes during train for datasets that have no need for imputation
-						(not (= feature (concat "." !tsTimeFeature "_delta_1")))
-					)
-					(let
-						(assoc
-							case_indices_to_impute
-								(filter
-									(lambda (= (null) (get series_data (current_value))) )
-									;for rate or delta features, only impute as many initial cases at the start of series as the order of this feature
-									;eg, if this is a rate_2 feature, impute the first two rate values, in descending order
-									(if (or (= "rate" feature_time_series_type) (= "delta" feature_time_series_type))
-										(reverse (trunc (indices series_data) feature_time_series_order))
-
-										;else check all cases in the the entire series
-										(indices series_data)
-									)
-								)
-						)
-						(accum (assoc cases_to_impute (unzip series_case_ids case_indices_to_impute) ))
-					)
-				)
 			))
 
 			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
@@ -357,128 +313,6 @@
 		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
 		(if (> ts_series_length_limit !tsSeriesLimitLength)
 			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))
-		)
-
-		;once all the values have been derived for the entire feature, impute nulls if necessary
-		(if (size cases_to_impute)
-			(seq
-
-				;there are cases to impute, set this feature's has_nulls flag to true
-				(assign_to_entities (assoc
-					!featureNullRatiosMap (set !featureNullRatiosMap (list feature "has_nulls") (true))
-				))
-
-				;if this dataset hasn't been analyzed yet or if it has grown significantly since lass analysis pass
-				;do an analyze pass in order to impute with good hyperparameters
-				#!AnalyzePreDerivationImpute
-				(if (and
-						(not skip_auto_analyze)
-						(>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
-						(or
-							(< (call !GetNumTrainingCases) !autoAnalyzeLimitSize)
-							;no limit defined
-							(<= !autoAnalyzeLimitSize 0)
-						)
-					)
-					(let
-						(assoc analyze_features !trainedFeatures)
-
-						(if (= 0 !autoAnalyzeThreshold)
-							(let
-								;get all currently trained features (labels) from a random case
-								(assoc
-									currently_trained_features_map
-										(get_all_labels
-											(retrieve_entity_root (call !SampleCases (assoc num 1)) (true))
-										)
-								)
-
-								;first analyze may not have had all features trained yet, only analyze those that actually exist in the model
-								(assign (assoc
-									analyze_features
-										(filter
-											(lambda (contains_index currently_trained_features_map (current_value)) )
-											!trainedFeatures
-										)
-								))
-
-								; first analyze set the initial threshold to be the max of 100 or the currently trained dataset size
-								(assign_to_entities (assoc !autoAnalyzeThreshold (max (call !GetNumTrainingCases) 100) ))
-
-							)
-						)
-
-						;run basic targetless analysis, will increase the !autoAnalyzeThreshold because auto analyze is enabled
-						(call !Analyze (assoc
-							targeted_model "targetless"
-							context_features analyze_features
-							weight_feature ".none"
-							use_case_weights (false)
-							inverse_residuals_as_weights (true)
-							k_folds 1
-							derived_auto_analyzed (true)
-						))
-					)
-				)
-
-				;iterate over cases that need to impute this feature and impute it
-				||(map
-					(lambda (let
-						(assoc
-							case_id (current_value 1)
-							context_values (retrieve_from_entity (current_value 1) features)
-							react_value (null)
-						)
-
-						(assign (assoc
-							react_value
-								(call !ReactDiscriminative (assoc
-									context_features features
-									context_values context_values
-									action_features (list feature)
-									;ignore the case for which we are doing the imputation since its feature value is null
-									ignore_case case_id
-									;don't encode the input because it's being passed in directly from the case
-									skip_encoding (true)
-									;don't decode because the output will be stored as-is right afterwards
-									skip_decoding (true)
-									return_action_values_only (true)
-									allow_nulls (false)
-								))
-						))
-
-						;update null value in the case with the reacted value
-						(call !StoreCaseValues (assoc
-							;map of case id -> value
-							case_values_map (associate case_id (first react_value))
-							label_name feature
-							overwrite (true)
-						))
-					))
-					cases_to_impute
-				)
-
-				;update null counts for derived feature after analyze and impute
-				(call !UpdateHasNulls (assoc features (list feature)))
-
-				;add this feature to all these cases_to_impute as an imputed feature
-				(declare (assoc
-					cases_to_impute_imputed_features_map
-						;iterate over the case ids to create a map of case id -> updated derive_imputed map for just the updated cases
-						(map
-							(lambda
-								(if (contains_index cases_derive_imputed_map (current_index))
-									(append (get cases_derive_imputed_map (current_index)) (associate feature (null)) )
-									;else just store the feature
-									(associate feature (null))
-								)
-							)
-							(zip cases_to_impute)
-						)
-				))
-				;update cases_derive_imputed_map
-				(accum (assoc cases_derive_imputed_map cases_to_impute_imputed_features_map))
-			)
 		)
 	)
 
