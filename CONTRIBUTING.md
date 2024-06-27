@@ -122,7 +122,7 @@ For example: `#ReactIntoTrainee`
 
 Endpoints are defined in `howso.amlg` using labels written in Snake Case.
 
-For example: `#react_into_trainee`
+For example: `#react_aggregate`
 
 ### Trainee Attributes
 
