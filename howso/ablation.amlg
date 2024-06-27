@@ -108,25 +108,33 @@
 	)
 
 	;reduce the trained data by removing cases which have an influence weight entropy that falls above
-	; a threshold
+	; a threshold.
 	;
 	;parameters:
-	; features: default !trainedFeatures. a list of features to use when computing influence weight entropies
 	; distribute_weight_feature: optional, default !autoAblationWeightFeature. name of feature whose values to use as case weights
+	; features: default all trained features. a list of features to use when computing influence weight entropies
 	; influence_weight_entropy_threshold: optional, default !autoAblationInfluenceWeightEntropyThreshold. cases with
 	; 	influence weight entropy above this quantile will be removed
+	; skip_auto_analyze: default false. whether to skip auto analyzing as cases are removed
 	#reduce_data
 	(declare
 		(assoc
-			;{type "list" values "string"}
-			features !trainedFeatures
 			;{type "string"}
 			distribute_weight_feature !autoAblationWeightFeature
+			;{type "list" values "string"}
+			features !trainedFeatures
 			;{type "number"}
 			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+			;{type "boolean"}
+			skip_auto_analyze (false)
 		)
 		(call !ValidateParameters)
-		(declare (assoc max_influence_weight_entropy_to_keep .infinity ))
+
+		;variables for internal use.
+		(declare (assoc
+			max_influence_weight_entropy_to_keep .infinity
+			cases (list)
+		))
 
 		(if (not !hasPopulatedCaseWeight)
 			(call !InitializeAutoAblation (assoc
@@ -140,26 +148,42 @@
 				use_case_weights (true)
 			))
 		)
+		(while
+			(<= !autoAblationMinModelSize (call !GetNumTrainingCases))
 
-		(assign (assoc
-			max_influence_weight_entropy_to_keep
-				(call !MaxInfluenceWeightEntropyToKeepQuery (assoc
-					influence_weight_entropy_threshold influence_weight_entropy_threshold
-					weight_feature distribute_weight_feature
+			(seq
+				(assign (assoc
+					max_influence_weight_entropy_to_keep
+						(call !MaxInfluenceWeightEntropyToKeepQuery (assoc
+							influence_weight_entropy_threshold influence_weight_entropy_threshold
+							weight_feature distribute_weight_feature
+						))
+					cases
+						(call !GetCasesByCondition (assoc
+							condition
+								(associate
+									!internalLabelInfluenceWeightEntropy
+										(list max_influence_weight_entropy_to_keep .infinity)
+								)
+							num_cases !autoAnalyzeThreshold
+						))
 				))
-		))
 
-		(call !RemoveCases (assoc
-			cases
-				(call !GetCasesByCondition (assoc
-					condition
-						(associate
-							!internalLabelInfluenceWeightEntropy
-								(list max_influence_weight_entropy_to_keep .infinity)
-						)
+				;if there are no cases which satisfy the criteria, then break.
+				(if (not (size cases)) (conclude) )
+
+				(call !RemoveCases (assoc
+					cases cases
+					distribute_weight_feature distribute_weight_feature
 				))
-			distribute_weight_feature distribute_weight_feature
-		))
+
+				(call !AutoAnalyzeIfNeeded)
+
+				;if there are fewer cases to remove than the auto analyze threshold,
+				; then there is not enough to remove and we should break out of here.
+				(if (< !autoAnalyzeThreshold (size cases)) (conclude) )
+			)
+		)
 
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -231,7 +255,7 @@
 				)
 				; This is probably unnecessary but in case we cannot compute the requested influence weight
 				; quantile return 1 as well.
-				(= max_influence_weight_entropy_to_keep .nan)
+				(= max_influence_weight_entropy_to_keep (null))
 			)
 		)
 	)
