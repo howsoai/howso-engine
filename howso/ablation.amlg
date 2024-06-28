@@ -107,6 +107,128 @@
 		(call !CreateCaseWeights (assoc feature_name weight_feature) )
 	)
 
+	#!CheckAbsThresholds
+	(declare
+		(assoc
+			abs_threshold_map (assoc)
+
+			;internal
+			prediction_stats_map (first (values !featurePredictionStatsMap))
+
+			measure (null)
+			feature (null)
+			measure_threshold_map (null)
+			feature_threshold_map (null)
+		)
+
+		;Set up the outer loop, which iterates over the indices of abs_threshold_map,
+		; which themselves are the measures which have thresholds defined.
+		(assign (assoc
+			measure (first (indices abs_threshold_map))
+		))
+		(while (!= (null) measure)
+			(assign (assoc
+				measure_threshold_map (get abs_threshold_map measure)
+			))
+
+			;Set up the inner loop, which iterates over the indices of measure_threshold_map,
+			; which themselves are the features which have thresholds defined for the current
+			; measure.
+			(assign (assoc
+				feature (first (indices measure_threshold_map))
+			))
+			(while (!= (null) feature)
+				(assign (assoc
+					feature_threshold (get measure_threshold_map feature)
+				))
+				(if
+					(<
+						(get prediction_stats_map (list measure feature))
+						feature_threshold
+					)
+					(conclude (conclude (true)))
+				)
+
+				;Increment to the next index of measure_threhsold_map, i.e. the next feature
+				; for this measure.
+				(assign (assoc
+					feature (get (indices measure_threshold_map) (+ (current_index 1) 1) )
+				))
+			)
+
+			;Increment to the next index of abs_threshold_map, i.e. the next measure.
+			(assign (assoc
+				measure (get (indices abs_threshold_map) (+ (current_index 1) 1) )
+			))
+		)
+
+		;If the two loops end because we've exhausted all measures and each feature for those
+		; measures, return (false) which indicates that no measure has been satisfied.
+		(false)
+	)
+
+	#!CheckRelThresholds
+	(declare
+		(assoc
+			rel_threshold_map (assoc)
+			prev_prediction_stats_map (assoc)
+
+			;internal
+			new_prediction_stats_map (first (values !featurePredictionStatsMap))
+			measure (null)
+			feature (null)
+			measure_threshold_map (null)
+			feature_threshold_map (null)
+		)
+
+		;Set up the outer loop, which iterates over the indices of rel_threshold_map,
+		; which themselves are the measures which have thresholds defined.
+		(assign (assoc
+			measure (first (indices rel_threshold_map))
+		))
+		(while (!= (null) measure)
+			(assign (assoc
+				measure_threshold_map (get rel_threshold_map measure)
+			))
+
+			;Set up the inner loop, which iterates over the indices of measure_threshold_map,
+			; which themselves are the features which have thresholds defined for the current
+			; measure.
+			(assign (assoc
+				feature (first (indices measure_threshold_map))
+			))
+			(while (!= (null) feature)
+				(assign (assoc
+					feature_threshold (get measure_threshold_map feature)
+				))
+				(if (<=
+						(-
+							(get prev_prediction_stats_map (list measure feature))
+							(get new_prediction_stats_map (list measure feature))
+						)
+						feature_threshold
+					)
+					(conclude (conclude (true)))
+				)
+
+				;Increment to the next index of measure_threhsold_map, i.e. the next feature
+				; for this measure.
+				(assign (assoc
+					feature (get (indices measure_threshold_map) (+ (current_index 1) 1) )
+				))
+			)
+
+			;Increment to the next index of rel_threshold_map, i.e. the next measure.
+			(assign (assoc
+				measure (get (indices rel_threshold_map) (+ (current_index 1) 1) )
+			))
+		)
+
+		;If the two loops end because we've exhausted all measures and each feature for those
+		; measures, return (false) which indicates that no measure has been satisfied.
+		(false)
+	)
+
 	;reduce the trained data by removing cases which have an influence weight entropy that falls above
 	; a threshold.
 	;
@@ -125,6 +247,10 @@
 			features !trainedFeatures
 			;{type "number"}
 			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+			;{type "assoc"}
+			abs_threshold_map (assoc)
+			;{type "assoc"}
+			rel_threshold_map (assoc)
 			;{type "boolean"}
 			skip_auto_analyze (false)
 		)
@@ -134,13 +260,17 @@
 		(declare (assoc
 			max_influence_weight_entropy_to_keep .infinity
 			cases (list)
+			prev_prediction_stats_map (assoc)
+			thresholds_enabled (or (size abs_threshold_map) (size rel_threshold_map) )
 		))
 
+		;ensure the case weight feature is populated
 		(if (not !hasPopulatedCaseWeight)
 			(call !InitializeAutoAblation (assoc
 				weight_feature distribute_weight_feature
 			))
 		)
+		;ensure that we have influence weight entropies to begin with
 		(if (not !hasInfluenceWeightEntropies)
 			(call !ComputeAndStoreInfluenceWeightEntropies (assoc
 				features features
@@ -148,40 +278,82 @@
 				use_case_weights (true)
 			))
 		)
-		(while
-			(<= !autoAblationMinModelSize (call !GetNumTrainingCases))
 
-			(seq
-				(assign (assoc
-					max_influence_weight_entropy_to_keep
-						(call !MaxInfluenceWeightEntropyToKeepQuery (assoc
-							influence_weight_entropy_threshold influence_weight_entropy_threshold
-							weight_feature distribute_weight_feature
+		;if residual-based threholds are enabled, cache that information and set up some
+		; data structures for use later.
+		(if (and thresholds_enabled (= 0 (size !featurePredictionStatsMap)) )
+			(call !CalculateFeatureResiduals (assoc
+				weight_feature distribute_weight_feature
+				use_case_weights (true)
+				compute_all_statistics (true)
+			))
+		)
+
+		(while (< !autoAblationMinModelSize (call !GetNumTrainingCases))
+			(assign (assoc
+				max_influence_weight_entropy_to_keep
+					(call !MaxInfluenceWeightEntropyToKeepQuery (assoc
+						influence_weight_entropy_threshold influence_weight_entropy_threshold
+						weight_feature distribute_weight_feature
+					))
+			))
+
+			(assign (assoc
+				cases
+					(call !GetCasesByCondition (assoc
+						condition
+							(associate
+								!internalLabelInfluenceWeightEntropy 
+									(list max_influence_weight_entropy_to_keep .infinity)
+							)
+						;Remove the amount of cases required to auto-analyze, but don't drop below
+						; !autoAblationMinModelSize
+						num_cases
+							(min !autoAnalyzeThreshold (- (call !GetNumTrainingCases) !autoAblationMinModelSize))
+					))
+			))
+
+			;if there are no cases which satisfy the criteria, then break.
+			(if (not (size cases)) (conclude) )
+
+			(call !RemoveCases (assoc
+				cases cases
+				distribute_weight_feature distribute_weight_feature
+			))
+
+			(call !AutoAnalyzeIfNeeded (assoc
+				skip_auto_analyze (false)
+			))
+
+			;if there are fewer cases to remove than the auto analyze threshold,
+			; then there is not enough to remove and we should break out of here.
+			(if (< !autoAnalyzeThreshold (size cases)) (conclude) )
+
+			(if thresholds_enabled
+				(seq
+					(print "Thresholds Enabled\n")
+					(assign (assoc
+						;Use (set to force a deep copy.
+						prev_prediction_stats_map
+							(set (first (values !featurePredictionStatsMap)) )
+					))
+					(call !CalculateFeatureResiduals (assoc
+						use_case_weights (true)
+						weight_feature distribute_weight_feature
+						compute_all_statistics (true)
+					))
+					(if (call !CheckAbsThresholds (assoc
+							abs_threshold_map abs_threshold_map
 						))
-					cases
-						(call !GetCasesByCondition (assoc
-							condition
-								(associate
-									!internalLabelInfluenceWeightEntropy
-										(list max_influence_weight_entropy_to_keep .infinity)
-								)
-							num_cases !autoAnalyzeThreshold
+						(conclude (print "Abs Threshold Failed"))
+
+						(call !CheckRelThresholds (assoc
+							rel_threshold_map rel_threshold_map
+							prev_prediction_stats_map prev_prediction_stats_map
 						))
-				))
-
-				;if there are no cases which satisfy the criteria, then break.
-				(if (not (size cases)) (conclude) )
-
-				(call !RemoveCases (assoc
-					cases cases
-					distribute_weight_feature distribute_weight_feature
-				))
-
-				(call !AutoAnalyzeIfNeeded)
-
-				;if there are fewer cases to remove than the auto analyze threshold,
-				; then there is not enough to remove and we should break out of here.
-				(if (< !autoAnalyzeThreshold (size cases)) (conclude) )
+						(conclude  (print "Rel Threshold Failed"))
+					)
+				)
 			)
 		)
 
