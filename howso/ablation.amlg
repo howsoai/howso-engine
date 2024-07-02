@@ -107,64 +107,56 @@
 		(call !CreateCaseWeights (assoc feature_name weight_feature) )
 	)
 
+	#!CheckThresholds
+	(declare
+		(assoc
+			abs_threshold_map (assoc)
+			rel_threshold_map (assoc)
+			prev_prediction_stats_map (assoc)
+			new_prediction_stats_map (first (values !featurePredictionStatsMap))
+		)
+
+		(or
+			(apply "or" (map
+				(lambda
+					(call !CheckAbsThresholds (assoc
+						abs_threshold_map (get abs_threshold_map (current_value 1))
+						prediction_stats_map (get new_prediction_stats_map (current_value 1))
+					))
+				)
+				(indices abs_threshold_map)
+			))
+			
+			(apply "or" (map
+				(lambda
+					(call !CheckRelThresholds (assoc
+						rel_threshold_map (get rel_threshold_map (current_value 1))
+						prev_prediction_stats_map (get prev_prediction_stats_map (current_value 1))
+						new_prediction_stats_map (get new_prediction_stats_map (current_value 1))
+					))
+				)
+				(indices rel_threshold_map)
+			))
+		)
+	)
+
 	#!CheckAbsThresholds
 	(declare
 		(assoc
 			abs_threshold_map (assoc)
-
-			;internal
-			prediction_stats_map (first (values !featurePredictionStatsMap))
-
-			measure (null)
-			feature (null)
-			measure_threshold_map (null)
-			feature_threshold_map (null)
+			prediction_stats_map (assoc)
 		)
 
-		;Set up the outer loop, which iterates over the indices of abs_threshold_map,
-		; which themselves are the measures which have thresholds defined.
-		(assign (assoc
-			measure (first (indices abs_threshold_map))
-		))
-		(while (!= (null) measure)
-			(assign (assoc
-				measure_threshold_map (get abs_threshold_map measure)
-			))
-
-			;Set up the inner loop, which iterates over the indices of measure_threshold_map,
-			; which themselves are the features which have thresholds defined for the current
-			; measure.
-			(assign (assoc
-				feature (first (indices measure_threshold_map))
-			))
-			(while (!= (null) feature)
-				(assign (assoc
-					feature_threshold (get measure_threshold_map feature)
+		(apply "or"
+			(values (zip
+				(lambda (>
+					(current_value 1)
+					(current_value)
 				))
-				(if
-					(<
-						(get prediction_stats_map (list measure feature))
-						feature_threshold
-					)
-					(conclude (conclude (true)))
-				)
-
-				;Increment to the next index of measure_threhsold_map, i.e. the next feature
-				; for this measure.
-				(assign (assoc
-					feature (get (indices measure_threshold_map) (+ (current_index 1) 1) )
-				))
-			)
-
-			;Increment to the next index of abs_threshold_map, i.e. the next measure.
-			(assign (assoc
-				measure (get (indices abs_threshold_map) (+ (current_index 1) 1) )
+				(append (indices abs_threshold_map) (indices abs_threshold_map))
+				(append (values abs_threshold_map) (values prediction_stats_map))
 			))
 		)
-
-		;If the two loops end because we've exhausted all measures and each feature for those
-		; measures, return (false) which indicates that no measure has been satisfied.
-		(false)
 	)
 
 	#!CheckRelThresholds
@@ -172,61 +164,36 @@
 		(assoc
 			rel_threshold_map (assoc)
 			prev_prediction_stats_map (assoc)
-
+			new_prediction_stats_map (assoc)
+			
 			;internal
-			new_prediction_stats_map (first (values !featurePredictionStatsMap))
-			measure (null)
-			feature (null)
-			measure_threshold_map (null)
-			feature_threshold_map (null)
+			rel_prediction_stats_map (null)
 		)
 
-		;Set up the outer loop, which iterates over the indices of rel_threshold_map,
-		; which themselves are the measures which have thresholds defined.
+		;Create a map which has feature names as indices and deltas between the previous and new
+		; prediction stats as values. E.g.:
+		;  {target -0.01 precision 0.05}
 		(assign (assoc
-			measure (first (indices rel_threshold_map))
-		))
-		(while (!= (null) measure)
-			(assign (assoc
-				measure_threshold_map (get rel_threshold_map measure)
-			))
-
-			;Set up the inner loop, which iterates over the indices of measure_threshold_map,
-			; which themselves are the features which have thresholds defined for the current
-			; measure.
-			(assign (assoc
-				feature (first (indices measure_threshold_map))
-			))
-			(while (!= (null) feature)
-				(assign (assoc
-					feature_threshold (get measure_threshold_map feature)
-				))
-				(if (<=
-						(-
-							(get prev_prediction_stats_map (list measure feature))
-							(get new_prediction_stats_map (list measure feature))
-						)
-						feature_threshold
+			rel_prediction_stats_map
+				(zip
+					(lambda
+						(- (current_value 1) (current_value))
 					)
-					(conclude (conclude (true)))
+					(append (indices rel_threshold_map) (indices rel_threshold_map))
+					(append (values prev_prediction_stats_map) (values new_prediction_stats_map))
 				)
+		))
 
-				;Increment to the next index of measure_threhsold_map, i.e. the next feature
-				; for this measure.
-				(assign (assoc
-					feature (get (indices measure_threshold_map) (+ (current_index 1) 1) )
+		(apply "or"
+			(values (zip
+				(lambda (>
+					(current_value)
+					(current_value 1)
 				))
-			)
-
-			;Increment to the next index of rel_threshold_map, i.e. the next measure.
-			(assign (assoc
-				measure (get (indices rel_threshold_map) (+ (current_index 1) 1) )
+				(append (indices rel_threshold_map) (indices rel_threshold_map))
+				(append (values rel_threshold_map) (values rel_prediction_stats_map))
 			))
 		)
-
-		;If the two loops end because we've exhausted all measures and each feature for those
-		; measures, return (false) which indicates that no measure has been satisfied.
-		(false)
 	)
 
 	;reduce the trained data by removing cases which have an influence weight entropy that falls above
@@ -342,16 +309,12 @@
 						weight_feature distribute_weight_feature
 						compute_all_statistics (true)
 					))
-					(if (call !CheckAbsThresholds (assoc
+					(if (call !CheckThresholds (assoc
 							abs_threshold_map abs_threshold_map
-						))
-						(conclude (print "Abs Threshold Failed"))
-
-						(call !CheckRelThresholds (assoc
 							rel_threshold_map rel_threshold_map
 							prev_prediction_stats_map prev_prediction_stats_map
 						))
-						(conclude  (print "Rel Threshold Failed"))
+						(conclude (print "Threshold Failed"))
 					)
 				)
 			)
