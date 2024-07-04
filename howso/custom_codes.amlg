@@ -22,59 +22,8 @@
 
 		(declare (assoc
 			sourced_features (indices (get_all_labels (parse raw_code_string)))
-			;flag will be set to true if nulls should be imputed
-			impute_nulls (= (false) (get !featureBoundsMap (list feature "allow_null")))
-			;case ids that need to be imputed for this feature
-			cases_to_impute (list)
-			;map of source feature to the list of their offsets
-			sourced_features_offsets_map (assoc)
-			;set of unique row offsets referenced by this feature's code string, used for boundary checking
-			unique_source_offsets_set (assoc)
-			boundaries_tuple (null)
 			cycle_length (null)
 		))
-
-		;the features being sourced from to derive this feature are referred to as sourced features. sourced features may use different row offets.
-		;continuous features cache a map of all source features and their offsets, to be used later in boundary checking.
-		(if (not (contains_index !nominalsMap feature))
-			(seq
-				(assign (assoc
-					boundaries_tuple
-						(call !ConstrainBoundariesForFeature (assoc
-							bounds_map (get !featureBoundsMap feature)
-							feature feature
-							is_datetime (contains_index !featureDateTimeMap feature)
-							cycle_length (get !cyclicFeaturesMap feature)
-						))
-					cycle_length (get !cyclicFeaturesMap feature)
-				))
-
-				;To collect a mapping of all features and their offsets used to derive this feature, use rewrite to accumulate a list of offsets per feature,
-				;but only bother to collect sourced feature offsets if there are bounds that may need to be checked against
-				(if (or (!= (null) (first boundaries_tuple)) (!= (null) (last boundaries_tuple)) )
-					(seq
-						(rewrite
-							(lambda (let
-								(assoc
-									offset_value (current_value 1)
-									label_name (first (get_labels (current_value 1)))
-								)
-								(if (!= (null) label_name)
-									(accum "sourced_features_offsets_map" (list label_name) (list (get_value offset_value)))
-								)
-							))
-							(parse raw_code_string)
-						)
-						(assign (assoc
-							unique_source_offsets_set
-								(zip
-									(apply "append" (values sourced_features_offsets_map))
-								)
-						))
-					)
-				)
-			)
-		)
 
 		;declare all the features that are necessary that are needed to derive this feature,
 		;where the first features are the ones that need to be sorted on
@@ -91,8 +40,6 @@
 						sourced_features
 					)
 				)
-			boundary_min (first boundaries_tuple)
-			boundary_max (last boundaries_tuple)
 			ts_series_length_limit (retrieve_from_entity "!tsSeriesLimitLength")
 
 			;store whether this is a rate or delta feature and the order, e.g., 'rate' and 2
@@ -159,143 +106,6 @@
 							series_data series_data
 						))
 				))
-
-				;do nothing if deriving nominals since they are restricted already
-				(if (contains_index !nominalsMap feature)
-					(null)
-
-					;else derived continuous values need to be within bounds if bounds exist,
-					;but only bound those values that resulted from imputed values.
-					(or (!= (null) boundary_min) (!= (null) boundary_max) )
-					(let
-						(assoc
-							;at this point series_data is the full list of derived values for this feature in the same order as series_case_ids
-							;and these derived values will be respectively added to each of the cases at the end of this flow.
-							;
-							;iterate over a map of case index - > series_case_id, and since each index corresponds to its derived value,
-							;we pull all the corresponding imputed features for that case.
-							;e.g., if this feature needed feature 'A' with offset of 0 and feature 'B' with offset of 1, we pull the imputed
-							;features for this case and check if 'A' is on that list and then pull the imputed features from the previous
-							;case (offest of 1), and then check whether 'B' is on that list.  If 'B' happens to be on the previous cases's
-							;imputed features list, we will leave the previous cases's index and case id on this bound_check_indices_map
-							bound_check_indices_map
-								(filter
-									(lambda (let
-										(assoc
-											series_case_index (current_index 1)
-											offset_to_derived_imputed_features_map (assoc)
-										)
-
-										;create a map of relative offset -> set of derived imputed features in that case as referenced by that offset
-										(assign (assoc
-											offset_to_derived_imputed_features_map
-												(map
-													(lambda
-														;grab the set of imputed features for the correct series case id
-														;by its index using the current series case index minus the offset
-														(get cases_derive_imputed_map (get series_case_ids (- series_case_index (current_index))))
-													)
-													unique_source_offsets_set
-												)
-										))
-
-										;leave only those source features that are on the imputed features list for their respective offset
-										;e.g., if source feature 'B' uses an offset of 1, and happens to be on the list of imputed features for
-										;the case referenced by that offset, we leave 'B' and filter out the rest as appropriate
-										(size (filter
-											(lambda (let
-												(assoc
-													sourced_feature (current_value 1)
-													offsets (get sourced_features_offsets_map (current_value 1))
-												)
-
-												;keep those source features that were imputed in their respected offset row
-												(size (filter
-													(lambda
-														;leave only those offsets that had source features that were imputed, e.g., if source
-														;feature 'B' was on offset 1's list, leave "1", while filtering out the rest as appropriate
-														(contains_index
-															(get offset_to_derived_imputed_features_map (current_value))
-															sourced_feature
-														)
-													)
-													offsets
-												))
-											))
-											sourced_features
-										))
-									))
-									;iterate over a map of case index -> series case id so that it can be filtered
-									(zip (indices series_case_ids) series_case_ids)
-								)
-						)
-
-						;only do bounds check if there are indices that need checking
-						(if (size bound_check_indices_map)
-							(seq
-								(assign (assoc
-									series_data
-										(map
-											(lambda (let
-												(assoc
-													valid_value
-														(if (contains_index bound_check_indices_map (current_index 1))
-															(if (= (null) (current_value 1))
-																(true)
-
-																(and cycle_length (>= boundary_min boundary_max))
-																;for cyclic, exclusionary bounds mean the value has to be less than max or more than min
-																(or (<= (current_value 1) boundary_max) (>= (current_value 1) boundary_min))
-
-																;normal bounds check, if bound specified, value must be either more than min or less than max, respectively
-																(and
-																	(or (= (null) boundary_min) (>= (current_value 1) boundary_min))
-																	(or (= (null) boundary_max) (<= (current_value 1) boundary_max))
-																)
-															)
-
-															;else this index isn't on the list that needs checking, thus this is a valid value
-															(true)
-														)
-												)
-
-												;leave value as is
-												(if valid_value
-													(current_value)
-
-													;else bound to max value
-													(> (current_value) boundary_max)
-													boundary_max
-
-													;else bound to min value
-													boundary_min
-												)
-											))
-											series_data
-										)
-								))
-
-								;these case values were derived from imputed features, so we add this feature to cases_derive_imputed_map
-								(assign (assoc
-									bound_check_indices_map
-										;iterate over the case ids to create a map of case id -> updated derive_imputed map for just the updated cases
-										(map
-											(lambda
-												(if (contains_index cases_derive_imputed_map (current_index))
-													(append (get cases_derive_imputed_map (current_index)) (associate feature (null)) )
-													;else just store the feature
-													(associate feature (null))
-												)
-											)
-											(zip (values bound_check_indices_map))
-										)
-								))
-								;update cases_derive_imputed_map
-								(accum (assoc cases_derive_imputed_map bound_check_indices_map))
-							)
-						)
-					)
-				)
 
 				;add feature, setting each case's corresponding value
 				(call !StoreCaseValues (assoc
