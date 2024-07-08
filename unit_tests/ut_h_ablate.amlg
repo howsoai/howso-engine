@@ -40,14 +40,14 @@
 
 	(print "first train call doesn't ablate: ")
 	(call assert_same (assoc
-		obs (get regular_train_payload (list "payload" "ablated_indices"))
+		obs (get regular_train_payload (list 1 "payload" "ablated_indices"))
 		exp (list)
 	))
 
 	(call exit_if_failures (assoc msg "Non-ablation train call") )
 
     (call_entity "howso" "analyze" (assoc
-        context_features context_features
+        context_features features
         k_values (list 3)
         p_values (list 1)
 		targeted_model "targetless"
@@ -73,17 +73,27 @@
 
 	(print "second train call ablates: ")
 	(call assert_same (assoc
-		obs (get ablate_train_payload (list "payload" "ablated_indices"))
+		obs (get ablate_train_payload (list 1 "payload" "ablated_indices"))
 		exp (list 0)
 	))
 
 	(call exit_if_failures (assoc msg "Ablation train call") )
 
+	(print "second train call accumulates more data mass than cases: ")
+	(call assert_true (assoc
+		obs
+			(>
+				(call_entity "howso" "debug_label" (assoc label "!dataMassChangeSinceLastAnalyze"))
+				(get ablate_train_payload (list 1 "payload" "num_trained"))
+			)
+	))
+	(call exit_if_failures (assoc msg "Accumulate data mass"))
+
 	(declare (assoc
 		model_size
 			(get
 				(call_entity "howso" "get_num_training_cases")
-				(list "payload" "count")
+				(list 1 "payload" "count")
 			)
 	))
 	(print "model size after training and ablating is less than total train data: ")
@@ -109,7 +119,7 @@
 
 	(print "third train call ablates all duplicates:")
 	(call assert_same (assoc
-		obs (get ablate_train_payload (list "payload" "ablated_indices"))
+		obs (get ablate_train_payload (list 1 "payload" "ablated_indices"))
 		exp (list 0 1)
 	))
 
@@ -126,7 +136,7 @@
 
 	(print "high entropy case is not in model: ")
 	(call assert_same (assoc
-		obs (get point_five_cases (list "payload" "cases"))
+		obs (get point_five_cases (list 1 "payload" "cases"))
 		exp (list)
 	))
 
@@ -143,13 +153,13 @@
 
 	(print "low entropy case is in model: ")
 	(call assert_same (assoc
-		obs (get eleven_cases (list "payload" "cases"))
+		obs (get eleven_cases (list 1 "payload" "cases"))
 		exp (list (list 11 11))
 	))
 
 	(print "High entropy case is not in model: ")
 	(call assert_same (assoc
-		obs (get point_five_cases (list "payload" "cases"))
+		obs (get point_five_cases (list 1 "payload" "cases"))
 		exp (list)
 	))
 
@@ -162,7 +172,7 @@
     ))
 
 	(call_entity "howso" "analyze" (assoc
-        context_features context_features
+        context_features features
         k_values (list 3)
         p_values (list 1)
 		targeted_model "targetless"
@@ -177,6 +187,25 @@
 		session "unit_test"
 	))
 
+	(assign (assoc
+		pre_reduction_size
+			(size (get (call_entity "howso" "get_cases")
+				(list 1 "payload" "cases")
+			))
+	))
+	(call_entity "howso" "reduce_data" (assoc influence_weight_entropy_threshold 0.5))
+
+	(print "Data reduction reduces model size by the expected amount: ")
+	(call assert_same (assoc
+		obs
+			(size (get (call_entity "howso" "get_cases")
+				(list 1 "payload" "cases")
+			))
+		exp
+			(floor (/ pre_reduction_size 2))
+	))
+	(call exit_if_failures (assoc msg "Data reduction does not reduce model size by the expected amount"))
+
 	(declare (assoc
 		alternate_weight_feature_payload
 			(call_entity "howso" "get_cases" (assoc
@@ -184,21 +213,20 @@
 			))
 	))
 
-
 	(print "Alternative case weight feature is populated: ")
 	(call assert_true (assoc
 		obs
 			(< 1 (size
 					(filter
 						(lambda (!= 1 (first (current_value))) )
-						(get alternate_weight_feature_payload (list "payload" "cases"))
+						(get alternate_weight_feature_payload (list 1 "payload" "cases"))
 					)
 			))
 	))
 
 	(call assert_same (assoc
 		obs
-			(get (call_entity "howso" "get_auto_ablation_params") "payload")
+			(get (call_entity "howso" "get_auto_ablation_params") (list 1 "payload"))
 		exp
 			(assoc
 				auto_ablation_enabled (true)
@@ -213,7 +241,53 @@
 				conviction_lower_threshold (null)
 			)
 	))
-
 	(call exit_if_failures (assoc msg "Alternative case weight feature was not populated"))
+
+
+	(declare (assoc
+		pre_train_total_weight
+			(apply "+" (map
+				(lambda (first (current_value)))
+				(get
+					(call_entity "howso" "get_cases" (assoc features (list "test_weight")))
+					(list 1 "payload" "cases")
+				)
+			))
+	))
+
+	;train a case with the weight feature specified as 3, then check the weight before/after
+	(assign (assoc
+		ablate_train_payload
+			(call_entity "howso" "train" (assoc
+				features (append features "test_weight")
+				input_cases
+					(list
+						(list 0 0 3)
+					)
+				session "unit_test"
+				train_weights_only (true)
+				accumulate_weight_feature "test_weight"
+			))
+	))
+
+	(declare (assoc
+		post_train_total_weight
+			(apply "+" (map
+				(lambda (first (current_value)))
+				(get
+					(call_entity "howso" "get_cases" (assoc features (list "test_weight")))
+					(list 1 "payload" "cases")
+				)
+			))
+	))
+
+	(call assert_approximate (assoc
+		obs (- post_train_total_weight pre_train_total_weight)
+		exp 3
+		;float inprecision here...
+		percent 0.001
+	))
+	(call exit_if_failures (assoc msg "Training with values for weight feature accumulates properly"))
+
 	(call exit_if_failures (assoc msg unit_test_name) )
 )

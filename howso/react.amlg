@@ -15,25 +15,66 @@
 	(declare
 		(assoc
 			;default values for reacts
+			;{type "list" values "string"}
 			context_features (list)
+			;{type "list" values {type "list"}}
+			context_values (null)
+			;{type "list" values "string"}
 			action_features (list)
+			;{type "list" values {type "list"}}
+			action_values (null)
+			;{type "list" values "string"}
 			derived_context_features (list)
+			;{type "list" values "string"}
 			derived_action_features (list)
+			;{type "list" values "string"}
 			post_process_features (list)
+			;{type "list" values {type "list"}}
+			post_process_values (null)
+			;{type "list" values "string"}
 			extra_features (list)
+			;{type "boolean"}
 			use_case_weights (false)
+			;{type "string"}
 			weight_feature ".case_weight"
+			;{type "boolean"}
 			allow_nulls (false)
+			;{ref "CaseIndices"}
+			case_indices (null)
+			;{type "list"}
+			rand_seed (null)
+			;{type "number"}
+			desired_conviction (null)
+			;{ref "GenerateNewCases"}
+			generate_new_cases "no"
+			;{ref "ReactDetails"}
+			details (null)
+			;{type "string"}
+			into_series_store (null)
 
 			;generate react specific parameters:
+			;{type "boolean"}
 			use_regional_model_residuals (true)
+			;{ref "FeatureBoundsMap"}
 			feature_bounds_map (assoc)
+			;{type "list" values "string"}
 			preserve_feature_values (list)
+			;{type "boolean"}
+			leave_case_out (null)
+			;{type "boolean"}
 			substitute_output (true)
+			;{type "boolean"}
 			input_is_substituted (false)
+			;{type "boolean"}
+			ordered_by_specified_features (null)
+			;{type "boolean"}
+			exclude_novel_nominals_from_uniqueness_check (null)
+			;{type "string" enum ["min" "max" "most_similar"]}
 			new_case_threshold "min"
+			;{type "number"}
+			num_cases_to_generate (null)
 		)
-
+		(call !ValidateParameters)
 		(call !ValidateFeatures)
 
 		;determine number of reacts to batch
@@ -338,27 +379,64 @@
 	#react
 	(declare
 		(assoc
+			;{type "list" values "string"}
 			context_features (list)
+			;{type "list"}
 			context_values (list)
+			;{type "list" values "string"}
 			action_features (list)
+			;{type "list"}
 			action_values (list)
+			;{type "list" values "string"}
 			derived_action_features (list)
+			;{type "list" values "string"}
 			derived_context_features (list)
+			;{type "list" values "string"}
 			post_process_features (list)
+			;{type "list"}
 			post_process_values (list)
+			;{type "list" values "string"}
 			extra_features (list)
+			;{type "boolean"}
 			use_case_weights (false)
+			;{type "string"}
 			weight_feature ".case_weight"
+			;{type "boolean"}
 			allow_nulls (false)
+			;{type "boolean"}
+			leave_case_out (null)
+			;{type "list" values ["string" "number"]}
+			case_indices (null)
+			;{ref "ReactDetails"}
+			details (null)
+			;{type "number"}
+			desired_conviction (null)
+			;{type "string"}
+			ignore_case (null)
+			;{ref "GenerateNewCases"}
+			generate_new_cases "no"
+			;{type "boolean"}
+			ordered_by_specified_features (null)
+			;{type "boolean"}
+			exclude_novel_nominals_from_uniqueness_check (null)
+			;{type "string"}
+			into_series_store (null)
 
-			;generate react specific parameters:
+			;{type "boolean"}
 			use_regional_model_residuals (true)
+			;{ref "FeatureBoundsMap"}
 			feature_bounds_map (assoc)
+			;{type "list" values "string"}
 			preserve_feature_values (list)
+			;{type "boolean"}
 			substitute_output (true)
+			;{type "boolean"}
 			input_is_substituted (false)
+			;{type "string"}
 			new_case_threshold "min"
 		)
+
+		(call !ValidateParameters)
 
 		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
 
@@ -825,6 +903,7 @@
 	; force_targetless: flag, if set to true forces use of targetless hyperparameters if available
 	; use_case_weights: flag, if set to true will scale influence weights by each case's .case_weight
 	; custom_extra_filtering_queries: optional list of filtering queries to reduce the search space
+	; impute_react: optional flag, if true will not ignore future data for time series reacts
 	;returns: assoc of case (entity) ids -> their distance to react case, and the next_action_chase_case id if there is one
 	#!GenerateReaction
 	(declare
@@ -871,7 +950,8 @@
 			;check if action_feature has nulls, if not, the no need to filter them out since they don't exist
 			;else action_feature does have nulls, filter them out since nulls function as true
 			ignore_null_action_feature
-				(if (not allow_nulls)
+				;don't need to filter out inactive features since they are all null
+				(if (and (not allow_nulls) (not (contains_index !inactiveFeaturesMap (first action_features))) )
 					(!= (false) (get !featureNullRatiosMap (list (first action_features) "has_nulls")) )
 
 					;else nulls are allowed
@@ -882,10 +962,12 @@
 		;for all time series where the time feature is a context,
 		;filter out future data based on whether the time feature is universal
 		(if !tsTimeFeature
-			(let
-				(assoc context_map (zip context_features context_values) )
-				(if (contains_index context_map !tsTimeFeature)
-					(accum (assoc custom_extra_filtering_queries (call !ComputeTimeSeriesFilterQuery) ))
+			(if (not impute_react)
+				(let
+					(assoc context_map (zip context_features context_values) )
+					(if (contains_index context_map !tsTimeFeature)
+						(accum (assoc custom_extra_filtering_queries (call !ComputeTimeSeriesFilterQuery) ))
+					)
 				)
 			)
 		)
@@ -1035,8 +1117,11 @@
 		;populate filtering_queries for details if necessary
 		(call !PopulateFilteringQueriesForDetails)
 
-		;if there is no context, calculate the expected value
-		(if (= (list) context_features)
+		;if there is no context or local model, calculate the expected value
+		(if (or
+				(= (list) context_features)
+				(= 0 (size (first candidate_cases_lists)))
+			)
 			(call !CalculateFeatureExpectedValue (assoc feature (first action_features) allow_nulls (false)))
 
 			;else interpolate the result from the nearest neighbors

@@ -111,7 +111,7 @@
 		(declare (assoc
 			cached_residuals_map
 				(call !GetFeatureResiduals (assoc
-					action_feature (first param_path)
+					prediction_stats_action_feature (first param_path)
 					robust_hyperparameters (get param_path 2)
 					weight_feature (last param_path)
 				))
@@ -307,11 +307,6 @@
 										(mod new_feature_value cycle_length)
 									)
 							))
-						)
-
-						;prevent nan from output by converting to null
-						(if (= .nan new_feature_value)
-							(assign (assoc new_feature_value (null)))
 						)
 
 						;wrap code in a list so it can be appended correctly to the list of context_values
@@ -850,12 +845,19 @@
 			))
 
 			;nominal features just use global residual
-			(assign (assoc feature_residual (get cached_residuals_map feature) ))
+			(seq
+				(assign (assoc feature_residual (get cached_residuals_map feature) ))
+
+				;if residual is a tuple containing the SDM, use the residual value instead of the SDM
+				(if (~ (assoc) feature_residual)
+					(assign (assoc feature_residual (get feature_residual "expected_deviation") ))
+				)
+			)
 		)
 
 		;if feature_residual is null but there is an action value, this may generate a 'nan' value for this feature
 		;to prevent that, set the residual to: boundary_max - boundary_min (if boundaries are specified)
-		(if (and (or (= (null) feature_residual) (= .nan feature_residual)) (!= (null) action_value))
+		(if (and (= (null) feature_residual) (!= (null) action_value))
 			(let
 				(assoc
 					boundaries_tuple
@@ -891,7 +893,7 @@
 		)
 
 		(if feature_is_ordinal
-			(assign (assoc ordinal_residual (get hyperparam_map (list "!featureOrdinalDeviations" feature))))
+			(assign (assoc ordinal_residual (get hyperparam_map (list "featureOrdinalDeviations" feature))))
 		)
 
 		;if there is no residual for nominal features, set it to be the smallest allowed value
@@ -902,13 +904,10 @@
 						(if (get !cachedFeatureMinResidualMap feature)
 							(get !cachedFeatureMinResidualMap feature)
 
-							;else no cached feature min residual, set it to 50% chance you'll get the next one wrong:  1-(n+1/n+2)
-							(- 1
-								(/
-									(+ 1 (call !GetNumTrainingCases))
-									(+ 2 (call !GetNumTrainingCases))
-								)
-							)
+							;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
+							;estimating the probability of having no incorrect predictions. We chose .5 assuming the Jeffreys prior approach
+							;ensure value is not larger than 0.5
+							(min 0.5 (/ 1 (+ 0.5 (call !GetNumTrainingCases))) )
 						)
 				))
 			)
@@ -956,12 +955,9 @@
 						(assoc
 							unique_local_ordinal_values
 								(map
-									;convert the indices to numbers since ordinals are numeric, convert .nas back to null
+									;convert the indices to numbers since ordinals are numeric
 									(lambda
-										(if (= .nas (current_value))
-											(null)
-											(+ (current_value))
-										)
+										(+ (current_value))
 									)
 									;grab unique values only by taking the indices of the assoc of ordinal values in the local model
 									(values

@@ -1,46 +1,18 @@
 ;Contains methods for ablation flows.
 (null
 
-	;clear the values for the ablation conviction lower and upper thresholds
-	#clear_conviction_thresholds
-	(seq
-		(assign_to_entities (assoc !convictionLowerThreshold (null) !convictionUpperThreshold (null)))
-		(accum_to_entities (assoc !revision 1))
-		(call !Return)
-	)
-
-	;set the ablation lower conviction threshold
-	; parameters:
-	; conviction_lower_threshold : optional lower bond, cases below this won't be trained on
-	#set_conviction_lower_threshold
-	(seq
-		(assign_to_entities (assoc !convictionLowerThreshold conviction_lower_threshold))
-		(accum_to_entities (assoc !revision 1))
-		(call !Return)
-	)
-
-	;set the ablation upper conviction threshold
-	; parameters:
-	; conviction_upper_threshold : optional upper bound, cases above this won't be trained on
-	#set_conviction_upper_threshold
-	(seq
-		(assign_to_entities (assoc !convictionUpperThreshold conviction_upper_threshold))
-		(accum_to_entities (assoc !revision 1))
-		(call !Return)
-	)
-
 	;compute the entropy of the influence weights of the context's influential cases
-	; context_values: optional list of context values to react to
+	; features: list of features to react to
+	; feature_values: optional list of feature values to react to
 	; case_id: optional case id in the model to react to
-	; context_features: list of context features to react to
 	; use_case_weights: optional flag default true. if false, case weights will not be used during the react
 	; weight_feature: optional, default '.case_weight'. name of feature whose values to use as case weights
 	#!ComputeInfluenceWeightEntropy
 	(declare
 		(assoc
-			context_values (null)
+			features (list)
+			feature_values (null)
 			case_id (null)
-			context_features (list)
 			use_case_weights (true)
 			weight_feature !autoAblationWeightFeature
 
@@ -55,7 +27,7 @@
         (assign (assoc
             react_kwargs
                 (assoc
-                    context_features context_features
+                    context_features features
                     use_case_weights use_case_weights
                     weight_feature weight_feature
                     details (assoc influential_cases (true) )
@@ -64,13 +36,13 @@
 
         (if
             ;if context_values are not null, we are reacting to a new case
-            (!= context_values (null))
-			(accum "react_kwargs" (assoc context_values context_values) )
+            (!= feature_values (null))
+			(accum "react_kwargs" (assoc context_values feature_values) )
 			;elif case_id is not null, we are reacting to an existing case
 			(!= case_id (null))
 			(accum "react_kwargs" (assoc
 				case_indices (retrieve_from_entity case_id (list ".session" ".session_training_index") )
-				preserve_feature_values context_features
+				preserve_feature_values features
 				leave_case_out (true)
 			))
 		)
@@ -80,9 +52,9 @@
 		))
 
         (if
-            ;if context_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
-            (!= context_values (null))
-			(if (= context_values (unzip (first influential_cases) context_features))
+            ;if feature_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
+            (!= feature_values (null))
+			(if (= feature_values (unzip (first influential_cases) features))
 				;this concludes out through #ShouldNewCaseBeAblated directly into #TrainCreateCases.
 				(conclude (conclude (false)))
 			)
@@ -96,7 +68,7 @@
 	)
 
 	;used to compute and store the influence weight entropies for all cases contained in the Trainee in #Analyze
-	; context_features: list of context features to use when determining influential cases.
+	; features: list of features to use when determining influential cases.
 	; label_name: optional name of the feature to store influence weight entropies in.
 	#!ComputeAndStoreInfluenceWeightEntropies
 	(let
@@ -106,7 +78,7 @@
 					(lambda
 						(call !ComputeInfluenceWeightEntropy (assoc
 							case_id (current_index 1)
-							context_features context_features
+							features features
 							use_case_weights use_case_weights
 							weight_feature weight_feature
 						))
@@ -117,11 +89,7 @@
 
 		(call !StoreCaseValues (assoc
 			case_values_map influence_weight_entropy_map
-			label_name
-				(if (= (null) label_name)
-					!internalLabelInfluenceWeightEntropy
-					label_name
-				)
+			label_name (or label_name !internalLabelInfluenceWeightEntropy)
 		))
 
 		(accum_to_entities (assoc !revision 1))
@@ -139,16 +107,121 @@
 		(call !CreateCaseWeights (assoc feature_name weight_feature) )
 	)
 
+	;reduce the trained data by removing cases which have an influence weight entropy that falls above
+	; a threshold.
+	;
+	;parameters:
+	; distribute_weight_feature: optional, default !autoAblationWeightFeature. name of feature whose values to use as case weights
+	; features: default all trained features. a list of features to use when computing influence weight entropies
+	; influence_weight_entropy_threshold: optional, default !autoAblationInfluenceWeightEntropyThreshold. cases with
+	; 	influence weight entropy above this quantile will be removed
+	; skip_auto_analyze: default false. whether to skip auto analyzing as cases are removed
+	#reduce_data
+	(declare
+		(assoc
+			;{type "string"}
+			distribute_weight_feature !autoAblationWeightFeature
+			;{type "list" values "string"}
+			features !trainedFeatures
+			;{type "number"}
+			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+			;{type "boolean"}
+			skip_auto_analyze (false)
+		)
+		(call !ValidateParameters)
+
+		;variables for internal use.
+		(declare (assoc
+			max_influence_weight_entropy_to_keep .infinity
+			cases (list)
+		))
+
+		(if (not !hasPopulatedCaseWeight)
+			(call !InitializeAutoAblation (assoc
+				weight_feature distribute_weight_feature
+			))
+		)
+		(if (not !hasInfluenceWeightEntropies)
+			(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+				features features
+				weight_feature distribute_weight_feature
+				use_case_weights (true)
+			))
+		)
+		(while
+			(<= !autoAblationMinModelSize (call !GetNumTrainingCases))
+
+			(seq
+				(assign (assoc
+					max_influence_weight_entropy_to_keep
+						(call !MaxInfluenceWeightEntropyToKeepQuery (assoc
+							influence_weight_entropy_threshold influence_weight_entropy_threshold
+							weight_feature distribute_weight_feature
+						))
+					cases
+						(call !GetCasesByCondition (assoc
+							condition
+								(associate
+									!internalLabelInfluenceWeightEntropy
+										(list max_influence_weight_entropy_to_keep .infinity)
+								)
+							num_cases !autoAnalyzeThreshold
+						))
+				))
+
+				;if there are no cases which satisfy the criteria, then break.
+				(if (not (size cases)) (conclude) )
+
+				(call !RemoveCases (assoc
+					cases cases
+					distribute_weight_feature distribute_weight_feature
+				))
+
+				(call !AutoAnalyzeIfNeeded)
+
+				;if there are fewer cases to remove than the auto analyze threshold,
+				; then there is not enough to remove and we should break out of here.
+				(if (< !autoAnalyzeThreshold (size cases)) (conclude) )
+			)
+		)
+
+		(accum_to_entities (assoc !revision 1))
+		(call !Return)
+	)
+
+	;helper method which queries and returns the specified quantile of influence weight entropies
+	; for use in data reduction and auto-ablation.
+	; influence_weight_entropy_threshold: optional, default !autoAblationInfluenceWeightEntropyThreshold. cases with
+	; 	influence weight entropy above this quantile will be removed
+	; weight_feature: optional, default !autoAblationWeightFeature. name of feature whose values to use as case weights
+	#!MaxInfluenceWeightEntropyToKeepQuery
+	(declare
+		(assoc
+			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+			weight_feature !autoAblationWeightFeature
+		)
+
+		(compute_on_contained_entities (list
+			(query_exists !internalLabelInfluenceWeightEntropy)
+			(query_not_equals !internalLabelInfluenceWeightEntropy 0)
+			(query_quantile
+				!internalLabelInfluenceWeightEntropy
+				influence_weight_entropy_threshold
+				weight_feature
+			)
+		))
+	)
+
 	;determine whether a new case (one that is not in the Trainee) should be ablated (trained as weights) or kept.
 	; a return value of true indicates that a case should be kept and a return value of false indicates that the case should be ablated.
-	; context_values: list of context values to react to
-	; context_features: list of context features to react to
+	; features: list of features to react to
+	; feature_values: list of feature values to react to
 	; num_cases: number of current cases in the model
 	#!ShouldNewCaseBeAblated
 	(declare
 		(assoc
-			context_features (list)
-			context_values (list)
+			features (list)
+			feature_values (list)
 
 			;internal
 			max_influence_weight_entropy_to_keep .infinity
@@ -168,24 +241,21 @@
 
 		(assign (assoc
 			max_influence_weight_entropy_to_keep
-				(compute_on_contained_entities (list
-					(query_exists !internalLabelInfluenceWeightEntropy)
-					(query_quantile !internalLabelInfluenceWeightEntropy !autoAblationInfluenceWeightEntropyThreshold ".case_weight")
-				))
+				(call !MaxInfluenceWeightEntropyToKeepQuery)
 		))
 
 		(+
 			(or
 				(> max_influence_weight_entropy_to_keep
 					(call !ComputeInfluenceWeightEntropy (assoc
-						context_values context_values
-						context_features context_features
+						features features
+						feature_values feature_values
 					))
 
 				)
 				; This is probably unnecessary but in case we cannot compute the requested influence weight
 				; quantile return 1 as well.
-				(= max_influence_weight_entropy_to_keep .nan)
+				(= max_influence_weight_entropy_to_keep (null))
 			)
 		)
 	)
@@ -292,7 +362,7 @@
 												action_features (list feature)
 												details
 													(if ablate_by_feature_residuals
-														(assoc "feature_residuals" (true))
+														(assoc "feature_residuals_full" (true))
 													)
 												substitute_output (false)
 												skip_encoding (true)
@@ -307,8 +377,8 @@
 											(accum (assoc
 												residual_map
 													(associate feature (assoc
-														"min" (get reaction (list "feature_residuals" feature))
-														"max" (get reaction (list "feature_residuals" feature))
+														"min" (get reaction (list "feature_residuals_full" feature))
+														"max" (get reaction (list "feature_residuals_full" feature))
 													))
 											))
 

@@ -7,10 +7,7 @@
 
 		;if this is called before regular analyze, analyze the model as targetless
 		(if (= (null) saved_analyze_parameters_map)
-			(call analyze (assoc
-				context_features !trainedFeatures
-				analyze_level 2
-			))
+			(call analyze (assoc context_features !trainedFeatures))
 
 			(call analyze saved_analyze_parameters_map)
 		)
@@ -21,7 +18,7 @@
 	;parameters:
 	; context_features: list of context features to analyze for
 	; action_features: list of action features to analyze for. applicable only to 'single_targeted' mode
-	; k_folds: optional, (defaults to 6) number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
+	; k_folds: optional, (defaults to 1) number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
 	; k_folds_by_indices : optional flag, default is false. if set to true will do k_folds ordered by session id indices, i.e., it'll hold out the
 	;			first 1/6th of the trained cases, then the next 1/6th, etc. in the order they were trained.
 	;			NOTE: if the dataset has been edited or has multiple trained sessions, the holdouts may be imbalanced due to multiple cases having
@@ -35,11 +32,6 @@
 	; k_values: optional list used in hyperparameter search
 	; p_values: optional list used in hyperparameter search
 	; dt_values: optional list used in hyperparameter search
-	; analyze_level: optional value, if specified will analyze for the following flows:
-	;			1: predictions/accuracy (hyperparameters, by default does not analyze for p=0)
-	;			2: data synth (level 1 + cache: global residuals)
-	;			3: standard details (level 1 + cache: case prediction conviction)
-	;			4: full analysis (levels 1,2,3 + cache: model feature prediction conviction)
 	; targeted_model: enumeration, default is "single_targeted"
 	;   "single_targeted" = analyze hyperparameters for the specified action_features
 	;   "omni_targeted" = analyze hyperparameters for each action feature, using all other features as context_features. if action_features aren't specified, uses all context_features.
@@ -51,20 +43,56 @@
 	; use_case_weights: optional, default is null. when true will scale influence weights by each case's weight_feature weight. if use_case_weights isn't specified, it will
 	;				   be true if auto ablation is enabled and false otherwise
 	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
+	; use_sdm: optional flag, default is false. if set to true, uses sparse deviation matrix for nominal deviations.
 	;
 	; returns success when completed
 	#analyze
 	(declare
 		(assoc
+			;{type "list" values "string"}
 			context_features (list)
+			;{type "list" values "string"}
 			action_features (list)
+			;{type "number"}
 			k_folds 1
+			;{type "boolean"}
+			bypass_hyperparameter_analysis (null)
+			;{type "boolean"}
+			bypass_calculate_feature_residuals (null)
+			;{type "boolean"}
+			bypass_calculate_feature_weights (null)
+			;{type "boolean"}
+			use_deviations (null)
+			;{type "number"}
+			num_samples (null)
+			;{type "number"}
+			num_analysis_samples (null)
+			;{type "number"}
+			analysis_sub_model_size (null)
+			;{type "list" values "number"}
+			k_values (null)
+			;{type "list" values "number"}
+			p_values (null)
+			;{type "list" values "number"}
+			dt_values (null)
+			;{type "string" enum ["single_targeted" "omni_targeted" "targetless"]}
+			targeted_model "single_targeted"
+			;{type "string"}
 			weight_feature ".case_weight"
+			;{type "boolean"}
 			use_case_weights (null)
+			;{type "boolean"}
 			inverse_residuals_as_weights (null)
+			;{type "boolean"}
+			use_sdm (false)
 		)
 
+		(call !ValidateParameters)
 		(call !ValidateFeatures)
+
+		;analyze uses its own explicit warnings since it should not output warnings from all the
+		;react calls made during the analyze flow
+		(declare (assoc analyze_warnings (assoc) ))
 
 		(if use_case_weights
 			;CreateCaseWeights will find all cases missing weight_feature, then initialize
@@ -100,7 +128,6 @@
 					"k_values" k_values
 					"p_values" p_values
 					"dt_values" dt_values
-					"analyze_level" analyze_level
 					"targeted_model" targeted_model
 					"num_analysis_samples" num_analysis_samples
 					"analysis_sub_model_size" analysis_sub_model_size
@@ -109,39 +136,6 @@
 					"weight_feature" weight_feature
 				)
 		))
-
-		;prediction/accuracy: hyperparameters only
-		(if (= 1 analyze_level)
-			(assign (assoc
-				bypass_hyperparameter_analysis (false)
-				bypass_calculate_feature_residuals (true)
-				bypass_calculate_feature_weights (false)
-			))
-
-			;data synth, hyperparameters + model residuals
-			(= 2 analyze_level)
-			(assign (assoc
-				bypass_hyperparameter_analysis (false)
-				bypass_calculate_feature_residuals (false)
-				bypass_calculate_feature_weights (true)
-			))
-
-			;details, hyperparameters + case prediction conviction
-			(= 3 analyze_level)
-			(assign (assoc
-				bypass_hyperparameter_analysis (false)
-				bypass_calculate_feature_residuals (true)
-				bypass_calculate_feature_weights (false)
-			))
-
-			;full analysis: everything
-			(= 4 analyze_level)
-			(assign (assoc
-				bypass_hyperparameter_analysis (false)
-				bypass_calculate_feature_residuals (false)
-				bypass_calculate_feature_weights (false)
-			))
-		)
 
 		(declare (assoc holdout_entity_name (null) ))
 
@@ -210,6 +204,7 @@
 				residual_num_samples (if (> num_samples 0) num_samples 200)
 				use_case_weights use_case_weights
 				weight_feature weight_feature
+				use_sdm use_sdm
 			))
 		)
 
@@ -253,7 +248,7 @@
 
 		(accum_to_entities (assoc !revision 1))
 
-		(call !Return)
+		(call !Return (assoc warnings (if (size analyze_warnings) (indices analyze_warnings)) ))
 	)
 
 	;helper method to run the targeted or targetless analyze
@@ -266,6 +261,28 @@
 
 		;prime caches and update inactive features
 		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
+
+		;if any action feature is inactive, do targetless analyze instead
+		(declare (assoc
+			inactive_action_feature
+				(first (filter
+					(lambda (contains_index !inactiveFeaturesMap (current_value)))
+					action_features
+				))
+		))
+		(if inactive_action_feature
+			(seq
+				(assign (assoc
+					targeted_model "targetless"
+					context_features (values (append context_features action_features) (true))
+					analyze_warnings
+						(associate
+							(concat "There are no values to analyze for '" inactive_action_feature "', defaulting to 'targetless'.") (null)
+						)
+				))
+				(assign (assoc action_features [] ))
+			)
+		)
 
 		(if (!= "omni_targeted" targeted_model)
 			(if (or (= "targetless" targeted_model) (= 1 (size action_features)))
@@ -328,7 +345,7 @@
 							(true)
 						)
 				)
-				(map
+				||(map
 					(lambda (let
 						(assoc
 							impute_case_id (current_index 1)
@@ -357,6 +374,7 @@
 												skip_decoding (true)
 												return_action_values_only (true)
 												allow_nulls (false)
+												impute_react (true)
 											))
 										)
 									))
@@ -380,7 +398,7 @@
 			(seq
 				(call !InitializeAutoAblation)
 				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-					context_features
+					features
 						(if
 							(= 0 (size context_features))
 							!trainedFeatures
@@ -402,7 +420,7 @@
 	; robust_mode: which type of context feature analysis to use during error computation, one of "robust" or "full".
 	; num_analysis_samples: optional. number of cases to sample during analysis. only applies for k_folds = 1
 	; residual_num_samples: optional. initial number of samples to use for computing residuals
-	; derived_auto_analyzed: optional, if true, will set the 'derived_auto_analyzed' parameter to true in the hyperparameter set,
+	; derived_auto_analyzed: optional, if true, will set the 'derivedAutoAnalyzed' parameter to true in the hyperparameter set,
 	;			denoting that these parameters were auto-analyzed during derive features flow.
 	#!AnalyzeHyperparameters
 	(declare
@@ -669,13 +687,22 @@
 		;check if auto analysis is enabled and the analysis threshold should be increased
 		(if (and
 				!autoAnalyzeEnabled
-				(>= num_cases !autoAnalyzeThreshold)
+				(>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
 			)
 			;set the next auto analysis threshold
 			(assign_to_entities (assoc
-				!autoAnalyzeThreshold (* num_cases !autoAnalyzeGrowthFactorAmount)
+				!autoAnalyzeThreshold
+					;!autoAnalyzeThreshold is a delta from the previous threshold.
+					(max
+						(- (* num_cases !autoAnalyzeGrowthFactorAmount) !autoAnalyzeThreshold)
+						100 ;if several case deletions cause the above formula to return < 0, default
+							; to the default !autoAnalyzeThreshold.
+					)
 			))
 		)
+
+		;reset !dataMassChangeSinceLastAnalyze since we are now analyzing
+		(assign_to_entities (assoc !dataMassChangeSinceLastAnalyze 0.0 ))
 
 		;for k_folds = 1, set the default num_analysis_samples to be 1000
 		(if (and (= 1 k_folds) (= (null) num_analysis_samples ))
@@ -1022,6 +1049,7 @@
 										0
 
 										(call !ConvertDeviationToFeatureWeight (assoc
+											feature_is_nominal (contains_index !nominalsMap (current_index 1) )
 											feature_deviation (current_value 1)
 											p_value (get output_map "p")
 										))
@@ -1038,15 +1066,22 @@
 
 	;helper method to convert deviation value to feature weight given a deviation and p value
 	;parameters:
+	; feature_is_nominal: flag, set to true if feature is nominal
 	; feature_deviation: value or tuple as passed in from the hyperparameter map
 	; p_value: p value from the hyperarameter map
 	#!ConvertDeviationToFeatureWeight
 	(let
 		(assoc
 			deviation_value
-				;deviation may be a tuple if it contains null uncertainties
-				(if (= (list) (get_type feature_deviation))
-					(first feature_deviation)
+				(if feature_is_nominal
+					;if the deviation is an assoc containing a sparse deviation matrix, pull the expected deviation value from it
+					(if (~ (assoc) feature_deviation)
+						(get feature_deviation "expected_deviation")
+
+						feature_deviation
+					)
+
+					;else continuous
 					feature_deviation
 				)
 		)
@@ -1203,6 +1238,7 @@
 									0
 
 									(call !ConvertDeviationToFeatureWeight (assoc
+										feature_is_nominal (contains_index !nominalsMap (current_index 1) )
 										feature_deviation (current_value 1)
 										p_value p_value
 									))

@@ -160,15 +160,6 @@
 						))
 				))
 
-				;replace .nan with (null).  .nan are possible for initial cases in a series since they don't have any lags
-				(assign (assoc
-					series_data
-						(map
-							(lambda (if (= .nan (current_value)) (null) (current_value)))
-							series_data
-						)
-				))
-
 				;null out rate and delta features for the initial case in a series so it can be imputed below since those derived values
 				;may be quite inaccurate. Run only on the first 'feature_time_series_order' cases in the series (i.e., 2 cases for rate_2)
 				(if (or (= "rate" feature_time_series_type) (= "delta" feature_time_series_type))
@@ -326,6 +317,31 @@
 					overwrite (true)
 				))
 
+				;if derived feature was inactive, remove it from inactive list
+				(if (contains_index !inactiveFeaturesMap feature)
+					(if
+						(size (contained_entities (list (query_not_equals feature (null)))) )
+						(let
+							(assoc updated_inactive_features_map (remove !inactiveFeaturesMap feature) )
+
+							(if (size updated_inactive_features_map)
+								(assign_to_entities (assoc !inactiveFeaturesMap updated_inactive_features_map ))
+
+								;else all features have some non-null values
+								(assign_to_entities (assoc
+									!inactiveFeaturesMap (null)
+									!inactiveFeaturesNeedCaching (false)
+								))
+							)
+
+							(call !SetFeatureWeightsForFeatures (assoc
+								features_weights_map (associate feature 1)
+								overwrite (true)
+							))
+						)
+					)
+				)
+
 				;accumulate case ids for imputation after all series are derived
 				(if (and
 						(contains_value series_data (null))
@@ -382,7 +398,7 @@
 				#!AnalyzePreDerivationImpute
 				(if (and
 						(not skip_auto_analyze)
-						(>= (call !GetNumTrainingCases) !autoAnalyzeThreshold)
+						(>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
 						(or
 							(< (call !GetNumTrainingCases) !autoAnalyzeLimitSize)
 							;no limit defined
@@ -431,7 +447,7 @@
 				)
 
 				;iterate over cases that need to impute this feature and impute it
-				(map
+				||(map
 					(lambda (let
 						(assoc
 							case_id (current_value 1)
@@ -453,6 +469,7 @@
 									skip_decoding (true)
 									return_action_values_only (true)
 									allow_nulls (false)
+									impute_react (true)
 								))
 						))
 
@@ -698,11 +715,6 @@
 											(call_sandboxed new_feature_transform_processed (assoc feature_values_map feature_values_map) op_limit !sandboxedMemoryLimit)
 										)
 								))
-
-								;prevent output of .nan, replace with null if any encountered
-								(if (= .nan output_value)
-									(assign (assoc output_value (null)))
-								)
 
 								;append derived feature and value to the input features and values so that they could be used by the next derived feature
 								(accum (assoc feature_values_map (associate (current_value 2) output_value)))

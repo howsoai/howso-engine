@@ -32,17 +32,29 @@
 	#train
 	(declare
 		(assoc
+			;{type "list" values {type "list" min_size 1} min_size 1}
 			input_cases (list)
+			;{type "list" values "string"}
 			features (list)
+			;{type "list" values "string"}
 			derived_features (null)
+			;{type "string"}
 			session (null)
+			;{type "string"}
 			series (null)
+			;{type "boolean"}
 			input_is_substituted (false)
+			;{type "boolean"}
 			allow_training_reserved_features (false)
+			;{type "string"}
 			accumulate_weight_feature (null)
+			;{type "boolean"}
 			train_weights_only (false)
+			;{type "boolean"}
 			skip_auto_analyze (false)
 		)
+
+		(call !ValidateParameters)
 
 		;unsure that session is set to some string value
 		(if (= (null) session)
@@ -222,6 +234,26 @@
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc new_case_ids (call !TrainCreateCases) ))
 
+		;accumulates the data mass change to !dataMassChangeSinceLastAnalyze, which is either 1.0
+		; or the case weight, if it exists.
+		(declare
+			(assoc
+				weight_feature_index (get (zip features (indices features)))
+			)
+			(accum_to_entities (assoc
+				!dataMassChangeSinceLastAnalyze
+					(apply "+" (map
+						(lambda
+							(if accumulate_weight_feature
+								(or (get (current_value 1) weight_feature_index) 1)
+								1
+							)
+						)
+						input_cases
+					))
+			))
+		)
+
 		;set values if there were cases that were trained on
 		(if (> (size new_case_ids ) 0)
 			(seq
@@ -248,6 +280,15 @@
 
 					(if (size new_features)
 						(seq
+							(accum (assoc
+								warnings
+									(associate (concat
+										"The following features trained were previously undefined: "
+										(apply "concat" (trunc (weave (indices new_features) ", "))) ". "
+										"They have been trained and assumed to be numeric and continuous. "
+										"Please update the feature attributes if they are known."
+									))
+							))
 							(accum_to_entities (assoc
 								!featureAttributes
 									(map
@@ -433,6 +474,20 @@
 			))
 		)
 
+		(if (!= (size features) (size (first input_cases)) )
+			(conclude (conclude
+				(call !Return (assoc
+					errors (list "The number of feature names specified does not match the number of feature values given.")
+					payload
+						(assoc
+							"num_trained" 0
+							"ablated_indices" ablated_indices_list
+							"status" status_output
+						)
+				))
+			))
+		)
+
 		;if specifying a series, make sure there are series_cases and the lengths match
 		(if (!= (null) series)
 			(if (= (size series_cases) 0)
@@ -538,7 +593,6 @@
 
 				;do not train on this case if it is null or all case values are null or it's within provided thresholds
 				(if (and
-						(!= (null) feature_values)
 						(not (apply "=" (append feature_values (list (null)))))
 						;no thresholds specified or the case is outside of thresholds
 
@@ -546,8 +600,8 @@
 						(and
 							(call !CaseOutsideThresholds)
 							(call !ShouldNewCaseBeAblated (assoc
-								context_features features
-								context_values feature_values
+								features features
+								feature_values feature_values
 								num_cases num_cases
 							))
 						)
@@ -608,7 +662,10 @@
 		(assoc num_cases (call !GetNumTrainingCases))
 		(if
 			(and
-				(>= num_cases !autoAnalyzeThreshold)
+				;check if the !dataMassChangeSinceLastAnalyze is greater than the threshold,
+				(>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
+				;but continue to check the number of cases for ensuring the contents are large
+				; enough to warrant re-analyzing.
 				(or (< num_cases !autoAnalyzeLimitSize) (<= !autoAnalyzeLimitSize 0))
 			)
 			(if skip_auto_analyze

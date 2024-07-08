@@ -57,12 +57,60 @@ called from `ut_comprehensive_unit_test.amlg`. If you want to test an endpoint, 
 add your test to `ut_howso.amlg`. If you want to test a Trainee method, then it makes more sense to add
 your test to `ut_trainee_template.amlg`. Please read these files to see how to add your test file to the set.
 
+
+## Typing Guide (WiP)
+
+To document parameters, we do "type-hinting" with comments on each parameter in the form of an assoc that specifies things like
+the parameter's type (or possible types), the types of its values, the types of its keys and so on.
+
+Return types of methods should be specified by comments on the assoc with the parameters. (This is currently in planning)
+
+- All parameters must have at least "type" or "ref" specified
+- Optionality will be automatically inferred by the default value. Nullable/Optional are the same here.
+
+
+### Typing (assoc) keys and their values
+
+| Key                 | Values |
+| ------------------- | ------ |
+| type                | If single type, the type as a string. If multiple types, a list of types as strings. The available types are "list", "assoc", "number", "string", "boolean", "any".
+| values              | Only used when `type` is "list" or "assoc". Values should be similar to the values of `type` and should define the possible types of the values. This value can be an assoc if the type is a data structure/
+| min_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
+| max_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
+| enum                | Only applicable when `type` is "string". A list of possible values for the string
+| min                 | Only applicable when `type` is "number". The minimum value.
+| max                 | Only applicable when `type` is "number". The maximum value.
+| indices             | Only applicable when `type` is "assoc". Value is an assoc of named indices to their expected types.
+| additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is specified for indices that were not named in `indices`. This should only be used if `indices` is used as well.
+| optional            | The value of this should be a boolean, and this should only be specified for sub-types. This will be automatically added to the top level of type hints based on the default value of the parameter.
+
+
+### Typing Examples
+
+```
+#foo_bar_method
+(declare
+    (assoc
+        ;{type "list" values "string"}
+        list_of_strs (list)
+        ;{type "number" min 1}
+        optional_positive_number (null)
+        ;{type "boolean"}
+        random_flag (false)
+        ;{type "assoc" values "number"}
+        map_of_number_values (assoc)
+    )
+    ...
+)
+```
+
 ## Style Guide
 
 The styling of code written in the Howso Engine inherits the styling of the Amalgam language with additions
 that help reading the code easier. These additions are mostly the use of different naming conventions for
 labels of different types of code. See the [Amalgam](https://github.com/howsoai/amalgam) project for more
 information on how to style Amalgam code.
+
 ### Trainee Methods
 
 Trainee methods that are called from endpoints are defined in modules
@@ -74,7 +122,7 @@ For example: `#ReactIntoTrainee`
 
 Endpoints are defined in `howso.amlg` using labels written in Snake Case.
 
-For example: `#react_into_trainee`
+For example: `#react_aggregate`
 
 ### Trainee Attributes
 

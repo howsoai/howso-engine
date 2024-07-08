@@ -53,10 +53,13 @@
 	;label for loading modules
 	#!loadModulesEndpoint (null)
 
+	;label holding a map of external label names to maps of parameters names to typing specification for each parameter
+	;this label is built and assigned in #!BuildParameterValidationMap, which is called in #initialize[_for_deployment]
+	;and then used within the #!ValidateParameters
+	#!parameterValidationMap (null)
+
 	;value-storing labels, initialized and commented below via the initialize label
 	#!numericalPrecision (null)
-	#!convictionLowerThreshold  (null)
-	#!convictionUpperThreshold  (null)
 	#!trainedFeatures (null)
 	#!trainedFeaturesContextKey (null)
 	#!reactIntoFeaturesList (null)
@@ -116,6 +119,7 @@
 	#!autoAnalyzeThreshold (null)
 	#!autoAnalyzeGrowthFactorAmount (null)
 	#!autoAnalyzeLimitSize (null)
+	#!dataMassChangeSinceLastAnalyze (null)
 	#!savedAnalyzeParameterMap (null)
 	#!derivedFeaturesSet (null)
 	#!sourceToDerivedFeatureMap (null)
@@ -157,7 +161,7 @@
 	#!regionalModelMinSize (null)
 	#!regionalModelMinPercent (null)
 	#!revision 0
-	#!supportedPredictionStats (list "mae" "mda" "contribution" "confusion_matrix" "mda_permutation" "r2" "rmse" "spearman_coeff" "precision" "recall" "accuracy" "missing_value_accuracy" "mcc")
+	#!supportedPredictionStats (list "mae" "confusion_matrix" "r2" "rmse" "spearman_coeff" "precision" "recall" "accuracy" "mcc" "all" "missing_value_accuracy")
 	#!sandboxedComputeLimit (null)
 	#!sandboxedMemoryLimit (null)
 	#!containedTraineeIdToNameMap (null)
@@ -206,6 +210,7 @@
 		"details_cases"
 		"details_influences"
 		"details_residuals"
+		"details_stats"
 		"feature_conviction"
 		"feature_residuals"
 		"generate_features"
@@ -218,11 +223,10 @@
 		"input_validation"
 		"io"
 		"marginal"
-		"prediction_stats"
 		"react"
 		"react_discriminative"
 		"react_group"
-		"react_into_trainee"
+		"react_aggregate"
 		"react_series"
 		"react_series_utilities"
 		"react_utilities"
@@ -235,6 +239,7 @@
 		"synthesis_utilities"
 		"synthesis_validation"
 		"train"
+		"typing"
 		"update_cases"
 		"upgrade"
 	)
@@ -243,12 +248,16 @@
 	;This should be run once by the deployment script.
 	#initialize_for_deployment
 	(declare
-		(assoc file_extension "caml")
+		(assoc
+			;{type "string"}
+			file_extension "caml"
+		)
 		(assign_to_entities (assoc !file_extension file_extension ))
 
 		(call !LoadModules)
 		;clear out this label so that it can't be run again
 		(assign_to_entities (assoc initialize_for_deployment (null)))
+		(call !BuildParameterValidationMap)
 	)
 
 	;load module entities code directly into trainee template only if modules have not been loaded
@@ -272,9 +281,18 @@
 	; trainee_id: optional, unique id for this trainee
 	; filepath: optional, filepath location to where the howso file is stored
 	#initialize
-	(seq
+	(declare
+		(assoc
+			;{type "string"}
+			trainee_id (null)
+			;{type "string"}
+			filepath (null)
+		)
+
 		;load specified modules' code into the trainee if they have not been loaded yet
 		(call !LoadModules)
+
+		(call !BuildParameterValidationMap)
 
 		;can stop initializing if !traineeContainer already exists because this trainee has already been initialized
 		(if (contains_entity !traineeContainer) (conclude))
@@ -331,10 +349,6 @@
 
 			;set of features for which case convictions are stored
 			!storedConvictionsFeatureSet (null)
-
-			;numerical values
-			!convictionLowerThreshold  (null)
-			!convictionUpperThreshold  (null)
 
 			;the default list of features for the model, derived as the sorted indices of !featureAttributes
 			!trainedFeatures (list)
@@ -592,7 +606,7 @@
 			!autoAblationConvictionLowerThreshold (null)
 
 			;the name of the weight feature to use for auto ablation.
-			!autoAblationWeightFeature (null)
+			!autoAblationWeightFeature ".case_weight"
 
 			;whether this Trainee has had influence weight entropies computed and stored for its trained cases.
 			!hasInfluenceWeightEntropies (false)
@@ -600,7 +614,7 @@
 			;when false the model should not be auto-analyzed
 			!autoAnalyzeEnabled (false)
 
-			;if specified, stores the threshold for the number of cases at which the model should be re-analyzed
+			;if specified, stores the threshold for the change in data mass since the last analyze at which the model should be re-analyzed
 			!autoAnalyzeThreshold 100
 
 			;if !autoAnalyzeEnabledis set, the factor by which to increase that threshold everytime the model grows to that threshold size
@@ -694,6 +708,9 @@
 
 			;dynamicDeviations type
 			!dynamicDeviationType "full"
+			;cumulative count of the data mass changed since analyze was last called. this is accumulated to by any operations
+			; which add, remove, or edit cases.
+			!dataMassChangeSinceLastAnalyze 0.0
 		))
 	)
 
@@ -734,7 +751,12 @@
 	;parameters:
 	; trainee_id: string, unique identifier
 	#set_trainee_id
-	(seq
+	(declare
+		(assoc
+			;{type "string"}
+			trainee_id (null)
+		)
+		(call !ValidateParameters)
 		(assign_to_entities (assoc !traineeId trainee_id))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -742,9 +764,14 @@
 
 	;set trainee's unique parent id
 	;parameters:
-	; parent-id: string, unique identifier
+	; parent_id: string, unique identifier
 	#set_parent_id
-	(seq
+	(declare
+		(assoc
+			;{type "string"}
+			parent_id (null)
+		)
+		(call !ValidateParameters)
 		(assign_to_entities (assoc !parentId parent_id))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -754,7 +781,12 @@
 	;parameters:
 	; metadata: arbitary metadata to store in a trainee
 	#set_metadata
-	(seq
+	(declare
+		(assoc
+			;{type "assoc"}
+			metadata (null)
+		)
+		(call !ValidateParameters)
 		(assign_to_entities (assoc !metaData metadata))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -769,8 +801,11 @@
 	; seed : optional, the value of the random seed to set on the trainee, defaults to a system-provided 64-bit random number
 	#set_random_seed
 	(declare
-		(assoc seed (system "rand" 16) )
-
+		(assoc
+			;{type "any"}
+			seed (system "rand" 16)
+		)
+		(call !ValidateParameters)
 		(set_entity_rand_seed trainee seed)
 		(accum_to_entities (assoc !revision 1))
 
@@ -784,7 +819,11 @@
 	;	neighbors before stopping (for influential cases)
 	#set_influence_weight_threshold
 	(declare
-		(assoc influence_weight_threshold 0.99)
+		(assoc
+			;{type "number"}
+			influence_weight_threshold 0.99
+		)
+		(call !ValidateParameters)
 		(assign_to_entities (assoc !influenceWeightThreshold influence_weight_threshold))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
@@ -808,11 +847,31 @@
 						(lambda
 							(assoc
 								"description" (current_value 1)
-								"parameters" (get_entity_comments (null) (current_index 1) (true))
+								"parameters"
+									;when debugging, comments are injected to all lines, these must be removed
+									;some parameters may have comments other than the type hint as well
+									(map
+										(lambda
+											;(current_value) is a tuple of [comments of parameter, default value]
+											(append
+												;regex to just capture the {} information
+												(or (parse (substr (first (current_value)) "\\{.+\\}")) (assoc) )
+												(assoc
+													default (last (current_value 1))
+													optional (= (last (current_value 1)) (null))
+												)
+											)
+										)
+										;first item is the assoc of parameter names to comments/default value
+										(first (get_entity_comments (null) (current_index 1) (true)))
+									)
 							)
 						)
 						(get_entity_comments (null) (null) (true))
 					)
+
+					"schemas"
+					(retrieve_from_entity "!customTypes")
 				)
 		))
 
@@ -826,25 +885,32 @@
 	(retrieve_from_entity label)
 
 	;create a return response object in the format of:
-	; {
-	;	'status' : 'ok', # string 'ok' or 'error'
-	;	'errors' : [ {'detail': 'Some error message'} ], # list of error dicts
-	;	'warnings' : [ {'detail': 'Some warning message'} ], # list of warning dicts
-	;	'payload' : whatever # json response payload
-	; }
+	; success:
+	; [ 1, { 'payload' : payload, 'warnings' : warnings } ]
+	;
+	; error:
+	; [ 0, { 'detail': error_descriptions, 'code': error_code, 'errors': field_validation_details } ]
 	;
 	;parameters:
 	; errors: optional, list of error strings to output
+	; error_code: optional, string defining the error code, e.g., 'validation'
+	; error_details: optional, assoc defining field validation errors
 	; warnings: optional, list of warning strings to output
 	; payload: any value or object
 	#!Return
 	(if errors
-		(assoc "status" "error"	"errors" (map (lambda (assoc "detail" (current_value 1))) errors) "warnings" (null)	"payload" payload)
+		(list 0
+			(append
+				(assoc "detail" (if (> (size errors) 1) errors (first errors)) )
+				(if error_code (assoc "code" error_code) (assoc))
+				(if error_details (assoc "errors" error_details) (assoc))
+			)
+		)
 
 		warnings
-		(assoc "status" "ok"	"errors" (null) "warnings" (map (lambda (assoc "detail" (current_value 1))) warnings) "payload" payload)
+		(list 1 (assoc "payload" payload "warnings" warnings ) )
 
-		(assoc "status" "ok"	"errors" (null)	"warnings" (null) 	"payload" payload)
+		(list 1 (assoc "payload" payload) )
 	)
 
 )

@@ -75,9 +75,9 @@
 						(if (= .infinity smallest_gap)
 							0
 
-							;nan means that all values are nulls and a gap couldn't be computed
+							;(null) means that all values are nulls and a gap couldn't be computed
 							;set it to be 0.1 for edit distance feature, and zero for all other continuous
-							(= .nan smallest_gap)
+							(= (null) smallest_gap)
 							(if (contains_index !editDistanceFeatureTypesMap (current_index))
 								0.1
 								0
@@ -94,13 +94,16 @@
 			!cachedFeatureMinResidualMap
 				(map
 					(lambda
-						;unique features don't have a residual
-						(if (contains_index !uniqueNominalsSet (current_index))
-							0
-
-							;empty datasets set minimal residual to be half a gap
-							(= 0 num_training_cases)
+						;empty datasets set minimal residual to be half a gap
+						(if (= 0 num_training_cases)
 							0.5
+
+							;For unique features:
+							;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
+							;estimating the probability of having no incorrect predictions. We chose .5 assuming the Jeffreys prior approach
+							;ensure value is not larger than 0.5
+							(contains_index !uniqueNominalsSet (current_index))
+							(min 0.5 (/ 1 (+ 0.5 num_training_cases)) )
 
 							;else set nominal lower residual bound to:  gap / (num_cases + 1)
 							(contains_index !nominalsMap (current_index))
@@ -306,12 +309,11 @@
 			k_parameter (get hyperparam_map "k")
 			p_parameter (get hyperparam_map "p")
 			dt_parameter (get hyperparam_map "dt")
-			num_context_features (size features)
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
 		))
 
-		;if case_ids weren't specified either, use a random num_samples sampling of cases from the whole model
-		(if (= 0 (size case_ids))
+		;if 'case_id' and 'action_condition_filter_query' are not specified either, use a random 'num_samples' sampling of cases from the whole model
+		(if (and (= 0 (size case_ids)) (= 0 (size action_condition_filter_query)))
 			(assign (assoc
 				case_ids
 					;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
@@ -340,7 +342,7 @@
 		)
 
 		;ensure features with nulls have cases that have values for computation but only if the selected cases were not conditioned
-		(if (and (not robust_residuals) (= (null) condition))
+		(if (and (not robust_residuals) (= 0 (size action_condition_filter_query)))
 			(let
 				(assoc not_null_feature_output_map (call !SelectNonNullCases) )
 
@@ -388,6 +390,25 @@
 			)
 		)
 
+		;if there are unique features whose residuals should be computed, remove them from 'features' and update
+		;unique_features_for_populating_output to update the output at the end since unique features don't have residuals
+		(if (size !uniqueNominalsSet)
+			(seq
+				(assign (assoc
+					unique_features_for_populating_output (indices (keep (zip features) (indices !uniqueNominalsSet)))
+				))
+
+				(if (size unique_features_for_populating_output)
+					(assign (assoc
+						features (indices (remove (zip features) (indices !uniqueNominalsSet)))
+					))
+
+					;else reset unique_features_for_populating_output back to null
+					(assign (assoc unique_features_for_populating_output (null) ))
+				)
+			)
+		)
+
 		;compute null deviations during analysis (when specifying custom hp) or when computing and caching all residuals
 		(if (or compute_all_statistics (and (!= (null) custom_hyperparam_map) (= (null) target_residual_feature) ))
 			(seq
@@ -431,6 +452,28 @@
 		;keep a copy of all originally specified features
 		(assign (assoc case_features features))
 
+		;if 'case_ids' are not set, then use 'action_condition_filter_query' to get the case ids of the action set, otherwise
+		;flag that 'case_ids' were provided so 'action_condition_filter_query' is ignored. 'case_ids' supercedes 'action_condition_filter_query'.
+		(if (= (size case_ids) 0)
+			(assign (assoc
+				case_ids
+					(call !GetCasesByCondition (assoc
+						condition_filter_query action_condition_filter_query
+						num_cases num_samples
+					))
+			))
+			(declare (assoc
+				provided_case_id_flag (true)
+			))
+		)
+
+		;Ensure enough cases
+		(if (< (size case_ids) 2000)
+			(assign (assoc
+				case_ids (rand case_ids 2000)
+			))
+		)
+
 		;if computing for one target_residual_feature, remove it from features so it's never in the context
 		(if target_residual_feature
 			(assign (assoc
@@ -440,10 +483,14 @@
 
 		;create a map of feature -> flag, set to true if the feature has any null values
 		;that way there's no need to explicitly filter nulls out when querying for a feature that no nulls
+		;or if it's inactive
 		(declare (assoc
 			feature_may_have_nulls_map
 				(map
-					(lambda (!= (false) (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) ) )
+					(lambda (and
+						(!= (false) (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) )
+						(not (contains_index !inactiveFeaturesMap (current_index)) )
+					))
 					(zip
 						(if target_residual_feature
 							(list target_residual_feature)
@@ -514,6 +561,25 @@
 											(query_not_in_entity_list (list case_id focal_case))
 											(query_not_in_entity_list (list case_id))
 										)
+										;Only query the cases filtered by the 'context_condition_filter_query' if both action and context filter queries are provided and 'case_ids'
+										;were not provided at the beginning of the function, or if only the 'context_condition_filter_query' is provided. Otherwise query everything.
+										;This is due to the performance issues when using 'query_not_in_entity_list' from a large list of 'case_ids'.
+										(if
+											(or
+												(and
+													(not provided_case_id_flag)
+													(!= (size action_condition_filter_query) 0)
+													(!= (size context_condition_filter_query) 0)
+												)
+												(and
+													(not provided_case_id_flag)
+													(!= (size context_condition_filter_query) 0)
+													(= (size action_condition_filter_query) 0)
+												)
+											)
+											context_condition_filter_query
+											(list)
+										)
 										time_series_filter_query
 										(query_nearest_generalized_distance
 											k_parameter
@@ -547,6 +613,12 @@
 											diff 0
 											output_categorical_action_probabilities (true)
 											categorical_action_probabilities_map (assoc)
+											feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_index 1))
+											feature_is_non_string_edit_distance (false)
+										)
+
+										(if (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap feature)) )
+											(assign (assoc feature_is_non_string_edit_distance (true)))
 										)
 
 										;create the feature-specific candidate_cases_lists tuple for intepolation
@@ -693,6 +765,21 @@
 
 		(declare (assoc features_map (zip features) ))
 
+		;if 'case_ids' are not set, then use 'action_condition_filter_query' to get the case ids of the action set, otherwise
+		;flag that 'case_ids' were provided so 'action_condition_filter_query' is ignored.
+		(if (= (size case_ids) 0)
+			(assign (assoc
+				case_ids
+					(call !GetCasesByCondition (assoc
+						condition_filter_query action_condition_filter_query
+						num_cases num_samples
+					))
+			))
+			(declare (assoc
+				provided_case_id_flag (true)
+			))
+		)
+
 		(assign (assoc
 			feature_residuals_lists
 				||(map
@@ -712,7 +799,11 @@
 
 						(declare (assoc
 							;if feature has no nulls, no need to ignore it, if it has nulls or nulls are unknown, explicitly ignore nulls in the query
-							ignore_null_action_feature (!= (false) (get !featureNullRatiosMap (list feature "has_nulls")))
+							ignore_null_action_feature
+								(and
+									(!= (false) (get !featureNullRatiosMap (list feature "has_nulls")))
+									(not (contains_index !inactiveFeaturesMap feature) )
+								)
 							has_time_series_filter_query (and !tsTimeFeature (contains_value react_context_features !tsTimeFeature) )
 							time_series_filter_query (list)
 						))
@@ -854,6 +945,25 @@
 													(query_not_equals feature (null))
 													(list)
 												)
+												;Only query the cases filtered by the 'context_condition_filter_query' if both action and context filter queries are provided and 'case_ids'
+												;were not provided at the beginning of the function, or if only the 'context_condition_filter_query' is provided. Otherwise query everything.
+												;This is due to the performance issues when using 'query_not_in_entity_list' from a large list of 'case_ids'.
+												(if
+													(or
+														(and
+															(not provided_case_id_flag)
+															(!= (size action_condition_filter_query) 0)
+															(!= (size context_condition_filter_query) 0)
+														)
+														(and
+															(not provided_case_id_flag)
+															(!= (size context_condition_filter_query) 0)
+															(= (size action_condition_filter_query) 0)
+														)
+													)
+													context_condition_filter_query
+													(list)
+												)
 												time_series_filter_query
 												(query_nearest_generalized_distance
 													k_parameter
@@ -959,7 +1069,7 @@
 
 				;else continuous, output [diff, ordinal_diff, actual, predicted] for computing MAE, RSME, R^2
 				(and
-					(= .nan (- case_feature_value interpolated_value))
+					(= (null) (- case_feature_value interpolated_value))
 					(not feature_is_edit_distance)
 				)
 				(null)
@@ -991,7 +1101,7 @@
 							)
 
 							;else continuous
-							(if (contains_index !editDistanceFeatureTypesMap  feature)
+							(if feature_is_edit_distance
 								;use string edit distance only if it's a string
 								(edit_distance case_feature_value interpolated_value
 									(or
@@ -1005,8 +1115,8 @@
 						)
 				))
 
-				;output the residual. if it's .nan, output null for non-nominals, and 1 (or case weight) for nominals
-				(if (= .nan diff)
+				;output the residual. if it's (null), output null for non-nominals, and 1 (or case weight) for nominals
+				(if (= (null) diff)
 					(if feature_is_nominal 1)
 
 					;else output tuple [diff, ordinal_diff] for ordinals, and diff for continuous if applicable
@@ -1266,7 +1376,7 @@
 
 		(assign
 			"hyperparam_map"
-			(list "!nullUncertaintyMap")
+			(list "nullUncertaintyMap")
 			null_prediction_map
 		)
 
