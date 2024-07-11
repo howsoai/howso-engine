@@ -14,89 +14,138 @@
 	(declare
 		(assoc derivation_failed (false))
 
+		;first pass attempt to derive all the features, create a list of features that did not derive to a valid value (i.e., nulls)
+		(declare (assoc
+			invalid_derivation_features
+				(filter (map
+					(lambda (let
+						(assoc
+							feature (current_value 1)
+							valid_derivation
+								(call !DeriveSeriesValue (assoc
+									derived_feature (current_value 2)
+									feature_index_map feature_index_map
+									last_series_index last_series_index
+								))
+						)
+
+						;feature needs to be generated if it references a row that's not in the current series_data or is out of bounds
+						(if (not valid_derivation)
+							(seq
+								;valid_derivation of (null) means a time feature generated a value past the max bondary, stop the series
+								(if (= (null) valid_derivation)
+									(assign (assoc derivation_failed (true) ))
+								)
+								;output feature name of the invalid derivation so its value can be generated below
+								feature
+							)
+						)
+					))
+					derived_features
+				))
+		))
+
+		;output (true) because derivation failed and series should be stopped
+		(if derivation_failed (conclude (true)))
+
+		(if (size invalid_derivation_features)
+			(assign (assoc
+				react_context_features
+					(filter
+						(lambda (not (contains_value invalid_derivation_features (current_value))) )
+						(append react_context_features derived_features)
+					)
+			))
+		)
+
+		;iterate over invalid_derivation_features and synthesise their values instead
 		(map
 			(lambda (let
 				(assoc
 					feature (current_value 1)
-					valid_derivation
-						(call !DeriveSeriesValue (assoc
-							derived_feature (current_value 2)
-							feature_index_map feature_index_map
-							last_series_index last_series_index
-						))
+					modified_feature_bounds_map (null)
 				)
 
-				;feature needs to be generated if it references a row that's not in the current series_data or is out of bounds
-				(if (not valid_derivation)
-					(seq
-							;valid_derivation of (null) means a time feature generated a value past the max bondary, stop the series
-						(if (= (null) valid_derivation)
-							(seq
-								(assign (assoc derivation_failed (true)))
-								(conclude)
+				;grab the latest case values
+				(assign (assoc current_case_map (zip features (last series_data))))
+
+				;rate and delta features must not synth nulls since derivation failed, specifically at the start of a series where they are nulls
+				(if (> (get !featureAttributes [feature "ts_order"]) last_series_index)
+					(assign (assoc
+						modified_feature_bounds_map
+							(if (size feature_bounds_map)
+								(set feature_bounds_map [feature "allow_null"] (false))
+
+								;else there's no feature_bounds_map, make one specifically for this feature
+								(set
+									(associate feature (get !featureBoundsMap feature))
+									[feature "allow_null"]
+									(false)
+								)
 							)
-						)
+					))
+				)
 
-						;grab the latest case values
-						(assign (assoc current_case_map (zip features (last series_data))))
+				;generate value for this feature
+				(declare (assoc
+					react_output
+						(call !SingleReact (assoc
+							context_features react_context_features
+							context_values (unzip current_case_map react_context_features)
+							action_features (list feature)
+							action_values (null)
+							;do not derive anything during this react
+							derived_action_features (list)
+							derived_context_features (list)
+							details (if output_details details)
+							extra_features (append extra_features action_features derived_action_features)
+							substitute_output substitute_output
+							input_is_substituted input_is_substituted
+							use_case_weights use_case_weights
+							weight_feature weight_feature
+							rand_seed rand_seed
 
-						;generate value for this feature
-						(assign (assoc
-							react_output
-								(call !SingleReact (assoc
-									context_features react_context_features
-									context_values (unzip current_case_map react_context_features)
-									action_features (list feature)
-									action_values (null)
-									;do not derive anything during this react
-									derived_action_features (list)
-									derived_context_features (list)
-									details (if output_details details)
-									extra_features (append extra_features action_features derived_action_features)
-									substitute_output substitute_output
-									input_is_substituted input_is_substituted
-									use_case_weights use_case_weights
-									weight_feature weight_feature
-									rand_seed rand_seed
-
-									desired_conviction desired_conviction
-									use_regional_model_residuals use_regional_model_residuals
-									feature_bounds_map feature_bounds_map
-									ordered_by_specified_features ordered_by_specified_features
-									generate_new_cases "no"
-									preserve_feature_values preserve_feature_values
-								))
+							desired_conviction desired_conviction
+							use_regional_model_residuals use_regional_model_residuals
+							feature_bounds_map
+								(if modified_feature_bounds_map
+									modified_feature_bounds_map
+									feature_bounds_map
+								)
+							ordered_by_specified_features ordered_by_specified_features
+							generate_new_cases "no"
+							preserve_feature_values preserve_feature_values
 						))
+				))
 
-						;update series_data in place, updating the last row, the column matching the feature with the value
-						(assign
-							"series_data"
-							(list last_series_index (get feature_index_map feature))
-							(first (get react_output "action_values"))
-						)
+				;update series_data in place, updating the last row, the column matching the feature with the value
+				(assign
+					"series_data"
+					(list last_series_index (get feature_index_map feature))
+					(first (get react_output "action_values"))
+				)
 
-						;if gathering details, update the case detail values with those from this react
-						(if output_details
-							(assign (assoc
+				;if gathering details, update the case detail values with those from this react
+				(if output_details
+					(assign (assoc
+						case_detail_values_map
+							(map
+								(lambda
+									(append (current_value) (get react_output (current_index)))
+								)
 								case_detail_values_map
-									(map
-										(lambda
-											(append (current_value) (get react_output (current_index)))
-										)
-										case_detail_values_map
-									)
-							))
-						)
-					)
+							)
+					))
 				)
 
 				;grow the context features to be used in the generativereact as each feature is derived
 				(accum (assoc react_context_features feature))
 			))
-			derived_features
+			invalid_derivation_features
 		)
 
-		derivation_failed
+		;derivation did not fail
+		(false)
 	)
 
 	;Sort data by multiple columns. Used by series flows to ensure series data is sorted by its time features.
@@ -285,7 +334,7 @@
 	; output_new_series_ids: optional flag, default True, if true series ids are replaced with unique values on output.
 	; series_id_tracking: optional string, default "fixed".
 	 ;	If "fixed", tracks the particular relevant series ID.
-	 ;	If "dynamic", tracks the particular ;		relevant series ID, but is allowed to change the series ID that it tracks based on its current context.
+	 ;	If "dynamic", tracks the particular series ID, but is allowed to change the series ID that it tracks based on its current context.
 	 ;	If "no", does not track any particular series ID.
 	 ; continue_series_values: optional, list of lists of values, when specified will continue this specific untrained series as defined by these values.
 	 ; 		continue_series flag will be ignored and treated as true if this value is specified.
