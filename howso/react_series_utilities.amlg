@@ -498,7 +498,8 @@
 						)
 
 						;else every row begins as the original context values
-						(list original_context_values)
+						;make a copy of original_context_values, not a referenced copy
+						(apply "list" [original_context_values])
 					)
 			))
 			(accum (assoc last_series_index 1 ))
@@ -1348,6 +1349,61 @@
 	;and then tests it for uniqueness and retries as necessary until a unique case is created
 	#!SynthAndDeriveSeriesCase
 	(while do_uniqueness_check
+
+		(assign (assoc
+			max_order
+				(apply "max"
+					(map (lambda (get !featureAttributes [(current_value 1) "ts_order"])) action_features)
+				)
+		))
+
+		;rate and delta features must not synth nulls at the start of a series where they are always nulls due to
+		;not having previous data, allowing other features such as value lags and time lags to determine whether the
+		;resulting value will output a value or a null.  If these rates/deltas were to remain null, the resulting value
+		;would either be null or be generated without being conditioned properly resulting in unpredictable values being output.
+		(assign (assoc
+			modified_feature_bounds_map
+				;force non null
+				(if (< last_series_index max_order)
+					(if (size feature_bounds_map)
+						(append
+							feature_bounds_map
+							(zip
+								(map
+									(lambda (let
+										(assoc action_feature (get action_features (current_index 1)) )
+										;only set allow_null to false for features that have a higher order than the series index
+										(if (> (get !featureAttributes [action_feature "ts_order"]) last_series_index)
+											;if there is a feature bound specified for this action feature, overwrite it
+											(if (current_value)
+												(set (current_value) "allow_null" (false))
+
+												;else pull the bounds from !featureBoundsMap and overwrite those
+												(set (get !featureBoundsMap action_feature) "allow_null" (false) )
+											)
+
+											;else leave it as-is
+											(current_value)
+										)
+									)
+									(unzip feature_bounds_map action_features)
+								))
+								action_features
+							)
+						)
+
+						(filter (map
+							(lambda
+								(if (> (get !featureAttributes [(current_index 1) "ts_order"]) last_series_index)
+									(set (get !featureBoundsMap (current_index)) "allow_null" (false) )
+								)
+							)
+							(zip action_features)
+						))
+					)
+				)
+		))
+
 		(assign (assoc
 			react_output
 				(call !SingleReact (assoc
@@ -1371,7 +1427,11 @@
 
 					desired_conviction desired_conviction
 					use_regional_model_residuals use_regional_model_residuals
-					feature_bounds_map feature_bounds_map
+					feature_bounds_map
+						(if modified_feature_bounds_map
+							modified_feature_bounds_map
+							feature_bounds_map
+						)
 					ordered_by_specified_features ordered_by_specified_features
 					exclude_novel_nominals_from_uniqueness_check exclude_novel_nominals_from_uniqueness_check
 					generate_new_cases "no"
