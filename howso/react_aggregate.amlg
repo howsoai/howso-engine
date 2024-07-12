@@ -124,7 +124,7 @@
 			;{type "boolean"}
 			use_case_weights (false)
 			;{type "boolean"}
-			always_recalculate (false)
+			always_recalculate (null)
 			;{type "string"}
 			weight_feature ".case_weight"
 			;{type "number" min 0}
@@ -473,8 +473,8 @@
 		;If we are not always recalculating metrics, then we need to check which metrics exist in cache by attempting to retrieve them
 		(if (and (not always_recalculate) (= conditioned_residuals (false)))
 			(seq
-				(assign
-					(assoc output
+				(assign (assoc
+					output
 						(call !GetFeatureDetailsStats (append
 							(keep
 								details
@@ -488,9 +488,7 @@
 								confusion_matrix_min_count confusion_matrix_min_count
 							)
 						))
-					)
-				)
-
+				))
 				(accum (assoc
 					existing_cached_stats
 						(values (map
@@ -743,8 +741,8 @@
 		(if (= conditioned_residuals (false))
 			;if `not_all_metrics_cached` is true, then metrics have been calculated, and thus, need to be retrieved
 			(if (or not_all_metrics_cached always_recalculate)
-				(assign
-					(assoc output
+				(assign (assoc
+					output
 						(call !GetFeatureDetailsStats (append
 							(keep
 								details
@@ -758,8 +756,7 @@
 								confusion_matrix_min_count confusion_matrix_min_count
 							)
 						))
-					)
-				)
+				))
 			)
 		)
 
@@ -768,18 +765,12 @@
 			(let
 				(assoc
 					action_condition_precision
-						(if (= (get details "action_condition_precision") (null) )
-							"exact"
-							(get details "action_condition_precision")
-						)
+						(or (get details "action_condition_precision") "exact" )
 					context_condition_precision
-						(if (= (get details "action_condition_precision") (null) )
-							"exact"
-							(get details "action_condition_precision")
-						)
+						(or (get details "context_condition_precision") "exact" )
 				)
-				(assign
-					(assoc output
+				(assign (assoc
+					output
 						;currently only supports one action feature, will support both in the future.
 						(call !CalculateConditionalPredictionStats (append
 							(keep
@@ -802,8 +793,7 @@
 								confusion_matrix_min_count confusion_matrix_min_count
 							)
 						))
-					)
-				)
+				))
 			)
 		)
 
@@ -850,7 +840,8 @@
 		)
 	)
 
-	;Helper method for ReactAggregate that checks the output to see if the requested stat exists
+	;Helper method for ReactAggregate that checks the output to see if the requested stat exists.
+	; Returns true if the checked stat exists, otherwise returns false.
 	#!ValidateCachedStats
 	(declare
 		(assoc
@@ -861,71 +852,68 @@
 
 		(declare (assoc exists (true)))
 
-		;prediction stats validation depends on the selected prediction stats
-		(if (= stat_name "prediction_stats")
-			(if
-				;if mae is the only prediction stat only, make sure every feature has a mae value
+		;if the stat is not prediction stats or it is prediction stats and the only selected stat is mae
+		(if (or
+				(!= stat_name "prediction_stats")
 				(and
-					(= (size selected_prediction_stats) 1)
-					(= (first selected_prediction_stats) "mae")
+					(= stat_name "prediction_stats")
+					(and
+						(= (size selected_prediction_stats) 1)
+						(= selected_prediction_stats ["mae"])
+					)
 				)
+			)
+			;make sure that the stat exists for all features
+			(seq
+				;in this code block, if its prediction stats, then it must be mae only
+				(if (= stat_name "prediction_stats")
+					(assign (assoc stat_name "mae"))
+				)
+				;attempts to get all of the stats, if any are null, that means it does not exist for all features
+				(if (contains_value
+						(map
+							(lambda (get output ["payload" (current_value 1) stat_name]))
+							features
+						)
+						(null)
+					)
+					(assign (assoc exists (false)) )
+				)
+				exists
+			)
+			;else the stat is prediction stats and it is not just mae. Checks to see if any exists.
+			;  If any exists, then it means that they all should exist.
+			(seq
+				(assign (assoc
+					selected_prediction_stats
+						(filter
+							;exclude mae, as mae can be returned even if the other prediction stats are not calculated
+							(lambda (not (contains_value ["mae"] (current_value))))
+							(call !ProcessSelectedPredictionStats (assoc selected_prediction_stats selected_prediction_stats))
+						)
+					;set the default to be false
+					exists (false)
+				))
 				(seq
+					;map through every feature and check for every selected prediction stat.
+					; if a selected prediction stats exists, set exists to true
 					(map
 						(lambda
-							(if
-								(not (get output ["payload" (current_value 1) "mae"]))
-								(assign (assoc exists (false)))
+							(map
+								(lambda
+									(if
+										;(current value 2) is the name feature and (current value 1) is individual stat, ie rmse
+										(get output ["payload" (current_value 2) (current_value 1)])
+										(assign (assoc exists (true)))
+									)
+								)
+								selected_prediction_stats
 							)
 						)
 						features
 					)
 					exists
 				)
-				; else if it includes other prediction stats, check to see if any exists. If any
-				;  exists, then it means that they all should exist. This is checked this way since
-				;  prediction stats varies by feature type (nominal vs continuous).
-				(seq
-					(assign (assoc
-						selected_prediction_stats
-							(filter
-								;exclude mae, as mae can be returned even if the other prediction stats are not calculated
-								(lambda (not (contains_value ["mae"] (current_value))))
-								(call !ProcessSelectedPredictionStats (assoc selected_prediction_stats selected_prediction_stats))
-							)
-						exists (false)
-					))
-					(seq
-						(map
-							(lambda
-								(map
-									(lambda
-										(if
-											;(current value 2) is the name feature and (current value 1) is individual stat, ie rmse
-											(get output ["payload" (current_value 2) (current_value 1)])
-											(assign (assoc exists (true)))
-										)
-									)
-									selected_prediction_stats
-								)
-							)
-							features
-						)
-						exists
-					)
-				)
-			)
-			;else for all other influence metrics, make sure that they exist for all features
-			(seq
-				(map
-					(lambda
-						(if
-							(not (get output ["payload" (current_value 1) stat_name]))
-							(assign (assoc exists (false)))
-						)
-					)
-					features
-				)
-				exists
 			)
 		)
 	)
