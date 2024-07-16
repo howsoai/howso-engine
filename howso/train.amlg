@@ -5,7 +5,7 @@
 	; returns a response object in the following format:
 	;	(associate
 	;		"num_trained" num_trained_cases
-	;		"ablated_indices" (list of ablated case indices)
+	;		"ablated_indices" (list of session training indices for the ablated cases)
 	;		"status" "status output message"
 	;	)
 	; 	list of 'status' values:
@@ -63,8 +63,7 @@
 
 		(assign (assoc
 			accumulate_weight_feature
-				(if
-					(and !autoAblationEnabled (= (null) accumulate_weight_feature))
+				(if (and !autoAblationEnabled (= (null) accumulate_weight_feature))
 					!autoAblationWeightFeature
 					accumulate_weight_feature
 				)
@@ -99,6 +98,10 @@
 			ablated_indices_list (list)
 			cur_session_case_indices_map (retrieve_from_entity session ".indices_map")
 			warnings (assoc)
+			;don't bother auto analyzing if not training on enough cases
+			run_autoanalyze_check (false)
+			;possible data mass of model if all the specified cases are trained
+			new_possible_data_mass 0
 		))
 
 		;parameter and data checks, returns on error
@@ -267,17 +270,65 @@
 
 		(declare (assoc num_cases (call !GetNumTrainingCases) ))
 
-		(declare (assoc skip_ablation (call !CanTrainAblationBeSkipped) ))
+		(declare (assoc
+			skip_ablation (call !CanTrainAblationBeSkipped)
+			;if accumulating weight feature, store the index of that weight feature
+			weight_feature_index (get (zip features (indices features)) accumulate_weight_feature)
+			;trained count that's updated immediatelly as cases are trained during ablation
+			ablation_trained_instance_count trained_instance_count
+		))
+
+		(if (or !autoAnalyzeEnabled skip_ablation)
+			(seq
+				(assign (assoc
+					new_possible_data_mass
+						(+
+							!dataMassChangeSinceLastAnalyze
+							(if accumulate_weight_feature
+								(apply "+" (map
+									(lambda (or (get (current_value 1) weight_feature_index) 1))
+									input_cases
+								))
+
+								;else just increase by 1 for each case being trained
+								(size input_cases)
+							)
+						)
+				))
+
+				;if the number of cases will exceed the next autoAnalyzeThreshold, do run the autoanalyze check after training
+				(if
+					(and
+						!autoAnalyzeEnabled
+						;check if the new_possible_data_mass is greater than the threshold
+						(>= new_possible_data_mass !autoAnalyzeThreshold)
+						;but continue to check the number of cases for ensuring the contents are large
+						; enough to warrant re-analyzing.
+						(or (< num_cases !autoAnalyzeLimitSize) (<= !autoAnalyzeLimitSize 0))
+					)
+					(seq
+						(assign (assoc run_autoanalyze_check (true) ))
+						;if auto-ablation is enabled and the amount of new data being trained may exceed
+						;the ablation threshold, go ahead and ablate during this train flow
+						(if
+							(and
+								!autoAblationEnabled
+								(> (+ num_cases new_possible_data_mass) !autoAblationMinModelSize)
+							)
+							(assign (assoc skip_ablation (false) ))
+						)
+					)
+				)
+			)
+		)
 
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc new_case_ids (call !TrainCreateCases) ))
 
-		;accumulates the data mass change to !dataMassChangeSinceLastAnalyze, which is either 1.0
-		; or the case weight, if it exists.
-		(declare
-			(assoc
-				weight_feature_index (get (zip features (indices features)))
-			)
+		;ablation flow that did not auto analyze, accumulate all the data mass in one step here
+		(if (and (not skip_ablation) (not run_autoanalyze_check))
+			;accumulates the data mass change to !dataMassChangeSinceLastAnalyze, which is either 1.0
+			; or the case weight, if it exists.
 			(accum_to_entities (assoc
 				!dataMassChangeSinceLastAnalyze
 					(apply "+" (map
@@ -287,7 +338,19 @@
 								1
 							)
 						)
-						input_cases
+						;if accumulating the weight feature, accumulate it for all cases, even if they were ablated.
+						(if accumulate_weight_feature
+							input_cases
+							;else only accumulate for cases that were actually trained and not ablated
+							(unzip
+								input_cases
+								(remove
+									(indices input_cases)
+									;change ablated_indices_list into a 0-based list to match indices of input_cases
+									(map (lambda (- (current_value) trained_instance_count)) ablated_indices_list)
+								)
+							)
+						)
 					))
 			))
 		)
@@ -295,8 +358,7 @@
 		;set values if there were cases that were trained on
 		(if (> (size new_case_ids ) 0)
 			(seq
-				;if ablation awas skipped, trained_instance_count was never updated, update it here instead
-				(if skip_ablation (accum (assoc trained_instance_count (size new_case_ids))) )
+				(accum (assoc trained_instance_count (size new_case_ids)))
 
 				;add action to the existing replay data
 				(assign_to_entities session (assoc
@@ -373,6 +435,12 @@
 			)
 		)
 
+
+		(if (and skip_ablation (> (size new_case_ids ) 0) )
+			;update !dataMassChangeSinceLastAnalyze to the already computed new_possible_data_mass
+			(assign_to_entities (assoc !dataMassChangeSinceLastAnalyze new_possible_data_mass ))
+		)
+
 		;auto populate derived features if necessary
 		(if (> (size derived_features) 0)
 			(call !DeriveTrainFeatures (assoc
@@ -384,9 +452,9 @@
 		)
 
 		;if auto analysis is enabled, check whether this model should be re-analyzed
-		;and return the appropriate status to client so that analysis could be started
-		(if (> (size new_case_ids ) 0)
-			(if (and skip_ablation !autoAnalyzeEnabled)
+		;and either analyze or return the appropriate status to client so that analysis could be started
+		(if skip_ablation
+			(if (and run_autoanalyze_check (> (size new_case_ids ) 0))
 				(call !AutoAnalyzeIfNeeded)
 			)
 		)
@@ -451,11 +519,19 @@
 
 		;if accumulate_weight_feature was specified and there are ablated cases, accumulate weights to their neighbors
 		(if (and (size ablated_indices_list) accumulate_weight_feature)
-			(call !AccumulateCaseInfluenceWeights (assoc
-				features features
-				accumulate_weight_feature accumulate_weight_feature
-				cases (unzip input_cases ablated_indices_list)
-			))
+			(let
+				(assoc trained_instance_count (- trained_instance_count (size new_case_ids)) )
+				(call !AccumulateCaseInfluenceWeights (assoc
+					features features
+					accumulate_weight_feature accumulate_weight_feature
+					cases
+						(unzip
+							input_cases
+							;change ablated_indices_list into a 0-based list to match indices of input_cases
+							(map (lambda (- (current_value) trained_instance_count)) ablated_indices_list)
+						)
+				))
+			)
 		)
 
 		;return response
@@ -545,7 +621,7 @@
 
 		;if bad input, ie, size of series does not match the training input_cases, don't train anything
 		(if (= (null) input_cases)
-			(conclude
+			(conclude (conclude
 				(call !Return (assoc
 					errors (list message)
 					payload
@@ -555,6 +631,41 @@
 							"status" status_output
 						)
 				))
+			))
+		)
+
+		(declare (assoc
+			numeric_feature_indices
+				(filter
+					(lambda (or
+						;only keep non-nominals or numerical nominals
+						(contains_index !numericNominalFeaturesMap (get features (current_value)) )
+						(not (contains_index !nominalsMap (get features (current_value))) )
+					))
+					(indices features)
+				)
+		))
+
+		;output warning for any numeric features that contain non-numeric values
+		(if (size numeric_feature_indices)
+			(map
+				(lambda
+					(map
+						(lambda
+							;streamline for performance by checking if numeric first, and if not, then separately check that it's not null
+							(if (!~ 0 (get (current_value 1) (current_value)))
+								(if (!= (null) (get (current_value 1) (current_value)))
+									(accum (assoc
+										warnings
+											(associate (concat "Feature '" (get features (current_value 2)) "' contains non-numeric values." ))
+									))
+								)
+							)
+						)
+						numeric_feature_indices
+					)
+				)
+				input_cases
 			)
 		)
 	)
@@ -562,6 +673,28 @@
 	;private helper method for train that creates the cases in input_cases and returns the case ids
 	#!TrainCreateCases
 	(if skip_ablation
+		(map
+			(lambda
+				;create the case and output case id
+				(call !CreateCase (assoc
+					features features
+					feature_values
+						(if encode_features_on_train
+							(call !ConvertFromInput (assoc
+								feature_values (current_value 2)
+								features features
+							))
+							;else use feature_values as-is
+							(current_value 1)
+						)
+					session (get_value session)
+					session_training_index (+ trained_instance_count (current_index 1))
+				))
+			)
+			input_cases
+		)
+
+		;else ablating cases during training
 		(let
 			(assoc
 				train_features
@@ -571,109 +704,151 @@
 						features
 					)
 			)
-			(map
-				(lambda (let
-					(assoc
-						feature_values
-							;if auto ablate is enabled, default the weight to 1 for this case
-							(if !autoAblationEnabled
-								(append (current_value 1) (list 1))
-								(current_value 1)
-							)
-					)
 
-					;create the case and output case id
-					(call !CreateCase (assoc
-						features train_features
-						feature_values
-							(if encode_features_on_train
-								(call !ConvertFromInput (assoc
-									feature_values feature_values
-									features train_features
-								))
-								;else use feature_values as-is
-								feature_values
-							)
-						session (get_value session)
-						session_training_index (+ trained_instance_count (current_index 1))
-					))
-				))
-				input_cases
+			;if user explicitly specified to skip autoanalyze, send back "analyze" status so user knows an analyze is needed
+			(if skip_auto_analyze
+				(assign (assoc status_output "analyze"))
 			)
-		)
 
-		(weave
-			(lambda (let
-				(assoc feature_values (first (current_value 1)))
+			;no autoanalyze needed during this train flow, simply train the cases with ablation
+			(if (or (not run_autoanalyze_check) skip_auto_analyze)
+				(conclude
+					(call !TrainCasesWitAblation (assoc session_training_index trained_instance_count))
+				)
+			)
 
-				(if encode_features_on_train
+			(declare (assoc
+				batch_data_mass_threshold 0
+				batch_data_mass 0
+				batch_size 0
+				input_case_index 0
+				output_case_ids []
+			))
+
+			;split by batches of cases until next analyze
+			(while (< input_case_index (size input_cases))
+
+				(assign (assoc
+					;always train a hundred extra cases since some are expected to be ablated
+					;to prevent this threshold value from dropping down to very small values
+					batch_data_mass_threshold (+ 100 (- !autoAnalyzeThreshold !dataMassChangeSinceLastAnalyze))
+					batch_data_mass 0
+					batch_size 0
+				))
+
+				(while (and (< batch_data_mass batch_data_mass_threshold) (< (+ input_case_index (current_index)) (size input_cases)) )
 					(assign (assoc
-						feature_values
-							(call !ConvertFromInput (assoc
-								feature_values feature_values
-								features features
-							))
+						batch_data_mass
+							(+
+								(or (previous_result 1) 0)
+								(if accumulate_weight_feature
+									(or (get input_cases [(+ input_case_index (current_index 2)) weight_feature_index ]) 1)
+									1
+								)
+							)
+						batch_size (+ 1 (current_index 1))
+					))
+					batch_data_mass
+				)
+				(assign (assoc
+					output_case_ids
+						(call !TrainCasesWitAblation (assoc
+							input_cases (unzip input_cases (range input_case_index (+ input_case_index batch_size -1)) )
+							;ensure that starting training index value is updated for each batch
+							session_training_index (+ trained_instance_count input_case_index)
+						))
+				))
+
+				(call !AutoAnalyzeIfNeeded)
+
+				(accum (assoc input_case_index batch_size ))
+
+				(if (> (current_index) 0)
+					(assign (assoc output_case_ids (append (previous_result 1) output_case_ids) ))
+				)
+
+				output_case_ids
+			)
+
+			output_case_ids
+		)
+	)
+
+	;Helper method to train cases with an ablation check
+	#!TrainCasesWitAblation
+	(weave
+		(lambda (let
+			(assoc
+				feature_values (first (current_value 1))
+				case_index (current_index 1)
+			)
+
+			(if encode_features_on_train
+				(assign (assoc
+					feature_values
+						(call !ConvertFromInput (assoc
+							feature_values feature_values
+							features features
+						))
+				))
+			)
+
+			;do not train on this case if it is null or all case values are null or it's within provided thresholds
+			;if one of the ablation methods returns false, then the case should be ablated.
+			(if (and
+					(call !CaseOutsideThresholds)
+					(call !ShouldNewCaseBeAblated (assoc
+						features features
+						feature_values feature_values
+						;always use the most current trained count to determine whether cases should be ablated
+						num_cases ablation_trained_instance_count
 					))
 				)
-
-				;do not train on this case if it is null or all case values are null or it's within provided thresholds
-				(if (and
-						(not (apply "=" (append feature_values (list (null)))))
-						;no thresholds specified or the case is outside of thresholds
-
-						;if one of the ablation methods returns false, then the case should be ablated.
-						(and
-							(call !CaseOutsideThresholds)
-							(call !ShouldNewCaseBeAblated (assoc
-								features features
-								feature_values feature_values
-								num_cases num_cases
+				;do not ablate, create the case and store case id
+				(let
+					(assoc
+						new_case_id
+							(call !CreateCase (assoc
+								features train_features
+								feature_values
+									;if auto ablate is enabled, populate the weight feature for this case
+									(if !autoAblationEnabled
+										(append feature_values (list 1))
+										feature_values
+									)
+								session (get_value session)
+								session_training_index (+ session_training_index case_index)
 							))
-						)
 					)
-					(seq
-						;create the case and store case id
-						(declare (assoc
-							new_case_id
-								(call !CreateCase (assoc
-									features
-										;if auto ablate is enabled, populate the weight feature for this case
-										(if
-											!autoAblationEnabled
-											(append features (list !autoAblationWeightFeature))
-											features
-										)
-									feature_values
-										;if auto ablate is enabled, populate the weight feature for this case
-										(if
-											!autoAblationEnabled
-											(append feature_values (list 1))
-											feature_values
-										)
-									session (get_value session)
-									session_training_index trained_instance_count
-								))
+
+					;if auto analyzing, need to accumulate data mass after every created case
+					(if run_autoanalyze_check
+						(accum_to_entities (assoc
+							!dataMassChangeSinceLastAnalyze
+								(if accumulate_weight_feature
+									(or (get feature_values weight_feature_index) 1)
+									1
+								)
 						))
-						(accum (assoc trained_instance_count 1 ))
-
-						;auto analyze if appropriate
-						(if !autoAnalyzeEnabled (call !AutoAnalyzeIfNeeded))
-
-						;output the new case id
-						(list new_case_id)
 					)
 
-					;else don't output anything, filtering out any null case ids
-					(seq
-						(accum (assoc ablated_indices_list (current_index 1)))
-						(list)
-					)
+					(accum (assoc ablation_trained_instance_count 1))
+
+					;output the new case id
+					(list new_case_id)
 				)
-			))
-			input_cases
-			;use weave as a map-filter by specifying null as the second list
-			(null)
-		)
+
+				;else don't output anything, filtering out any null case ids
+				(seq
+					;ensure ablated indices are based off actual training index and not restarted at 0 every time this method is called
+					(accum (assoc ablated_indices_list (+ session_training_index case_index) ))
+					(list)
+				)
+			)
+		))
+		input_cases
+		;use weave as a map-filter by specifying null as the second list
+		(null)
 	)
 
 	;private helper method that checks if the conditions for auto-analyze are met, and calls the analyze if so
