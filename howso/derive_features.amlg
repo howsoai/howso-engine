@@ -42,13 +42,6 @@
 			features (list)
 			derived_features (list)
 			case_ids (null)
-
-			;not a parameter, map of case id -> set of derive_imputed features that will be accumulated for all the features
-			;that are either imputed or derived from imputed features during this derivation flow and will be used
-			;to check that values derived using these imputed values are within bounds.
-			;At worst will grow to have all the cases in the model as its keys with each having the full list of feature names,
-			;but that would only happen if every case had every feature imputed or derived from other imputed features.
-			cases_derive_imputed_map (assoc)
 		)
 
 		(declare (assoc
@@ -103,35 +96,6 @@
 			))
 			derived_features
 		)
-
-		;cases_derive_imputed_map is populated above by DeriveCustomFeatureFromCode when cases have features that were imputed
-		;now all derivation and imputation is complete, iterate over all the cases, updating each one with the list of features that were imputed
-		;can be used later for auditing or reimputation
-		(if (size cases_derive_imputed_map)
-			(let
-				(assoc all_derived_features (append lag_features derived_features) )
-				(map
-					(lambda (let
-						(assoc
-							case_id (current_index 1)
-							imputed_features_set (current_value 1)
-						)
-
-						(call !StoreCaseValues (assoc
-							label_name !internalLabelImputed
-							case_values_map
-								(associate
-									case_id
-									;ensure order of imputed features is stored in the same order as they were derived
-									;by filtering all_derived_features to only keep those that were imputed
-									(filter (lambda (contains_index imputed_features_set (current_value))) all_derived_features)
-								)
-						))
-					))
-					cases_derive_imputed_map
-				)
-			)
-		)
 	)
 
 	;Derive feature value for the last row in series_data.
@@ -178,7 +142,7 @@
 						feature_index_map feature_index_map
 						!featureDateTimeMap !featureDateTimeMap
 						!ConvertDateToEpoch !ConvertDateToEpoch
-					) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit)
+					) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit)
 				)
 		))
 
@@ -328,7 +292,6 @@
 						)
 					)
 				)
-			feature_lists_to_impute_map (assoc)
 			ts_series_length_limit (retrieve_from_entity "!tsSeriesLimitLength")
 
 			;impute all lag features except:
@@ -414,51 +377,24 @@
 				;to decide whether they all exist or none exist
 				(declare (assoc first_lag_feature (first lag_features) ))
 
-				;insert all the values into cases and output list of features to impute if any
-				;accumulate a map of: case -> list of features to impute
-				(accum (assoc
-					feature_lists_to_impute_map
-						;filter out all cases that don't need to be imputed
-						(filter (map
-							(lambda (let
-								(assoc case_id (current_index 1) )
-								(if (contains_label case_id first_lag_feature)
-									(assign_to_entities
-										case_id
-										(zip lag_features (current_value))
-									)
-									;else these labels don't exist yet, need to append them to the entity
-									(accum_entity_roots
-										case_id
-										(zip_labels lag_features (current_value))
-									)
-								)
-
-								;if this case has any nulls, output the features that'll need to be imputed
-								(if (contains_value (current_value) (null))
-									(let
-										(assoc
-											features_to_impute
-												(indices (filter
-													(lambda
-														(and
-															(= (null) (current_value))
-															(contains_index must_impute_features_set (current_index))
-														)
-													)
-													(zip lag_features (current_value 1))
-												))
-										)
-										;output features to impute if there are any, else output null so this case can be filtered out
-										(if (!= 0 (size features_to_impute))
-											features_to_impute
-										)
-									)
-								)
-							))
-							(zip series_case_ids series_data)
-						))
-				))
+				;map over the case ids and assign the derived values (still with nulls if so)
+				(map
+					(lambda (let
+						(assoc case_id (current_index 1) )
+						(if (contains_label case_id first_lag_feature)
+							(assign_to_entities
+								case_id
+								(zip lag_features (current_value))
+							)
+							;else these labels don't exist yet, need to append them to the entity
+							(accum_entity_roots
+								case_id
+								(zip_labels lag_features (current_value))
+							)
+						)
+					))
+					(zip series_case_ids series_data)
+				)
 			))
 
 			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
@@ -467,104 +403,6 @@
 		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
 		(if (> ts_series_length_limit !tsSeriesLimitLength)
 			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))
-		)
-
-		(if (size feature_lists_to_impute_map)
-			(seq
-
-				;there are cases to impute, set this feature's has_nulls flag to true
-				(assign_to_entities (assoc
-					!featureNullRatiosMap (set !featureNullRatiosMap (list feature "has_nulls") (true))
-				))
-
-				;keep only those features that need to be imputed (not allowed to be null)
-				(assign (assoc
-					feature_lists_to_impute_map
-						(map
-							(lambda
-								(filter
-									(lambda (= (false) (get !featureBoundsMap (list (current_value 1) "allow_null"))) )
-									(current_value)
-								)
-							)
-							feature_lists_to_impute_map
-						)
-				))
-
-				;Analyze if necessary before imputing
-				(call !AnalyzePreDerivationImpute)
-
-				;iterate over all the cases to impute values for each case
-				||(map
-					(lambda (let
-						(assoc
-							case_id (current_index 1)
-							features_to_impute (current_value 1)
-							context_values (retrieve_from_entity (current_index 1) features)
-						)
-
-						;iterate over all the features and impute each feature
-						(map
-							(lambda (let
-								(assoc
-									feature (current_value 1)
-									react_value (null)
-								)
-
-								(assign (assoc
-									react_value
-										(call !ReactDiscriminative (assoc
-											context_features features
-											context_values context_values
-											action_features (list feature)
-											;ignore the case for which we are doing the imputation since its feature value is null
-											ignore_case case_id
-											;don't encode the input because it's being passed in directly from the case
-											skip_encoding (true)
-											;don't decode because the output will be stored as-is right afterwards
-											skip_decoding (true)
-											return_action_values_only (true)
-											allow_nulls (false)
-											impute_react (true)
-										))
-								))
-
-								;update null value in the case with the reacted value
-								(call !StoreCaseValues (assoc
-									;map of case id -> value
-									case_values_map (associate case_id (first react_value))
-									label_name feature
-									overwrite (true)
-								))
-							))
-							features_to_impute
-						)
-					))
-					feature_lists_to_impute_map
-				)
-
-				;update null counts for derived lag features after anayze and impute
-				(call !UpdateHasNulls (assoc features lag_features))
-
-				;add this feature to all these cases_to_impute as an imputed feature
-				(declare (assoc
-					cases_to_impute_imputed_features_map
-						;iterate over the case ids to create a map of case id -> updated derive_imputed map for just the updated cases
-						(map
-							(lambda
-								;if this case is already in the map, append to it, othrewise store all the features that were imputed for it
-								(if (contains_index cases_derive_imputed_map (current_index))
-									(append (get cases_derive_imputed_map (current_index)) (zip (current_value)))
-									;else just store the features
-									(zip (current_value))
-								)
-							)
-							feature_lists_to_impute_map
-						)
-				))
-				;update cases_derive_imputed_map
-				(accum (assoc cases_derive_imputed_map cases_to_impute_imputed_features_map))
-			)
 		)
 	)
 )
