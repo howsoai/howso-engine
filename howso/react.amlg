@@ -975,6 +975,8 @@
 					(list)
 				)
 			k_parameter (get hyperparam_map "k")
+			feature_deviations (get hyperparam_map "featureDeviations")
+			feature_weights (get hyperparam_map "featureWeights")
 
 			;check if action_feature has nulls, if not, the no need to filter them out since they don't exist
 			;else action_feature does have nulls, filter them out since nulls function as true
@@ -1001,36 +1003,56 @@
 			)
 		)
 
-		; USE SUBMODEL TO DETERMINE LOCALIZED DEVIATIONS
-		(if !dynamicDeviationsStored
+		;USE SUBMODEL TO DETERMINE LOCALIZED DEVIATIONS IF APPROPRIATE
+		(if
+			(and
+				(or
+					;if using deviations or targetless
+					feature_deviations
+					(= (get hyperparam_map ["paramPath" 0]) ".targetless")
+				)
+				;and has the submodel
+				(contains_index
+					(call !GetHierarchy)
+					(get hyperparam_map "submodelName")
+				)
+			)
 			(seq
 				(declare (assoc
-					local_deviations
+					dynamic_deviations
 						(call !ComputeDynamicDeviations (assoc
 							context_features context_features
 							context_values context_values
+							deviation_submodel_name (get hyperparam_map "submodelName")
 						))
 				))
 
-				;TODO: this is a Targetless assumption
-				(declare (assoc
-					local_weights
-						(map
-							(lambda
-								;ensure that inactive features always maintain a feature weight of 0
-								(if (contains_index !inactiveFeaturesMap (current_index))
-									0
+				;if hyperparams are using deviations, overwrite feature_deviations with dynamic deviations
+				(if feature_deviations
+					(assign (assoc feature_deviations dynamic_deviations))
+				)
 
-									(call !ConvertDeviationToFeatureWeight (assoc
-										feature_deviation (current_value 1)
-										p_value (get hyperparam_map "p")
-									))
+				;if targetless, overwrite feature weights with weights derived from dynamic deviations
+				(if (= ".targetless" (get hyperparam_map ["paramPath" 0]))
+					(assign (assoc
+						feature_weights
+							(map
+								(lambda
+									;ensure that inactive features always maintain a feature weight of 0
+									(if (contains_index !inactiveFeaturesMap (current_index))
+										0
+
+										(call !ConvertDeviationToFeatureWeight (assoc
+											feature_deviation (current_value 1)
+											p_value (get hyperparam_map "p")
+										))
+									)
+
 								)
-
+								dynamic_deviations
 							)
-							local_deviations
-						)
-				))
+					))
+				)
 			)
 		)
 
@@ -1057,10 +1079,10 @@
 							k_parameter
 							context_features
 							context_values
-							(if !dynamicDeviationsStored local_weights (get hyperparam_map "featureWeights"))
+							feature_weights
 							!queryDistanceTypeMap
 							(get hyperparam_map "featureDomainAttributes")
-							(if !dynamicDeviationsStored local_deviations (get hyperparam_map "featureDeviations") )
+							feature_deviations
 							(get hyperparam_map "p")
 							(get hyperparam_map "dt")
 							(if valid_weight_feature weight_feature (null))
