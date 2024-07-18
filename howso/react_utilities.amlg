@@ -711,10 +711,14 @@
 			local_deviations (null)
 		)
 
+		(declare (assoc
+			continuous_context_features (filter (lambda (!= "continuous" (get !featureAttributes [(current_value) "type"]))) context_features)
+		))
+
 		(assign (assoc
 			local_deviations
 				(zip
-					context_features
+					continuous_context_features
 					(get
 						(call execute_on_subtrainee (assoc
 							child_name_path [(get hyperparam_map "submodelName")]
@@ -723,7 +727,7 @@
 								(assoc
 									context_features context_features
 									context_values context_values
-									action_features (map (lambda (concat "." (current_value) "_residual") ) context_features)
+									action_features (map (lambda (concat "." (current_value) "_residual") ) continuous_context_features)
 								)
 						))
 						[1 "payload" "action_values"]
@@ -749,27 +753,56 @@
 
 		;if hyperparams are using deviations, overwrite feature_deviations with dynamic deviations
 		(if (get hyperparm_map "featureDeviations")
-			(assign (assoc feature_deviations local_deviations))
+			(assign (assoc
+				feature_deviations
+					(map
+						(lambda
+							(if (contains_index local_deviations (current_index))
+								;this feature has a local deviation
+								(if (~ 0 (current_value))
+									(get local_deviations (current_index))
+
+									;deviation is a list, overwrite first value with local deviation (don't clobber null-null, null-known, etc)
+									(~ [] (current_value))
+									(set (current_value) 0 (get local_deviations (current_index)) )
+
+									;otherwise its something else? fall back to original value
+									(current_value)
+								)
+
+								;else return original value
+								(current_value)
+							)
+						)
+						feature_deviations
+					)
+
+			))
 		)
 
 		;if targetless, overwrite feature weights with weights derived from dynamic deviations
 		(if (= ".targetless" (get hyperparam_map ["paramPath" 0]))
 			(assign (assoc
 				feature_weights
-					(map
-						(lambda
-							;ensure that inactive features always maintain a feature weight of 0
-							(if (contains_index !inactiveFeaturesMap (current_index))
-								0
+					(append
+						;original feature weights
+						feature_weights
+						;assoc of feature weights based on local deviations
+						(map
+							(lambda
+								;ensure that inactive features always maintain a feature weight of 0
+								(if (contains_index !inactiveFeaturesMap (current_index))
+									0
 
-								(call !ConvertDeviationToFeatureWeight (assoc
-									feature_deviation (current_value 1)
-									p_value (get hyperparam_map "p")
-								))
+									(call !ConvertDeviationToFeatureWeight (assoc
+										feature_deviation (current_value 1)
+										p_value (get hyperparam_map "p")
+									))
+								)
+
 							)
-
+							local_deviations
 						)
-						local_deviations
 					)
 			))
 		)
