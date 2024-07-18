@@ -690,21 +690,25 @@
 		)
 	)
 
-	;Computes the dynamic deviations for a set of context features and values by querying the deviation submodel
-	;returns an assoc of context_feature => dynamic deviation
+	;Computes the dynamic deviations for a set of context features and values by querying the deviation submodel.
+	;May assign to feature_weights or feature_deviations, according to the HPs
 	;params:
 	;  context_features: list of feature names to compute dynamic deviations for (also to query the submodel with)
 	;  context_values: list of values corresponding to context_features
-	;  deviation_submodel_name: name of the submodel
-	#!ComputeDynamicDeviations
+	;  hyperparam_map: the hyperparameters selected for the query
+	;
+	;assigns to:
+	;	feature_weights: the feature weights to be used in a query, only assigns if HPs are targetless
+	;	feature_deviations: the feature deviations to be used in a query, only assigns if HPs contain featureDeviations
+	#!UseDynamicDeviationsAndWeights
 	(declare
 		(assoc
 			context_features []
 			context_values []
-			deviation_submodel_name (null)
+			hyperparam_map (null)
 
 			;not param
-			local_deviations {}
+			local_deviations (null)
 		)
 
 		(assign (assoc
@@ -713,7 +717,7 @@
 					context_features
 					(get
 						(call execute_on_subtrainee (assoc
-							child_name_path [deviation_submodel_name]
+							child_name_path [(get hyperparam_map "submodelName")]
 							method "react"
 							payload
 								(assoc
@@ -727,17 +731,47 @@
 				)
 		))
 
-		;bound the deviation so that it is not less then the min residual or user specified error
-		(map
-			(lambda
-				;update direct value
-				(max
-					(get !cachedFeatureMinResidualMap (current_index))
-					(current_value)
-					(get !userSpecifiedFeatureErrorsMap (current_index))
-				)
-			)
+		(assign (assoc
 			local_deviations
+				;bound the deviation so that it is not less then the min residual or user specified error
+				(map
+					(lambda
+						;update direct value
+						(max
+							(get !cachedFeatureMinResidualMap (current_index))
+							(current_value)
+							(get !userSpecifiedFeatureErrorsMap (current_index))
+						)
+					)
+					local_deviations
+				)
+		))
+
+		;if hyperparams are using deviations, overwrite feature_deviations with dynamic deviations
+		(if (get hyperparm_map "featureDeviations")
+			(assign (assoc feature_deviations local_deviations))
+		)
+
+		;if targetless, overwrite feature weights with weights derived from dynamic deviations
+		(if (= ".targetless" (get hyperparam_map ["paramPath" 0]))
+			(assign (assoc
+				feature_weights
+					(map
+						(lambda
+							;ensure that inactive features always maintain a feature weight of 0
+							(if (contains_index !inactiveFeaturesMap (current_index))
+								0
+
+								(call !ConvertDeviationToFeatureWeight (assoc
+									feature_deviation (current_value 1)
+									p_value (get hyperparam_map "p")
+								))
+							)
+
+						)
+						local_deviations
+					)
+			))
 		)
 	)
 )
