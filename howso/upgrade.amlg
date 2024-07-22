@@ -184,13 +184,12 @@
 	)
 
 	;update version to latest, auto importing any exported data.
-	;this method should be run by a script from the ./upgrade_migration folder
 	;
 	;parameters:
 	; trainee: name of exported trainee to import and load into this trainee
 	; root_filepath: base path to Howso Engine Core installation
 	; trainee_json_filepath: optional, path from which to load previously exported meta.json and exp.json files.
-	;	If unspecified, expects them to be located in the base installation /migrations/ directory.
+	;	If unspecified, will upgrade trainee in place with latest code from the current Howso Engine installation.
 	#upgrade_trainee
 	(declare
 		(assoc
@@ -204,13 +203,11 @@
 		(call !ValidateParameters)
 
 		;create a temporary subtrainee from the latest howso code
-		(assign (assoc new_trainee_path (append !traineeContainer (concat "_temptrainee" (rand))) ))
-
 		(declare (assoc
-			result (load_entity (concat root_filepath !trainee_template_filename "." !file_extension) new_trainee_path (false) (false))
+			new_trainee_path (load_entity (concat root_filepath !trainee_template_filename "." !file_extension) [!traineeContainer] (false) (false))
 		))
 
-		(if (= (null) result)
+		(if (= (null) new_trainee_path)
 			(conclude
 				(call !Return (assoc errors (list "Failed to load trainee: invalid filepath or filename provided") ))
 			)
@@ -218,35 +215,16 @@
 
 		(call_entity new_trainee_path "initialize" (assoc trainee_id (retrieve_from_entity "!traineeId") ))
 
-		;load the json  files
-		(declare (assoc
-			;metadata json should be in the format of: { label : value }
-			import_metadata_map
-				(load
-					(if trainee_json_filepath
-						(concat trainee_json_filepath trainee ".meta.json")
-						(concat root_filepath !migration_folder trainee ".meta.json")
-					)
-				)
-			;cases and sessions json should be in the format of: { entity_id : { feature : value } }
-			import_cases_and_sessions_map
-				(load
-					(if trainee_json_filepath
-						(concat trainee_json_filepath trainee ".exp.json")
-						(concat root_filepath !migration_folder trainee ".exp.json")
-					)
-				)
-		))
-
-
 		(declare (assoc
 			old_major_version (retrieve_from_entity "major_version")
 			old_minor_version (retrieve_from_entity "minor_version")
 			old_point_version (retrieve_from_entity "point_version")
+			import_metadata_map (null)
+			import_cases_and_sessions_map (null)
 		))
 
-		;if not importing metadata from saved file, then copy it from this trainee
-		(if (= (null) import_metadata_map)
+		;if not importing metadata from saved file, upgrade trainee in place
+		(if (= (null) trainee_json_filepath)
 			(let
 				(assoc
 					;create a list of all the matadata labels
@@ -267,6 +245,27 @@
 
 			;else overwrite old version from exported file instead of from trainee
 			(seq
+				(assign (assoc
+					;metadata json should be in the format of: { label : value }
+					import_metadata_map (load (concat trainee_json_filepath trainee ".meta.json") )
+					;cases and sessions json should be in the format of: { entity_id : { feature : value } }
+					import_cases_and_sessions_map (load (concat trainee_json_filepath trainee ".exp.json") )
+				))
+
+				(if (or (= (null) import_metadata_map) (= (null) import_cases_and_sessions_map))
+					(conclude (conclude
+						(call !Return (assoc
+							errors
+								(list (concat
+									"Error loading JSON from either '"
+									(concat trainee_json_filepath trainee ".meta.json") "' or '"
+									(concat trainee_json_filepath trainee ".exp.json")
+									"': Invalid resource path."
+								))
+						))
+					))
+				)
+
 				(assign (assoc
 					old_major_version (get import_metadata_map "major_version")
 					old_minor_version (get import_metadata_map "minor_version")
