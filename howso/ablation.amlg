@@ -385,6 +385,7 @@
 			prev_prediction_stats_map (assoc)
 			thresholds_enabled (or (size abs_threshold_map) (size delta_threshold_map) (size rel_threshold_map) )
 			param_path_list (list "full" ".targetless" "robust" ".case_weight")
+			threshold_info (null)
 		))
 
 		;Ensure that ablation is initialized before we begin.
@@ -414,74 +415,77 @@
 			))
 		)
 
-		;Begin looping on data removal. The ultimate end condition is if the model gets too small
-		; to continue removing cases.
-		(while (< !autoAblationMinModelSize (call !GetNumTrainingCases))
-			(assign (assoc
-				cases
-					(call !GetCasesByCondition (assoc
-						condition
-							(associate
-								!internalLabelInfluenceWeightEntropy 
-									(list
-										(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-											influence_weight_entropy_threshold influence_weight_entropy_threshold
-											weight_feature distribute_weight_feature
-											cache_value (false)
-										))
-										.infinity
-									)
-							)
-						num_cases
-							(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinModelSize))
-					))
-			))
-
-			;if there are no cases which satisfy the criteria, then break.
-			(if (not (size cases)) (conclude))
-
-			(call !RemoveCases (assoc
-				cases cases
-				distribute_weight_feature distribute_weight_feature
-			))
-
-			(call !AutoAnalyzeIfNeeded (assoc
-				skip_auto_analyze skip_auto_analyze
-			))
-
-			(if thresholds_enabled
-				(seq
+		(assign (assoc
+			threshold_info
+				;Begin looping on data removal. The ultimate end condition is if the model gets too small
+				; to continue removing cases.
+				(while (< !autoAblationMinModelSize (call !GetNumTrainingCases))
 					(assign (assoc
-						;Use (set to force a deep copy.
-						prev_prediction_stats_map
-							(set (get
-								!featurePredictionStatsMap
-								(apply "concat" param_path_list)
+						cases
+							(call !GetCasesByCondition (assoc
+								condition
+									(associate
+										!internalLabelInfluenceWeightEntropy 
+											(list
+												(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
+													influence_weight_entropy_threshold influence_weight_entropy_threshold
+													weight_feature distribute_weight_feature
+													cache_value (false)
+												))
+												.infinity
+											)
+									)
+								num_cases
+									(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinModelSize))
 							))
 					))
-					(call !CalculateFeatureResiduals (assoc
-						weight_feature distribute_weight_feature
-						use_case_weights (true)
-						compute_all_statistics (true)
-						store_values (true)
+
+					;if there are no cases which satisfy the criteria, then break.
+					(if (not (size cases)) (conclude))
+
+					(call !RemoveCases (assoc
+						cases cases
+						distribute_weight_feature distribute_weight_feature
 					))
-					(let 
-						(assoc
-							threshold_info
-							(call !CheckThresholds (assoc
-								abs_threshold_map abs_threshold_map
-								delta_threshold_map delta_threshold_map
-								rel_threshold_map rel_threshold_map
-								prev_prediction_stats_map prev_prediction_stats_map
+
+					(call !AutoAnalyzeIfNeeded (assoc
+						skip_auto_analyze skip_auto_analyze
+					))
+
+					(if thresholds_enabled
+						(let
+							(assoc
+								;Use (set to force a deep copy.
+								prev_prediction_stats_map
+									(set (get
+										!featurePredictionStatsMap
+										(apply "concat" param_path_list)
+									))
+								batch_threshold_info (null)
+							)
+						
+							(call !CalculateFeatureResiduals (assoc
+								weight_feature distribute_weight_feature
+								use_case_weights (true)
+								compute_all_statistics (true)
+								store_values (true)
 							))
-						)
-						(if (!= (null) threshold_info)
-							(conclude) ;TODO: this conclude should help return the failed threshold
+							(assign (assoc
+								batch_threshold_info
+									(call !CheckThresholds (assoc
+										abs_threshold_map abs_threshold_map
+										delta_threshold_map delta_threshold_map
+										rel_threshold_map rel_threshold_map
+										prev_prediction_stats_map prev_prediction_stats_map
+									))
+							))
+							(if (!= (null) batch_threshold_info)
+								(conclude batch_threshold_info)
+							)
 						)
 					)
 				)
-			)
-		)
+		))
 
 		(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
 			influence_weight_entropy_threshold influence_weight_entropy_threshold
@@ -489,7 +493,12 @@
 		))
 
 		(accum_to_entities (assoc !revision 1))
-		(call !Return)
+		(call !Return (assoc 
+			payload
+				(assoc
+					threshold_info threshold_info
+				)
+		))
 	)
 
 	;helper method which queries and returns the specified quantile of influence weight entropies
