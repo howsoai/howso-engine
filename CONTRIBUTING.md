@@ -91,12 +91,16 @@ Return types of methods should be specified by comments on the assoc with the pa
 #foo_bar_method
 (declare
     (assoc
+        ; list, a list of strings
         ;{type "list" values "string"}
         list_of_strs (list)
+        ; number, a number in the range (0,inf)
         ;{type "number" min 1}
         optional_positive_number (null)
+        ; boolean, a flag
         ;{type "boolean"}
         random_flag (false)
+        ; assoc, a map of numbers
         ;{type "assoc" values "number"}
         map_of_number_values (assoc)
     )
