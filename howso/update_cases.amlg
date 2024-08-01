@@ -451,6 +451,11 @@
 			case_index 0
 			batch_of_cases []
 			closest_cases_maps {}
+			entropy_ratios []
+		))
+		(declare (assoc k_param (get hyperparam_map "k") ))
+		(declare (assoc
+			max_influence_entropy (entropy (range (/ 1 k_param) 1 k_param 1))
 		))
 
 		;accumulate all cases in batches of !ablatedCasesDistributionBatchSize
@@ -472,7 +477,7 @@
 								closest_cases_map
 									(compute_on_contained_entities (list
 										(query_nearest_generalized_distance
-											(get hyperparam_map "k")
+											k_param
 											context_features
 											(unzip case_value_map context_features)
 											(get hyperparam_map "featureWeights")
@@ -504,65 +509,87 @@
 			))
 
 			;distribute the weights by writing to each of the local models' cases
-			(map
-				(lambda (let
-					(assoc
-						;closest_cases_map (current_value 1)
-						case_weight
-							(if (!= (null) weight_feature_index)
-								(get batch_of_cases [ (current_index 1) weight_feature_index ] )
-								;assume weight of 1 if weight feature values are not given
-								1
-							)
-						total_weight (apply "+" (values (current_value 1)))
-					)
-
-					;iterate over all the closest cases and accumulate the normalized weight to each one
+			(assign (assoc
+				entropy_ratios
 					(map
-						(lambda
-							;if accumulate_weight_feature label doesn't exist in this case, add it with a weight `1`
-							(if (not (contains_label (current_index) accumulate_weight_feature))
-								(accum_entity_roots (current_index)
-									(zip_labels
-										(list accumulate_weight_feature)
-										(list (+ 1 (* (/ (current_value 1) total_weight) case_weight)) )
+						(lambda (let
+							(assoc
+								;closest_cases_map (current_value 1)
+								case_weight
+									(if (!= (null) weight_feature_index)
+										(get batch_of_cases [ (current_index 1) weight_feature_index ] )
+										;assume weight of 1 if weight feature values are not given
+										1
 									)
-								)
+								total_weight (apply "+" (values (current_value 1)))
+							)
 
-								;else label exists, accumulate to it
-								(accum_to_entities
-									(current_index)
-									(associate
-										accumulate_weight_feature
-											(* (/ (current_value 1) total_weight) case_weight)
+							(declare (assoc
+								influence_map
+									;iterate over all the closest cases and accumulate the normalized weight to each one
+									(map
+										(lambda (seq
+
+											;if accumulate_weight_feature label doesn't exist in this case, add it with a weight `1`
+											(if (not (contains_label (current_index) accumulate_weight_feature))
+												(accum_entity_roots (current_index)
+													(zip_labels
+														(list accumulate_weight_feature)
+														(list (+ 1 (* (/ (current_value 1) total_weight) case_weight)) )
+													)
+												)
+
+												;else label exists, accumulate to it
+												(accum_to_entities
+													(current_index)
+													(associate
+														accumulate_weight_feature
+															(* (/ (current_value 1) total_weight) case_weight)
+													)
+												)
+											)
+
+											;normalize influence
+											(/ (current_value) total_weight)
+										))
+										;closest_cases_map
+										(current_value 1)
 									)
+							))
+
+							;output 1 - ratio of influential cases entropy / max influential entropy
+							;that way if every case is evenly distributed, it adds zero practical mass to the model
+							(- 1
+								(/
+									(entropy (values influence_map))
+									max_influence_entropy
 								)
 							)
-						)
-						(current_value) ;closest_cases_map
+						))
+						closest_cases_maps
 					)
-				))
-				closest_cases_maps
-			)
+			))
+
+			(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze (apply "+" entropy_ratios) ))
 
 			(accum (assoc case_index batch_size))
 		)
 
 		;also add the weight accumulated to each case to !dataMassChangeSinceLastAnalyze to ensure that cases trained as
 		; only weights (whether through auto-ablation or otherwise) contribute to the progress towards the next auto-analyze,
-		; if enabled.
-		(accum_to_entities (assoc
-			!dataMassChangeSinceLastAnalyze
-				(if weight_feature_index
-					(apply "+" (map
-						(lambda (or (get (current_value) weight_feature_index) 1))
-						cases
-					))
+		; ; if enabled.
+		; (accum_to_entities (assoc
+		; 	!dataMassChangeSinceLastAnalyze
+		; 		(if weight_feature_index
+		; 			(apply "+" (map
+		; 				(lambda (or (get (current_value) weight_feature_index) 1))
+		; 				cases
+		; 			))
 
-					;else it's a weight of 1 for every case, equal to the number of cases
-					(size cases)
-				)
-		))
+		; 			;else it's a weight of 1 for every case, equal to the number of cases
+		; 			(size cases)
+		; 		)
+		; ))
 	)
 
 	;Iterate over the specified model cases, pull their weight and distribute it to their corresponding neighbors into the neighbors' distribute_weight_feature
