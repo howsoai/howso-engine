@@ -92,6 +92,8 @@
 			label_name (or label_name !internalLabelInfluenceWeightEntropy)
 		))
 
+		(call !RecomputeAndCacheMaxInfluenceWeightEntropy)
+
 		(accum_to_entities (assoc !revision 1))
 		(assign_to_entities (assoc !hasInfluenceWeightEntropies (true)))
 	)
@@ -152,9 +154,10 @@
 			(seq
 				(assign (assoc
 					max_influence_weight_entropy_to_keep
-						(call !MaxInfluenceWeightEntropyToKeepQuery (assoc
+						(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
 							influence_weight_entropy_threshold influence_weight_entropy_threshold
 							weight_feature distribute_weight_feature
+							cache_value (false)
 						))
 					cases
 						(call !GetCasesByCondition (assoc
@@ -183,6 +186,11 @@
 			)
 		)
 
+		(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
+			influence_weight_entropy_threshold influence_weight_entropy_threshold
+			weight_feature distribute_weight_feature
+		))
+
 		(accum_to_entities (assoc !revision 1))
 		(call !Return)
 	)
@@ -192,22 +200,34 @@
 	; influence_weight_entropy_threshold: optional, default !autoAblationInfluenceWeightEntropyThreshold. cases with
 	; 	influence weight entropy above this quantile will be removed
 	; weight_feature: optional, default !autoAblationWeightFeature. name of feature whose values to use as case weights
-	#!MaxInfluenceWeightEntropyToKeepQuery
+	; cache_value: flag, default true.  when true will cache the computed value
+	#!RecomputeAndCacheMaxInfluenceWeightEntropy
 	(declare
 		(assoc
 			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
 			weight_feature !autoAblationWeightFeature
+			cache_value (true)
 		)
 
-		(compute_on_contained_entities (list
-			(query_exists !internalLabelInfluenceWeightEntropy)
-			(query_not_equals !internalLabelInfluenceWeightEntropy 0)
-			(query_quantile
-				!internalLabelInfluenceWeightEntropy
-				influence_weight_entropy_threshold
-				weight_feature
-			)
+		(declare (assoc
+			quantile_value
+				(compute_on_contained_entities (list
+					(query_exists !internalLabelInfluenceWeightEntropy)
+					(query_not_equals !internalLabelInfluenceWeightEntropy 0)
+					(query_quantile
+						!internalLabelInfluenceWeightEntropy
+						influence_weight_entropy_threshold
+						weight_feature
+					)
+				))
 		))
+
+		(if cache_value
+			(assign_to_entities (assoc !autoAblationMaxInfluenceWeightEntropy quantile_value))
+		)
+
+		;output the value
+		quantile_value
 	)
 
 	;determine whether a new case (one that is not in the Trainee) should be ablated (trained as weights) or kept.
@@ -237,18 +257,14 @@
 			(conclude (true))
 		)
 
-		(assign (assoc
-			max_influence_weight_entropy_to_keep (call !MaxInfluenceWeightEntropyToKeepQuery)
-		))
+		(assign (assoc max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy  ))
 
 		;if there is no influence weight entropy cached yet, do the caching here
 		(if (= (null) max_influence_weight_entropy_to_keep)
 			(seq
 				(call !ComputeAndStoreInfluenceWeightEntropies (assoc features features))
 
-				(assign (assoc
-					max_influence_weight_entropy_to_keep (call !MaxInfluenceWeightEntropyToKeepQuery)
-				))
+				(assign (assoc max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy ))
 			)
 		)
 
@@ -271,7 +287,7 @@
 	;Helper method called by train to see if ablation can be skipped altogether
 	;outputs true if ablation can be skipped
 	;parameters:
-	; input_cases: list of cases from train method
+	; cases: list of cases from train method
 	; num_cases: number of currently trained cases in the model
 	#!CanTrainAblationBeSkipped
 	(and
@@ -295,7 +311,7 @@
 					(= (null) (first (current_value)))
 					(apply "=" (current_value))
 				))
-				input_cases
+				cases
 			))
 		)
 	)
@@ -478,7 +494,7 @@
 					(assoc
 						conviction_value
 							(get
-								(call !ReactGroup (assoc
+								(call !SingleReactGroup (assoc
 									features features
 									new_cases (list feature_values)
 									skip_encoding (true)
@@ -498,7 +514,7 @@
 							(< conviction_value !autoAblationConvictionUpperThreshold)
 						)
 
-						;if the model is empty, ReactGroup returns 0, force training
+						;if the model is empty, SingleReactGroup returns 0, force training
 						(= conviction_value 0)
 					)
 				)
