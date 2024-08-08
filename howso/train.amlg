@@ -102,6 +102,8 @@
 			run_autoanalyze_check (false)
 			;possible data mass of model if all the specified cases are trained
 			new_possible_data_mass 0
+			feature_index_map (zip features (indices features))
+			indices_to_train (null)
 		))
 
 		;parameter and data checks, returns on error
@@ -352,165 +354,8 @@
 			))
 		)
 
-		;set values if there were cases that were trained on
-		(if (> (size new_case_ids ) 0)
-			(seq
-				(accum (assoc trained_instance_count (size new_case_ids)))
 
-				;add action to the existing replay data
-				(assign_to_entities session (assoc
-					".replay_steps" (append cur_session_data new_case_ids)
-					".indices_map"
-						(append
-							cur_session_case_indices_map
-							(zip
-								(range (- trained_instance_count (size new_case_ids)) (- trained_instance_count 1))
-								new_case_ids
-							)
-						)
-					".trained_instance_count" trained_instance_count
-				))
-
-				;if any of the trained features are not defined in feature attributes, add them as continuous_numeric with default attributes
-				(let
-					(assoc new_features (remove (zip features) !trainedFeatures))
-
-					(if (size new_features)
-						(seq
-							(accum (assoc
-								warnings
-									(associate (concat
-										"The following features trained were previously undefined: "
-										(apply "concat" (trunc (weave (indices new_features) ", "))) ". "
-										"They have been trained and assumed to be numeric and continuous. "
-										"Please update the feature attributes if they are known."
-									))
-							))
-							(accum_to_entities (assoc
-								!featureAttributes
-									(map
-										(lambda (assoc "type" "continuous" "bounds" (assoc "allow_null" (true)) ))
-										new_features
-									)
-								!queryDistanceTypeMap (map (lambda "continuous_numeric") new_features)
-							))
-							(assign_to_entities (assoc
-								!trainedFeatures (sort (values (append !trainedFeatures (indices !featureAttributes)) (true)) )
-								!trainedFeaturesContextKey
-									(call !BuildContextFeaturesKey (assoc
-										context_features (values (append !trainedFeatures (indices !featureAttributes)) (true))
-									))
-							))
-						)
-					)
-				)
-
-				;update cached data properties such as has_nulls, null ratios, marginal stats, average model case entropies, etc
-				(call !ClearCachedDataProperties)
-			)
-		)
-
-		;if derived features wasn't specified, auto-detect them
-		(if (and (= (null) derived_features) (> (size !derivedFeaturesSet) 0))
-			(seq
-				(assign (assoc derived_features (list)))
-
-				;check features vs !sourceToDerivedFeatureMap and populate derived_features accordingly
-				(map
-					(lambda (let
-						(assoc feature_name (current_value 1))
-						;if this trained feature has derived features, add all of them to the derived_features list
-						(if (contains_index !sourceToDerivedFeatureMap feature_name)
-							(accum (assoc derived_features (get !sourceToDerivedFeatureMap feature_name)))
-						)
-					))
-					features
-				)
-
-				;clear out possible duplicates out of derived_features
-				(assign (assoc derived_features (values derived_features (true))))
-			)
-		)
-
-
-		(if (and skip_ablation (> (size new_case_ids ) 0) )
-			;update !dataMassChangeSinceLastAnalyze to the already computed new_possible_data_mass
-			(assign_to_entities (assoc !dataMassChangeSinceLastAnalyze new_possible_data_mass ))
-		)
-
-		;auto populate derived features if necessary
-		(if (> (size derived_features) 0)
-			(call !DeriveTrainFeatures (assoc
-				features features
-				;keep and derive only those features that are not in the features list
-				derived_features (filter (lambda (not (contains_value features (current_value)))) derived_features)
-				case_ids new_case_ids
-			))
-		)
-
-		;if auto analysis is enabled, check whether this model should be re-analyzed
-		;and either analyze or return the appropriate status to client so that analysis could be started
-		(if skip_ablation
-			(if (and run_autoanalyze_check (> (size new_case_ids ) 0))
-				(call !AutoAnalyzeIfNeeded)
-			)
-		)
-
-		(if !hasDependentFeatures
-			(let
-				(assoc
-					dependents_boundary_map (assoc)
-					dependent_values_combinations_map (assoc)
-					unique_nominals_set (list)
-				)
-
-				(if (size !continuousToNominalDependenciesMap)
-					(seq
-						(map
-							(lambda (let
-								(assoc
-									dependent_nominals (current_value 1)
-									continuous_feature (current_index 1)
-									dependents_combinations_map (assoc)
-									dependent_values_combinations (list)
-								)
-
-								(assign (assoc
-									dependents_combinations_map
-										(call !ComputeDependentBoundaries (assoc
-											nominals dependent_nominals
-											value_feature continuous_feature
-										))
-								))
-
-								(call !AccumulateDependentValuesCombinations (assoc
-									nested_value_combinations_map dependents_combinations_map
-									values_lists (list)
-									value_feature (first dependent_nominals)
-									remaining_dependent_nominals (tail dependent_nominals)
-								))
-
-								(accum (assoc
-									dependents_boundary_map (associate continuous_feature dependents_combinations_map)
-									dependent_values_combinations_map (associate continuous_feature dependent_values_combinations)
-								))
-							))
-							!continuousToNominalDependenciesMap
-						)
-
-						(assign_to_entities (assoc
-							!dependentsBoundaryMap dependents_boundary_map
-							!dependentValuesCombinationsMap dependent_values_combinations_map
-						))
-					)
-				)
-			)
-		)
-
-		;if there are features that have nulls, check if they still have nulls next time we react or analyze
-		(if !inactiveFeaturesMap
-			(assign_to_entities (assoc !inactiveFeaturesNeedCaching (true) ))
-		)
+		(call !PostTrainUpdates)
 
 		(accum_to_entities (assoc !revision 1))
 
@@ -763,8 +608,8 @@
 
 	;Helper method to train cases with an ablation check
 	#!TrainCasesWithAblation
-	(let
-		(assoc
+	(seq
+		(assign (assoc
 			indices_to_train
 				||(filter
 					(lambda  (let
@@ -796,7 +641,7 @@
 					))
 					(indices cases)
 				)
-		)
+		))
 
 		;ensure ablated indices are based off actual training index and not restarted at 0 every time this method is called
 		(accum (assoc
@@ -880,6 +725,244 @@
 		)
 
 		output_cases
+	)
+
+	;helper method for logic following the creation of trained cases including derivation, out-of-bounds checks, attribute updates, etc.
+	#!PostTrainUpdates
+	(seq
+		;set values if there were cases that were trained on
+		(if (> (size new_case_ids ) 0)
+			(seq
+				(accum (assoc trained_instance_count (size new_case_ids)))
+
+				;add action to the existing replay data
+				(assign_to_entities session (assoc
+					".replay_steps" (append cur_session_data new_case_ids)
+					".indices_map"
+						(append
+							cur_session_case_indices_map
+							(zip
+								(range (- trained_instance_count (size new_case_ids)) (- trained_instance_count 1))
+								new_case_ids
+							)
+						)
+					".trained_instance_count" trained_instance_count
+				))
+
+				;if any of the trained features are not defined in feature attributes, add them as continuous_numeric with default attributes
+				(let
+					(assoc new_features (remove (zip features) !trainedFeatures))
+
+					(if (size new_features)
+						(seq
+							(accum (assoc
+								warnings
+									(associate (concat
+										"The following features trained were previously undefined: "
+										(apply "concat" (trunc (weave (indices new_features) ", "))) ". "
+										"They have been trained and assumed to be numeric and continuous. "
+										"Please update the feature attributes if they are known."
+									))
+							))
+							(accum_to_entities (assoc
+								!featureAttributes
+									(map
+										(lambda (assoc "type" "continuous" "bounds" (assoc "allow_null" (true)) ))
+										new_features
+									)
+								!queryDistanceTypeMap (map (lambda "continuous_numeric") new_features)
+							))
+							(assign_to_entities (assoc
+								!trainedFeatures (sort (values (append !trainedFeatures (indices !featureAttributes)) (true)) )
+								!trainedFeaturesContextKey
+									(call !BuildContextFeaturesKey (assoc
+										context_features (values (append !trainedFeatures (indices !featureAttributes)) (true))
+									))
+							))
+						)
+					)
+				)
+
+				;update cached data properties such as has_nulls, null ratios, marginal stats, average model case entropies, etc
+				(call !ClearCachedDataProperties)
+			)
+		)
+
+		;if derived features wasn't specified, auto-detect them
+		(if (and (= (null) derived_features) (> (size !derivedFeaturesSet) 0))
+			(seq
+				(assign (assoc derived_features (list)))
+
+				;check features vs !sourceToDerivedFeatureMap and populate derived_features accordingly
+				(map
+					(lambda (let
+						(assoc feature_name (current_value 1))
+						;if this trained feature has derived features, add all of them to the derived_features list
+						(if (contains_index !sourceToDerivedFeatureMap feature_name)
+							(accum (assoc derived_features (get !sourceToDerivedFeatureMap feature_name)))
+						)
+					))
+					features
+				)
+
+				;clear out possible duplicates out of derived_features
+				(assign (assoc derived_features (values derived_features (true))))
+			)
+		)
+
+		(if (and skip_ablation (> (size new_case_ids ) 0) )
+			;update !dataMassChangeSinceLastAnalyze to the already computed new_possible_data_mass
+			(assign_to_entities (assoc !dataMassChangeSinceLastAnalyze new_possible_data_mass ))
+		)
+
+		;auto populate derived features if necessary
+		(if (> (size derived_features) 0)
+			(call !DeriveTrainFeatures (assoc
+				features features
+				;keep and derive only those features that are not in the features list
+				derived_features (filter (lambda (not (contains_value features (current_value)))) derived_features)
+				case_ids new_case_ids
+			))
+		)
+
+		;if auto analysis is enabled, check whether this model should be re-analyzed
+		;and either analyze or return the appropriate status to client so that analysis could be started
+		(if skip_ablation
+			(if (and run_autoanalyze_check (> (size new_case_ids ) 0))
+				(call !AutoAnalyzeIfNeeded)
+			)
+		)
+
+		;update dependent feature bounds
+		(if !hasDependentFeatures
+			(let
+				(assoc
+					dependents_boundary_map (assoc)
+					dependent_values_combinations_map (assoc)
+					unique_nominals_set (list)
+				)
+
+				(if (size !continuousToNominalDependenciesMap)
+					(seq
+						(map
+							(lambda (let
+								(assoc
+									dependent_nominals (current_value 1)
+									continuous_feature (current_index 1)
+									dependents_combinations_map (assoc)
+									dependent_values_combinations (list)
+								)
+
+								(assign (assoc
+									dependents_combinations_map
+										(call !ComputeDependentBoundaries (assoc
+											nominals dependent_nominals
+											value_feature continuous_feature
+										))
+								))
+
+								(call !AccumulateDependentValuesCombinations (assoc
+									nested_value_combinations_map dependents_combinations_map
+									values_lists (list)
+									value_feature (first dependent_nominals)
+									remaining_dependent_nominals (tail dependent_nominals)
+								))
+
+								(accum (assoc
+									dependents_boundary_map (associate continuous_feature dependents_combinations_map)
+									dependent_values_combinations_map (associate continuous_feature dependent_values_combinations)
+								))
+							))
+							!continuousToNominalDependenciesMap
+						)
+
+						(assign_to_entities (assoc
+							!dependentsBoundaryMap dependents_boundary_map
+							!dependentValuesCombinationsMap dependent_values_combinations_map
+						))
+					)
+				)
+			)
+		)
+
+		;check for trained cases with out of bounds values
+		(if (size (keep !featureBoundsMap features))
+			(map
+				(lambda (let
+					(assoc
+						feature (current_index 1)
+						bounds_map (current_value 1)
+						feature_index (get feature_index_map (current_index 1))
+					)
+
+					(if (or
+							(contains_index bounds_map "min")
+							(contains_index bounds_map "max")
+						)
+						(let
+							(assoc
+								feature_values
+									(map
+										(lambda (get (current_value) feature_index) )
+										;only get values for trained cases in ablation flows
+										(if indices_to_train
+											(unzip cases indices_to_train)
+											cases
+										)
+									)
+							)
+
+							(if (contains_index bounds_map "min")
+								(if
+									(<
+										(apply "min" feature_values)
+										(or
+											;use the epoch value if this is a datetime feature
+											(get bounds_map "epoch_min_value")
+											(get bounds_map "min")
+										)
+									)
+									(accum (assoc
+										warnings
+											(associate (concat
+												"At least one case has been trained with a value less than the minimum value defined in the feature attributes for feature: "
+												feature ". Please consider editing any out-of-bounds cases or updating the bounds by updating the feature attributes."
+											))
+									))
+								)
+							)
+
+							(if (contains_index bounds_map "max")
+								(if
+									(>
+										(apply "max" feature_values)
+										(or
+											;use the epoch value if this is a datetime feature
+											(get bounds_map "epoch_max_value")
+											(get bounds_map "max")
+										)
+									)
+									(accum (assoc
+										warnings
+											(associate (concat
+												"At least one case has been trained with a value greater than the maximum value defined in the feature attributes for feature: "
+												feature ". Please consider editing any out-of-bounds cases or updating the bounds by updating the feature attributes."
+											))
+									))
+								)
+							)
+						)
+					)
+
+				))
+				(keep !featureBoundsMap features)
+			)
+		)
+
+		;if there are features that have nulls, check if they still have nulls next time we react or analyze
+		(if !inactiveFeaturesMap
+			(assign_to_entities (assoc !inactiveFeaturesNeedCaching (true) ))
+		)
 	)
 
 	;private helper method that checks if the conditions for auto-analyze are met, and calls the analyze if so
