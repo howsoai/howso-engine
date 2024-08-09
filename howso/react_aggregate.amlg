@@ -5,6 +5,7 @@
     ;
     ;parameters:
     ; context_features: optional list of features to use as contexts for computations. default is all features if unspecified.
+	; action_features: optional list of features to do computations for. default is the value of context_features
     ; num_samples: optional. Total sample size of model to use (using sampling with replacement) for all non-robust computation.
     ;               Defaults to 1000. If specified overrides sample_model_fraction.
     ; num_robust_residual_samples: optional. Total sample size of model to use (using sampling with replacement) for robust feature_mda and residual computation.
@@ -118,6 +119,8 @@
 		(assoc
 			;{type "list" values "string"}
 			context_features (list)
+			;{type "list" values "string"}
+			action_features (list)
 			;{type "boolean"}
 			use_case_weights (null)
 			;{type "string"}
@@ -191,25 +194,28 @@
 			)
         )
 
+		;action_feature must be specified if doing any influences
 		(if (and
 				(= (null) feature_influences_action_feature)
-				(not
-					(=
-						(null)
-						(get details "feature_contributions_full")
-						(get details "feature_contributions_robust")
-						(get details "feature_mda_full")
-						(get details "feature_mda_permutation_full")
-						(get details "feature_mda_robust")
-						(get details "feature_mda_permutation_robust")
+				(contains_value
+					(unzip
+						details
+						[
+							"feature_contributions_full"
+							"feature_contributions_robust"
+							"feature_mda_full"
+							"feature_mda_robust"
+							"feature_mda_permutation_full"
+							"feature_mda_permutation_robust"
+						]
 					)
+					(true)
 				)
 			)
 			(conclude
-				(call !Return (assoc errors (list "Must specify action_feature when computing feature_mda_permutation, feature_mda, or feature_contributions.")))
+				(call !Return (assoc errors (list "action_feature must be specified when computing feature_mda_permutation, feature_mda, or feature_contributions.")))
 			)
 		)
-
 
 		;sample_model_fraction is ignored for any robust computation
 		(if
@@ -273,6 +279,10 @@
 				context_features
 					(filter (lambda (not (contains_index !uniqueNominalsSet (current_value))) ) !trainedFeatures)
 			))
+		)
+
+		(if (= 0 (size action_features))
+			(assign (assoc action_features context_features ))
 		)
 
 
@@ -458,15 +468,22 @@
 		;condtioned_residuals is set to true if any form of condition stats are provided and any prediction stats are selected
 		(if (and
 				(or (get details "context_condition") (get details "action_condition") (get details "prediction_stats_features"))
-				(or (get details "prediction_stats") (get details "prediction_stat_robust"))
+				(get details "prediction_stats")
 			)
 			(assign (assoc conditioned_residuals (true) ))
 		)
 
 		;calculates and stores the full residuals unless its conditioned prediction stats
-		(if (or (get details "feature_residuals_full") (and (get details "prediction_stats") (= conditioned_residuals (false))))
+		(if (or
+				(get details "feature_residuals_full")
+				(and
+					(get details "prediction_stats")
+					(= conditioned_residuals (false))
+				)
+			)
 			(call !CalculateAndStoreFeatureResiduals (assoc
-				features context_features
+				features action_features
+				context_features context_features
 				case_ids case_ids
 				robust_residuals (false)
 				hyperparameter_feature prediction_stats_action_feature
@@ -480,7 +497,8 @@
 		;calculates and stores the robust residuals unless its conditioned prediction stats
 		(if (get details "feature_residuals_robust")
 			(call !CalculateAndStoreFeatureResiduals (assoc
-				features context_features
+				features action_features
+				context_features context_features
 				case_ids robust_residual_case_ids
 				robust_residuals (true)
 				hyperparameter_feature prediction_stats_action_feature
@@ -492,7 +510,10 @@
 		)
 
 		;doing feature_contributions
-		(if (not (= (null) (get details "feature_contributions_full") (get details "feature_contributions_robust")))
+		(if (or
+				(contains_index details "feature_contributions_full")
+				(contains_index details "feature_contributions_robust")
+			)
 			(seq
 				(assign (assoc
 					;make sure context_features doesnt have the specified action feature by filtering it out
@@ -544,7 +565,7 @@
 			)
 		)
 
-		;doing feature_mda_full
+		;doing feature_mda
 		(if (not
 				(=
 					(null)
@@ -694,6 +715,7 @@
 						;currently only supports one action feature, will support both in the future.
 						(call !CalculateConditionalPredictionStats (append
 							(assoc
+								action_features prediction_stats_action_features
 								context_features context_features
 								action_feature feature_influences_action_feature
 								weight_feature weight_feature
