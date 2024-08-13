@@ -52,7 +52,7 @@ build() {
   mkdir -p ${pkg_dir}/
 
   # Create howso artifact:
-  ${amlg_exe} deploy_howso.amlg
+  "${amlg_exe}" deploy_howso.amlg
   if [ ! -f ~/.howso/lib/dev/engine/howso.caml ]; then
     echo "No caml files built - howso engine build failed"
     exit 76
@@ -73,11 +73,32 @@ test() {
   update_version_file ${engine_version}
   cd ${src_dir}/unit_tests
   echo "Running howso-engine unit tests with amalgam version \"${amlg_version}\"..."
-  ${amlg_exe} ./ut_comprehensive_unit_test.amlg | tee /tmp/ut_results
+  "${amlg_exe}" ./ut_comprehensive_unit_test.amlg | tee /tmp/ut_results
   reset_version_file
   local ut_res=$(cat /tmp/ut_results --debug-internal-memory | grep "PASSED : Total comprehensive test execution time" | wc -l 2>&1)
   if [ $ut_res \< 1 ]; then
     cat /tmp/ut_results
+    exit 81
+  fi
+}
+
+performance_test() {
+  engine_version=${1:-'0.0.0'}
+  echo "Performance testing Howso Engine version ${engine_version}..."
+
+  arm_ver=${2:-''}
+  if [[ "$arm_ver" == "arm64_8a" ]]; then
+    amlg_exe="${src_dir}/target/bin/amalgam-st"
+  fi
+  check_amalgam_exe
+
+  update_version_file ${engine_version}
+  echo "Running howso-engine performance tests with amalgam version \"${amlg_version}\"..."
+  "${amlg_exe}" ./run_performance_tests.amlg | tee /tmp/pt_results
+  reset_version_file
+  local pt_res=$(cat /tmp/pt_results | grep "PASSED : Total comprehensive test execution time" | wc -l)
+  if [ "$pt_res" \< 1 ]; then
+    cat /tmp/pt_results
     exit 81
   fi
 }
@@ -138,11 +159,11 @@ reset_version_file() {
 check_amalgam_exe() {
   # Check if the amalgam binary exists. If not, warn user to download
   # a proper version and locate it at howso-engine/target/bin/amalgam
-  if [[ ! -x $amlg_exe ]]; then
+  if [[ ! -x "$amlg_exe" ]]; then
     echo "${amlg_exe} does not exist. Download a proper amalgam binary."
     exit 146
   fi
-  amlg_version=$($amlg_exe --version)
+  amlg_version=$("$amlg_exe" --version)
 }
 
 package() {
