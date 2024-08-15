@@ -119,6 +119,71 @@
 			(accum (assoc hyperparam_map (assoc "allFeatureResidualsCached" (false))))
 		)
 
+		;update HPs with new deviations if they used deviations
+		;TODO: should this have a features check? maybe within CalculateAndStore we should always CalculateAndStore.. duh
+		(if (size (get hyperparam_map "featureDeviations"))
+			(declare
+				(assoc
+					features_with_nulls
+						(filter
+							(lambda
+								(> (compute_on_contained_entities (list (query_equals (current_value 1) (null)) (query_count) )) 1)
+							)
+							features
+						)
+				)
+				;compute null deviations and update hyperparam_map with them
+				(if (size features_with_nulls)
+					(let
+						(assoc null_uncertainties_map (call !ComputeAndCacheNullResiduals) )
+
+						(assign
+							"hyperparam_map"
+							(list "featureDeviations")
+							(map
+								(lambda
+									;update deviation value with null uncertainies
+									(if (contains_index null_uncertainties_map (current_index))
+										(if (~ (list) (current_value))
+											;if the deviation is a number, wrap it in a triple
+											(if (or (~ 0 (first (current_value))) (= (null) (first (current_value))) )
+												(append (first (current_value)) (get null_uncertainties_map (current_index)) )
+
+												;else the deviation must be a SDM, wrap it in a list so that the output is a triple
+												;in the format of [sdm, null-value, null-null] instead of appending null uncertaintes to the SDM
+												(append
+													(list (first (current_value 1)))
+													(get null_uncertainties_map (current_index))
+												)
+											)
+											(append (list (current_value 1)) (get null_uncertainties_map (current_index)) )
+										)
+
+										;leave deviation value as-is
+										(current_value)
+									)
+								)
+								(if (= 0 (size (get hyperparam_map "featureDeviations")) )
+									(zip (indices null_uncertainties_map))
+									(get hyperparam_map "featureDeviations")
+								)
+							)
+						)
+					)
+
+					(assign "hyperparam_map" ["featureDeviations"] (get output_map "residual_map"))
+				)
+
+				(assign
+					"hyperparam_map"
+					(list "featureOrdinalDeviations")
+					(get output_map "ordinal_residuals_map")
+				)
+			)
+		)
+
+		(assign "hyperparam_map" ["featureResiduals"] (get output_map "residual_map"))
+
 		;only update !hyperparameterMetadataMap if they have no deviations cached
 		;or the type of residuals computed matches the hyperparameters
 		;or there have been new feature deviations computed that aren't in the hyperparameters
@@ -898,43 +963,24 @@
 				)
 		))
 
-		(declare (assoc
-			prediction_stats
-				(assoc
-					".robust" (= (true) robust_residuals)
-					".hyperparam_path"
-						(if (and use_case_weights (= param_path (list ".default")) )
-							;intentionally storing which case weight feature is used for retrieval
-							(list ".default" (null) (null) weight_feature)
+		(assoc
+			".robust" (= (true) robust_residuals)
+			".hyperparam_path"
+				(if (and use_case_weights (= param_path (list ".default")) )
+					;intentionally storing which case weight feature is used for retrieval
+					(list ".default" (null) (null) weight_feature)
 
-							param_path
-						)
-					"accuracy" accuracy_map
-					"precision" precision_map
-					"recall" recall_map
-					"mcc" mcc_map
-					"r2" r2_map
-					"rmse" rmse_map
-					"spearman_coeff" spearman_coeff_map
-					"confusion_matrix" confusion_matrix_map
+					param_path
 				)
-		))
-
-		(if store_values
-			(seq
-				(accum_to_entities (assoc
-					!featurePredictionStatsMap
-						(associate
-							(apply "concat" (append (if robust_residuals "robust" "full") (remove param_path 1) ))
-							prediction_stats
-						)
-				))
-				(call !UpdateHyperparametersWithResiduals)
-			)
+			"accuracy" accuracy_map
+			"precision" precision_map
+			"recall" recall_map
+			"mcc" mcc_map
+			"r2" r2_map
+			"rmse" rmse_map
+			"spearman_coeff" spearman_coeff_map
+			"confusion_matrix" confusion_matrix_map
 		)
-
-		;return values
-		prediction_stats
 	)
 
 	;helper method for CalculateFeatureResiduals to average out the list(s) of residual values into individual value(s)
@@ -1036,58 +1082,6 @@
 						)
 					)
 			))
-		)
-
-		;when using custom hyperparameters for all features, update  hyperparam_map with the newly calculated values for output
-		#!UpdateHyperparametersWithResiduals
-		(if (and (!= (null) custom_hyperparam_map) (= (null) target_residual_feature) )
-			(seq
-				;compute null deviations and update hyperparam_map with them
-				(if (size features_with_nulls)
-					(let
-						(assoc null_uncertainties_map (call !ComputeAndCacheNullResiduals) )
-
-						(assign
-							"hyperparam_map"
-							(list "featureDeviations")
-							(map
-								(lambda
-									;update deviation value with null uncertainies
-									(if (contains_index null_uncertainties_map (current_index))
-										(if (~ (list) (current_value))
-											;if the deviation is a number, wrap it in a triple
-											(if (or (~ 0 (first (current_value))) (= (null) (first (current_value))) )
-												(append (first (current_value)) (get null_uncertainties_map (current_index)) )
-
-												;else the deviation must be a SDM, wrap it in a list so that the output is a triple
-												;in the format of [sdm, null-value, null-null] instead of appending null uncertaintes to the SDM
-												(append
-													(list (first (current_value 1)))
-													(get null_uncertainties_map (current_index))
-												)
-											)
-											(append (list (current_value 1)) (get null_uncertainties_map (current_index)) )
-										)
-
-										;leave deviation value as-is
-										(current_value)
-									)
-								)
-								(if (= 0 (size (get hyperparam_map "featureDeviations")) )
-									(zip (indices null_uncertainties_map))
-									(get hyperparam_map "featureDeviations")
-								)
-							)
-						)
-					)
-				)
-
-				(assign
-					"hyperparam_map"
-					(list "featureOrdinalDeviations")
-					ordinal_residuals_map
-				)
-			)
 		)
 
 		;return null prediction_stats
