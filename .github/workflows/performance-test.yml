@@ -1,0 +1,88 @@
+name: Performance Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: |
+          JSON payload containing extra info used by workflow.
+
+          For builds that have dependencies, key values of 'repo' => 'build-id' may
+          be used to define version. If blank or not supplied, latest tagged release
+          build will be used. Build ID may also be a release tag version.
+
+          Example:
+          {
+            "amalgam": "6191984493",
+            "howso-engine": "68.1.0"
+          }
+        required: false
+        type: string
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  amalgam-version:
+    uses: "./.github/workflows/get-dependency-details.yml"
+    secrets: inherit
+    with:
+      owner: "howsoai"
+      repo: "amalgam"
+      payload: "${{ inputs.payload }}"
+
+  howso-engine-version:
+    uses: "./.github/workflows/get-dependency-details.yml"
+    secrets: inherit
+    with:
+      owner: "howsoai"
+      repo: "howso-engine"
+      payload: "${{ inputs.payload }}"
+        
+  performance-test-linux-amd64:
+    needs: [amalgam-version, howso-engine-version]
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Collect Workflow Telemetry
+      uses: catchpoint/workflow-telemetry-action@v2
+      with:
+        comment_on_pr: off
+        proc_trace_chart_show: off
+        proc_trace_table_show: off
+
+    - uses: actions/checkout@v4
+
+    - name: Download Amalgam
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh ${{ needs.amalgam-version.outputs.run-type }} download -D target -R "howsoai/amalgam" -p "*linux-amd64*" "${{ needs.amalgam-version.outputs.run-id }}"
+        # Needed because release/non-release downloads are different structure
+        cd target && if [ ! -f amalgam-*.tar.gz ]; then mv */amalgam-*.tar.gz ./; fi && tar -xvzf amalgam-*.tar.gz
+        ln -s . target
+
+    - name: Download Howso Engine
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh ${{ needs.howso-engine-version.outputs.run-type }} download -D target -R "howsoai/howso-engine" "${{ needs.howso-engine-version.outputs.run-id }}"
+        # Needed because release/non-release downloads are different structure
+        cd target && if [ ! -f howso-engine-*.tar.gz ]; then mv */howso-engine-*.tar.gz ./; fi && tar -xvzf howso-engine-*.tar.gz
+
+    - name: Set up performance test environment
+      run: |
+        cp run_performance_tests.amlg build.sh target/
+        cp -a performance_tests target/
+        cd target && sed -i.bak -e s@howso.amlg@howso.caml@ performance_tests/*.amlg
+
+    - name: Run performance test
+      run: |
+        sudo locale-gen es_ES.UTF-8
+        cd target
+        ./bin/amalgam-mt --debug-internal-memory ./run_performance_tests.amlg | tee /tmp/pt_results
+        if ! grep -q 'PASSED : Total test execution time' /tmp/pt_results; then
+          cat /tmp/pt_results
+          exit 81
+        fi
