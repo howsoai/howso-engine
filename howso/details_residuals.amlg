@@ -113,12 +113,6 @@
 					(if (get details "case_feature_residuals_robust")
 						(accum (assoc output (assoc "case_feature_residuals_robust" (zip features 0)) ))
 					)
-					(if (get details "global_case_feature_residual_convictions_full")
-						(accum (assoc output (assoc "global_case_feature_residual_convictions_full" (zip features 1)) ))
-					)
-					(if (get details "global_case_feature_residual_convictions_robust")
-						(accum (assoc output (assoc "global_case_feature_residual_convictions_robust" (zip features 1)) ))
-					)
 					(if (get details "local_case_feature_residual_convictions_full")
 						(accum (assoc output (assoc "local_case_feature_residual_convictions_full" (zip features 1)) ))
 					)
@@ -146,14 +140,10 @@
 		(if
 			(or
 				(get details "case_feature_residuals_robust")
-				(get details "global_case_feature_residual_convictions_robust")
 				(get details "local_case_feature_residual_convictions_robust")
 			)
 			(seq
 				(call !CalculateCaseResiduals (assoc robust_residuals (true)))
-				(if (get details "global_case_feature_residual_convictions_robust")
-					(call !CalculateGlobalCaseFeatureResidualConvictions (assoc robust_residuals (true)))
-				)
 				(if (get details "local_case_feature_residual_convictions_robust")
 					(call !CalculateLocalCaseFeatureResidualConvictions  (assoc robust_residuals (true)))
 				)
@@ -163,14 +153,10 @@
 		(if
 			(or
 				(get details "case_feature_residuals_full")
-				(get details "global_case_feature_residual_convictions_full")
 				(get details "local_case_feature_residual_convictions_full")
 			)
 			(seq
 				(call !CalculateCaseResiduals (assoc robust_residuals (false)))
-				(if (get details "global_case_feature_residual_convictions_full")
-					(call !CalculateGlobalCaseFeatureResidualConvictions (assoc robust_residuals (false)))
-				)
 				(if (get details "local_case_feature_residual_convictions_full")
 					(call !CalculateLocalCaseFeatureResidualConvictions (assoc robust_residuals (false)))
 				)
@@ -451,115 +437,6 @@
 				)
 			))
 		)
-	)
-
-	#!CalculateGlobalCaseFeatureResidualConvictions
-	(declare
-		(assoc
-			global_feature_residuals (null)
-			;set param_path to pull global residuals matching robust_residuals flag for the given hyperparameters
-			param_path
-				(if robust_residuals
-					;concatenate the appropriate key for the cached residuals set
-					(apply "concat" (append "robust" (remove (get hyperparam_map "paramPath") 1) ) )
-					(apply "concat" (append "full" (remove (get hyperparam_map "paramPath") 1) ) )
-				)
-			global_convictions_map (assoc)
-		)
-
-		;pull the appropriate robust or standard residuals
-		(assign (assoc global_feature_residuals (get !residualsMap param_path)))
-
-		;if global_feature_residuals is empty, we call react_aggregate to cache the required residuals
-		(if (= 0 (size global_feature_residuals))
-			(let
-				(assoc hp_param_path (get hyperparam_map "paramPath"))
-				(call !CalculateAndStoreFeatureResiduals (assoc
-					features action_features
-					context_features context_features
-					custom_hyperparam_map hyperparam_map
-					robust_residuals robust_residuals
-					use_case_weights (not (contains_value [".none" (null)] (get hp_param_path 3)))
-					weight_feature
-						(if (contains_value [".none" (null)] (get hp_param_path 3))
-							".case_weight"
-							(get hp_param_path 3)
-						)
-				))
-				(assign (assoc global_feature_residuals (get !residualsMap param_path)))
-			)
-		)
-
-		;compute the global conviction
-		(assign (assoc
-			global_convictions_map
-				(map
-					(lambda
-						;current_index is the feature
-						;current_value is a list of residuals [global, case]
-
-						;conviction is: model / case residual, prevent divide by 0 by using the minimum residual instead if necesssary
-						; conviction is expected surprisal E(I) divided by observed surprisal, I
-						; C = E(I) / I
-						; The expected surprisal E(I) is the model residual divided by the model residual: MR / MR = 1.0
-						; The observed surprisal I is the observed residual divded by the model residual: OR / MR
-						; So, E(I) / I = (MR / MR) / (OR / MR) = MR / OR
-						; In this way, we can directly divide the model (global or local) residual by the observed residual to get conviction
-						(if (= 0 (last (current_value)) )
-							(/ (first (current_value)) (get !cachedFeatureMinResidualMap (current_index)))
-
-							;prevent nan from divide by null, output null as-is when nulls are allowed
-							(or (= (null) (last (current_value))) (= (null) (first (current_value))) )
-							(seq
-								(if (= (null) (first (current_value)))
-									(accum (assoc
-										warnings (associate (concat "Global residual was not computed for feature: " (current_index 2)) )
-									))
-								)
-								(null)
-							)
-
-							(/ (first (current_value)) (last (current_value)))
-						)
-					)
-					;remove built-in keys from residuals map, leaving only feature-residual values
-					(keep global_feature_residuals (indices case_residuals_map))
-					case_residuals_map
-				)
-		))
-
-		;can only scale global convictions if both convictions and ratios maps are defined
-		; convictions are multiplied by the null_conviction_ratios, which are (num_cases / num_not_null_cases)
-		; this can be thought of as dividing the surprisal of the observed feature value by the proportion of
-		; non-null values for the given feature
-		; so, as the amount of null_values in the model increases, the observed surprisal of a null decreases
-		(if (and global_null_conviction_ratios_map global_convictions_map)
-			(assign (assoc
-				global_convictions_map
-					(map
-						(lambda
-							;current_value is a list of [conviction, ratio], if ratio is null use 1 instead
-							(* (first (current_value)) (or (last (current_value)) 1))
-						)
-						global_convictions_map
-						global_null_conviction_ratios_map
-					)
-			))
-		)
-
-		(accum (assoc
-			output
-				(if robust_residuals
-					(assoc
-						"global_case_feature_residual_convictions_robust"
-						(if global_convictions_map (append global_convictions_map inactive_features_zeros_map))
-					)
-					(assoc
-						"global_case_feature_residual_convictions_full"
-						(if global_convictions_map (append global_convictions_map inactive_features_zeros_map))
-					)
-				)
-		))
 	)
 
 	#!CalculateLocalCaseFeatureResidualConvictions
