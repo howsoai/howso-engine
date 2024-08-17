@@ -57,13 +57,13 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
 
     (call_entity "howso" "set_feature_attributes" (assoc
         trainee "iris_trainee"
-        features (assoc "species" (assoc "type" "nominal"))
+        feature_attributes (assoc "species" (assoc "type" "nominal"))
     ))
 
     (call_entity "howso" "train" (assoc
         trainee "iris_trainee"
         features (list "sepal_length" "sepal_width" "petal_length" "petal_width" "species")
-        input_cases
+        cases
             (list
                 (list 6.4 2.8 5.6 2.2 "virginica")
                 (list 5.0 2.3 3.3 1.0 "versicolor")
@@ -80,7 +80,7 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
 
     (declare (assoc
         reaction
-            (call_entity "howso" "react" (assoc
+            (call_entity "howso" "single_react" (assoc
                 trainee "iris_trainee"
                 context_features (list "sepal_length" "sepal_width" "petal_length" "petal_width")
                 context_values (list 5.3 2.5 4.1 1.3)
