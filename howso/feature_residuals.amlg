@@ -18,6 +18,7 @@
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
 			confusion_matrix_min_count 15
+			feature_with_nulls (null)
 		)
 
 		(if (= (null) context_features)
@@ -119,69 +120,67 @@
 			(accum (assoc hyperparam_map (assoc "allFeatureResidualsCached" (false))))
 		)
 
-		;update HPs with new deviations if they used deviations
-		;TODO: should this have a features check? maybe within CalculateAndStore we should always CalculateAndStore.. duh
-		(if (size (get hyperparam_map "featureDeviations"))
-			(declare
-				(assoc
-					features_with_nulls
-						(filter
+		(let
+			(assoc
+				features_with_nulls
+					(filter
+						;keep only features that have nulls
+						(lambda (get (current_value) "has_nulls") )
+						;ignore all inactive features (where all values are nulls)
+						(remove !featureNullRatiosMap (indices !inactiveFeaturesMap))
+					)
+			)
+			;compute null deviations and update hyperparam_map with them
+			(if (size features_with_nulls)
+				(let
+					(assoc null_uncertainties_map (call !ComputeAndCacheNullResiduals) )
+
+					(assign
+						"hyperparam_map"
+						(list "featureDeviations")
+						(map
 							(lambda
-								(> (compute_on_contained_entities (list (query_equals (current_value 1) (null)) (query_count) )) 1)
-							)
-							features
-						)
-				)
-				;compute null deviations and update hyperparam_map with them
-				(if (size features_with_nulls)
-					(let
-						(assoc null_uncertainties_map (call !ComputeAndCacheNullResiduals) )
+								;update deviation value with null uncertainies
+								(if (contains_index null_uncertainties_map (current_index))
+									(if (~ (list) (current_value))
+										;if the deviation is a number, wrap it in a triple
+										(if (or (~ 0 (first (current_value))) (= (null) (first (current_value))) )
+											(append (first (current_value)) (get null_uncertainties_map (current_index)) )
 
-						(assign
-							"hyperparam_map"
-							(list "featureDeviations")
-							(map
-								(lambda
-									;update deviation value with null uncertainies
-									(if (contains_index null_uncertainties_map (current_index))
-										(if (~ (list) (current_value))
-											;if the deviation is a number, wrap it in a triple
-											(if (or (~ 0 (first (current_value))) (= (null) (first (current_value))) )
-												(append (first (current_value)) (get null_uncertainties_map (current_index)) )
-
-												;else the deviation must be a SDM, wrap it in a list so that the output is a triple
-												;in the format of [sdm, null-value, null-null] instead of appending null uncertaintes to the SDM
-												(append
-													(list (first (current_value 1)))
-													(get null_uncertainties_map (current_index))
-												)
+											;else the deviation must be a SDM, wrap it in a list so that the output is a triple
+											;in the format of [sdm, null-value, null-null] instead of appending null uncertaintes to the SDM
+											(append
+												(list (first (current_value 1)))
+												(get null_uncertainties_map (current_index))
 											)
-											(append (list (current_value 1)) (get null_uncertainties_map (current_index)) )
 										)
-
-										;leave deviation value as-is
-										(current_value)
+										(append (list (current_value 1)) (get null_uncertainties_map (current_index)) )
 									)
+
+									;leave deviation value as-is
+									(current_value)
 								)
-								(if (= 0 (size (get hyperparam_map "featureDeviations")) )
-									(zip (indices null_uncertainties_map))
-									(get hyperparam_map "featureDeviations")
-								)
+							)
+							(if (= 0 (size (get hyperparam_map "featureDeviations")) )
+								(zip (indices null_uncertainties_map))
+								(get hyperparam_map "featureDeviations")
 							)
 						)
 					)
-
-					(assign "hyperparam_map" ["featureDeviations"] (get output_map "residual_map"))
 				)
 
-				(assign
-					"hyperparam_map"
-					(list "featureOrdinalDeviations")
-					(get output_map "ordinal_residuals_map")
-				)
+				(assign "hyperparam_map" ["featureDeviations"] (get output_map "residual_map"))
+			)
+
+			(assign
+				"hyperparam_map"
+				(list "featureOrdinalDeviations")
+				(get output_map "ordinal_residuals_map")
 			)
 		)
 
+		;return the output map with capped residual values
+		(assign (assoc output_map (call !ExpandResidualValuesToUncertainty  (assoc feature_residuals_map output_map)) ))
 		(assign "hyperparam_map" ["featureResiduals"] (get output_map "residual_map"))
 
 		;only update !hyperparameterMetadataMap if they have no deviations cached
@@ -202,9 +201,6 @@
 			)
 		)
 		(accum_to_entities (assoc !revision 1))
-
-		;return the output map with capped residual values
-		(call !ExpandResidualValuesToUncertainty  (assoc feature_residuals_map output_map))
 	)
 
 	;returns cached feature null accuracies in the format of assoc feature -> null_accuracy
