@@ -127,42 +127,42 @@
 	;Edit feature values for the specified cases.
 	;Cases are specified by either case_indices or by the condition. If neither is provided, edits all cases.
 	;returns null if invalid features specified or an assoc with "count"
-	;
-	;parameters:
-	; features: list of names of feature to edit
-	; feature_values: list of values corresponding to features
-	; case_indices: optional, list of pair (list) of session id and index, where index is the original 0-based session_training_index of the case as
-	; 		it was trained. If specified, ignores condition and condition_session
-	; condition_session: optional, if specified ignores condition and operates on cases for the specified session id
-	; condition: assoc of feature->value(s)
-	;		no value = must have feature
-	;   	- for continuous or numeric ordinal features:
-	;			one value = must equal exactly the value or be close to it for fuzzy match
-	;			two values = inclusive between
-	;   	- for nominal or string ordinal features:
-	;			n values = must match any of these values exactly
-	; num_cases: optional, limit on the number of cases to edit; If set to zero there will be no limit.
-	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
-	; precision: optional string,  default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
-	; session: the session id when this call !is being made
 	#edit_cases
 	(declare
 		(assoc
 			;{type "list" values "string"}
+			;list of names of feature to edit
+			; feature_values: 
 			features (list)
 			;{type "list"}
+			;list of values corresponding to features
 			feature_values (list)
 			;{ref "CaseIndices"}
+			;optional, list of pair (list) of session id and index, where index is the original 0-based session_training_index of the case as
+			;	it was trained. If specified, ignores condition and condition_session
 			case_indices (list)
 			;{ref "Condition"}
+			;assoc of feature->value(s)
+			;		no value = must have feature
+			;   	- for continuous or numeric ordinal features:
+			;			one value = must equal exactly the value or be close to it for fuzzy match
+			;			two values = inclusive between
+			;   	- for nominal or string ordinal features:
+			;			n values = must match any of these values exactly
 			condition (assoc)
 			;{type "string"}
+			;optional, if specified ignores condition and operates on cases for the specified session id
 			condition_session (null)
 			;{type "number" min 0}
+			;optional, limit on the number of cases to edit; If set to zero there will be no limit.
+			;	If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
 			num_cases (null)
 			;{type "string" enum ["exact" "similar"]}
+			;optional string,  default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
+			; session: 
 			precision "exact"
 			;{type "string"}
+			;the session id when this call !is being made
 			session "none"
 		)
 		(call !ValidateParameters)
@@ -423,7 +423,7 @@
 	;parameters:
 	; features: feature set to use for finding neighbors
 	; cases: list of lists of values (non model-stored cases) for whose neighbors to accumulate weights for.
-	; accumulate_weight_feature : name of feature into which to accumulate neighbors' influences as weight.
+	; accumulate_weight_feature: name of feature into which to accumulate neighbors' influences as weight.
 	#!AccumulateCaseInfluenceWeights
 	(declare
 		(assoc
@@ -440,90 +440,151 @@
 					mode "robust"
 					weight_feature ".none"
 				))
-			;default value of 1 for the accumulate_weight_feature
-			new_weight_label_and_value (zip_labels (list accumulate_weight_feature) (list 1))
 			weight_feature_index
 				;will retrieve the index of weight feature or (null)
 				(if (contains_value features accumulate_weight_feature)
 					(get (zip features (indices features)) accumulate_weight_feature)
 				)
 			context_features (filter (lambda (!= (current_value) accumulate_weight_feature)) features)
+			num_cases (size cases)
+			batch_size 0
+			case_index 0
+			batch_of_cases []
+			closest_cases_maps {}
+			entropy_weights []
+		))
+		(declare (assoc k_param (get hyperparam_map "k") ))
+		(declare (assoc
+			;cache the maximum entropy possibe given k similar cases, used to compute the entropy ratio for each accumulated case
+			max_influence_entropy (entropy (range (/ 1 k_param) 1 k_param 1))
+			;smallest possible amount to be distributed
+			smallest_case_weight  (/ 1 (call !GetNumTrainingCases))
 		))
 
-		(map
-			(lambda (let
-				(assoc
-					case_value_map (zip features (current_value 1))
-					closest_cases_map (assoc)
-					total_weight 0
-					case_weight
-						(if (!= (null) weight_feature_index)
-							(get (current_value 1) weight_feature_index)
-							;assume weight of 1 if weight feature values are not given
-							1
-						)
-				)
+		;accumulate all cases in batches of !ablatedCasesDistributionBatchSize
+		(while (< case_index num_cases)
+			(assign (assoc batch_size (min !ablatedCasesDistributionBatchSize (- num_cases case_index)) ))
+			(assign (assoc
+				batch_of_cases (unzip cases (range case_index (+ case_index batch_size -1)))
+			))
 
-				(assign (assoc
-					;map of case_id -> weight
-					closest_cases_map
-						(compute_on_contained_entities (list
-							(query_nearest_generalized_distance
-								(get hyperparam_map "k")
-								context_features
-								(unzip case_value_map context_features)
-								(get hyperparam_map "featureWeights")
-								!queryDistanceTypeMap
-								(get hyperparam_map "featureDomainAttributes")
-								(get hyperparam_map "featureDeviations")
-								(get hyperparam_map "p")
-								(get hyperparam_map "dt")
-								(if (!= weight_feature ".none") weight_feature (null))
-								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-								"fixed rand seed"
-								(null) ;radius
-								!numericalPrecision
+			;store all the local models for the cases in one pass
+			(assign (assoc
+				closest_cases_maps (call !ComputeClosestCasesMapsForAccumulation)
+			))
+
+			;distribute the weights by writing to each of the local models' cases while also computing the entropy ratio for each case
+			(assign (assoc
+				entropy_weights
+					(map
+						(lambda (let
+							(assoc
+								;closest_cases_map (current_value 1)
+								case_weight
+									(if (!= (null) weight_feature_index)
+										(get batch_of_cases [ (current_index 1) weight_feature_index ] )
+										;assume weight of 1 if weight feature values are not given
+										1
+									)
+								total_weight (apply "+" (values (current_value 1)))
+							)
+
+							(declare (assoc
+								influence_map
+									;iterate over all the closest cases and accumulate the normalized weight to each one
+									(map
+										(lambda (seq
+
+											;if accumulate_weight_feature label doesn't exist in this case, add it with a weight `1`
+											(if (not (contains_label (current_index) accumulate_weight_feature))
+												(accum_entity_roots (current_index)
+													(zip_labels
+														(list accumulate_weight_feature)
+														(list (+ 1 (* (/ (current_value 1) total_weight) case_weight)) )
+													)
+												)
+
+												;else label exists, accumulate to it
+												(accum_to_entities
+													(current_index)
+													(associate
+														accumulate_weight_feature
+															(* (/ (current_value 1) total_weight) case_weight)
+													)
+												)
+											)
+
+											;normalize influence
+											(/ (current_value) total_weight)
+										))
+										;closest_cases_map
+										(current_value 1)
+									)
+							))
+
+							;output 1 - ratio of: influential cases entropy / max influential entropy
+							;that way if every case is evenly distributed, it adds zero practical mass (smallest_case_weight) to the model
+							(max
+								(- 1
+									(/
+										(entropy (values influence_map))
+										max_influence_entropy
+									)
+								)
+								;prevent adding zero mass by ensuring at least some amount is added
+								smallest_case_weight
 							)
 						))
-				))
-
-				;if there are perfect matches (value is infinite), keep only those and set their weight to 1
-				(if (contains_value (values closest_cases_map) .infinity)
-					(assign (assoc
-						closest_cases_map
-							;keep only perfect matches
-							(map 1 (filter (lambda (= (current_value) .infinity)) closest_cases_map) )
-					))
-				)
-
-				(assign (assoc total_weight (apply "+" (values closest_cases_map))))
-
-				;iterate over all the closest cases and accumulate the normalized weight to each one
-				(map
-					(lambda (seq
-						;if accumulate_weight_feature label doesn't exist in this case, add it with a weight `1`
-						(if (not (contains_label (current_index) accumulate_weight_feature))
-							(accum_entity_roots (current_index) new_weight_label_and_value)
-						)
-
-						(accum_to_entities
-							(current_index)
-							(associate
-								accumulate_weight_feature
-									(* (/ (current_value 1) total_weight) case_weight)
-							)
-						)
-					))
-					closest_cases_map
-				)
+						closest_cases_maps
+					)
 			))
-			cases
-		)
 
-		;also add the weight accumulated to each case to !dataMassChangeSinceLastAnalyze to ensure that cases trained as
-		; only weights (whether through auto-ablation or otherwise) contribute to the progress towards the next auto-analyze,
-		; if enabled.
-		(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze (size cases)))
+			;add the weight of all the entropy ratios accumulated by each case to !dataMassChangeSinceLastAnalyze to ensure that cases trained as
+			;weights (whether through auto-ablation or otherwise) contribute to the progress towards the next auto-analyze, if enabled.
+			(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze (apply "+" entropy_weights) ))
+
+			(accum (assoc case_index batch_size))
+		)
+	)
+
+	;helper method for !AccumulateCaseInfluenceWeights to compute all the local models for the specified batch_of_cases
+	#!ComputeClosestCasesMapsForAccumulation
+	||(map
+		(lambda (let
+			(assoc
+				;map of case_id -> weight
+				closest_cases_map
+					(compute_on_contained_entities (list
+						(query_nearest_generalized_distance
+							(replace k_param)
+							(replace context_features)
+							(replace (unzip (zip features (current_value 2)) context_features))
+							(replace (get hyperparam_map "featureWeights"))
+							(replace !queryDistanceTypeMap)
+							(replace (get hyperparam_map "featureDomainAttributes"))
+							(replace (get hyperparam_map "featureDeviations"))
+							(replace (get hyperparam_map "p"))
+							(replace (get hyperparam_map "dt"))
+							(if (!= weight_feature ".none") (replace weight_feature) (null))
+							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+							"fixed rand seed"
+							(null) ;radius
+							(replace !numericalPrecision)
+						)
+					))
+			)
+
+			;if there are perfect matches (value is infinite), keep only those and set their weight to 1
+			(if (contains_value (values closest_cases_map) .infinity)
+				;keep only perfect matches
+				(map 1 (filter (lambda (= (current_value) .infinity)) closest_cases_map) )
+
+				;else return map as-is
+				closest_cases_map
+			)
+		))
+		;list of list of values
+		batch_of_cases
 	)
 
 	;Iterate over the specified model cases, pull their weight and distribute it to their corresponding neighbors into the neighbors' distribute_weight_feature
@@ -575,20 +636,20 @@
 						(compute_on_contained_entities (list
 							(query_not_in_entity_list (list case))
 							(query_nearest_generalized_distance
-								(get hyperparam_map "k")
-								features
+								(replace (get hyperparam_map "k"))
+								(replace features)
 								(retrieve_from_entity case features)
-								(get hyperparam_map "featureWeights")
-								!queryDistanceTypeMap
-								(get hyperparam_map "featureDomainAttributes")
-								(get hyperparam_map "featureDeviations")
-								(get hyperparam_map "p")
-								(get hyperparam_map "dt")
-								distribute_weight_feature
+								(replace (get hyperparam_map "featureWeights"))
+								(replace !queryDistanceTypeMap)
+								(replace (get hyperparam_map "featureDomainAttributes"))
+								(replace (get hyperparam_map "featureDeviations"))
+								(replace (get hyperparam_map "p"))
+								(replace (get hyperparam_map "dt"))
+								(replace distribute_weight_feature)
 								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
 								"fixed rand seed"
 								(null) ;radius
-								!numericalPrecision
+								(replace !numericalPrecision)
 							)
 						))
 				))

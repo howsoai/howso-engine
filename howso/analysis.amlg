@@ -15,55 +15,44 @@
 
 
 	;Analyzes the data to compute the appropriate statistics, uncertainties, and select parameters as appropriate.
-	;parameters:
-	; context_features: list of context features to analyze for
-	; action_features: list of action features to analyze for. applicable only to 'single_targeted' mode
-	; k_folds: optional, (defaults to 1) number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
-	; k_folds_by_indices : optional flag, default is false. if set to true will do k_folds ordered by session id indices, i.e., it'll hold out the
-	;			first 1/6th of the trained cases, then the next 1/6th, etc. in the order they were trained.
-	;			NOTE: if the dataset has been edited or has multiple trained sessions, the holdouts may be imbalanced due to multiple cases having
-	;			the same session id index or missing session indices, therefore this flag should only be used internally for validation
-	; bypass_hyperparameter_analysis : optional
-	; bypass_calculate_feature_residuals : optional
-	; bypass_calculate_feature_weights : optional
-	; use_deviations: optional, default is null, will auto-determine whether to use deviations for LK metric in queries. When true forces the use
-	;			of deviations , when false will not use deviations.
-	; num_samples: used in calculating feature residuals
-	; k_values: optional list used in hyperparameter search
-	; p_values: optional list used in hyperparameter search
-	; dt_values: optional list used in hyperparameter search
-	; targeted_model: enumeration, default is "single_targeted"
-	;   "single_targeted" = analyze hyperparameters for the specified action_features
-	;   "omni_targeted" = analyze hyperparameters for each action feature, using all other features as context_features. if action_features aren't specified, uses all context_features.
-	;   "targetless" = analyze hyperparameters for all context features as possible action features, ignores action_features parameter
-	; num_analysis_samples : optional. number of cases to sample during analysis. only applies for k_folds = 1
-	; analysis_sub_model_size: optional. number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
-	; use_case_weights: optional, default is null. when true will scale influence weights by each case's weight_feature weight. if use_case_weights isn't specified, it will
-	;				   be true if auto ablation is enabled and false otherwise
-	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
-	; returns success when completed
 	#analyze
 	(declare
 		(assoc
 			;{type "list" values "string"}
+			;list of context features to analyze for
 			context_features (list)
 			;{type "list" values "string"}
+			;list of action features to analyze for. applicable only to 'single_targeted' mode
 			action_features (list)
 			;{type "number"}
+			;optional, (defaults to 1) number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
 			k_folds 1
 			;{type "boolean"}
+			optional flag, default is false. if set to true will do k_folds ordered by session id indices, i.e., it'll hold out the
+			;	first 1/6th of the trained cases, then the next 1/6th, etc. in the order they were trained.
+			;	NOTE: if the dataset has been edited or has multiple trained sessions, the holdouts may be imbalanced due to multiple cases having
+			;	the same session id index or missing session indices, therefore this flag should only be used internally for validation
+			;{type "boolean"}
+			;optional
 			bypass_hyperparameter_analysis (null)
 			;{type "boolean"}
+			;optional
 			bypass_calculate_feature_residuals (null)
 			;{type "boolean"}
+			;optional
 			bypass_calculate_feature_weights (null)
 			;{type "boolean"}
+			;optional, default is null, will auto-determine whether to use deviations for LK metric in queries. When true forces the use
+			;	of deviations , when false will not use deviations.
 			use_deviations (null)
 			;{type "number"}
 			num_samples (null)
 			;{type "number"}
+			;optional. number of cases to sample during analysis. only applies for k_folds = 1
+			; analysis_sub_model_size: 
 			num_analysis_samples (null)
 			;{type "number"}
+			;optional. number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
 			analysis_sub_model_size (null)
 			;{type "list" values "number"}
 			k_values (null)
@@ -72,10 +61,17 @@
 			;{type "list" values "number"}
 			dt_values (null)
 			;{type "string" enum ["single_targeted" "omni_targeted" "targetless"]}
+			;enumeration, default is "single_targeted"
+			;   "single_targeted" = analyze hyperparameters for the specified action_features
+			;   "omni_targeted" = analyze hyperparameters for each action feature, using all other features as context_features. if action_features aren't specified, uses all context_features.
+			;   "targetless" = analyze hyperparameters for all context features as possible action features, ignores action_features parameter
 			targeted_model "single_targeted"
 			;{type "string"}
+			;optional, default '.case_weight'.  name of feature whose values to use as case weights
 			weight_feature ".case_weight"
 			;{type "boolean"}
+			;optional, default is null. when true will scale influence weights by each case's weight_feature weight. if use_case_weights isn't specified, it will
+			;	be true if auto ablation is enabled and false otherwise
 			use_case_weights (null)
 			;{type "boolean"}
 			; will be set to false for targeted and true for targetless
@@ -591,16 +587,31 @@
 				!autoAnalyzeEnabled
 				(>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
 			)
-			;set the next auto analysis threshold
-			(assign_to_entities (assoc
-				!autoAnalyzeThreshold
-					;!autoAnalyzeThreshold is a delta from the previous threshold.
-					(max
-						(- (* num_cases !autoAnalyzeGrowthFactorAmount) !autoAnalyzeThreshold)
-						100 ;if several case deletions cause the above formula to return < 0, default
-							; to the default !autoAnalyzeThreshold.
+			(let
+				(assoc
+					total_case_mass
+						(if use_case_weights
+							(compute_on_contained_entities (list
+								(query_not_equals weight_feature (null))
+								(query_sum weight_feature)
+							))
+
+							;else it's 1 per case, thus the total mass is num_cases
+							num_cases
 					)
-			))
+				)
+
+				(assign_to_entities (assoc
+					!autoAnalyzeThreshold
+						;!autoAnalyzeThreshold is a delta from the previous threshold.
+						;if several case deletions cause the above formula to return < 0, default
+						; to the default !autoAnalyzeThreshold.
+						(max
+							(- (* total_case_mass !autoAnalyzeGrowthFactorAmount) !autoAnalyzeThreshold)
+							100
+						)
+				))
+			)
 		)
 
 		;reset !dataMassChangeSinceLastAnalyze since we are now analyzing
