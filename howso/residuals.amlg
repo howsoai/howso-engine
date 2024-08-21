@@ -1038,142 +1038,138 @@
 	)
 
 	;Helper method to compute null deviations
-	#!ComputeAndCacheNullResiduals
-	(seq
+	#!ComputeNullUncertainties
+	(declare
+		(assoc
+			;assoc of feature to cases with nulls
+			null_cases_map (assoc)
+			features_with_nulls (list)
+			context_features (list)
+		)
+
 		(declare (assoc
-			features_map (zip features)
+			context_map (zip context_features)
+			features_list (values (append context_features features_with_nulls) (true))
 			null_prediction_map (null)
 		))
 
-		;ComputeNullAccuracies requires features, features_with_nulls, and hyperparam_map
-		#!ComputeNullAccuracies
-		(seq
-			;iterate over all the features with nulls, and predict each feature's case's list
-			(assign (assoc
-				feature_residuals_lists
-					||(map
-						(lambda (let
-							(assoc
-								feature (get_value (current_value 1))
-								feature_is_nominal (contains_index !nominalsMap (current_value 1))
-								react_context_features (indices (remove features_map (current_value 1)))
-								null_case_ids
-									(contained_entities (list
-										(query_exists (current_value 2))
-										(query_equals (current_value 2) (null))
-										(query_sample 200)
-									))
+		;iterate over all the features with nulls, and predict each feature's case's list
+		(assign (assoc
+			feature_residuals_lists
+				||(map
+					(lambda (let
+						(assoc
+							feature (get_value (current_value 1))
+							feature_is_nominal (contains_index !nominalsMap (current_value 1))
+							react_context_features (indices (remove context_map (current_value 1)))
+							null_case_ids (get null_cases_map (current_value 1))
+						)
+
+						;need to oversample cases if robust and not many cases
+						(if (and
+								robust_residuals
+								(< (size null_case_ids) 200)
 							)
+							(assign (assoc null_case_ids (rand null_case_ids 200) ))
+						)
 
-							;iterate over list of cases that have nulls for this feature and predict each one,
-							;output a list of 1s and 0s where every correctly predicted null is a 1
-							(map
-								(lambda (let
-									(assoc
-										case_id (current_value 1)
-										case_values_map (zip features (retrieve_from_entity (current_value 1) features))
-										interpolated_value 0
+						;iterate over list of cases that have nulls for this feature and predict each one,
+						;output a list of 1s and 0s where every correctly predicted null is a 1
+						(map
+							(lambda (let
+								(assoc
+									case_id (current_value 1)
+									case_values_map (zip features_list (retrieve_from_entity (current_value 1) features_list))
+									interpolated_value 0
+								)
+
+								;grab a random set of context features when computing robust residuals
+								(if robust_residuals
+									(assign (assoc react_context_features (filter (lambda (< (rand) 0.5)) react_context_features) ))
+								)
+
+								(if (and
+										!tsTimeFeature
+										(contains_index react_context_features !tsTimeFeature)
 									)
-
-									;grab a random set of context features when computing robust residuals
-									(if robust_residuals
-										(assign (assoc react_context_features (filter (lambda (< (rand) 0.5)) react_context_features) ))
-									)
-
-									(if !tsTimeFeature
-										(let
-											(assoc context_map (zip react_context_features (unzip case_values_map react_context_features)) )
-											(if (contains_index context_map !tsTimeFeature)
-												(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
-											)
-										)
-									)
-
-									(declare (assoc
-										candidate_cases_lists
-											(compute_on_contained_entities (append
-												(if focal_case
-													(query_not_in_entity_list (list case_id focal_case))
-													(query_not_in_entity_list (list case_id))
-												)
-												(or time_series_filter_query [])
-												(query_nearest_generalized_distance
-													(replace (get hyperparam_map "k"))
-													(replace react_context_features)
-													(replace (unzip case_values_map react_context_features))
-													(replace (get hyperparam_map "featureWeights"))
-													(replace !queryDistanceTypeMap)
-													(replace (get hyperparam_map "featureDomainAttributes"))
-													(replace (get hyperparam_map "featureDeviations"))
-													(replace (get hyperparam_map "p"))
-													(replace (get hyperparam_map "dt"))
-													(if valid_weight_feature (replace weight_feature) (null))
-													(replace tie_break_random_seed)
-													(null) ;radius
-													(replace !numericalPrecision)
-													(replace feature)
-												)
+									(assign (assoc
+										time_series_filter_query
+											(call !ComputeTimeSeriesFilterQuery (assoc
+												context_map (zip react_context_features (unzip case_values_map react_context_features))
 											))
 									))
+								)
 
-									(assign (assoc
-										interpolated_value
-											;no local_cases_map means we use expected feature value
-											(if (size (first candidate_cases_lists))
-												(call !InterpolateActionValues (assoc
-													action_feature feature
-													candidate_case_ids (first candidate_cases_lists)
-													candidate_case_weights (get candidate_cases_lists 1)
-													candidate_case_values (last candidate_cases_lists)
-													allow_nulls (true)
-													output_influence_weights (false)
-												))
-
-												;else there's no local model, return expected values
-												(if feature_is_nominal
-													;pull global probability for feature
-													(get (call !ComputeModelNominalClassProbabilities (assoc feature feature)) feature)
-
-													;else get continuous expected value
-													(call !CalculateFeatureExpectedValue (assoc feature feature allow_nulls (true) ))
-												)
+								(declare (assoc
+									candidate_cases_lists
+										(compute_on_contained_entities (append
+											(if focal_case
+												(query_not_in_entity_list (list case_id focal_case))
+												(query_not_in_entity_list (list case_id))
 											)
-									))
-
-									;output a 1 if predicted a null correctly, else a 0
-									(+ (= (null) interpolated_value))
+											(or time_series_filter_query [])
+											(query_nearest_generalized_distance
+												(replace (get hyperparam_map "k"))
+												(replace react_context_features)
+												(replace (unzip case_values_map react_context_features))
+												(replace (get hyperparam_map "featureWeights"))
+												(replace !queryDistanceTypeMap)
+												(replace (get hyperparam_map "featureDomainAttributes"))
+												(replace (get hyperparam_map "featureDeviations"))
+												(replace (get hyperparam_map "p"))
+												(replace (get hyperparam_map "dt"))
+												(if valid_weight_feature (replace weight_feature) (null))
+												(replace tie_break_random_seed)
+												(null) ;radius
+												(replace !numericalPrecision)
+												(replace feature)
+											)
+										))
 								))
-								null_case_ids
-							)
-						))
 
-						features_with_nulls
-					)
-			))
+								(assign (assoc
+									interpolated_value
+										;no local_cases_map means we use expected feature value
+										(if (size (first candidate_cases_lists))
+											(call !InterpolateActionValues (assoc
+												action_feature feature
+												candidate_case_ids (first candidate_cases_lists)
+												candidate_case_weights (get candidate_cases_lists 1)
+												candidate_case_values (last candidate_cases_lists)
+												allow_nulls (true)
+												output_influence_weights (false)
+											))
 
-			;create a map of feature -> null prediction probability by averaging out all the correctly predicted nulls for each feature
-			(assign (assoc
-				null_prediction_map
-					(zip
-						features_with_nulls
-						(map
-							(lambda (/ (apply "+" (current_value)) (size (current_value)) ) )
-							feature_residuals_lists
+											;else there's no local model, return expected values
+											(if feature_is_nominal
+												;pull global probability for feature
+												(get (call !ComputeModelNominalClassProbabilities (assoc feature feature)) feature)
+
+												;else get continuous expected value
+												(call !CalculateFeatureExpectedValue (assoc feature feature allow_nulls (true) ))
+											)
+										)
+								))
+
+								;output a 1 if predicted a null correctly, else a 0
+								(+ (= (null) interpolated_value))
+							))
+							null_case_ids
 						)
-					)
-			))
-		)
+					))
 
-		(accum_to_entities (assoc
-			!featureNullAccuracyMap
-				(associate
-					(apply "concat" (append (if robust_residuals "robust" "full") (remove (get hyperparam_map "paramPath") 1) ))
-					(append
-						null_prediction_map
-						(assoc
-							".robust" robust_residuals
-							".hyperparam_path" (get hyperparam_map "paramPath")
-						)
+					features_with_nulls
+				)
+		))
+
+		;create a map of feature -> null prediction probability by averaging out all the correctly predicted nulls for each feature
+		(assign (assoc
+			null_prediction_map
+				(zip
+					features_with_nulls
+					(map
+						(lambda (/ (apply "+" (current_value)) (size (current_value)) ) )
+						feature_residuals_lists
 					)
 				)
 		))

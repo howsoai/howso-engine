@@ -123,7 +123,7 @@
 		;update hyperparam_map with null uncertainties if present
 		(if (size (get output_map "nullUncertainties"))
 			(let
-				(assoc null_uncertainties_map (get output_map "nullUncertainties") )
+				(assoc null_uncertainties_map (get output_map "null_uncertainty_map") )
 				(assign
 					"hyperparam_map"
 					(list "nullUncertainties")
@@ -184,46 +184,6 @@
 		hyperparam_map
 	)
 
-	;returns cached feature null accuracies in the format of assoc feature -> null_accuracy
-	;parameters are optional, when not specified will auto-select a cached set for output, when specified will attempt to
-	;output the cached null_accuracies best matching the requested parameters, null if none match.
-	;
-	;parameters:
-	; robust: flag, optional. if specified will attempt to return null_accuracies that were computed with the specified robust or non-robust type.
-	; action_feature: string, optional. if specified will attempt to return null_accuracies that were computed for this specified action_feature.
-	;				  Note: ".targetless" is the action feature used during targetless analysis.
-	; robust_hyperparameters: flag, optional. if true, will attempt to return null_accuracies that were computed using hyperparameters with the
-	;						  specified robust or non-robust type.
-	; weight_feature: string, optional. if specified, will attempt to return null_accuracies that were computed using this weight_feature.
-	#!GetFeatureNullAccuracies
-	(declare
-		(assoc
-			robust (null)
-			action_feature (null)
-			robust_hyperparameters (null)
-			weight_feature (null)
-		)
-
-		(if (= (null) robust action_feature robust_hyperparameters weight_feature)
-			;if only one residuals set has been computed, return it
-			(if (= 1 (size !featureNullAccuracyMap))
-				(remove
-					(first (values !featureNullAccuracyMap))
-					(list ".hyperparam_path" ".robust")
-				)
-
-				;there are several cached residuals, pick one 'smartly':
-				(remove
-					(call !AutoSelectPredictionStats (assoc original_values_map (retrieve_from_entity "!featureNullAccuracyMap") ))
-					(list ".hyperparam_path" ".robust")
-				)
-			)
-
-			;else specified parameters, try to find the matching one
-			(call !SelectPredictionStats (assoc filtered_values_map (retrieve_from_entity "!featureNullAccuracyMap") ))
-		)
-	)
-
 	;calculate feature residual values, i.e. the mae (mean absolute error of predictions on a sample of the model) for each of the specified features
 	;returns an assoc containing feature residuals, feature ordinal residuals and the hyperparam_map used for computations
 	;
@@ -276,7 +236,7 @@
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
 			compute_all_statistics (false)
-			store_values (true)
+			compute_null_uncertainties (true)
 			confusion_matrix_min_count 15
 		)
 
@@ -334,32 +294,50 @@
 				))
 		)
 
-		(let
-			(assoc
-				features_with_nulls
-					(indices (filter
-						;keep only features that have at least 2 nulls
-						(lambda
-							(>=
-								(compute_on_contained_entities (append
-									(query_exists (current_index))
-									(query_equals (current_index) (null))
-									(query_count)
-								))
-								2
+		(if compute_null_uncertainties
+			(let
+				(assoc
+					features_with_nulls
+						(indices (filter
+							;keep only features that have at least 2 nulls
+							(lambda
+								(>=
+									(compute_on_contained_entities (append
+										(query_exists (current_index))
+										(query_equals (current_index) (null))
+										(query_count)
+									))
+									2
+								)
 							)
-						)
-						(filter
-							;only query features that have nulls
-							(lambda (get (current_value) "has_nulls"))
-							;ignore all inactive features (where all values are nulls)
-							(remove !featureNullRatiosMap (indices !inactiveFeaturesMap))
-						)
+							(filter
+								;only query features that have nulls
+								(lambda (get (current_value) "has_nulls"))
+								;ignore all inactive features (where all values are nulls)
+								(keep (remove !featureNullRatiosMap (indices !inactiveFeaturesMap)) features)
+							)
+						))
+				)
+				;compute null deviations and update hyperparam_map with them
+				(if (size features_with_nulls)
+					(assign (assoc
+						null_uncertainties_map
+							(call !ComputeNullUncertainties (assoc
+								features_with_nulls features_with_nulls
+								context_features context_features
+								null_cases_map
+									(map
+										(lambda
+											(filter
+												(lambda (= (null) (retrieve_from_entity (current_value) (current_index 1))))
+												case_ids
+											)
+										)
+										(zip features_with_nulls)
+									)
+							))
 					))
-			)
-			;compute null deviations and update hyperparam_map with them
-			(if (size features_with_nulls)
-				(assign (assoc null_uncertainties_map (call !ComputeAndCacheNullResiduals) ))
+				)
 			)
 		)
 
@@ -375,7 +353,7 @@
 			"ordinal_residual_map" ordinal_residuals_map
 			"hyperparam_map" hyperparam_map
 			"prediction_stats" prediction_stats
-			"nullUncertainties" null_uncertainties_map
+			"null_uncertainty_map" null_uncertainties_map
 		)
 	)
 
