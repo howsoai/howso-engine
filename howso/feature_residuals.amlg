@@ -290,6 +290,7 @@
 			compute_all_statistics (false)
 			store_values (true)
 			confusion_matrix_min_count 15
+			shared_residuals (true)
 		)
 
 		(declare (assoc
@@ -336,14 +337,17 @@
 			(call !RunFullResiduals)
 		)
 
+		(if shared_residuals
+			(call !PrepSharedResiduals)
+		)
+
 		(declare (assoc
 			prediction_stats
 				(if compute_all_statistics
 					(call !PrepAllStatisticsResidualOutput)
-
 					(call !PrepResidualOutput)
-				))
-		)
+				)
+		))
 
 		;unique features have a residual of (null)
 		(if unique_features_for_populating_output
@@ -896,6 +900,28 @@
 				)
 		))
 
+
+		(map
+			(lambda
+				(let
+					(assoc
+						current_map_name (current_index 1)
+						current_map_value (current_value 1)
+					)
+					(assign (associate
+						current_map_name
+							(call !ExpandMapForSharedDeviations (assoc
+								shared_map current_map_value
+							))
+					))
+				)
+			)
+			(zip
+				(list "accuracy_map" "precision_map" "recall_map" "mcc_map" "r2_map" "rmse_map" "spearman_coeff_map" "confusion_matrix_map" "ordinal_residuals_map" "residuals_map")
+				(list accuracy_map precision_map recall_map mcc_map r2_map rmse_map spearman_coeff_map confusion_matrix_map ordinal_residuals_map residuals_map)
+			)
+		)
+
 		(declare (assoc
 			prediction_stats
 				(assoc
@@ -1036,7 +1062,62 @@
 			))
 		)
 
-		;when using custom hyperparameters for all features, update  hyperparam_map with the newly calculated values for output
+		; ;combined
+		; (let
+		; 	(assoc shared_residuals_map (get !sharedResidualsMap))
+		; 	(if shared_residuals_map
+		; 		(map
+		; 			(lambda
+		; 				(if
+		; 					(= (null) (get residuals_map (current_index)))
+		; 					(accum (assoc
+		; 						residuals_map
+		; 							(associate
+		; 								(current_index 2)
+		; 								(get residuals_map (get shared_residuals_map (current_value 2)))
+		; 							)
+		; 					))
+		; 				)
+		; 			)
+		; 			shared_residuals_map
+		; 		)
+		; 	)
+		; )
+		(assign (assoc
+			residuals_map (call !ExpandMapForSharedDeviations (assoc shared_map residuals_map))
+		))
+
+		(print "hi")
+
+		#!ExpandMapForSharedDeviations
+		(declare
+			(assoc
+				shared_map (null)
+				shared_residuals_map (sort (get !sharedResidualsMap))
+			)
+			(if shared_residuals_map
+				(map
+					(lambda
+						(if
+							(= (null) (get shared_map (current_index)))
+							(if (!= (null) (get shared_map (get shared_residuals_map (current_index))))
+								(accum (assoc
+									shared_map
+										(associate
+											(current_index 2)
+											(get shared_map (get shared_residuals_map (current_value 2)))
+										)
+								))
+							)
+						)
+					)
+					shared_residuals_map
+				)
+			)
+			(sort shared_map)
+		)
+
+		;when using custom hyperparameters for all features, update hyperparam_map with the newly calculated values for output
 		#!UpdateHyperparametersWithResiduals
 		(if (and (!= (null) custom_hyperparam_map) (= (null) target_residual_feature) )
 			(seq
@@ -1090,6 +1171,53 @@
 
 		;return null prediction_stats
 		(null)
+	)
+
+	#!PrepSharedResiduals
+	(let
+		(assoc combined_residuals (assoc))
+
+		(map
+			(lambda
+				(let
+					(assoc current_feature (current_index 1))
+						;if this feature has a shared deviation
+						(let
+							(assoc shared_deviation_feature (get !sharedResidualsMap current_feature))
+							(if shared_deviation_feature
+								(accum (assoc
+									combined_residuals
+										(associate
+											shared_deviation_feature
+											(append
+												(if
+													(= (null) (get combined_residuals shared_deviation_feature) )
+													[]
+													(get combined_residuals shared_deviation_feature)
+												)
+												(current_value 2)
+											)
+										)
+								))
+								(accum (assoc
+									combined_residuals
+										(associate
+											current_feature (current_value 2)
+										)
+								))
+							)
+						)
+				)
+			)
+			(zip features feature_residuals_lists)
+		)
+
+		(assign
+			(assoc
+				features (replace (indices combined_residuals))
+				feature_residuals_lists (replace (values combined_residuals))
+			)
+		)
 	)
 
 	;Helper method to sparsify confusion matrices by removing cells whose counts are less than the specified confusion_matrix_min_count
