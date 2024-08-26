@@ -1,13 +1,14 @@
 ;Contains methods for computing and storing feature residuals.
 (null
 
-	;Wrapper method for CalculateFeatureResiduals that additionally stores the computed residuals and prediction stats into model hyperparameters
+	;Updates the given hyperparam_map and returns it with updated parameters based on computed residuals
 	;parameters:
-	; see #CalculateFeatureResiduals
-	#!CalculateAndStoreFeatureResiduals
+	; see #!CalculateFeatureResiduals
+	#!CalculateResidualsAndUpdateParameters
 	(declare
 		(assoc
 			features (null)
+			context_features (null)
 			case_ids (null)
 			focal_case (null)
 			num_samples (null)
@@ -17,8 +18,19 @@
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
 			confusion_matrix_min_count 15
+			feature_with_nulls (null)
+			compute_null_uncertainties (true)
+			compute_all_statistics (true)
 		)
 
+		(if (= (null) context_features)
+			(assign (assoc context_features !trainedFeatures))
+		)
+
+		;if features aren't specified, use the set of context_features
+		(if (= (null) features)
+			(assign (assoc features context_features))
+		)
 		;if not using case weights, change weight_feature to '.none'
 		(if (= (false) use_case_weights)
 			(assign (assoc weight_feature ".none"))
@@ -30,7 +42,7 @@
 				(if (= (null) custom_hyperparam_map)
 					(call !GetHyperparameters (assoc
 						feature hyperparameter_feature
-						context_features (filter (lambda (!= hyperparameter_feature (current_value))) features)
+						context_features context_features
 						mode (if (!= ".targetless" hyperparameter_feature) "full" "robust")
 						weight_feature weight_feature
 					))
@@ -63,10 +75,6 @@
 				)
 		))
 
-		;if features aren't specified, assume all !trainedFeatures will need to have their mae calculated
-		(if (= (null) features)
-			(assign (assoc features !trainedFeatures))
-		)
 
 		;if there are ordinals but the hyperparameter map doesn't have a featureOrdinalDeviations assoc, initialize it
 		(if (and
@@ -90,6 +98,7 @@
 			output_map
 				(call !CalculateFeatureResiduals (assoc
 					features features
+					context_features context_features
 					case_ids case_ids
 					focal_case focal_case
 					num_samples num_samples
@@ -98,8 +107,9 @@
 					use_case_weights use_case_weights
 					weight_feature weight_feature
 					custom_hyperparam_map hyperparam_map
-					compute_all_statistics (true)
+					compute_all_statistics compute_all_statistics
 					confusion_matrix_min_count confusion_matrix_min_count
+					compute_null_uncertainties compute_null_uncertainties
 				))
 		))
 
@@ -113,138 +123,94 @@
 			(accum (assoc hyperparam_map (assoc "allFeatureResidualsCached" (false))))
 		)
 
-		;only update !hyperparameterMetadataMap if they have no deviations cached
-		;or the type of residuals computed matches the hyperparameters
-		;or there have been new feature deviations computed that aren't in the hyperparameters
-		(if (or
-				(= 0 (size (get !hyperparameterMetadataMap (append param_path "featureDeviations"))))
-				(> (size (get hyperparam_map "featureDeviations")) (size (get !hyperparameterMetadataMap (append param_path "featureDeviations"))) )
-				(and robust_residuals (= "robust" (get param_path 2)))
-				(and (not robust_residuals) (= "full" (get param_path 2)))
-			)
-			(if (= (first param_path) ".default")
-				;updating default hyperparam set with featuredeviations
-				(assign_to_entities (assoc !defaultHyperparameters hyperparam_map) )
+		;update hyperparam_map with null uncertainties if present
+		(if (size (get output_map "nullUncertainties"))
+			(let
+				(assoc null_uncertainties_map (get output_map "null_uncertainty_map") )
+				(assign
+					"hyperparam_map"
+					(list "nullUncertainties")
+					(map
+						(lambda
+							;append (null)s in front to match the deviations shape
+							(append (null) (current_value))
+						)
+						null_uncertainties_map
+					)
+				)
 
-				;update the appropriate hyperparameter set
-				(assign_to_entities (assoc !hyperparameterMetadataMap (set !hyperparameterMetadataMap param_path hyperparam_map)) )
-			)
-		)
+				(assign
+					"hyperparam_map"
+					(list "featureDeviations")
+					(map
+						(lambda
+							;update deviation value with null uncertainies
+							(if (contains_index null_uncertainties_map (current_index))
+								(if (~ (list) (current_value))
+									;if the deviation is a number, wrap it in a triple
+									(if (or (~ 0 (first (current_value))) (= (null) (first (current_value))) )
+										(append (first (current_value)) (get null_uncertainties_map (current_index)) )
 
-		(if (size (get output_map "residual_map"))
-			;always update the !residualsMap if there are deviations to store
-			(assign_to_entities (assoc
-				!residualsMap
-					(set
-						!residualsMap
-						(apply "concat" (append (if robust_residuals "robust" "full") (remove param_path 1)) )
-						(append
-							(get output_map "residual_map")
-							(assoc
-								".robust" (= (true) robust_residuals)
-								".hyperparam_path"
-									(if (and use_case_weights (= param_path (list ".default")))
-										;intentionally storing which case weight feature is used for retrieval
-										(list ".default" (null) (null) weight_feature)
-
-										param_path
+										;else the deviation must be a SDM, wrap it in a list so that the output is a triple
+										;in the format of [sdm, null-value, null-null] instead of appending null uncertaintes to the SDM
+										(append
+											(list (first (current_value 1)))
+											(get null_uncertainties_map (current_index))
+										)
 									)
+									(append (list (current_value 1)) (get null_uncertainties_map (current_index)) )
+								)
+
+								;leave deviation value as-is
+								(current_value)
 							)
 						)
+						(if (size (get hyperparam_map "featureDeviations"))
+							(get hyperparam_map "featureDeviations")
+							(zip (indices null_uncertainties_map))
+						)
 					)
-			))
+				)
+			)
 		)
-		(accum_to_entities (assoc !revision 1))
+
+		(assign
+			"hyperparam_map"
+			(list "featureOrdinalDeviations")
+			(get output_map "ordinal_residuals_map")
+		)
 
 		;return the output map with capped residual values
-		(call !ExpandResidualValuesToUncertainty  (assoc feature_residuals_map output_map))
-	)
+		(assign (assoc output_map (call !ExpandResidualValuesToUncertainty  (assoc feature_residuals_map output_map)) ))
+		(assign
+			"hyperparam_map"
+			["featureResiduals"]
+			(map
+				(lambda
+					(if (~ 0 (current_value))
+						(current_value)
 
-	;returns cached feature residuals in the format of assoc feature -> residual value
-	;parameters are optional, when not specified will auto-select a cached Residuals set for output, when specified will attempt to
-	;output the cached residuals best matching the requested parameters, null if none match.
-	;
-	;parameters:
-	; robust: flag, optional. if specified will attempt to return residuals that were computed with the specified robust or non-robust type.
-	; action_feature: string, optional. if specified will attempt to return residuals that were computed for this specified action_feature.
-	;				  Note: ".targetless" is the action feature used during targetless analysis.
-	; robust_hyperparameters: flag, optional. if true, will attempt to return residuals that were computed using hyperparameters with the
-	;						  specified robust or non-robust type.
-	; weight_feature: string, optional. if specified, will attempt to return residuals that were computed using this weight_feature.
-	#!GetFeatureResiduals
-	(declare
-		(assoc
-			robust (null)
-			prediction_stats_action_feature (null)
-			robust_hyperparameters (null)
-			weight_feature (null)
-		)
+						;must be a nominal
+						(~ (assoc) (current_value))
+						(get (current_value) "expected_deviation")
 
-		(if (= (null) robust prediction_stats_action_feature robust_hyperparameters weight_feature)
-			;if only one residuals set has been computed, return it
-			(if (= 1 (size !residualsMap))
-				(remove
-					(first (values !residualsMap))
-					(list ".hyperparam_path" ".robust")
+						;else fall back to null, this should never happen
+						(null)
+					)
 				)
-
-				;there are several cached residuals, pick one 'smartly':
-				(remove
-					(call !AutoSelectPredictionStats (assoc original_values_map (retrieve_from_entity "!residualsMap") ))
-					(list ".hyperparam_path" ".robust")
-				)
+				(get output_map "residual_map")
 			)
-
-			;else specified parameters, try to find the matching one
-			(call !SelectPredictionStats (assoc filtered_values_map (retrieve_from_entity "!residualsMap") ))
-		)
-	)
-
-	;returns cached feature null accuracies in the format of assoc feature -> null_accuracy
-	;parameters are optional, when not specified will auto-select a cached set for output, when specified will attempt to
-	;output the cached null_accuracies best matching the requested parameters, null if none match.
-	;
-	;parameters:
-	; robust: flag, optional. if specified will attempt to return null_accuracies that were computed with the specified robust or non-robust type.
-	; action_feature: string, optional. if specified will attempt to return null_accuracies that were computed for this specified action_feature.
-	;				  Note: ".targetless" is the action feature used during targetless analysis.
-	; robust_hyperparameters: flag, optional. if true, will attempt to return null_accuracies that were computed using hyperparameters with the
-	;						  specified robust or non-robust type.
-	; weight_feature: string, optional. if specified, will attempt to return null_accuracies that were computed using this weight_feature.
-	#!GetFeatureNullAccuracies
-	(declare
-		(assoc
-			robust (null)
-			action_feature (null)
-			robust_hyperparameters (null)
-			weight_feature (null)
 		)
 
-		(if (= (null) robust action_feature robust_hyperparameters weight_feature)
-			;if only one residuals set has been computed, return it
-			(if (= 1 (size !featureNullAccuracyMap))
-				(remove
-					(first (values !featureNullAccuracyMap))
-					(list ".hyperparam_path" ".robust")
-				)
-
-				;there are several cached residuals, pick one 'smartly':
-				(remove
-					(call !AutoSelectPredictionStats (assoc original_values_map (retrieve_from_entity "!featureNullAccuracyMap") ))
-					(list ".hyperparam_path" ".robust")
-				)
-			)
-
-			;else specified parameters, try to find the matching one
-			(call !SelectPredictionStats (assoc filtered_values_map (retrieve_from_entity "!featureNullAccuracyMap") ))
-		)
+		hyperparam_map
 	)
 
 	;calculate feature residual values, i.e. the mae (mean absolute error of predictions on a sample of the model) for each of the specified features
 	;returns an assoc containing feature residuals, feature ordinal residuals and the hyperparam_map used for computations
 	;
 	;parameters:
-	; features: optional list of all features used during computation. If not specified will use !trainedFeatures.
+	; features: optional list of all features to compute residuals for. If not specified will use !trainedFeatures.
+	; context_features: list of features to be used as the context. If not specified, will use the value of features.
 	; target_residual_feature: optional feature for which to calculate the (MAE) residual. If not specified, will compute for all features.
 	; case_ids: optional list of case ids to compute residuals for the action set, will ignore 'action_condition_filter_query' and 'num_samples' if specified
 	; action_condition_filter_query: optional list of filtering queries for the action set. If both 'action_condition_filter_query' and 'context_condition_filter_query' are specified,
@@ -271,7 +237,10 @@
 	#!CalculateFeatureResiduals
 	(declare
 		(assoc
+			;the features to compute residuals for
 			features (null)
+			;the features to be used as context
+			context_features (null)
 			target_residual_feature (null)
 			regional_model_only (false)
 			focal_case (null)
@@ -288,7 +257,7 @@
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
 			compute_all_statistics (false)
-			store_values (true)
+			compute_null_uncertainties (true)
 			confusion_matrix_min_count 15
 			shared_residuals (true)
 		)
@@ -323,10 +292,11 @@
 			confusion_matrix_map (assoc)
 			nominal_performance_map (assoc)
 
-			features_with_nulls (list)
-			null_feature_cases_map (assoc)
+			null_uncertainties_map (assoc)
 			;list of unique features to populate output at the end
 			unique_features_for_populating_output (null)
+
+			provided_case_id_flag (true)
 		))
 
 		(call !InitResiduals)
@@ -349,16 +319,69 @@
 				)
 		))
 
-		;unique features have a residual of (null)
-		(if unique_features_for_populating_output
-			(accum (assoc residuals_map (zip unique_features_for_populating_output) ))
+		(if compute_null_uncertainties
+			(let
+				(assoc
+					features_with_nulls
+						(indices (filter
+							;keep only features that have at least 2 nulls
+							(lambda
+								(>=
+									(compute_on_contained_entities (append
+										(query_exists (current_index))
+										(query_equals (current_index) (null))
+										(query_count)
+									))
+									2
+								)
+							)
+							(filter
+								;only query features that have nulls
+								(lambda (get (current_value) "has_nulls"))
+								;ignore all inactive features (where all values are nulls)
+								(keep (remove !featureNullRatiosMap (indices !inactiveFeaturesMap)) features)
+							)
+						))
+				)
+				;compute null deviations and update hyperparam_map with them
+				(if (size features_with_nulls)
+					(assign (assoc
+						null_uncertainties_map
+							(call !ComputeNullUncertainties (assoc
+								features_with_nulls features_with_nulls
+								context_features context_features
+								null_cases_map
+									(map
+										(if regional_model_only
+											;if regional model only, just filter which of the case ids have nulls for each feature
+											(lambda
+												(filter
+													(lambda (= (null) (retrieve_from_entity (current_value) (current_index 1))))
+													case_ids
+												)
+											)
+
+											;otherwise sample null feature value cases from the model using queries
+											(lambda
+												(contained_entities (append
+													(query_exists (current_index))
+													(query_equals (current_index) (null))
+													(query_sample 200)
+												))
+											)
+										)
+										(zip features_with_nulls)
+									)
+							))
+					))
+				)
+			)
 		)
 
-		;all feature residuals are always computed when using robust computation
-		(if (and robust_residuals details_features)
-			(assign (assoc
-				residuals_map (keep residuals_map details_features)
-				ordinal_residuals_map (keep ordinal_residuals_map details_features)
+		;unique features have a residual of (null)
+		(if unique_features_for_populating_output
+			(accum (assoc
+				residuals_map (zip unique_features_for_populating_output)
 			))
 		)
 
@@ -367,6 +390,7 @@
 			"ordinal_residual_map" ordinal_residuals_map
 			"hyperparam_map" hyperparam_map
 			"prediction_stats" prediction_stats
+			"null_uncertainty_map" null_uncertainties_map
 		)
 	)
 
@@ -930,35 +954,38 @@
 						(if (and use_case_weights (= param_path (list ".default")) )
 							;intentionally storing which case weight feature is used for retrieval
 							(list ".default" (null) (null) weight_feature)
-
-							param_path
-						)
-					"accuracy" accuracy_map
-					"precision" precision_map
-					"recall" recall_map
-					"mcc" mcc_map
-					"r2" r2_map
-					"rmse" rmse_map
-					"spearman_coeff" spearman_coeff_map
-					"confusion_matrix" confusion_matrix_map
+		(if (size unique_features_for_populating_output)
+			(let
+				(assoc
+					unique_feature_map (zip unique_features_for_populating_output)
 				)
-		))
-
-		(if store_values
-			(seq
-				(accum_to_entities (assoc
-					!featurePredictionStatsMap
-						(associate
-							(apply "concat" (append (if robust_residuals "robust" "full") (remove param_path 1) ))
-							prediction_stats
-						)
+				(accum (assoc
+					accuracy_map unique_feature_map
+					precision_map unique_feature_map
+					recall_map unique_feature_map
+					mcc_map unique_feature_map
 				))
-				(call !UpdateHyperparametersWithResiduals)
 			)
 		)
 
-		;return values
-		prediction_stats
+		(assoc
+			".robust" (= (true) robust_residuals)
+			".hyperparam_path"
+				(if (and use_case_weights (= param_path (list ".default")) )
+					;intentionally storing which case weight feature is used for retrieval
+					(list ".default" (null) (null) weight_feature)
+
+					param_path
+				)
+			"accuracy" accuracy_map
+			"precision" precision_map
+			"recall" recall_map
+			"mcc" mcc_map
+			"r2" r2_map
+			"rmse" rmse_map
+			"spearman_coeff" spearman_coeff_map
+			"confusion_matrix" confusion_matrix_map
+		)
 	)
 
 	;helper method for CalculateFeatureResiduals to average out the list(s) of residual values into individual value(s)
@@ -1066,36 +1093,6 @@
 			residuals_map (call !ExpandMapForSharedDeviations (assoc shared_map residuals_map))
 		))
 
-		(print "hi")
-
-		#!ExpandMapForSharedDeviations
-		(declare
-			(assoc
-				shared_map (null)
-				shared_residuals_map (sort (get !sharedResidualsMap))
-			)
-			(if shared_residuals_map
-				(map
-					(lambda
-						(if
-							(= (null) (get shared_map (current_index)))
-							(if (!= (null) (get shared_map (get shared_residuals_map (current_index))))
-								(accum (assoc
-									shared_map
-										(associate
-											(current_index 2)
-											(get shared_map (get shared_residuals_map (current_value 2)))
-										)
-								))
-							)
-						)
-					)
-					shared_residuals_map
-				)
-			)
-			(sort shared_map)
-		)
-
 		;when using custom hyperparameters for all features, update hyperparam_map with the newly calculated values for output
 		#!UpdateHyperparametersWithResiduals
 		(if (and (!= (null) custom_hyperparam_map) (= (null) target_residual_feature) )
@@ -1151,6 +1148,34 @@
 		;return null prediction_stats
 		(null)
 	)
+
+	#!ExpandMapForSharedDeviations
+		(declare
+			(assoc
+				shared_map (null)
+				shared_residuals_map (sort (get !sharedResidualsMap))
+			)
+			(if shared_residuals_map
+				(map
+					(lambda
+						(if
+							(= (null) (get shared_map (current_index)))
+							(if (!= (null) (get shared_map (get shared_residuals_map (current_index))))
+								(accum (assoc
+									shared_map
+										(associate
+											(current_index 2)
+											(get shared_map (get shared_residuals_map (current_value 2)))
+										)
+								))
+							)
+						)
+					)
+					shared_residuals_map
+				)
+			)
+			(sort shared_map)
+		)
 
 	#!PrepSharedResiduals
 	(let
