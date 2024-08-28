@@ -307,9 +307,14 @@
 			(call !RunFullResiduals)
 		)
 
+		(if shared_residuals
+			(call !PrepSharedResiduals)
+		)
+
 		;if shared deviations, the prediction_stats returned will be expanded,
 		; however the features list and feature_residuals_lists will be shortened
 		; to where each group of shared residuals will only have one list of values.
+		; (assign (assoc compute_all_statistics (false)))
 		(declare (assoc
 			prediction_stats
 				(if compute_all_statistics
@@ -318,7 +323,6 @@
 					(call !PrepResidualOutput)
 				))
 		)
-		;at this point I have a subset list of features and feature_residuals_list
 
 		(if compute_null_uncertainties
 			(let
@@ -340,7 +344,13 @@
 								;only query features that have nulls
 								(lambda (get (current_value) "has_nulls"))
 								;ignore all inactive features (where all values are nulls)
-								(keep (remove !featureNullRatiosMap (indices !inactiveFeaturesMap)) features)
+								(keep
+									(remove !featureNullRatiosMap (indices !inactiveFeaturesMap))
+									(if shared_residuals
+										(call !ExpandMapForSharedDeviations (assoc shared_map features))
+										features
+									)
+								)
 							)
 						))
 				)
@@ -371,55 +381,16 @@
 												))
 											)
 										)
-										(zip features_with_nulls) ;FIXME: why we zipping?
+										(zip features_with_nulls)
 									)
 							))
 					))
 				)
 			)
 		)
-		; TODO: Raise wairning if shared residuals mixes unique and non-unqiue
-		; FIXME: need to account for shared residuals
 		;unique features have a residual of (null)
 		(if unique_features_for_populating_output
-			(if
-				shared_deviations_features
-				;if every shared deviation is unique, then append all unique features, as they would have
-				;been excluded elsewhere
-				(map
-					(lambda
-						(let
-							(assoc
-								current_unique_feature (current_value 1)
-								all_unique (true)
-								feature_grouping (call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve (current_value 2)))
-							)
-							(map
-								(lambda
-									(if
-										(not (contains_value unique_features_for_populating_output (current_value)))
-										(assign (assoc all_unique (false)))
-									)
-								)
-								feature_grouping
-							)
-							(if all_unique
-								;if any features in the shared residuals group are not in the unique_features_for_populating_output, that
-								; means that the feature is not unique and thus has deviations that are calculated, and thus this
-								; feature does not need to be appended to residuals_map with a null for the residuals.
-								;if every shared deviation is unique, then append this feature to residuals_map if its not already there,
-								(if
-									(not (contains_value (indices residuals_map) current_unique_feature))
-									(accum (assoc residuals_map (zip (list current_unique_feature))))
-								)
-							)
-						)
-					)
-					unique_features_for_populating_output
-				)
-				;else
-				(accum (assoc residuals_map (zip unique_features_for_populating_output)))
-			)
+			(accum (assoc residuals_map (zip unique_features_for_populating_output)))
 		)
 
 		(if shared_residuals
@@ -1085,9 +1056,6 @@
 		;where each react is either:
 		; the diff value, for nominals and continuous, or a list of [diff, ordinal_diff] for continuous ordinal features
 
-		(if shared_residuals
-			(call !PrepSharedResiduals)
-		)
 		;for each feature, collapse each list of residuals into a single value by averaging them out
 		;for ordinals we need to split out the ordinal residuals from the rest
 		(if (size ordinal_features_map)
@@ -1312,16 +1280,145 @@
 						)
 				)
 			)
-			null_cases_map
+			(zip features feature_residuals_lists)
 		)
 
 		(assign
 			(assoc
-				null_cases_map (replace combined_residuals)
-				features_with_nulls (indices combined_residuals)
+				features_with_nulls (replace (indices combined_residuals))
+				null_feature_residuals_lists (replace (values combined_residuals))
 			)
 		)
+	)
+	; (let
+	; 	(assoc combined_residuals (assoc))
 
+	; 	(map
+	; 		(lambda
+	; 			(let
+	; 				(assoc current_feature (current_index 1))
+	; 					;if this feature has a shared deviation
+	; 					(let
+	; 						(assoc shared_deviation_feature (get !sharedResidualsMap current_feature))
+	; 						(if shared_deviation_feature
+	; 							(accum (assoc
+	; 								combined_residuals
+	; 									(associate
+	; 										shared_deviation_feature
+	; 										(append
+	; 											(if
+	; 												(= (null) (get combined_residuals shared_deviation_feature) )
+	; 												[]
+	; 												(get combined_residuals shared_deviation_feature)
+	; 											)
+	; 											(current_value 2)
+	; 										)
+	; 									)
+	; 							))
+	; 							(accum (assoc
+	; 								combined_residuals
+	; 									(associate
+	; 										current_feature (current_value 2)
+	; 									)
+	; 							))
+	; 						)
+	; 					)
+	; 			)
+	; 		)
+	; 		null_cases_map
+	; 	)
+
+	; 	(assign
+	; 		(assoc
+	; 			null_cases_map (replace combined_residuals)
+	; 			features_with_nulls (indices combined_residuals)
+	; 		)
+	; 	)
+
+	; )
+
+
+
+	#!ValidateSharedDeviations
+	;validates
+	(let
+		;check to make sure that each feature only shows up once in any shared deviations groups
+		(assoc
+			invalid_repeated_shared_deviations_features (list)
+			invalid_unique_shared_deviations_features (list)
+			error_message (list)
+		)
+		(let
+			(assoc shared_deviations_features_flattened (list))
+			;flatten all of the values in the groups of shared deviations
+			(map
+				(lambda (accum (assoc
+					shared_deviations_features_flattened (current_value 1)
+				)))
+				shared_deviations_features
+			)
+			;sort the flattened list
+			(assign (assoc shared_deviations_features_flattened (sort shared_deviations_features_flattened)))
+			;see if any value appears twice in a row, indicating a duplicate value
+			(map
+				(lambda
+					(let
+						(assoc current_shared_deviation_feature (current_value 1))
+						(if
+							(=
+								current_shared_deviation_feature
+								(get shared_deviations_features_flattened (+ (current_index) 1))
+							)
+							(accum (assoc invalid_repeated_shared_deviations_features current_shared_deviation_feature ))
+						)
+					)
+				)
+				shared_deviations_features_flattened
+			)
+		)
+		(map
+			(lambda
+				(let
+					(assoc current_shared_deviation_feature (current_index 1))
+					(seq
+						(if
+							(contains_value (indices !uniqueNominalsSet) current_shared_deviation_feature)
+							(accum (assoc invalid_unique_shared_deviations_features current_shared_deviation_feature))
+						)
+					)
+				)
+			)
+			!sharedResidualsMap
+		)
+		(if
+			(or (size invalid_repeated_shared_deviations_features) (size invalid_unique_shared_deviations_features))
+			(seq
+				(if invalid_repeated_shared_deviations_features
+					(accum (assoc
+						error_message
+							(list (concat
+								"Features can only share deviations with one group, the following features are appear in "
+								"more than one shared deviations groups: "
+								(apply "concat" (trunc (weave (values invalid_repeated_shared_deviations_features (true)) ", ")))
+								"."
+							))
+					))
+				)
+				(if invalid_unique_shared_deviations_features
+					(accum (assoc
+						error_message
+							(list (concat
+								"Features with shared deviations may not be unique nominals, as they have null deviations. "
+								"The following features are in a shared deviations group and is a unique nominal: "
+								(apply "concat" (trunc (weave invalid_unique_shared_deviations_features ", ")))
+								"."
+							))
+					))
+
+				)
+				(conclude (call !Return (assoc errors error_message)))
+			)
+		)
 	)
 
 	;Helper method to sparsify confusion matrices by removing cells whose counts are less than the specified confusion_matrix_min_count
