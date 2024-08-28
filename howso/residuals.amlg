@@ -245,6 +245,7 @@
 			target_residual_feature target_residual_feature
 			case_ids (indices regional_model_cases_map)
 			regional_model_only (true)
+			compute_null_uncertainties (false)
 			use_case_weights use_case_weights
 			weight_feature weight_feature
 			focal_case ignore_case
@@ -257,7 +258,7 @@
 		))
 	)
 
-	;helper method for CalculateFeatureResiduals to initialize variables and sample case_ids
+	;helper method for !CalculateFeatureResiduals to initialize variables and sample case_ids
 	#!InitResiduals
 	(seq
 		;need 2x as many default robust samples since on average half the features won't have computations
@@ -271,6 +272,11 @@
 		;if features aren't specified, assume all !trainedFeatures will need to have their mae calculated
 		(if (= (null) features)
 			(assign (assoc features !trainedFeatures))
+		)
+
+		;if features aren't specified, assume all features will need to have their mae calculated
+		(if (= (null) context_features)
+			(assign (assoc context_features features))
 		)
 
 		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
@@ -313,30 +319,46 @@
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
 		))
 
+		;flag that 'case_ids' were not provided so 'action_condition_filter_query' is used.
+		(if (and (= (size case_ids) 0) (size action_condition_filter_query))
+			(assign (assoc
+				provided_case_id_flag (false)
+			))
+		)
+
 		;if 'case_id' and 'action_condition_filter_query' are not specified either, use a random 'num_samples' sampling of cases from the whole model
-		(if (and (= 0 (size case_ids)) (= 0 (size action_condition_filter_query)))
+		(if (= 0 (size case_ids))
 			(assign (assoc
 				case_ids
-					;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
-					(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
-						(if robust_residuals
-							(call !SampleCases (assoc
-								num num_samples
-								rand_seed (rand)
-								case_weight_feature (if valid_weight_feature weight_feature)
-							))
-							;grab samples from the model
-							(call !AllCases (assoc num num_samples rand_seed (rand)))
-						)
+					(if (size action_condition_filter_query)
+						;if action condition, get the matching case ids
+						(call !GetCasesByCondition (assoc
+							condition_filter_query action_condition_filter_query
+							num_cases num_samples
+						))
 
-						;else the model is small, use the smaller of num_samples or (num_cases * 2^f) because that's the amount of all possible combinations
-						(if robust_residuals
-							(call !SampleCases (assoc
-								num (min num_samples (* num_training_cases (pow 2 (size features))))
-								case_weight_feature (if valid_weight_feature weight_feature)
-							))
-							;else just use all the case ids because the model size is <= num_samples or the model is small
-							(call !AllCases)
+						;otherwise sample from the model
+						;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
+						(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
+							(if robust_residuals
+								(call !SampleCases (assoc
+									num num_samples
+									rand_seed (rand)
+									case_weight_feature (if valid_weight_feature weight_feature)
+								))
+								;grab samples from the model
+								(call !AllCases (assoc num num_samples rand_seed (rand)))
+							)
+
+							;else the model is small, use the smaller of num_samples or (num_cases * 2^f) because that's the amount of all possible combinations
+							(if robust_residuals
+								(call !SampleCases (assoc
+									num (min num_samples (* num_training_cases (pow 2 (size features))))
+									case_weight_feature (if valid_weight_feature weight_feature)
+								))
+								;else just use all the case ids because the model size is <= num_samples or the model is small
+								(call !AllCases)
+							)
 						)
 					)
 			))
@@ -409,64 +431,16 @@
 				)
 			)
 		)
-
-		;compute null deviations during analysis (when specifying custom hp) or when computing and caching all residuals
-		(if (or compute_all_statistics (and (!= (null) custom_hyperparam_map) (= (null) target_residual_feature) ))
-			(seq
-				;list of features that have 2 or more nulls (can't predict a single null value)
-				(assign (assoc
-					features_with_nulls
-						(filter
-							(lambda
-								(> (compute_on_contained_entities (list (query_equals (current_value 1) (null)) (query_count) )) 1)
-							)
-							(if target_residual_feature
-								(list target_residual_feature)
-								features
-							)
-						)
-				))
-
-				;if there are features that have nulls, pull only cases with nulls for those features
-				(if (size features_with_nulls)
-					;populate map of feature -> list of case ids with nulls
-					(assign (assoc
-						null_feature_cases_map
-							(map
-								(lambda
-									(contained_entities (list
-										(query_equals (current_index 1) (null))
-										(query_sample 200)
-									))
-								)
-								(zip features_with_nulls)
-							)
-					))
-				)
-			)
-		)
 	)
 
 	;helper method for CalculateFeatureResiduals to calculate robust residuals
 	#!RunRobustResiduals
 	(seq
 		;keep a copy of all originally specified features
-		(assign (assoc case_features features))
-
-		;if 'case_ids' are not set, then use 'action_condition_filter_query' to get the case ids of the action set, otherwise
-		;flag that 'case_ids' were provided so 'action_condition_filter_query' is ignored. 'case_ids' supercedes 'action_condition_filter_query'.
-		(if (= (size case_ids) 0)
-			(assign (assoc
-				case_ids
-					(call !GetCasesByCondition (assoc
-						condition_filter_query action_condition_filter_query
-						num_cases num_samples
-					))
-			))
-			(declare (assoc
-				provided_case_id_flag (true)
-			))
-		)
+		(assign (assoc
+			case_features
+				(values (append context_features features) (true))
+		))
 
 		;Ensure enough cases
 		(if (< (size case_ids) 2000)
@@ -478,7 +452,7 @@
 		;if computing for one target_residual_feature, remove it from features so it's never in the context
 		(if target_residual_feature
 			(assign (assoc
-				features (filter (lambda (!= (current_value) target_residual_feature)) features)
+				context_features (filter (lambda (!= (current_value) target_residual_feature)) context_features)
 			))
 		)
 
@@ -530,17 +504,21 @@
 						;ensure that at least one feature is removed
 						;this while statement should only loop in rare edge cases
 						(while all_flags_set
-							(assign (assoc remaining_feature_flags (map (lambda (< (rand) 0.5)) features) ))
+							(assign (assoc remaining_feature_flags (map (lambda (< (rand) 0.5)) context_features) ))
 							(assign (assoc all_flags_set (apply "and" remaining_feature_flags) ))
 						)
 						;filter out context features based on the bitmask and also create a set of all the removed features
 						(assign (assoc
-							react_context_features (filter (lambda (get remaining_feature_flags (current_index))) features)
+							react_context_features (filter (lambda (get remaining_feature_flags (current_index))) context_features)
+						))
+
+						(assign (assoc
 							removed_features_map
 								(if target_residual_feature
 									(zip (list target_residual_feature))
 
-									(zip (filter (lambda (not (get remaining_feature_flags (current_index)) )) features) )
+									;filter the action features to be those that are not context features, feature/context_features params may overlap
+									(zip (filter (lambda (not (contains_value react_context_features (current_index)) )) features) )
 								)
 						))
 
@@ -634,7 +612,7 @@
 											(assign (assoc feature_is_non_string_edit_distance (true)))
 										)
 
-										;create the feature-specific candidate_cases_lists tuple for intepolation
+										;create the feature-specific candidate_cases_lists tuple for interpolation
 										(declare (assoc
 											candidate_cases_lists
 												(if (!= (null) local_cases_map)
@@ -777,22 +755,7 @@
 	#!RunFullResiduals
 	(seq
 
-		(declare (assoc features_map (zip features) ))
-
-		;if 'case_ids' are not set, then use 'action_condition_filter_query' to get the case ids of the action set, otherwise
-		;flag that 'case_ids' were provided so 'action_condition_filter_query' is ignored.
-		(if (= (size case_ids) 0)
-			(assign (assoc
-				case_ids
-					(call !GetCasesByCondition (assoc
-						condition_filter_query action_condition_filter_query
-						num_cases num_samples
-					))
-			))
-			(declare (assoc
-				provided_case_id_flag (true)
-			))
-		)
+		(declare (assoc context_features_map (zip context_features) ))
 
 		(assign (assoc
 			feature_residuals_lists
@@ -802,12 +765,12 @@
 							feature (get_value (current_value 1))
 							feature_is_nominal (contains_index !nominalsMap (current_value 1))
 							feature_is_ordinal (contains_index ordinal_features_map (current_value 1))
-							react_context_features (indices (remove features_map (current_value 1)))
+							react_context_features (indices (remove context_features_map (current_value 1)))
 							feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_value 1))
 							feature_is_non_string_edit_distance (false)
-
 							feature_deviations (get hyperparam_map "featureDeviations")
 							feature_weights (get hyperparam_map "featureWeights")
+							needed_features (append context_features (get_value (current_value 1)))
 						)
 
 						(if (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap feature)) )
@@ -834,7 +797,7 @@
 									(assoc
 										local_cases_map (assoc)
 										case_id (current_value 1)
-										case_values_map (zip features (retrieve_from_entity (current_value 1) features))
+										case_values_map (zip needed_features (retrieve_from_entity (current_value 1) needed_features))
 
 										interpolated_value 0
 										diff 0
@@ -921,10 +884,6 @@
 					(if target_residual_feature
 						(list target_residual_feature)
 
-						(!= details_features (null))
-						;if details_features is present, compute for these.
-						details_features
-
 						;else
 						features
 					)
@@ -934,9 +893,6 @@
 		;if we only collected residuals for this one feature, set the residuals features list to have only target_residual_feature
 		(if target_residual_feature
 			(assign (assoc features (list target_residual_feature) ))
-
-			details_features
-			(assign (assoc features details_features))
 		)
 
 		;filter out nulls
@@ -1106,142 +1062,142 @@
 	)
 
 	;Helper method to compute null deviations
-	#!ComputeAndCacheNullResiduals
-	(seq
+	#!ComputeNullUncertainties
+	(declare
+		(assoc
+			;assoc of feature to cases with nulls
+			null_cases_map (assoc)
+			features_with_nulls (list)
+			context_features (list)
+		)
+
 		(declare (assoc
-			features_map (zip features)
+			context_map (zip context_features)
+			features_list (values (append context_features features_with_nulls) (true))
 			null_prediction_map (null)
 		))
 
-		;ComputeNullAccuracies requires null_features_cases_map, features_map, features_with_nulls, and hyperparam_map
-		#!ComputeNullAccuracies
-		(seq
-			;iterate over all the features with nulls, and predict each feature's case's list
-			(assign (assoc
-				feature_residuals_lists
-					||(map
-						(lambda (let
-							(assoc
-								feature (get_value (current_value 1))
-								feature_is_nominal (contains_index !nominalsMap (current_value 1))
-								react_context_features (indices (remove features_map (current_value 1)))
-								all_react_context_features (list)
-								null_case_ids (get null_feature_cases_map (current_value 1))
+		;iterate over all the features with nulls, and predict each feature's case's list
+		(assign (assoc
+			feature_residuals_lists
+				||(map
+					(lambda (let
+						(assoc
+							feature (get_value (current_value 1))
+							feature_is_nominal (contains_index !nominalsMap (current_value 1))
+							all_react_context_features (indices (remove context_map (current_value 1)))
+							null_case_ids (get null_cases_map (current_value 1))
+						)
+
+						;need to oversample cases if robust and not many cases
+						(if (and
+								robust_residuals
+								(< (size null_case_ids) 200)
 							)
+							(assign (assoc null_case_ids (rand null_case_ids 200) ))
+						)
 
-							(if robust_residuals
-								(assign (assoc all_react_context_features react_context_features))
-							)
+						;iterate over list of cases that have nulls for this feature and predict each one,
+						;output a list of 1s and 0s where every correctly predicted null is a 1
+						(map
+							(lambda (let
+								(assoc
+									case_id (current_value 1)
+									case_values_map (zip features_list (retrieve_from_entity (current_value 1) features_list))
+									interpolated_value 0
+									react_context_features
+										(if robust_residuals
+											;grab a random set of context features when computing robust residuals
+											(filter (lambda (< (rand) 0.5)) all_react_context_features)
 
-							;iterate over list of cases that have nulls for this feature and predict each one,
-							;output a list of 1s and 0s where every correctly predicted null is a 1
-							(map
-								(lambda (let
-									(assoc
-										case_id (current_value 1)
-										case_values_map (zip features (retrieve_from_entity (current_value 1) features))
-										interpolated_value 0
-									)
-
-									;grab a random set of context features when computing robust residuals
-									(if robust_residuals
-										(assign (assoc react_context_features (filter (lambda (< (rand) 0.5)) all_react_context_features) ))
-									)
-
-									(if !tsTimeFeature
-										(let
-											(assoc context_map (zip react_context_features (unzip case_values_map react_context_features)) )
-											(if (contains_index context_map !tsTimeFeature)
-												(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
-											)
+											;otherwise use the whole set
+											all_react_context_features
 										)
-									)
+								)
 
-									(declare (assoc
-										candidate_cases_lists
-											(compute_on_contained_entities (append
-												(if focal_case
-													(query_not_in_entity_list (list case_id focal_case))
-													(query_not_in_entity_list (list case_id))
-												)
-												time_series_filter_query
-												(query_nearest_generalized_distance
-													(replace (get hyperparam_map "k"))
-													(replace react_context_features)
-													(replace (unzip case_values_map react_context_features))
-													(replace (get hyperparam_map "featureWeights"))
-													(replace !queryDistanceTypeMap)
-													(replace (get hyperparam_map "featureDomainAttributes"))
-													(replace (get hyperparam_map "featureDeviations"))
-													(replace (get hyperparam_map "p"))
-													(replace (get hyperparam_map "dt"))
-													(if valid_weight_feature (replace weight_feature) (null))
-													(replace tie_break_random_seed)
-													(null) ;radius
-													(replace !numericalPrecision)
-													(replace feature)
-												)
+
+								(if (and
+										!tsTimeFeature
+										(contains_index react_context_features !tsTimeFeature)
+									)
+									(assign (assoc
+										time_series_filter_query
+											(call !ComputeTimeSeriesFilterQuery (assoc
+												context_map (zip react_context_features (unzip case_values_map react_context_features))
 											))
 									))
+								)
 
-									(assign (assoc
-										interpolated_value
-											;no local_cases_map means we use expected feature value
-											(if (size (first candidate_cases_lists))
-												(call !InterpolateActionValues (assoc
-													action_feature feature
-													candidate_case_ids (first candidate_cases_lists)
-													candidate_case_weights (get candidate_cases_lists 1)
-													candidate_case_values (last candidate_cases_lists)
-													allow_nulls (true)
-													output_influence_weights (false)
-												))
-
-												;else there's no local model, return expected values
-												(if feature_is_nominal
-													;pull global probability for feature
-													(get (call !ComputeModelNominalClassProbabilities (assoc feature feature)) feature)
-
-													;else get continuous expected value
-													(call !CalculateFeatureExpectedValue (assoc feature feature allow_nulls (true) ))
-												)
+								(declare (assoc
+									candidate_cases_lists
+										(compute_on_contained_entities (append
+											(if focal_case
+												(query_not_in_entity_list (list case_id focal_case))
+												(query_not_in_entity_list (list case_id))
 											)
-									))
-
-									;output a 1 if predicted a null correctly, else a 0
-									(+ (= (null) interpolated_value))
+											(or time_series_filter_query [])
+											(query_nearest_generalized_distance
+												(replace (get hyperparam_map "k"))
+												(replace react_context_features)
+												(replace (unzip case_values_map react_context_features))
+												(replace (get hyperparam_map "featureWeights"))
+												(replace !queryDistanceTypeMap)
+												(replace (get hyperparam_map "featureDomainAttributes"))
+												(replace (get hyperparam_map "featureDeviations"))
+												(replace (get hyperparam_map "p"))
+												(replace (get hyperparam_map "dt"))
+												(if valid_weight_feature (replace weight_feature) (null))
+												(replace tie_break_random_seed)
+												(null) ;radius
+												(replace !numericalPrecision)
+												(replace feature)
+											)
+										))
 								))
-								null_case_ids
-							)
-						))
 
-						features_with_nulls
-					)
-			))
+								(assign (assoc
+									interpolated_value
+										;no local_cases_map means we use expected feature value
+										(if (size (first candidate_cases_lists))
+											(call !InterpolateActionValues (assoc
+												action_feature feature
+												candidate_case_ids (first candidate_cases_lists)
+												candidate_case_weights (get candidate_cases_lists 1)
+												candidate_case_values (last candidate_cases_lists)
+												allow_nulls (true)
+												output_influence_weights (false)
+											))
 
-			;create a map of feature -> null prediction probability by averaging out all the correctly predicted nulls for each feature
-			(assign (assoc
-				null_prediction_map
-					(zip
-						features_with_nulls
-						(map
-							(lambda (/ (apply "+" (current_value)) (size (current_value)) ) )
-							feature_residuals_lists
+											;else there's no local model, return expected values
+											(if feature_is_nominal
+												;pull global probability for feature
+												(get (call !ComputeModelNominalClassProbabilities (assoc feature feature)) feature)
+
+												;else get continuous expected value
+												(call !CalculateFeatureExpectedValue (assoc feature feature allow_nulls (true) ))
+											)
+										)
+								))
+
+								;output a 1 if predicted a null correctly, else a 0
+								(+ (= (null) interpolated_value))
+							))
+							null_case_ids
 						)
-					)
-			))
-		)
+					))
 
-		(accum_to_entities (assoc
-			!featureNullAccuracyMap
-				(associate
-					(apply "concat" (append (if robust_residuals "robust" "full") (remove (get hyperparam_map "paramPath") 1) ))
-					(append
-						null_prediction_map
-						(assoc
-							".robust" robust_residuals
-							".hyperparam_path" (get hyperparam_map "paramPath")
-						)
+					features_with_nulls
+				)
+		))
+
+		;create a map of feature -> null prediction probability by averaging out all the correctly predicted nulls for each feature
+		(assign (assoc
+			null_prediction_map
+				(zip
+					features_with_nulls
+					(map
+						(lambda (/ (apply "+" (current_value)) (size (current_value)) ) )
+						feature_residuals_lists
 					)
 				)
 		))
@@ -1300,12 +1256,6 @@
 					null_prediction_map
 				)
 		))
-
-		(assign
-			"hyperparam_map"
-			(list "nullUncertaintyMap")
-			null_prediction_map
-		)
 
 		null_prediction_map
 	)
