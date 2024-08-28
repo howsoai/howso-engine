@@ -346,81 +346,81 @@
 				)
 				;compute null deviations and update hyperparam_map with them
 				(if (size features_with_nulls)
-					(seq
-						(if (size (get !sharedResidualsMap))
-							(map
-								(lambda
-									(let
-										(assoc
-											current_feature_with_nulls (current_value)
-											;the feature under which this features shared residuals is stored
-											current_shared_residual_key_value (get !sharedResidualsMap (current_value))
-										)
-										;if exists, means it has a shared deviation
-										(if current_shared_residual_key_value
-											(map
-												(lambda
-													(if
-														;if this feature has the same shared residuals key, then it belongs
-														; to the same group of shared residuals and must be added to null features list
-														(= (current_value) current_shared_residual_key_value)
-														;append to list of features_with_nulls if it doesn't already exist
-														(if
-															(not (contains_value features_with_nulls (current_index)))
-															(accum (assoc features_with_nulls (current_index)))
-														)
-													)
+					(assign (assoc
+						null_uncertainties_map
+							(call !ComputeNullUncertainties (assoc
+								features_with_nulls features_with_nulls
+								context_features context_features
+								null_cases_map
+									(map
+										(if regional_model_only
+											;if regional model only, just filter which of the case ids have nulls for each feature
+											(lambda
+												(filter
+													(lambda (= (null) (retrieve_from_entity (current_value) (current_index 1))))
+													case_ids
 												)
-												(get !sharedResidualsMap)
 											)
-										)
-									)
-								)
-								features_with_nulls
-							)
-						)
-						(assign (assoc
-							null_uncertainties_map
-								(call !ComputeNullUncertainties (assoc
-									features_with_nulls features_with_nulls
-									context_features context_features
-									null_cases_map
-										(map
-											(if regional_model_only
-												;if regional model only, just filter which of the case ids have nulls for each feature
-												(lambda
-													(filter
-														(lambda (= (null) (retrieve_from_entity (current_value) (current_index 1))))
-														case_ids
-													)
-												)
 
-												;otherwise sample null feature value cases from the model using queries
-												(lambda
-													(contained_entities (append
-														(query_exists (current_index))
-														(query_equals (current_index) (null))
-														(query_sample 200)
-													))
-												)
+											;otherwise sample null feature value cases from the model using queries
+											(lambda
+												(contained_entities (append
+													(query_exists (current_index))
+													(query_equals (current_index) (null))
+													(query_sample 200)
+												))
 											)
-											(zip features_with_nulls) ;FIXME: why we zipping?
 										)
-								))
-						))
-					)
+										(zip features_with_nulls) ;FIXME: why we zipping?
+									)
+							))
+					))
 				)
 			)
 		)
-
+		; TODO: Raise wairning if shared residuals mixes unique and non-unqiue
 		; FIXME: need to account for shared residuals
 		;unique features have a residual of (null)
 		(if unique_features_for_populating_output
-			(accum (assoc
-				residuals_map (zip unique_features_for_populating_output)
-			))
+			(if
+				shared_deviations_features
+				;if every shared deviation is unique, then append all unique features, as they would have
+				;been excluded elsewhere
+				(map
+					(lambda
+						(let
+							(assoc
+								current_unique_feature (current_value 1)
+								all_unique (true)
+								feature_grouping (call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve (current_value 2)))
+							)
+							(map
+								(lambda
+									(if
+										(not (contains_value unique_features_for_populating_output (current_value)))
+										(assign (assoc all_unique (false)))
+									)
+								)
+								feature_grouping
+							)
+							(if all_unique
+								;if any features in the shared residuals group are not in the unique_features_for_populating_output, that
+								; means that the feature is not unique and thus has deviations that are calculated, and thus this
+								; feature does not need to be appended to residuals_map with a null for the residuals.
+								;if every shared deviation is unique, then append this feature to residuals_map if its not already there,
+								(if
+									(not (contains_value (indices residuals_map) current_unique_feature))
+									(accum (assoc residuals_map (zip (list current_unique_feature))))
+								)
+							)
+						)
+					)
+					unique_features_for_populating_output
+				)
+				;else
+				(accum (assoc residuals_map (zip unique_features_for_populating_output)))
+			)
 		)
-
 
 		(if shared_residuals
 			(map
@@ -451,6 +451,30 @@
 			"hyperparam_map" hyperparam_map
 			"prediction_stats" prediction_stats
 			"null_uncertainty_map" null_uncertainties_map
+		)
+	)
+
+	;helper function, for each shared deviation feature, return its group
+	#!GetSharedDeviationGrouping
+	(declare
+		(assoc feature_group_to_retrieve (null))
+		(if feature_group_to_retrieve
+			(let
+				(assoc
+					current_key (get !sharedResidualsMap feature_group_to_retrieve)
+					current_feature_grouping (list)
+				)
+				(map
+					(lambda
+						(if
+							(= (current_value) current_key)
+							(accum (assoc current_feature_grouping (current_index 1)))
+						)
+					)
+					!sharedResidualsMap
+				)
+				current_feature_grouping
+			)
 		)
 	)
 
