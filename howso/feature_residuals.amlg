@@ -308,7 +308,14 @@
 		)
 
 		(if shared_residuals
-			(call !PrepSharedResiduals)
+			(if (not (size !sharedResidualsMap))
+				;if there are no set shared residuals, ignore shared deviations
+				(assign (assoc shared_residuals (false)))
+				(call !PrepSharedResiduals (assoc
+					features_keys_lists (assoc "features" features)
+					feature_residuals_keys_lists (assoc " feature_residuals_lists" feature_residuals_lists)
+				))
+			)
 		)
 
 		;if shared deviations, the prediction_stats returned will be expanded,
@@ -346,6 +353,7 @@
 								;ignore all inactive features (where all values are nulls)
 								(keep
 									(remove !featureNullRatiosMap (indices !inactiveFeaturesMap))
+									;if shared deviations, the features list needs to be expanded to include features that were dropped for shared deviations calculations
 									(if shared_residuals
 										(call !ExpandMapForSharedDeviations (assoc shared_map features))
 										features
@@ -388,11 +396,18 @@
 				)
 			)
 		)
+
 		;unique features have a residual of (null)
 		(if unique_features_for_populating_output
-			(accum (assoc residuals_map (zip unique_features_for_populating_output)))
+			(accum (assoc
+				residuals_map (zip unique_features_for_populating_output)
+			))
 		)
 
+
+		;for shared deviations, only one set of deviations are calculated for each group. At the end of the calculations,
+		; the deviations mapping is expanded to add back the other features whose deviations were not calculated and point them at the feature
+		; in which their shared deviations are stored under.
 		(if shared_residuals
 			(map
 				(lambda (let
@@ -408,7 +423,6 @@
 					))
 				))
 				(assoc
-					;converts back to full
 					"ordinal_residuals_map" ordinal_residuals_map
 					"residuals_map" residuals_map
 					"null_uncertainties_map" null_uncertainties_map
@@ -1005,8 +1019,6 @@
 			)
 		)
 
-		;FIXME: function to check unique_features_for_populating_output
-
 		(if (size unique_features_for_populating_output)
 			(let
 				(assoc
@@ -1142,18 +1154,6 @@
 			))
 		)
 
-		; (assign (assoc
-		; 	residuals_map (call !ExpandMapForSharedDeviations (assoc shared_map residuals_map))
-		; ))
-
-		; (assign (assoc
-		; 	features (call !ExpandMapForSharedDeviations (assoc shared_map features))
-		; ))
-
-		; (if shared_residuals
-		; 	(call !ExpandMapForSharedDeviations)
-		; )
-
 		;return null prediction_stats
 		(null)
 	)
@@ -1197,22 +1197,29 @@
 			(sort shared_map)
 		)
 
+	;Helper function to prep shared feature deviations, by taking in a list of features and their list of residuals,
+	; combining all of the residuals under the feature key of the group of the shared deviations, and removing the features
+	; from the features list whose residuals have been combined into another features.
 	#!PrepSharedResiduals
-	(let
-		(assoc combined_residuals (assoc))
+	(declare
+		(assoc
+			combined_residuals (assoc)
+			;takes in a assoc where the key is the name under which the modified features list will be saved under
+			features_keys_lists (assoc)
+			feature_residuals_keys_lists (assoc)
+		)
 
 		(map
-			(lambda
-				(let
-					(assoc current_feature (current_index 1))
-						;if this feature has a shared deviation
-						(let
-							(assoc shared_deviation_feature (get !sharedResidualsMap current_feature))
-							(if shared_deviation_feature
-								(accum (assoc
-									combined_residuals
-										(associate
-											shared_deviation_feature
+			(lambda (let
+				(assoc current_feature (current_index 1))
+					;if this feature has a shared deviation
+					(let
+						(assoc shared_deviation_feature (get !sharedResidualsMap current_feature))
+						(if shared_deviation_feature
+							(accum (assoc
+								combined_residuals
+									(associate
+										shared_deviation_feature
 											(append
 												(if
 													(= (null) (get combined_residuals shared_deviation_feature) )
@@ -1221,25 +1228,21 @@
 												)
 												(current_value 2)
 											)
-										)
-								))
-								(accum (assoc
-									combined_residuals
-										(associate
-											current_feature (current_value 2)
-										)
-								))
-							)
+									)
+							))
+							(accum (assoc
+								combined_residuals (associate current_feature (current_value 2))
+							))
 						)
-				)
-			)
-			(zip features feature_residuals_lists)
+					)
+			))
+			(zip (first (values features_keys_lists)) (first (values feature_residuals_keys_lists)))
 		)
 
 		(assign
-			(assoc
-				features (replace (indices combined_residuals))
-				feature_residuals_lists (replace (values combined_residuals))
+			(associate
+				(first (indices features_keys_lists)) (replace (indices combined_residuals))
+				(first (indices feature_residuals_keys_lists)) (replace (values combined_residuals))
 			)
 		)
 	)
