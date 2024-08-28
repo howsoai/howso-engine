@@ -307,10 +307,9 @@
 			(call !RunFullResiduals)
 		)
 
-		(if shared_residuals
-			(call !PrepSharedResiduals)
-		)
-
+		;if shared deviations, the prediction_stats returned will be expanded,
+		; however the features list and feature_residuals_lists will be shortened
+		; to where each group of shared residuals will only have one list of values.
 		(declare (assoc
 			prediction_stats
 				(if compute_all_statistics
@@ -319,6 +318,7 @@
 					(call !PrepResidualOutput)
 				))
 		)
+		;at this point I have a subset list of features and feature_residuals_list
 
 		(if compute_null_uncertainties
 			(let
@@ -346,44 +346,103 @@
 				)
 				;compute null deviations and update hyperparam_map with them
 				(if (size features_with_nulls)
-					(assign (assoc
-						null_uncertainties_map
-							(call !ComputeNullUncertainties (assoc
-								features_with_nulls features_with_nulls
-								context_features context_features
-								null_cases_map
-									(map
-										(if regional_model_only
-											;if regional model only, just filter which of the case ids have nulls for each feature
-											(lambda
-												(filter
-													(lambda (= (null) (retrieve_from_entity (current_value) (current_index 1))))
-													case_ids
+					(seq
+						(if (size (get !sharedResidualsMap))
+							(map
+								(lambda
+									(let
+										(assoc
+											current_feature_with_nulls (current_value)
+											;the feature under which this features shared residuals is stored
+											current_shared_residual_key_value (get !sharedResidualsMap (current_value))
+										)
+										;if exists, means it has a shared deviation
+										(if current_shared_residual_key_value
+											(map
+												(lambda
+													(if
+														;if this feature has the same shared residuals key, then it belongs
+														; to the same group of shared residuals and must be added to null features list
+														(= (current_value) current_shared_residual_key_value)
+														;append to list of features_with_nulls if it doesn't already exist
+														(if
+															(not (contains_value features_with_nulls (current_index)))
+															(accum (assoc features_with_nulls (current_index)))
+														)
+													)
 												)
-											)
-
-											;otherwise sample null feature value cases from the model using queries
-											(lambda
-												(contained_entities (append
-													(query_exists (current_index))
-													(query_equals (current_index) (null))
-													(query_sample 200)
-												))
+												(get !sharedResidualsMap)
 											)
 										)
-										(zip features_with_nulls)
 									)
-							))
-					))
+								)
+								features_with_nulls
+							)
+						)
+						(assign (assoc
+							null_uncertainties_map
+								(call !ComputeNullUncertainties (assoc
+									features_with_nulls features_with_nulls
+									context_features context_features
+									null_cases_map
+										(map
+											(if regional_model_only
+												;if regional model only, just filter which of the case ids have nulls for each feature
+												(lambda
+													(filter
+														(lambda (= (null) (retrieve_from_entity (current_value) (current_index 1))))
+														case_ids
+													)
+												)
+
+												;otherwise sample null feature value cases from the model using queries
+												(lambda
+													(contained_entities (append
+														(query_exists (current_index))
+														(query_equals (current_index) (null))
+														(query_sample 200)
+													))
+												)
+											)
+											(zip features_with_nulls) ;FIXME: why we zipping?
+										)
+								))
+						))
+					)
 				)
 			)
 		)
 
+		; FIXME: need to account for shared residuals
 		;unique features have a residual of (null)
 		(if unique_features_for_populating_output
 			(accum (assoc
 				residuals_map (zip unique_features_for_populating_output)
 			))
+		)
+
+
+		(if shared_residuals
+			(map
+				(lambda (let
+					(assoc
+						current_map_name (current_index 1)
+						current_map_value (current_value 1)
+					)
+					(assign (associate
+						current_map_name
+							(call !ExpandMapForSharedDeviations (assoc
+								shared_map current_map_value
+							))
+					))
+				))
+				(assoc
+					;converts back to full
+					"ordinal_residuals_map" ordinal_residuals_map
+					"residuals_map" residuals_map
+					"null_uncertainty_map" null_uncertainties_map
+				)
+			)
 		)
 
 		(assoc
@@ -925,27 +984,33 @@
 				)
 		))
 
-
+		;converts back to full
 		(map
-			(lambda
-				(let
-					(assoc
-						current_map_name (current_index 1)
-						current_map_value (current_value 1)
-					)
-					(assign (associate
-						current_map_name
-							(call !ExpandMapForSharedDeviations (assoc
-								shared_map current_map_value
-							))
-					))
+			(lambda (let
+				(assoc
+					current_map_name (current_index 1)
+					current_map_value (current_value 1)
 				)
-			)
-			(zip
-				(list "accuracy_map" "precision_map" "recall_map" "mcc_map" "r2_map" "rmse_map" "spearman_coeff_map" "confusion_matrix_map" "ordinal_residuals_map" "residuals_map")
-				(list accuracy_map precision_map recall_map mcc_map r2_map rmse_map spearman_coeff_map confusion_matrix_map ordinal_residuals_map residuals_map)
+				(assign (associate
+					current_map_name
+						(call !ExpandMapForSharedDeviations (assoc
+							shared_map current_map_value
+						))
+				))
+			))
+			(assoc
+				"accuracy_map" accuracy_map
+				"precision_map" precision_map
+				"recall_map" recall_map
+				"mcc_map" mcc_map
+				"r2_map" r2_map
+				"rmse_map" rmse_map
+				"spearman_coeff_map" spearman_coeff_map
+				"confusion_matrix_map" confusion_matrix_map
 			)
 		)
+
+		;FIXME: function to check unique_features_for_populating_output
 
 		(if (size unique_features_for_populating_output)
 			(let
@@ -996,6 +1061,9 @@
 		;where each react is either:
 		; the diff value, for nominals and continuous, or a list of [diff, ordinal_diff] for continuous ordinal features
 
+		(if shared_residuals
+			(call !PrepSharedResiduals)
+		)
 		;for each feature, collapse each list of residuals into a single value by averaging them out
 		;for ordinals we need to split out the ordinal residuals from the rest
 		(if (size ordinal_features_map)
@@ -1082,9 +1150,17 @@
 			))
 		)
 
-		(assign (assoc
-			residuals_map (call !ExpandMapForSharedDeviations (assoc shared_map residuals_map))
-		))
+		; (assign (assoc
+		; 	residuals_map (call !ExpandMapForSharedDeviations (assoc shared_map residuals_map))
+		; ))
+
+		; (assign (assoc
+		; 	features (call !ExpandMapForSharedDeviations (assoc shared_map features))
+		; ))
+
+		; (if shared_residuals
+		; 	(call !ExpandMapForSharedDeviations)
+		; )
 
 		;return null prediction_stats
 		(null)
@@ -1097,22 +1173,33 @@
 				shared_residuals_map (sort (get !sharedResidualsMap))
 			)
 			(if shared_residuals_map
-				(map
-					(lambda
-						(if
-							(= (null) (get shared_map (current_index)))
-							(if (!= (null) (get shared_map (get shared_residuals_map (current_index))))
-								(accum (assoc
-									shared_map
-										(associate
-											(current_index 2)
-											(get shared_map (get shared_residuals_map (current_value 2)))
-										)
-								))
+				(if (~ (list) shared_map)
+					(map
+						(lambda
+							(if (not (contains_value shared_map (current_value)))
+								(accum (assoc shared_map (current_value 1)))
 							)
 						)
+						(indices shared_residuals_map)
 					)
-					shared_residuals_map
+					; else an assoc
+					(map
+						(lambda
+							(if
+								(= (null) (get shared_map (current_index)))
+								(if (!= (null) (get shared_map (get shared_residuals_map (current_index))))
+									(accum (assoc
+										shared_map
+											(associate
+												(current_index 2)
+												(get shared_map (get shared_residuals_map (current_value 2)))
+											)
+									))
+								)
+							)
+						)
+						shared_residuals_map
+					)
 				)
 			)
 			(sort shared_map)
@@ -1163,6 +1250,54 @@
 				feature_residuals_lists (replace (values combined_residuals))
 			)
 		)
+	)
+
+	#!PrepSharedResidualsNulls
+	(let
+		(assoc combined_residuals (assoc))
+
+		(map
+			(lambda
+				(let
+					(assoc current_feature (current_index 1))
+						;if this feature has a shared deviation
+						(let
+							(assoc shared_deviation_feature (get !sharedResidualsMap current_feature))
+							(if shared_deviation_feature
+								(accum (assoc
+									combined_residuals
+										(associate
+											shared_deviation_feature
+											(append
+												(if
+													(= (null) (get combined_residuals shared_deviation_feature) )
+													[]
+													(get combined_residuals shared_deviation_feature)
+												)
+												(current_value 2)
+											)
+										)
+								))
+								(accum (assoc
+									combined_residuals
+										(associate
+											current_feature (current_value 2)
+										)
+								))
+							)
+						)
+				)
+			)
+			null_cases_map
+		)
+
+		(assign
+			(assoc
+				null_cases_map (replace combined_residuals)
+				features_with_nulls (indices combined_residuals)
+			)
+		)
+
 	)
 
 	;Helper method to sparsify confusion matrices by removing cells whose counts are less than the specified confusion_matrix_min_count
