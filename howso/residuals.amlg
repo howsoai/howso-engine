@@ -118,7 +118,6 @@
 		))
 	)
 
-
 	;Limit computed residuals from feature_residuals_map to be the max of cached minimum residual, computed residual, and user-specified error
 	;outputs the passed in feature_residuals_map with limited values.
 	;
@@ -126,65 +125,249 @@
 	; feature_residuals_map: output assoc from CalculateFeatureResiduals containing a map of feature -> residual value in the 'residual_map' key
 	;					i.e.: { "residual_map" : { "featureA" : 3.4... } }
 	#!ExpandResidualValuesToUncertainty
-	(set
-		feature_residuals_map
-		"residual_map"
-		(map
-			(lambda
-				;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
-				(if (contains_index !nominalsMap (current_index))
-					(let
-						(assoc
-							;map of class -> count
-							class_counts_map
-								(compute_on_contained_entities (list
-									(query_value_masses (current_index 2) (null) (contains_index !numericNominalFeaturesMap (current_index 2)) )
-								))
-						)
-
-						;do not max cap nominal deviations if less than 2 classes have been trained
-						(if (<= (size class_counts_map) 1)
-							(max
-								(get !cachedFeatureMinResidualMap (current_index))
-								(current_value)
-								(get !userSpecifiedFeatureErrorsMap (current_index))
+	(if shared_deviations
+		(call !ExpandResidualValuesToUncertaintySharedDeviations (assoc feature_residuals_map feature_residuals_map))
+		(set
+			feature_residuals_map
+			"residual_map"
+			(map
+				(lambda
+					;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
+					(if (contains_index !nominalsMap (current_index))
+						(let
+							(assoc
+								;map of class -> count
+								class_counts_map
+									(compute_on_contained_entities (list
+										(query_value_masses (current_index 2) (null) (contains_index !numericNominalFeaturesMap (current_index 2)) )
+									))
 							)
 
-							;else cap the max nominal deviation
-							(let
-								(assoc total_count (apply "+" (values class_counts_map)) )
+							;do not max cap nominal deviations if less than 2 classes have been trained
+							(if (<= (size class_counts_map) 1)
+								(max
+									(get !cachedFeatureMinResidualMap (current_index))
+									(current_value)
+									(get !userSpecifiedFeatureErrorsMap (current_index))
+								)
 
-								(min
-									;nominal max deviation is the sum of: each class's probability multiplied by probability of getting it wrong
-									(apply "+"
-										(map
-											(lambda (let
-												(assoc class_prob (* (/ (current_value 1) total_count)) )
-												(* class_prob (- 1 class_prob))
-											))
-											(values class_counts_map)
+								;else cap the max nominal deviation
+								(let
+									(assoc total_count (apply "+" (values class_counts_map)) )
+
+									(min
+										;nominal max deviation is the sum of: each class's probability multiplied by probability of getting it wrong
+										(apply "+"
+											(map
+												(lambda (let
+													(assoc class_prob (* (/ (current_value 1) total_count)) )
+													(* class_prob (- 1 class_prob))
+												))
+												(values class_counts_map)
+											)
 										)
-									)
 
-									(max
-										(get !cachedFeatureMinResidualMap (current_index))
-										(current_value)
-										(get !userSpecifiedFeatureErrorsMap (current_index))
+										(max
+											(get !cachedFeatureMinResidualMap (current_index))
+											(current_value)
+											(get !userSpecifiedFeatureErrorsMap (current_index))
+										)
 									)
 								)
 							)
 						)
-					)
 
-					;else continuous value don't have upper bounds, set the lower bound
-					(max
-						(get !cachedFeatureMinResidualMap (current_index))
-						(current_value)
-						(get !userSpecifiedFeatureErrorsMap (current_index))
+						;else continuous value don't have upper bounds, set the lower bound
+						(max
+							(get !cachedFeatureMinResidualMap (current_index))
+							(current_value)
+							(get !userSpecifiedFeatureErrorsMap (current_index))
+						)
 					)
 				)
+				(get feature_residuals_map "residual_map")
 			)
-			(get feature_residuals_map "residual_map")
+		)
+	)
+
+	;Limit computed residuals from feature_residuals_map when using shared deviations to be the max of cached minimum residual, computed residual, and user-specified error
+	;outputs the passed in feature_residuals_map with limited values.
+	;
+	;parameters:
+	; feature_residuals_map: output assoc from CalculateFeatureResiduals containing a map of feature -> residual value in the 'residual_map' key
+	;					i.e.: { "residual_map" : { "featureA" : 3.4... } }
+	#!ExpandResidualValuesToUncertaintySharedDeviations
+	(set
+		feature_residuals_map
+		"residual_map"
+		(let
+			(assoc
+				temp_residual_map
+					(map
+						(lambda
+							;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
+							(if (contains_index !nominalsMap (current_index))
+								(let
+									(assoc
+										;map of class -> count
+										feature_grouping
+											(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve (current_index 2)))
+										class_counts_map (assoc)
+										current_feature (current_index 1)
+									)
+									(if (> (size feature_grouping) 0)
+										(map
+											(lambda
+												(accum (assoc
+													class_counts_map
+														(compute_on_contained_entities (list
+															(query_value_masses (current_value 2) (null) (contains_index !numericNominalFeaturesMap (current_value 2)) )
+														))
+												))
+											)
+											feature_grouping
+										)
+										(assign (assoc
+											class_counts_map
+												(compute_on_contained_entities (list
+													(query_value_masses current_feature (null) (contains_index !numericNominalFeaturesMap current_feature) )
+												))
+										))
+									)
+									;do not max cap nominal deviations if less than 2 classes have been trained
+									(if (<= (size class_counts_map) 1)
+										(max
+											(call !GetSharedGroupValues (assoc
+												aggregation "max"
+												feature_to_retrieve current_feature
+												feature_group_location (call !cachedFeatureMinResidualMap)
+											))
+											(current_value)
+											(call !GetSharedGroupValues (assoc
+												aggregation "max"
+												feature_to_retrieve current_feature
+												feature_group_location (call !userSpecifiedFeatureErrorsMap)
+											))
+										)
+
+										;else cap the max nominal deviation
+										(let
+											(assoc total_count (apply "+" (values class_counts_map)) )
+											(min
+												;nominal max deviation is the sum of: each class's probability multiplied by probability of getting it wrong
+												(apply "+"
+													(map
+														(lambda (let
+															(assoc class_prob (* (/ (current_value 1) total_count)) )
+															(* class_prob (- 1 class_prob))
+														))
+														(values class_counts_map)
+													)
+												)
+
+												(max
+													(call !GetSharedGroupValues (assoc
+														aggregation "max"
+														feature_to_retrieve current_feature
+														feature_group_location (call !cachedFeatureMinResidualMap)
+													))
+													(current_value)
+													(call !GetSharedGroupValues (assoc
+														aggregation "max"
+														feature_to_retrieve current_feature
+														feature_group_location (call !userSpecifiedFeatureErrorsMap)
+													))
+												)
+											)
+										)
+									)
+								)
+								(max
+									(call !GetSharedGroupValues (assoc
+										aggregation "max"
+										feature_to_retrieve (current_index)
+										feature_group_location (call !cachedFeatureMinResidualMap)
+									))
+									(call !GetSharedGroupValues (assoc
+										aggregation "max"
+										feature_to_retrieve (current_index)
+										feature_group_location (call !userSpecifiedFeatureErrorsMap)
+									))
+									(current_value)
+								)
+							)
+						)
+						(call !ReduceMapSharedDeviations (assoc map_to_reduce (get feature_residuals_map "residual_map") ))
+					)
+			)
+
+			(assign (assoc
+				temp_residual_map
+					(call !ExpandMapForSharedDeviations (assoc
+						shared_map temp_residual_map
+					))
+			))
+
+			temp_residual_map
+		)
+	)
+
+
+	#!GetSharedGroupValues
+	(declare
+		(assoc
+			aggregation (null)
+			feature_to_retrieve (null)
+			feature_group_location (null)
+		)
+		(let
+			(assoc
+				feature_group_values (list)
+				feature_group_full
+					(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve feature_to_retrieve))
+			)
+			(if (> (size feature_group_full) 0)
+				(map
+					(lambda
+						(accum (assoc
+							feature_group_values
+								(get feature_group_location (current_value 1))
+						))
+					)
+					feature_group_full
+				)
+				(accum (assoc
+					feature_group_values
+						(get feature_group_location feature_to_retrieve)
+				))
+			)
+			(if
+				(= aggregation "max")
+				(assign (assoc feature_group_values (apply "max" feature_group_values) ))
+
+				(= aggregation "min")
+				(assign (assoc feature_group_values (apply "min" feature_group_values) ))
+			)
+			feature_group_values
+		)
+	)
+
+	#!ReduceMapSharedDeviations
+	(declare
+		(assoc map_to_reduce (null))
+		(let
+			(assoc
+				;If a feature is part of a shared deviations group, but is not the key, then drop
+				features_to_drop
+					(filter
+						(lambda (not (contains_value (values !sharedResidualsMap (true)) (current_value) )))
+						(indices !sharedResidualsMap (true))
+					)
+			)
+			(filter
+				(lambda (not (contains_value features_to_drop (current_index)) ))
+				map_to_reduce
+			)
 		)
 	)
 
