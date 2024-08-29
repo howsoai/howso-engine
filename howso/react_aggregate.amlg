@@ -5,6 +5,7 @@
     ;
     ;parameters:
     ; context_features: optional list of features to use as contexts for computations. default is all features if unspecified.
+	; action_features: optional list of features to do residuals and prediction stats computations for. default is the value of context_features
     ; num_samples: optional. Total sample size of model to use (using sampling with replacement) for all non-robust computation.
     ;               Defaults to 1000. If specified overrides sample_model_fraction.
     ; num_robust_residual_samples: optional. Total sample size of model to use (using sampling with replacement) for robust feature_mda and residual computation.
@@ -49,9 +50,11 @@
     ;               (power set/permutations) set of all other context_features to predict the feature. false removes cached values. Uses robust computation.
     ;		feature_contributions_full: optional, none/true/false. For each context_feature, use the full set of all other context_features to compute the
     ;				mean absolute delta between prediction of action_feature with and without the context_feature in the model. false removes cached values. Uses full computation.
+	;				Returns mean absolute delta under "feature_contributions_full" and mean delta under "directional_feature_contributions_full".
     ;		feature_contributions_robust: optional, none/true/false. For each context_feature, use the robust (power set/permutation) set of all other context_features
     ;				to compute the mean absolute delta between prediction of action_feature with and without the context_feature in the model. Uses robust computation.
     ;				false removes cached values. Uses robust computation.
+	;				Returns mean absolute delta under "feature_contributions_robust" and mean delta under "directional_feature_contributions_robust".
     ;		feature_mda_full: optional, none/true/false. if true will compute Mean Decrease in Accuracy (feature_mda) for each context feature at predicting mda_action_features.
     ;				Drop each feature and use the full set of remaining context features for each prediction. false removes cached values. Uses full computation.
     ;		feature_mda_permutation_full: optional, none/true/false. Compute feature_mda_full by scrambling each feature and using the full set of remaining context features
@@ -61,9 +64,6 @@
     ;		feature_mda_permutation_robust: optional, none/true/false. Compute feature_mda by scrambling each feature and using the robust (power set/permutations)
     ;				set of remaining context features for each prediction.  false removes cached values. Uses robust computation.
     ;		selected_prediction_stats": list of strings, optional.  Allowed values are:
-    ;						"mda" : mean decrease in accuracy when each feature is dropped from the model, applies to all features.
-    ;						"contribution": feature contribution to predicted value when each feature is dropped from the model, applies to all features.
-    ;						"mda_permutation": mean decrease in accuracy that used scrambling of feature values instead of dropping each feature, applies to all features.
     ;						"mae" : Mean absolute error. For continuous features, this is calculated as the mean of absolute values of the difference
     ;							between the actual and predicted values. For nominal features, this is 1 - the average categorical action probability of each case's
     ;							correct classes. Categorical action probabilities are the probabilities for each class for the action feature.
@@ -118,6 +118,8 @@
 		(assoc
 			;{type "list" values "string"}
 			context_features (list)
+			;{type "list" values "string"}
+			action_features (list)
 			;{type "boolean"}
 			use_case_weights (null)
 			;{type "string"}
@@ -154,8 +156,7 @@
 
 		(declare (assoc
 			invalid_parameters (false)
-			conditioned_residuals (false)
-			output (null)
+			output (assoc)
 			num_training_cases (call !GetNumTrainingCases)
 			holdout_entity_name (null)
 			warnings (assoc)
@@ -191,25 +192,28 @@
 			)
         )
 
+		;action_feature must be specified if doing any influences
 		(if (and
 				(= (null) feature_influences_action_feature)
-				(not
-					(=
-						(null)
-						(get details "feature_contributions_full")
-						(get details "feature_contributions_robust")
-						(get details "feature_mda_full")
-						(get details "feature_mda_permutation_full")
-						(get details "feature_mda_robust")
-						(get details "feature_mda_permutation_robust")
+				(contains_value
+					(unzip
+						details
+						[
+							"feature_contributions_full"
+							"feature_contributions_robust"
+							"feature_mda_full"
+							"feature_mda_robust"
+							"feature_mda_permutation_full"
+							"feature_mda_permutation_robust"
+						]
 					)
+					(true)
 				)
 			)
 			(conclude
-				(call !Return (assoc errors (list "Must specify action_feature when computing feature_mda_permutation, feature_mda, or feature_contributions.")))
+				(call !Return (assoc errors (list "action_feature must be specified when computing feature_mda_permutation, feature_mda, or feature_contributions.")))
 			)
 		)
-
 
 		;sample_model_fraction is ignored for any robust computation
 		(if
@@ -269,10 +273,11 @@
 		)
 
 		(if (= 0 (size context_features))
-			(assign (assoc
-				context_features
-					(filter (lambda (not (contains_index !uniqueNominalsSet (current_value))) ) !trainedFeatures)
-			))
+			(assign (assoc context_features !trainedFeatures ))
+		)
+
+		(if (= 0 (size action_features))
+			(assign (assoc action_features context_features ))
 		)
 
 
@@ -292,17 +297,23 @@
 						num (* sample_model_fraction num_training_cases)
 					))
 
-					;else sample with replacement 1000 for all non-robust computations
+					;else just sample 1000 cases
 					(or
 						(get details "feature_residuals_full")
 						(get details "feature_mda_full")
 						(get details "feature_mda_permutation_full")
 						(get details "feature_contributions_full")
 					)
-					(call !SampleCases (assoc
-						num 1000
-						case_weight_feature (if valid_weight_feature weight_feature)
-					))
+					(if (> (call !GetNumTrainingCases) 1000)
+						;if more than 1000 cases, sample 1000
+						(call !SampleCases (assoc
+							num 1000
+							case_weight_feature (if valid_weight_feature weight_feature)
+						))
+
+						;otherwise just use all the cases
+						(call !AllCases)
+					)
 				)
 			robust_residual_case_ids
 				(if num_robust_residual_samples
@@ -333,7 +344,6 @@
 						case_weight_feature (if valid_weight_feature weight_feature)
 					))
 				)
-			mda_map (null)
 		))
 
 		;if the residuals hyperparameter feature hasn't been provided, figure it out dynamically when computing residuals
@@ -372,360 +382,299 @@
 			)
 		)
 
-		;if any of residual sets should be removed
-		(if (contains_value (list (get details "feature_residuals_full") (get details "feature_residuals_robust")) (false))
-			(let
-				(assoc
-					residuals_map (retrieve_from_entity "!residualsMap")
-					prediction_stats_map (retrieve_from_entity "!featurePredictionStatsMap")
-					hyperparam_map (assoc)
-				)
-				;remove 'full' residuals
-				(if (= (false) (get details "feature_residuals_full"))
-					(seq
-						(assign (assoc
-							hyperparam_map
-								(call !GetHyperparameters (assoc
-									feature prediction_stats_action_feature
-									context_features (filter (lambda (!= prediction_stats_action_feature (current_value))) context_features)
-									mode
-										(if (!= ".targetless" prediction_stats_action_feature)
-											"full"
-											"robust"
-										)
-									weight_feature weight_feature
-								))
-						))
-						;remove the specified values from the cached residuals and prediction stats
-						(assign (assoc
-							residuals_map
-								(remove
-									residuals_map
-									(apply "concat" (append "full" (remove (get hyperparam_map "paramPath") 1) ) )
-								)
-							prediction_stats_map
-								(remove
-									prediction_stats_map
-									(apply "concat" (append "full" (remove (get hyperparam_map "paramPath") 1) ) )
-								)
-						))
-					)
-				)
-				;remove 'robust' residuals
-				(if (= (false) (get details "feature_residuals_robust"))
-					(seq
-						(assign (assoc
-							hyperparam_map
-								(call !GetHyperparameters (assoc
-									feature prediction_stats_action_feature
-									context_features (filter (lambda (!= prediction_stats_action_feature (current_value))) context_features)
-									mode "robust"
-									weight_feature weight_feature
-								))
-						))
-						;remove the specified values from the cached residuals and prediction stats
-						(assign (assoc
-							residuals_map
-								(remove
-									residuals_map
-									(apply "concat" (append "robust" (remove (get hyperparam_map "paramPath") 1) ) )
-								)
-							prediction_stats_map
-								(remove
-									prediction_stats_map
-									(apply "concat" (append "robust" (remove (get hyperparam_map "paramPath") 1) ) )
-								)
-						))
-					)
-				)
-
-				(assign_to_entities (assoc
-					!residualsMap residuals_map
-					!featurePredictionStatsMap prediction_stats_map
-				))
-				(accum_to_entities (assoc !revision 1))
-			)
-		)
-
-		;set the custom hp map if specified a hyperparameter_param_path
 		(declare (assoc
+			;set the custom hp map if specified a hyperparameter_param_path
 			custom_hyperparam_map
 				(if hyperparameter_param_path
 					(get !hyperparameterMetadataMap hyperparameter_param_path)
 				)
+			;initialize conditional queries
+			action_condition_filter_query
+				(if (get details "action_condition")
+					(call !GetQueryByCondition (assoc
+						condition (get details "action_condition")
+						precision (or (get details "action_condition_precision") "exact")
+						num_cases (get details "action_num_samples")
+					))
+					(list)
+				)
+			context_condition_filter_query
+				(if (get details "context_condition")
+					(call !GetQueryByCondition (assoc
+						condition (get details "context_condition")
+						precision (or (get details "context_condition_precision") "exact")
+						num_cases (get details "context_num_samples")
+					))
+					(list)
+				)
 		))
 
-		;condtioned_residuals is set to true if any form of condition stats are provided and any prediction stats are selected
-		(if (and
-				(or (get details "context_condition") (get details "action_condition") (get details "prediction_stats_features"))
-				(or (get details "prediction_stats") (get details "prediction_stat_robust"))
-			)
-			(assign (assoc conditioned_residuals (true) ))
-		)
-
 		;calculates and stores the full residuals unless its conditioned prediction stats
-		(if (or (get details "feature_residuals_full") (and (get details "prediction_stats") (= conditioned_residuals (false))))
-			(call !CalculateAndStoreFeatureResiduals (assoc
-				features context_features
-				case_ids case_ids
-				robust_residuals (false)
-				hyperparameter_feature prediction_stats_action_feature
-				weight_feature weight_feature
-				use_case_weights use_case_weights
-				custom_hyperparam_map custom_hyperparam_map
-				confusion_matrix_min_count confusion_matrix_min_count
+		(if (get details "prediction_stats")
+			(let
+				(assoc
+					prediction_stats_map
+						(call !CalculateFeatureResiduals (assoc
+							features action_features
+							context_features context_features
+							robust_residuals (false)
+							hyperparameter_feature prediction_stats_action_feature
+							use_case_weights use_case_weights
+							weight_feature weight_feature
+							custom_hyperparam_map custom_hyperparam_map
+							compute_all_statistics (true)
+							confusion_matrix_min_count confusion_matrix_min_count
+							action_condition_filter_query action_condition_filter_query
+							context_condition_filter_query context_condition_filter_query
+							case_ids
+								;if there is an action condition, case ids matching the condition will be selected internally
+								(if (size action_condition_filter_query)
+									(null)
+									case_ids
+								)
+						))
+					selected_prediction_stats
+						(call !ProcessSelectedPredictionStats (assoc selected_prediction_stats (or (get details "selected_prediction_stats") [])))
+				)
+				(accum (assoc
+					output
+						(append
+							(filter
+								(lambda (contains_value selected_prediction_stats (current_index)))
+								(remove (get prediction_stats_map "prediction_stats") [".robust" ".hyperparam_path"])
+							)
+							(if (contains_value selected_prediction_stats "mae")
+								(assoc "mae" (get prediction_stats_map "residual_map"))
+								{}
+							)
+							(if (get details "feature_residuals_full")
+								{"feature_residuals_full" (get prediction_stats_map "residual_map")}
+								{}
+							)
+						)
+				))
+			)
+
+			;this should only run if prediction_stats is not requested, don't want to compute these residuals twice
+			(get details "feature_residuals_full")
+			(accum (assoc
+				output
+					(assoc
+						"feature_residuals_full"
+							(get (call !CalculateFeatureResiduals (assoc
+								features action_features
+								context_features context_features
+								case_ids case_ids
+								robust_residuals (false)
+								hyperparameter_feature prediction_stats_action_feature
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+								custom_hyperparam_map custom_hyperparam_map
+								compute_all_statistics (false)
+								confusion_matrix_min_count confusion_matrix_min_count
+							)) "residual_map" )
+					)
 			))
 		)
 
 		;calculates and stores the robust residuals unless its conditioned prediction stats
 		(if (get details "feature_residuals_robust")
-			(call !CalculateAndStoreFeatureResiduals (assoc
-				features context_features
-				case_ids robust_residual_case_ids
-				robust_residuals (true)
-				hyperparameter_feature prediction_stats_action_feature
-				weight_feature weight_feature
-				use_case_weights use_case_weights
-				custom_hyperparam_map custom_hyperparam_map
-				confusion_matrix_min_count confusion_matrix_min_count
+			(accum (assoc
+				output
+					(assoc
+						"feature_residuals_robust"
+							(get (call !CalculateFeatureResiduals (assoc
+								features action_features
+								context_features context_features
+								case_ids robust_residual_case_ids
+								robust_residuals (true)
+								hyperparameter_feature prediction_stats_action_feature
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+								custom_hyperparam_map custom_hyperparam_map
+								compute_all_statistics (false)
+								confusion_matrix_min_count confusion_matrix_min_count
+							)) "residual_map")
+					)
 			))
 		)
 
 		;doing feature_contributions
-		(if (not (= (null) (get details "feature_contributions_full") (get details "feature_contributions_robust")))
-			(seq
-				(assign (assoc
+		(if (or
+				(get details "feature_contributions_full")
+				(get details "feature_contributions_robust")
+			)
+			(let
+				(assoc
 					;make sure context_features doesnt have the specified action feature by filtering it out
 					context_features (filter (lambda (!= feature_influences_action_feature (current_value))) context_features)
-				))
-
-				;if any of the stored feature_contributions_full sets should be removed
-				(if (contains_value (list (get details "feature_contributions_full") (get details "feature_contributions_robust")) (false))
-					(let
-						(assoc contributions_map (retrieve_from_entity "!contributionsMap"))
-
-						(if (= (false) (get details "feature_contributions_full"))
-							(assign (assoc contributions_map (remove contributions_map (concat "full" weight_feature feature_influences_action_feature)) ))
-						)
-
-						(if (= (false) (get details "feature_contributions_robust"))
-							(assign (assoc contributions_map (remove contributions_map (concat "robust" weight_feature feature_influences_action_feature)) ))
-						)
-
-						(assign_to_entities (assoc !contributionsMap contributions_map))
-						(accum_to_entities (assoc !revision 1))
-					)
 				)
 
 				(if (get details "feature_contributions_full")
-					(call !CalculateFeatureContributions (assoc
-						context_features context_features
-						action_feature feature_influences_action_feature
-						robust (false)
-						case_ids case_ids
-						weight_feature weight_feature
-						custom_hyperparam_map custom_hyperparam_map
-						num_samples num_samples
+					(accum (assoc
+						output
+							(call !CalculateFeatureContributions (assoc
+								context_features context_features
+								action_feature feature_influences_action_feature
+								robust (false)
+								case_ids case_ids
+								weight_feature weight_feature
+								custom_hyperparam_map custom_hyperparam_map
+								num_samples num_samples
+							))
 					))
 				)
 
 				(if (get details "feature_contributions_robust")
-					(call !CalculateFeatureContributions (assoc
-						context_features context_features
-						action_feature feature_influences_action_feature
-						robust (true)
-						case_ids robust_influence_case_ids
-						weight_feature weight_feature
-						custom_hyperparam_map custom_hyperparam_map
-						num_robust_influence_samples num_robust_influence_samples
-						num_robust_influence_samples_per_case num_robust_influence_samples_per_case
+					(accum (assoc
+						output
+							(call !CalculateFeatureContributions (assoc
+								context_features context_features
+								action_feature feature_influences_action_feature
+								robust (true)
+								case_ids robust_influence_case_ids
+								weight_feature weight_feature
+								custom_hyperparam_map custom_hyperparam_map
+								num_robust_influence_samples num_robust_influence_samples
+								num_robust_influence_samples_per_case num_robust_influence_samples_per_case
+							))
 					))
 				)
 			)
 		)
 
-		;doing feature_mda_full
-		(if (not
-				(=
-					(null)
-					(get details "feature_mda_full")
-					(get details "feature_mda_robust")
-					(get details "feature_mda_permutation_full")
-					(get details "feature_mda_permutation_robust")
-				)
+		;doing feature_mda
+		(if (or
+				(get details "feature_mda_full")
+				(get details "feature_mda_robust")
+				(get details "feature_mda_permutation_full")
+				(get details "feature_mda_permutation_robust")
 			)
-			(seq
-				(assign (assoc
+			(let
+				(assoc
 					;make sure context_features doesnt have the specified action feature by filtering it out
 					context_features (filter (lambda (!= feature_influences_action_feature (current_value))) context_features)
-				))
-
-				;if any of the stored feature_mda_full sets should be removed
-				(if (contains_value
-						(list
-							(get details "feature_mda_full")
-							(get details "feature_mda_robust")
-							(get details "feature_mda_permutation_full")
-							(get details "feature_mda_permutation_robust")
-						)
-						(false)
-					)
-					(let
-						(assoc mda_map (retrieve_from_entity "!mdaMap"))
-
-						(if (= (false) (get details "feature_mda_full"))
-							(assign (assoc mda_map (remove mda_map (concat "dropfull" weight_feature feature_influences_action_feature)) ))
-						)
-
-						(if (= (false) (get details "feature_mda_robust"))
-							(assign (assoc mda_map (remove mda_map (concat "droprobust" weight_feature feature_influences_action_feature)) ))
-						)
-
-						(if (= (false) (get details "feature_mda_permutation_full"))
-							(assign (assoc mda_map (remove mda_map (concat "permutationfull" weight_feature feature_influences_action_feature)) ))
-						)
-
-						(if (= (false) (get details "feature_mda_permutation_robust"))
-							(assign (assoc mda_map (remove mda_map (concat "permutationrobust" weight_feature feature_influences_action_feature)) ))
-						)
-
-						(assign_to_entities (assoc !mdaMap mda_map))
-						(accum_to_entities (assoc !revision 1))
-					)
 				)
 
 				(if (get details "feature_mda_full")
-					(call !CalculateMDA (assoc
-						context_features context_features
-						action_feature feature_influences_action_feature
-						sensitivity_to_randomization (false)
-						robust (false)
-						case_ids case_ids
-						use_case_weights use_case_weights
-						weight_feature weight_feature
-						custom_hyperparam_map custom_hyperparam_map
+					(accum (assoc
+						output
+							(assoc
+								"feature_mda_full"
+									(call !DecreaseInAccuracy (assoc
+										context_features context_features
+										action_features [feature_influences_action_feature]
+										sensitivity_to_randomization (false)
+										robust (false)
+										case_ids case_ids
+										use_case_weights use_case_weights
+										weight_feature weight_feature
+										hyperparam_map custom_hyperparam_map
+									))
+							)
 					))
 				)
 
 				(if (get details "feature_mda_robust")
-					(call !CalculateMDA (assoc
-						context_features context_features
-						action_feature feature_influences_action_feature
-						sensitivity_to_randomization (false)
-						robust (true)
-						;TODO: replace with robust_influence_case_ids
-						case_ids robust_residual_case_ids
-						use_case_weights use_case_weights
-						weight_feature weight_feature
-						custom_hyperparam_map custom_hyperparam_map
+					(accum (assoc
+						output
+							(assoc
+								"feature_mda_robust"
+									(call !DecreaseInAccuracy (assoc
+										context_features context_features
+										action_features [feature_influences_action_feature]
+										sensitivity_to_randomization (false)
+										robust (true)
+										;TODO: replace with robust_influence_case_ids
+										case_ids robust_residual_case_ids
+										use_case_weights use_case_weights
+										weight_feature weight_feature
+										hyperparam_map custom_hyperparam_map
+									))
+							)
 					))
 				)
 
 				(if	(get details "feature_mda_permutation_full")
-					(call !CalculateMDA (assoc
-						context_features context_features
-						action_feature feature_influences_action_feature
-						sensitivity_to_randomization (true)
-						robust (false)
-						case_ids case_ids
-						use_case_weights use_case_weights
-						weight_feature weight_feature
-						custom_hyperparam_map custom_hyperparam_map
+					(accum (assoc
+						output
+							(assoc
+								"feature_mda_permutation_full"
+									(call !DecreaseInAccuracy (assoc
+										context_features context_features
+										action_features [feature_influences_action_feature]
+										sensitivity_to_randomization (true)
+										robust (false)
+										case_ids case_ids
+										use_case_weights use_case_weights
+										weight_feature weight_feature
+										hyperparam_map custom_hyperparam_map
+									))
+							)
 					))
 				)
 
 				(if (get details "feature_mda_permutation_robust")
-					(call !CalculateMDA (assoc
-						context_features context_features
-						action_feature feature_influences_action_feature
-						sensitivity_to_randomization (true)
-						robust (true)
-						;TODO: replace with robust_influence_case_ids
-						case_ids robust_residual_case_ids
-						use_case_weights use_case_weights
-						weight_feature weight_feature
-						custom_hyperparam_map custom_hyperparam_map
+					(accum (assoc
+						output
+							(assoc
+								"feature_mda_permutation_robust"
+									(call !DecreaseInAccuracy (assoc
+										context_features context_features
+										action_features [feature_influences_action_feature]
+										sensitivity_to_randomization (true)
+										robust (true)
+										;TODO: replace with robust_influence_case_ids
+										case_ids robust_residual_case_ids
+										use_case_weights use_case_weights
+										weight_feature weight_feature
+										hyperparam_map custom_hyperparam_map
+									))
+							)
 					))
 				)
 			)
 		)
 
-		(if (= conditioned_residuals (false))
-			(assign
-				(assoc output
-					(call !GetFeatureDetailsStats (assoc
-						prediction_stats (get details "prediction_stats")
-						feature_influences_action_feature feature_influences_action_feature
-						prediction_stats_action_feature prediction_stats_action_feature
-						selected_prediction_stats (get details "selected_prediction_stats")
-						robust_hyperparameters robust_hyperparameters
-						weight_feature weight_feature
-						feature_residuals_full (get details "feature_residuals_full")
-						feature_residuals_robust (get details "feature_residuals_robust")
-						feature_contributions_full (get details "feature_contributions_full")
-						feature_contributions_robust (get details "feature_contributions_robust")
-						feature_mda_full (get details "feature_mda_full")
-						feature_mda_permutation_full (get details "feature_mda_permutation_full")
-						feature_mda_robust (get details "feature_mda_robust")
-						feature_mda_permutation_robust (get details "feature_mda_permutation_robust")
-						confusion_matrix_min_count confusion_matrix_min_count
-					))
-				)
-			)
-		)
+		;transform stats to be per-feature for output and filter out any empty assocs
+		(assign (assoc
+			output
+				(filter
+					(lambda (and (!= (assoc) (current_value)) (!= (null) (current_value)) ))
+					(map
+						(lambda (let
+							(assoc feature (current_index 1))
 
-		;conditioned residuals only true if a form of prediction_stats are selected in additional to have a condition parameter
-		(if (= conditioned_residuals (true))
-			(let
-				(assoc
-					action_condition_precision (if
-						(= (get details "action_condition_precision") (null) )
-						"exact"
-						(get details "action_condition_precision")
-					)
-					context_condition_precision (if
-						(= (get details "action_condition_precision") (null) )
-						"exact"
-						(get details "action_condition_precision")
-					)
-				)
-				(assign
-					(assoc output
-						;currently only supports one action feature, will support both in the future.
-						(call !CalculateConditionalPredictionStats (assoc
-							prediction_stats (get details "prediction_stats")
-							selected_prediction_stats (get details "selected_prediction_stats")
-							action_feature feature_influences_action_feature
-							weight_feature weight_feature
-							robust_hyperparameters robust_hyperparameters
-							context_condition (get details "context_condition")
-							context_precision_num_samples (get details "context_precision_num_samples")
-							context_condition_precision context_condition_precision
-							action_condition (get details "action_condition")
-							action_num_samples (get details "action_num_samples")
-							action_condition_precision action_condition_precision
-							num_robust_influence_samples_per_case num_robust_influence_samples_per_case
-							prediction_stats_features (get details "prediction_stats_features")
-							feature_contributions_full (get details "feature_contributions_full")
-							feature_contributions_robust (get details "feature_contributions_robust")
-							feature_mda_full (get details "feature_mda_full")
-							feature_mda_permutation_full (get details "feature_mda_permutation_full")
-							feature_mda_robust (get details "feature_mda_robust")
-							feature_mda_permutation_robust (get details "feature_mda_permutation_robust")
-							confusion_matrix_min_count confusion_matrix_min_count
+							(if (contains_index !uniqueNominalsSet feature)
+								;if unique nominal, we want to bring out the nulls, but only for those that we gave a null intentionally (nominal stuff)
+								(filter
+									(lambda (contains_index (get output (current_index)) feature))
+									(map
+										(lambda (get (current_value) feature))
+										output
+									)
+								)
+
+								;else standard filter-map flow
+								(filter (map
+									(lambda (get (current_value) feature))
+									output
+								))
+							)
 						))
+						(zip action_features)
 					)
 				)
-			)
-		)
+		))
 
 		(if holdout_entity_name
 			(call !RestoreHeldOutCases (assoc holdout_entity_name holdout_entity_name))
 		)
 
-		(accum "output" ["warnings"] warnings)
-
-        (call !Return output)
+        (call !Return (assoc
+			payload output
+			warnings warnings
+		))
 	)
 
 	#!ReactAggregateMismatchedParametersWarning
@@ -760,5 +709,25 @@
 					))
 			))
 		)
+	)
+
+	;Helper method for selecting the prediction stats.
+	#!ProcessSelectedPredictionStats
+	(declare
+		(assoc selected_prediction_stats (list))
+
+		(if (= 0 (size selected_prediction_stats))
+			;if no prediction stats are selected, return all of the supported stats except the confusion matrix
+			(assign (assoc
+				selected_prediction_stats
+					(filter (lambda (not (contains_value ["confusion_matrix" "all"] (current_value)))) !supportedPredictionStats)
+			))
+			;else if prediction stats are provided, and they contain all, then all supported stats including the confusion matrix are returned
+			(if (contains_value selected_prediction_stats "all")
+				(assign (assoc selected_prediction_stats (filter (lambda (!= "all" (current_value))) !supportedPredictionStats) ))
+			)
+		)
+
+		selected_prediction_stats
 	)
 )

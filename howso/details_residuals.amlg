@@ -10,8 +10,7 @@
 				(compute_on_contained_entities (append
 					filtering_queries
 					(query_nearest_generalized_distance
-						;closest n should have a limit of how small it can be
-						(min min_regional_model_size_by_percent (max k_parameter !regionalModelMinSize))
+						(max k_parameter !regionalModelMinSize)
 						context_features
 						context_values
 						feature_weights
@@ -44,6 +43,7 @@
 								store_values store_values
 								;use the same hyperparameters that were used to make the original prediction
 								custom_hyperparam_map hyperparam_map
+								compute_null_uncertainties (false)
 							))
 					))
 
@@ -89,14 +89,16 @@
 	;calculate residuals for a given case, assuming the case is already not in the model
 	;outputs an assoc of features -> residual value (mean absolute error for continuous, difference in categorical action probability for categorical)
 	;parameters:
-	; features: features for which to calculate residuals
-	; case_values : corresponding values for the features for the case, i.e. the expected values
+	; context_features: features to use as contexts in residuals calculations, may include action_features
+	; action_features: features for which to calculate residuals
+	; case_value_map : map of case values, i.e. the expected values
 	; ignore_case: case_id, if set will query for K+1 cases and ignore the perfect matching case during the reaction
 	#!CalculateResidualsForCase
 	(declare
 		(assoc
-			features (list)
-			case_values (list)
+			context_features (list)
+			action_features (list)
+			case_value_map (assoc)
 			ignore_case (null)
 			case_residuals_map (null)
 		)
@@ -111,32 +113,25 @@
 					(if (get details "case_feature_residuals_robust")
 						(accum (assoc output (assoc "case_feature_residuals_robust" (zip features 0)) ))
 					)
-					(if (get details "global_case_feature_residual_convictions_full")
-						(accum (assoc output (assoc "global_case_feature_residual_convictions_full" (zip features 1)) ))
+					(if (get details "case_feature_residual_convictions_full")
+						(accum (assoc output (assoc "case_feature_residual_convictions_full" (zip features 1)) ))
 					)
-					(if (get details "global_case_feature_residual_convictions_robust")
-						(accum (assoc output (assoc "global_case_feature_residual_convictions_robust" (zip features 1)) ))
-					)
-					(if (get details "local_case_feature_residual_convictions_full")
-						(accum (assoc output (assoc "local_case_feature_residual_convictions_full" (zip features 1)) ))
-					)
-					(if (get details "local_case_feature_residual_convictions_robust")
-						(accum (assoc output (assoc "local_case_feature_residual_convictions_robust" (zip features 1)) ))
+					(if (get details "case_feature_residual_convictions_robust")
+						(accum (assoc output (assoc "case_feature_residual_convictions_robust" (zip features 1)) ))
 					)
 				)
 			)
 		)
 
 		(declare (assoc
-			context_map (zip features case_values)
+			context_map (keep case_value_map context_features)
 			inactive_features_zeros_map (assoc)
 		))
 
-		;remove any inactive features from the details_features or all features lists so they are ignored during compute
+		;remove any inactive features from all features lists so they are ignored during compute
 		;and create an assoc of inactive feature -> 0 for all of them to add to output of all residual computations
 		(if !inactiveFeaturesMap
 			(assign (assoc
-				details_features (filter (lambda (not (contains_index !inactiveFeaturesMap (current_value)))) details_features)
 				features (filter (lambda (not (contains_index !inactiveFeaturesMap (current_value)))) features)
 				inactive_features_zeros_map (zip (indices !inactiveFeaturesMap) 0)
 			))
@@ -145,15 +140,11 @@
 		(if
 			(or
 				(get details "case_feature_residuals_robust")
-				(get details "global_case_feature_residual_convictions_robust")
-				(get details "local_case_feature_residual_convictions_robust")
+				(get details "case_feature_residual_convictions_robust")
 			)
 			(seq
 				(call !CalculateCaseResiduals (assoc robust_residuals (true)))
-				(if (get details "global_case_feature_residual_convictions_robust")
-					(call !CalculateGlobalCaseFeatureResidualConvictions (assoc robust_residuals (true)))
-				)
-				(if (get details "local_case_feature_residual_convictions_robust")
+				(if (get details "case_feature_residual_convictions_robust")
 					(call !CalculateLocalCaseFeatureResidualConvictions  (assoc robust_residuals (true)))
 				)
 			)
@@ -162,15 +153,11 @@
 		(if
 			(or
 				(get details "case_feature_residuals_full")
-				(get details "global_case_feature_residual_convictions_full")
-				(get details "local_case_feature_residual_convictions_full")
+				(get details "case_feature_residual_convictions_full")
 			)
 			(seq
 				(call !CalculateCaseResiduals (assoc robust_residuals (false)))
-				(if (get details "global_case_feature_residual_convictions_full")
-					(call !CalculateGlobalCaseFeatureResidualConvictions (assoc robust_residuals (false)))
-				)
-				(if (get details "local_case_feature_residual_convictions_full")
+				(if (get details "case_feature_residual_convictions_full")
 					(call !CalculateLocalCaseFeatureResidualConvictions (assoc robust_residuals (false)))
 				)
 			)
@@ -186,7 +173,7 @@
 					(map
 						(lambda (let
 							(assoc
-								expected_case_value (get context_map (current_value 1))
+								expected_case_value (get case_value_map (current_value 1))
 								action_feature (current_value 1)
 								action_is_nominal (contains_index !nominalsMap (current_value 1))
 								action_feature (current_value 1)
@@ -245,20 +232,20 @@
 											)
 									))
 
-									;return average of all the probust predictions for each feature
+									;return average of all the robust predictions for each feature
 									(/ (apply "+" robust_predictions) 30)
 								)
 							)
 						))
-						features
+						action_features
 					)
 
 					;else standard computation, do leave-one-out for each feature and predict it once
 					(map
 						(lambda (let
 							(assoc
-								filtered_context_features (filter (lambda (!= (current_value 2) (current_value))) features)
-								expected_case_value (get context_map (current_value 1))
+								filtered_context_features (indices (remove context_map (current_value 1)))
+								expected_case_value (get case_value_map (current_value 1))
 								action_feature (current_value 1)
 								action_is_nominal (contains_index !nominalsMap (current_value 1))
 							)
@@ -304,17 +291,12 @@
 								)
 							)
 						))
-						(or details_features features)
+						action_features
 					)
 				)
 		)
 		(assign (assoc
-			case_residuals_map
-				(if (and details_features (not robust_residuals))
-					(zip details_features case_residuals)
-
-					(zip features case_residuals)
-				)
+			case_residuals_map (zip action_features case_residuals)
 			local_model_null_features_convictions (assoc)
 			global_null_conviction_ratios_map (null)
 			local_null_conviction_ratios_map (null)
@@ -330,8 +312,7 @@
 						(contained_entities (append
 							filtering_queries
 							(query_nearest_generalized_distance
-								;closest n should have a limit of how small it can be
-								(min min_regional_model_size_by_percent (max k_parameter !regionalModelMinSize))
+								(max k_parameter !regionalModelMinSize)
 								context_features
 								context_values
 								feature_weights
@@ -347,7 +328,7 @@
 								!numericalPrecision
 							)
 						))
-					computing_local_case_feature_residual_convictions (get details "local_case_feature_residual_convictions")
+					computing_case_feature_residual_convictions (get details "case_feature_residual_convictions")
 					null_residual_and_ratio_tuple_map (assoc)
 				)
 
@@ -374,7 +355,7 @@
 								;if all cases in local model have nulls for this feature as well, and we will be computing local
 								;feature residual convictions, set that conviction to be 1 for this case
 								(if (and
-										computing_local_case_feature_residual_convictions
+										computing_case_feature_residual_convictions
 										(= 0 (size non_null_local_values))
 									)
 									(accum (assoc local_model_null_features_convictions (associate null_feature 1)))
@@ -398,11 +379,11 @@
 										(assoc
 											local_feature_min (apply "min" non_null_local_values)
 											local_feature_max (apply "max" non_null_local_values)
-											num_uinque_local_values (size (values non_null_local_values (true) ))
+											num_unique_local_values (size (values non_null_local_values (true) ))
 										)
 
 										;if entire local model is null or only has 1 non-null value, use the global null residual
-										(if (<= num_uinque_local_values 1)
+										(if (<= num_unique_local_values 1)
 											(list
 												(get !featureNullRatiosMap (list null_feature "null_residual"))
 												(get !featureNullRatiosMap (list null_feature "non_null_ratio"))
@@ -446,17 +427,6 @@
 			)
 		)
 
-		(if (and robust_residuals details_features)
-			(assign (assoc case_residuals_map (keep case_residuals_map details_features)))
-		)
-
-		;add case_feature_residuals to output if requested
-		(if (or (get details "case_feature_residuals_full")  (get details "case_feature_residuals_robust"))
-			(if robust_residuals
-				(accum (assoc output (assoc "case_feature_residuals_robust" (append case_residuals_map inactive_features_zeros_map)) ))
-				(accum (assoc output (assoc "case_feature_residuals_full" (append case_residuals_map inactive_features_zeros_map)) ))
-			)
-		)
 		;add case_feature_residuals to output if requested
 		(if (or (get details "case_feature_residuals_full")  (get details "case_feature_residuals_robust"))
 			(accum (assoc output
@@ -468,120 +438,10 @@
 		)
 	)
 
-	#!CalculateGlobalCaseFeatureResidualConvictions
-	(declare
-		(assoc
-			global_feature_residuals (null)
-			;set param_path to pull global residuals matching robust_residuals flag for the given hyperparameters
-			param_path
-				(if robust_residuals
-					;concatenate the appropriate key for the cached residuals set
-					(apply "concat" (append "robust" (remove (get hyperparam_map "paramPath") 1) ) )
-					(apply "concat" (append "full" (remove (get hyperparam_map "paramPath") 1) ) )
-				)
-			global_convictions_map (assoc)
-		)
-
-		;pull the appropriate robust or standard residuals
-		(assign (assoc global_feature_residuals (get !residualsMap param_path)))
-
-		;if global_feature_residuals is empty, we call react_aggregate to cache the required residuals
-		(if (= 0 (size global_feature_residuals))
-			(let
-				(assoc hp_param_path (get hyperparam_map "paramPath"))
-				(call react_aggregate (assoc
-					action_feature (if (size action_features) (first hp_param_path))
-					details (assoc
-						feature_residuals_full (if (not robust_residuals) (true))
-						feature_residuals_robust (if robust_residuals (true))
-					)
-					use_case_weights (!= ".none" (last hp_param_path))
-					weight_feature (if (!= ".none" (last hp_param_path)) (last hp_param_path) ".case_weight" )
-				))
-				(assign (assoc global_feature_residuals (get !residualsMap param_path)))
-			)
-		)
-
-		;compute the global conviction
-		(assign (assoc
-			global_convictions_map
-				(map
-					(lambda
-						;current_index is the feature
-						;current_value is a list of residuals [global, case]
-
-						;conviction is: model / case residual, prevent divide by 0 by using the minimum residual instead if necesssary
-						; conviction is expected surprisal E(I) divided by observed surprisal, I
-						; C = E(I) / I
-						; The expected surprisal E(I) is the model residual divided by the model residual: MR / MR = 1.0
-						; The observed surprisal I is the observed residual divded by the model residual: OR / MR
-						; So, E(I) / I = (MR / MR) / (OR / MR) = MR / OR
-						; In this way, we can directly divide the model (global or local) residual by the observed residual to get conviction
-						(if (= 0 (last (current_value)) )
-							(/ (first (current_value)) (get !cachedFeatureMinResidualMap (current_index)))
-
-							;prevent nan from divide by null, output null as-is when nulls are allowed
-							(or (= (null) (last (current_value))) (= (null) (first (current_value))) )
-							(seq
-								(if (= (null) (first (current_value)))
-									(accum (assoc
-										warnings (associate (concat "Global residual was not computed for feature: " (current_index 2)) )
-									))
-								)
-								(null)
-							)
-
-							(/ (first (current_value)) (last (current_value)))
-						)
-					)
-					;remove built-in keys from residuals map, leaving only feature-residual values
-					(keep global_feature_residuals (indices case_residuals_map))
-					case_residuals_map
-				)
-		))
-
-		;can only scale global convictions if both convictions and ratios maps are defined
-		; convictions are multiplied by the null_conviction_ratios, which are (num_cases / num_not_null_cases)
-		; this can be thought of as dividing the surprisal of the observed feature value by the proportion of
-		; non-null values for the given feature
-		; so, as the amount of null_values in the model increases, the observed surprisal of a null decreases
-		(if (and global_null_conviction_ratios_map global_convictions_map)
-			(assign (assoc
-				global_convictions_map
-					(map
-						(lambda
-							;current_value is a list of [conviction, ratio], if ratio is null use 1 instead
-							(* (first (current_value)) (or (last (current_value)) 1))
-						)
-						global_convictions_map
-						global_null_conviction_ratios_map
-					)
-			))
-		)
-
-		(if details_features
-			(assign (assoc global_convictions_map (keep global_convictions_map details_features)))
-		)
-
-		(accum (assoc
-			output
-				(if robust_residuals
-					(assoc
-						"global_case_feature_residual_convictions_robust"
-						(if global_convictions_map (append global_convictions_map inactive_features_zeros_map))
-					)
-					(assoc
-						"global_case_feature_residual_convictions_full"
-						(if global_convictions_map (append global_convictions_map inactive_features_zeros_map))
-					)
-				)
-		))
-	)
-
 	#!CalculateLocalCaseFeatureResidualConvictions
 	(declare
 		(assoc
-			features_map (zip features (append context_values action_values))
+			action_features_map (keep case_value_map action_features)
 		)
 
 		;compute the local area residuals for each context feature by
@@ -595,7 +455,7 @@
 							;the feature for which to compute the residual
 							residual_feature (current_index 1)
 							;context features without the residual feature
-							local_context_features (indices (remove features_map (current_index 1)))
+							local_context_features (indices (remove context_map (current_index 1)))
 							residual_feature_map (assoc)
 							regional_model_cases_map (assoc)
 						)
@@ -604,52 +464,42 @@
 								(compute_on_contained_entities (append
 									filtering_queries
 									(query_nearest_generalized_distance
-										;closest n should have a limit of how small it can be
-										(min min_regional_model_size_by_percent (max k_parameter !regionalModelMinSize))
-										local_context_features
-										(unzip features_map local_context_features)
-										feature_weights
-										!queryDistanceTypeMap
-										query_feature_attributes_map
-										context_deviations
-										p_parameter
-										dt_parameter
-										(if valid_weight_feature weight_feature (null))
+										(replace (max k_parameter !regionalModelMinSize))
+										(replace local_context_features)
+										(replace (unzip case_value_map local_context_features))
+										(replace feature_weights)
+										(replace !queryDistanceTypeMap)
+										(replace query_feature_attributes_map)
+										(replace context_deviations)
+										(replace p_parameter)
+										(replace dt_parameter)
+										(if valid_weight_feature (replace weight_feature) (null))
 										;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
 										"fixed rand seed"
 										(null)
-										!numericalPrecision
+										(replace !numericalPrecision)
 									)
 								))
 						))
-						(assign (assoc
-							residual_feature_map
-								(get
-									(call !ExpandResidualValuesToUncertainty  (assoc
-										feature_residuals_map
-											(call !CalculateFeatureResiduals (assoc
-												features (append local_context_features residual_feature)
-												target_residual_feature residual_feature
-												case_ids (indices regional_model_cases_map)
-												regional_model_only (true)
-												robust_residuals robust_residuals
-												focal_case ignore_case
-												;use the same hyperparameters that were used to make the original prediction
-												custom_hyperparam_map hyperparam_map
-											))
+						(get
+							(call !ExpandResidualValuesToUncertainty  (assoc
+								feature_residuals_map
+									(call !CalculateFeatureResiduals (assoc
+										features (append local_context_features residual_feature)
+										target_residual_feature residual_feature
+										case_ids (indices regional_model_cases_map)
+										regional_model_only (true)
+										robust_residuals robust_residuals
+										focal_case ignore_case
+										;use the same hyperparameters that were used to make the original prediction
+										custom_hyperparam_map hyperparam_map
+										compute_null_uncertainties (false)
 									))
-									"residual_map"
-								)
-						))
-
-						;get the residual value for this one feature
-						(get residual_feature_map residual_feature)
+							))
+							["residual_map" residual_feature]
+						)
 					))
-					(if details_features
-						(zip details_features)
-
-						features_map
-					)
+					action_features_map
 				)
 		))
 
@@ -709,11 +559,11 @@
 			output
 				(if robust_residuals
 					(assoc
-						"local_case_feature_residual_convictions_robust"
+						"case_feature_residual_convictions_robust"
 							(append local_convictions_map inactive_features_zeros_map)
 					)
 					(assoc
-						"local_case_feature_residual_convictions_full"
+						"case_feature_residual_convictions_full"
 							(append local_convictions_map inactive_features_zeros_map)
 					)
 				)
