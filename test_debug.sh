@@ -50,12 +50,12 @@ test() {
   set +e
 
   # Capture GDB output (timeout 3 hours)
-  gdb_output=$(gdb -batch -ex run -ex bt --args ${amlg_exe} ./ut_comprehensive_unit_test.amlg | tee /tmp/ut_results)
+  gdb_output=$(gdb -batch -ex run -ex bt --args ${amlg_exe} ./ut_comprehensive_unit_test.amlg validate | tee /tmp/ut_results)
   gdb_exit_code=$?
   echo "$gdb_output" | tail -n 200
   echo "GDB exited with code $gdb_exit_code"
   echo "\n\n---- End GDB output ----\n\n"
-  
+
   reset_version_file
   local ut_res=$(cat /tmp/ut_results | grep "PASSED : Total comprehensive test execution time" | wc -l)
   if [ $ut_res \< 1 ]; then
