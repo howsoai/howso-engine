@@ -1,7 +1,7 @@
 #!/bin/bash
 # Linux build scripts for howso-engine release cycle - build/test/package
 #
-# usage: ./build.sh build|test|package
+# usage: ./build/build.sh build|test|package
 #
 ####
 set -e
@@ -13,7 +13,7 @@ amlg_version="0.0.0"
 engine_version="0.0.0"
 
 # root directory for git repository.
-src_dir=$( cd "$(dirname "${BASH_SOURCE[0]}")"/; pwd -P )
+src_dir=$( cd "$(dirname "${BASH_SOURCE[0]}")"/..; pwd -P )
 
 # root directory for build artifacts.
 out_dir=${src_dir}/target
