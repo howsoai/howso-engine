@@ -1,7 +1,7 @@
 #!/bin/bash
 # Executes howso-engine unit tests with GDB -- Linux/x86 only!
 #
-# usage: ./test_debug.sh test {engine-version}
+# usage: ./build/test_debug.sh test {engine-version}
 #
 ####
 set -e

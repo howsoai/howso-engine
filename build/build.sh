@@ -1,7 +1,7 @@
 #!/bin/bash
 # Linux build scripts for howso-engine release cycle - build/test/package
 #
-# usage: ./build.sh build|test|package
+# usage: ./build/build.sh build|test|package
 #
 ####
 set -e
