@@ -125,7 +125,7 @@
 	; feature_residuals_map: output assoc from CalculateFeatureResiduals containing a map of feature -> residual value in the 'residual_map' key
 	;					i.e.: { "residual_map" : { "featureA" : 3.4... } }
 	#!ExpandResidualValuesToUncertainty
-	(if shared_deviations
+	(if use_shared_deviations
 		(call !ExpandResidualValuesToUncertaintySharedDeviations (assoc feature_residuals_map feature_residuals_map))
 		(set
 			feature_residuals_map
@@ -237,16 +237,16 @@
 									;do not max cap nominal deviations if less than 2 classes have been trained
 									(if (<= (size class_counts_map) 1)
 										(max
-											(call !GetSharedGroupValues (assoc
+											(call !GetSharedDeviationsGroupValues (assoc
 												aggregation "max"
-												feature_to_retrieve current_feature
-												feature_group_location (call !cachedFeatureMinResidualMap)
+												feature_group_to_retrieve current_feature
+												group_value_location (call !cachedFeatureMinResidualMap)
 											))
 											(current_value)
-											(call !GetSharedGroupValues (assoc
+											(call !GetSharedDeviationsGroupValues (assoc
 												aggregation "max"
-												feature_to_retrieve current_feature
-												feature_group_location (call !userSpecifiedFeatureErrorsMap)
+												feature_group_to_retrieve current_feature
+												group_value_location (call !userSpecifiedFeatureErrorsMap)
 											))
 										)
 
@@ -266,16 +266,16 @@
 												)
 
 												(max
-													(call !GetSharedGroupValues (assoc
+													(call !GetSharedDeviationsGroupValues (assoc
 														aggregation "max"
-														feature_to_retrieve current_feature
-														feature_group_location (call !cachedFeatureMinResidualMap)
+														feature_group_to_retrieve current_feature
+														group_value_location (call !cachedFeatureMinResidualMap)
 													))
 													(current_value)
-													(call !GetSharedGroupValues (assoc
+													(call !GetSharedDeviationsGroupValues (assoc
 														aggregation "max"
-														feature_to_retrieve current_feature
-														feature_group_location (call !userSpecifiedFeatureErrorsMap)
+														feature_group_to_retrieve current_feature
+														group_value_location (call !userSpecifiedFeatureErrorsMap)
 													))
 												)
 											)
@@ -283,28 +283,28 @@
 									)
 								)
 								(max
-									(call !GetSharedGroupValues (assoc
+									(call !GetSharedDeviationsGroupValues (assoc
 										aggregation "max"
-										feature_to_retrieve (current_index)
-										feature_group_location (call !cachedFeatureMinResidualMap)
+										feature_group_to_retrieve (current_index)
+										group_value_location (call !cachedFeatureMinResidualMap)
 									))
-									(call !GetSharedGroupValues (assoc
+									(call !GetSharedDeviationsGroupValues (assoc
 										aggregation "max"
-										feature_to_retrieve (current_index)
-										feature_group_location (call !userSpecifiedFeatureErrorsMap)
+										feature_group_to_retrieve (current_index)
+										group_value_location (call !userSpecifiedFeatureErrorsMap)
 									))
 									(current_value)
 								)
 							)
 						)
-						(call !ReduceMapSharedDeviations (assoc map_to_reduce (get feature_residuals_map "residual_map") ))
+						(call !ReduceSharedDeviationsMapping (assoc map_to_reduce (get feature_residuals_map "residual_map") ))
 					)
 			)
 
 			(assign (assoc
 				temp_residual_map
-					(call !ExpandMapForSharedDeviations (assoc
-						shared_map temp_residual_map
+					(call !ExpandForSharedDeviations (assoc
+						compressed_values temp_residual_map
 					))
 			))
 
@@ -312,47 +312,58 @@
 		)
 	)
 
-
-	#!GetSharedGroupValues
+	;Grabs all the values from an assoc at a designated location for all of the features in a shared deviations group, then applies aggrregation
+	;
+	;parameters:
+	; aggregation: A literal string of either "min" or "max"
+	; feature_group_to_retrieve: The feature whose shared deviations group values should be retrieved. Can be any feature in a shared deviations group.
+	; 	Retrieves all of the values of the group, so generally only need to be called once per group.
+	; group_value_location: The location where the feature values are to be pulled from. Location should point to an assoc.
+	#!GetSharedDeviationsGroupValues
 	(declare
 		(assoc
 			aggregation (null)
-			feature_to_retrieve (null)
-			feature_group_location (null)
+			feature_group_to_retrieve (null)
+			group_value_location (null)
 		)
 		(let
 			(assoc
-				feature_group_values (list)
-				feature_group_full
-					(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve feature_to_retrieve))
+				group_values (list)
+				whole_shared_deviations_group
+					(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve feature_group_to_retrieve))
 			)
-			(if (> (size feature_group_full) 0)
+			(if (> (size whole_shared_deviations_group) 0)
 				(map
 					(lambda
 						(accum (assoc
-							feature_group_values
-								(get feature_group_location (current_value 1))
+							group_values
+								(get group_value_location (current_value 1))
 						))
 					)
-					feature_group_full
+					whole_shared_deviations_group
 				)
 				(accum (assoc
-					feature_group_values
-						(get feature_group_location feature_to_retrieve)
+					group_values
+						(get group_value_location feature_group_to_retrieve)
 				))
 			)
 			(if
 				(= aggregation "max")
-				(assign (assoc feature_group_values (apply "max" feature_group_values) ))
+				(assign (assoc group_values (apply "max" group_values) ))
 
 				(= aggregation "min")
-				(assign (assoc feature_group_values (apply "min" feature_group_values) ))
+				(assign (assoc group_values (apply "min" group_values) ))
 			)
-			feature_group_values
+			group_values
 		)
 	)
 
-	#!ReduceMapSharedDeviations
+	;Takes a assoc of of values and filters the assoc to only features that either do not belong to a group of shared deviations, or are the primary
+	; key for a group of shared deviation features.
+	;
+	;parameters:
+	; map_to_reduce: An assoc that is to be reduced.
+	#!ReduceSharedDeviationsMapping
 	(declare
 		(assoc map_to_reduce (null))
 		(let
@@ -360,8 +371,8 @@
 				;If a feature is part of a shared deviations group, but is not the key, then drop
 				features_to_drop
 					(filter
-						(lambda (not (contains_value (values !sharedResidualsMap (true)) (current_value) )))
-						(indices !sharedResidualsMap (true))
+						(lambda (not (contains_value (values !sharedDeviationsMap (true)) (current_value) )))
+						(indices !sharedDeviationsMap (true))
 					)
 			)
 			(filter
@@ -1235,12 +1246,11 @@
 			context_map (zip context_features)
 			features_list (values (append context_features features_with_nulls) (true))
 			null_prediction_map (null)
-			null_feature_residuals_lists (list)
 		))
 
 		;iterate over all the features with nulls, and predict each feature's case's list
 		(assign (assoc
-			null_feature_residuals_lists
+			feature_residuals_lists
 				||(map
 					(lambda (let
 						(assoc
@@ -1351,11 +1361,11 @@
 				)
 		))
 
-		(if shared_deviations
-				(call !PrepSharedResiduals (assoc
-					features_keys_lists (assoc "features_with_nulls" features_with_nulls)
-					feature_residuals_keys_lists (assoc " null_feature_residuals_lists" null_feature_residuals_lists)
-				))
+		(if use_shared_deviations
+			(call !PrepSharedDeviations (assoc
+				features_list (assoc "features_with_nulls" features_with_nulls)
+				feature_residuals_keys_lists (assoc " feature_residuals_lists" feature_residuals_lists)
+			))
 		)
 
 		;create a map of feature -> null prediction probability by averaging out all the correctly predicted nulls for each feature
@@ -1365,7 +1375,7 @@
 					features_with_nulls
 					(map
 						(lambda (/ (apply "+" (current_value)) (size (current_value)) ) )
-						null_feature_residuals_lists
+						feature_residuals_lists
 					)
 				)
 		))

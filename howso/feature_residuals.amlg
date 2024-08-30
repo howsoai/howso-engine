@@ -259,7 +259,7 @@
 			compute_all_statistics (false)
 			compute_null_uncertainties (true)
 			confusion_matrix_min_count 15
-			shared_deviations (false)
+			use_shared_deviations (false)
 		)
 
 		(declare (assoc
@@ -307,21 +307,20 @@
 			(call !RunFullResiduals)
 		)
 
-		(if shared_deviations
-			(if (not (size !sharedResidualsMap))
+		(if use_shared_deviations
+			(if (not (size !sharedDeviationsMap))
 				;if there are no set shared residuals, ignore shared deviations
-				(assign (assoc shared_deviations (false)))
-				(call !PrepSharedResiduals (assoc
-					features_keys_lists (assoc "features" features)
-					feature_residuals_keys_lists (assoc " feature_residuals_lists" feature_residuals_lists)
+				(assign (assoc use_shared_deviations (false)))
+				(call !PrepSharedDeviations (assoc
+					features_list (assoc "features" features)
+					feature_residuals_lists (assoc " feature_residuals_lists" feature_residuals_lists)
 				))
 			)
 		)
 
-		;if shared deviations, the prediction_stats returned will be expanded,
-		; however the features list and feature_residuals_lists will be shortened
-		; to where each group of shared residuals will only have one list of values.
-		; (assign (assoc compute_all_statistics (false)))
+		;if shared deviations, the prediction_stats returned will a fully expanded assoc of prediction stats,
+		; however the features list and feature_residuals_lists will be shortened to only features that do not belong
+		; to a shared deviations group, or are the primary key for a group of shared deviations.
 		(declare (assoc
 			prediction_stats
 				(if compute_all_statistics
@@ -354,8 +353,8 @@
 								(keep
 									(remove !featureNullRatiosMap (indices !inactiveFeaturesMap))
 									;if shared deviations, the features list needs to be expanded to include features that were dropped for shared deviations calculations
-									(if shared_deviations
-										(call !ExpandMapForSharedDeviations (assoc shared_map features))
+									(if use_shared_deviations
+										(call !ExpandForSharedDeviations (assoc compressed_values features))
 										features
 									)
 								)
@@ -408,7 +407,7 @@
 		;for shared deviations, only one set of deviations are calculated for each group. At the end of the calculations,
 		; the deviations mapping is expanded to add back the other features whose deviations were not calculated and point them at the feature
 		; in which their shared deviations are stored under.
-		(if shared_deviations
+		(if use_shared_deviations
 			(map
 				(lambda (let
 					(assoc
@@ -417,8 +416,8 @@
 					)
 					(assign (associate
 						current_map_name
-							(call !ExpandMapForSharedDeviations (assoc
-								shared_map current_map_value
+							(call !ExpandForSharedDeviations (assoc
+								compressed_values current_map_value
 							))
 					))
 				))
@@ -969,8 +968,7 @@
 				)
 		))
 
-		(if shared_deviations
-			;converts back to full
+		(if use_shared_deviations
 			(map
 				(lambda (let
 					(assoc
@@ -979,9 +977,9 @@
 					)
 					(assign (associate
 						current_map_name
-							(call !ExpandMapForSharedDeviations (assoc
-								shared_map current_map_value
-							))
+							(call !ExpandForSharedDeviations
+								(assoc compressed_values current_map_value)
+							)
 					))
 				))
 				(assoc
@@ -1136,34 +1134,37 @@
 		(null)
 	)
 
-	;Helper function that takes a mapping that has been reduced, and expands it by readding the features from the groups that have been dropped.
-	#!ExpandMapForSharedDeviations
+	;Helper function that takes a mapping or list that has been reduced, and expands it by readding the features from the groups that have been dropped.
+
+	;parameters:
+	; compressed_values: an assoc or list of values that need to expanded. If a list, adds back in the features from shared deviations groups that were removed
+	;  for calculations If an assoc, adds back in removed features as keys and copies the value of the primary key for each shared deviation group as its value.
+	;       e.g. {"a": 2.5, "b": 0} -> {"a": 2.5 "b":9 "c": 2.5 "d": 2.5} if features a, c, d were in a shared deviations group.
+	#!ExpandForSharedDeviations
 		(declare
 			(assoc
-				shared_map (null)
-				shared_deviations_map (sort (get !sharedResidualsMap))
+				compressed_values (null)
+				shared_deviations_map (get !sharedDeviationsMap)
 			)
 			(if shared_deviations_map
-				(if (~ (list) shared_map)
+				(if (~ (list) compressed_values)
 					(map
 						(lambda
-							(if (not (contains_value shared_map (current_value)))
-								(accum (assoc shared_map (current_value 1)))
+							(if (not (contains_value compressed_values (current_value)) )
+								(accum (assoc compressed_values (current_value 1)) )
 							)
 						)
 						(indices shared_deviations_map)
 					)
-					; else an assoc
 					(map
 						(lambda
-							(if
-								(= (null) (get shared_map (current_index)))
-								(if (!= (null) (get shared_map (get shared_deviations_map (current_index))))
+							(if (= (null) (get compressed_values (current_index)) )
+								(if (!= (null) (get compressed_values (get shared_deviations_map (current_index)) ))
 									(accum (assoc
-										shared_map
+										compressed_values
 											(associate
 												(current_index 2)
-												(get shared_map (get shared_deviations_map (current_value 2)))
+												(get compressed_values (get shared_deviations_map (current_value 2)) )
 											)
 									))
 								)
@@ -1173,19 +1174,21 @@
 					)
 				)
 			)
-			(sort shared_map)
+			(sort compressed_values)
 		)
 
 	;Helper function to prep shared feature deviations, by taking in a list of features and their list of residuals,
-	; combining all of the residuals under the feature key of the group of the shared deviations, and removing the features
+	; combining all of the residuals under the primary feature key of the group of the shared deviations, and removing the features
 	; from the features list whose residuals have been combined into another features.
-	#!PrepSharedResiduals
+	;parameters:
+	; features_list: An assoc where the key is the value under which the preppred features list will be stored under, the value is the feature list to be prepped.
+	; feature_residuals_lists: An assoc where the key is the value under which the preppred features residuals list will be stored under, the value is the feature residuals lists to be prepped.
+	#!PrepSharedDeviations
 	(declare
 		(assoc
-			combined_residuals (assoc)
-			;takes in a assoc where the key is the name under which the modified features list will be saved under
-			features_keys_lists (assoc)
-			feature_residuals_keys_lists (assoc)
+			features_list (assoc)
+			feature_residuals_lists (assoc)
+			expanded_mapping (assoc)
 		)
 
 		(map
@@ -1194,50 +1197,51 @@
 					current_feature (current_index 1)
 					current_deviations (current_value 1)
 				)
-
 				(let
-					(assoc shared_deviation_feature_key (get !sharedResidualsMap current_feature))
+					(assoc shared_deviation_feature_key (get !sharedDeviationsMap current_feature))
 					(if shared_deviation_feature_key
-						;if this feature is part of a shared residual group, add it to the feature key for the group
 						(accum (assoc
-							combined_residuals
+							expanded_mapping
 								(associate
 									shared_deviation_feature_key
 										(append
 											(if
 												;if null, it means that this is the first of set deviations to be appended for the group, thus append to an empty list.
-												(= (null) (get combined_residuals shared_deviation_feature_key) )
+												(= (null) (get expanded_mapping shared_deviation_feature_key) )
 												[]
-												(get combined_residuals shared_deviation_feature_key)
+												(get expanded_mapping shared_deviation_feature_key)
 											)
 											current_deviations
 										)
 								)
 						))
 						;else add this feature and its deviations directly
-						(accum (assoc combined_residuals (associate current_feature current_deviations )))
+						(accum (assoc expanded_mapping (associate current_feature current_deviations )))
 					)
 				)
 			))
-			(zip (first (values features_keys_lists)) (first (values feature_residuals_keys_lists)))
+			(zip (first (values features_list)) (first (values feature_residuals_lists)))
 		)
 
 		(assign
 			(associate
-				(first (indices features_keys_lists)) (replace (indices combined_residuals))
-				(first (indices feature_residuals_keys_lists)) (replace (values combined_residuals))
+				(first (indices features_list)) (replace (indices expanded_mapping))
+				(first (indices feature_residuals_lists)) (replace (values expanded_mapping))
 			)
 		)
 	)
 
+	;Validates the necessary parameters for shared deviations, making sure that each feature only belongs to one group of shared deviations,
+	; and that no shared deviations features are unique nominals.
 	#!ValidateSharedDeviations
 	(let
-		;check to make sure that each feature only shows up once in any shared deviations groups
 		(assoc
 			invalid_repeated_shared_deviations_features (list)
 			invalid_unique_shared_deviations_features (list)
 			error_message (list)
 		)
+
+		;check to make sure that each feature only shows up once in any shared deviations groups
 		(let
 			(assoc shared_deviations_features_flattened (list))
 			;flatten all of the values in the groups of shared deviations
@@ -1266,22 +1270,22 @@
 				shared_deviations_features_flattened
 			)
 		)
+
+		;check to see if any features in a shared deviations group is a unique nominal
 		(map
 			(lambda
 				(let
 					(assoc current_shared_deviation_feature (current_index 1))
-					(seq
-						(if
-							(contains_value (indices !uniqueNominalsSet) current_shared_deviation_feature)
-							(accum (assoc invalid_unique_shared_deviations_features current_shared_deviation_feature))
-						)
+					(if (contains_value (indices !uniqueNominalsSet) current_shared_deviation_feature)
+						(accum (assoc invalid_unique_shared_deviations_features current_shared_deviation_feature))
 					)
 				)
 			)
-			!sharedResidualsMap
+			!sharedDeviationsMap
 		)
-		(if
-			(or (size invalid_repeated_shared_deviations_features) (size invalid_unique_shared_deviations_features))
+
+		;warns if any of the errors are present
+		(if (or (size invalid_repeated_shared_deviations_features) (size invalid_unique_shared_deviations_features))
 			(seq
 				(if invalid_repeated_shared_deviations_features
 					(accum (assoc
@@ -1311,27 +1315,27 @@
 		)
 	)
 
-	;Helper function, for each shared deviation feature, return its group
+	;Helper function that takes in a feature that belongs to a group of shared deviations features and returns all of the features in that group.
+	;
+	;parameters:
+	; feature_group_to_retrieve: A feature that belongs to a group of shared deviations features.
 	#!GetSharedDeviationGrouping
 	(declare
 		(assoc feature_group_to_retrieve (null))
-		(if feature_group_to_retrieve
-			(let
-				(assoc
-					current_key (get !sharedResidualsMap feature_group_to_retrieve)
-					current_feature_grouping (list)
-				)
-				(map
-					(lambda
-						(if
-							(= (current_value) current_key)
-							(accum (assoc current_feature_grouping (current_index 1)))
-						)
-					)
-					!sharedResidualsMap
-				)
-				current_feature_grouping
+		(let
+			(assoc
+				current_shared_deviations_key (get !sharedDeviationsMap feature_group_to_retrieve)
+				current_group (list)
 			)
+			(map
+				(lambda
+					(if (= (current_value) current_shared_deviations_key)
+						(accum (assoc current_group (current_index 1)))
+					)
+				)
+				!sharedDeviationsMap
+			)
+			current_group
 		)
 	)
 
