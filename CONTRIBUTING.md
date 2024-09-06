@@ -33,6 +33,8 @@ get further information about debugging Amalgam.
 
 The Howso Engine has a suite of unit tests and performance tests. To run the full set of unit tests, simply
 call the desired Amalgam executable on `ut_comprehensive_unit_test.amlg` from within the `unit_tests` directory.
+Unit tests can be called with the additional "validate" command line argument which triggers Amalgam's memory
+validation at the end of the test.
 
 Unit tests are held in the `unit_tests` directory while performance tests are held in the `performance_tests`
 directory.

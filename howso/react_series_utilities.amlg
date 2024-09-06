@@ -62,6 +62,14 @@
         )
 
 		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
+		;if for some reason expected values haven't been cached, do that here
+		(if (= 0 (size !expectedValuesMap))
+			(call !CacheExpectedValuesAndProbabilities (assoc
+				features !trainedFeatures
+				weight_feature weight_feature
+				use_case_weights use_case_weights
+			))
+		)
 
 		(declare (assoc
 			warnings (assoc)
@@ -251,7 +259,7 @@
 			;0-based index of last row in series_data, start with -1 because it's accumulated at the start of the loop
 			last_series_index -1
 			first_generated_row (true)
-			;map of id feature index -> value to replace at end of series generation
+			;map of id feature -> value to replace at end of series generation
 			replacement_id_values_map (assoc)
 			;flag if there are unique non-id features
 			has_unique_features (false)
@@ -861,20 +869,21 @@
 
 		;if need to update/replace id values, for each id, update all the rows and set updated value for each id feature
 		(if (size replacement_id_values_map)
-			(map
-				(lambda (let
-					(assoc
-						id_index (get feature_index_map (current_index 1))
-						id_value (current_value 1)
-					)
+			(assign (assoc
+				series_data
 					(map
-						(lambda (assign "series_data" (list (current_index 1) id_index) id_value))
-						(indices series_data)
+						(lambda
+							(unzip
+								(append
+									(zip features (current_value))
+									replacement_id_values_map
+								)
+								features
+							)
+						)
+						series_data
 					)
-
-				))
-				replacement_id_values_map
-			)
+			))
 
 			;else series_id_tracking="no", we'll need to create series id values to append to series below
 			has_non_tracked_ids
@@ -1369,6 +1378,7 @@
 						(append
 							feature_bounds_map
 							(zip
+								action_features
 								(map
 									(lambda (let
 										(assoc action_feature (get action_features (current_index 1)) )
@@ -1379,7 +1389,7 @@
 												(set (current_value) "allow_null" (false))
 
 												;else pull the bounds from !featureBoundsMap and overwrite those
-												(set (get !featureBoundsMap action_feature) "allow_null" (false) )
+												(set (or (get !featureBoundsMap action_feature) {}) "allow_null" (false) )
 											)
 
 											;else leave it as-is
@@ -1388,18 +1398,61 @@
 									)
 									(unzip feature_bounds_map action_features)
 								))
-								action_features
 							)
 						)
 
 						(filter (map
 							(lambda
 								(if (> (get !featureAttributes [(current_index 1) "ts_order"]) last_series_index)
-									(set (get !featureBoundsMap (current_index)) "allow_null" (false) )
+									(set (or (get !featureBoundsMap (current_index)) {}) "allow_null" (false) )
 								)
 							)
 							(zip action_features)
 						))
+					)
+
+					;else synthing data for the rest of the cases in a series, don't allow nulls for features that have no nulls
+					(let
+						(assoc
+							explicit_no_null_features
+								(filter
+									(lambda (or
+										(= (false) (get !featureNullRatiosMap [(current_value 1) "has_nulls"]))
+										;rate or delta feature whose 'parent' feature has no nulls
+										(= (false) (get !featureNullRatiosMap [(get !derivedFeaturesMap (current_value 1)) "has_nulls"]))
+									))
+									action_features
+								)
+						)
+						(if (size feature_bounds_map)
+							(append
+								feature_bounds_map
+								(zip
+									explicit_no_null_features
+									(map
+										(lambda
+											(set
+												(or (get feature_bounds_map (current_value)) {})
+												"allow_null"
+												(false)
+											)
+										)
+										explicit_no_null_features
+									)
+								)
+							)
+
+							(map
+								(lambda
+									(set
+										(or (get !featureBoundsMap (current_index)) {})
+										"allow_null"
+										(false)
+									)
+								)
+								(zip explicit_no_null_features)
+							)
+						)
 					)
 				)
 		))
@@ -1445,7 +1498,13 @@
 		(accum (assoc current_case_map (zip action_features (get react_output "action_values")) ))
 
 		;overwrite the last row in series data with the values from the updated current case
-		(assign "series_data" (list last_series_index) (unzip current_case_map features))
+		(assign (assoc
+			series_data
+				(append
+					(trunc series_data)
+					[(unzip current_case_map features)]
+				)
+		))
 
 		(if output_details
 			(assign (assoc
