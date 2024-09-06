@@ -94,17 +94,26 @@ Return types of methods should be specified by comments on the assoc with the pa
 (declare
     (assoc
         ;{type "list" values "string"}
+        ;a list of strings
         list_of_strs (list)
         ;{type "number" min 1}
-        optional_positive_number (null)
+        ;a value in the range (0,inf)
+        some_positive_number (null)
         ;{type "boolean"}
-        random_flag (false)
+        ;some true/false value
+        some_boolean (null)
         ;{type "assoc" values "number"}
+        ;a map of numbers
         map_of_number_values (assoc)
     )
     ...
 )
 ```
+
+Explicit mention of a parameter's type should not be repeated in the description. Additionally, explicit mention of
+`optional` in a parameter's description should not be included. Optional parameters are identified by having a default
+value of (null). In the above example `list_of_strs` and `map_of_number_values` would be interpreted as required while
+ `some_positive_number` and `some_boolean` would be interpreted as optional because a default value is (null).
 
 ## Style Guide
 
