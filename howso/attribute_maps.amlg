@@ -199,86 +199,115 @@
 	; shared_deviations_key_map <- mapping of shared deviations where the keys are each feature within a group of shared deviations, and the values are the feature names in
 	;   which their deviations are stored under. For each group of shared deviations, they are stored under the first sorted feature in their group.
 	;   e.g., a group of features with shared devations is [A, B, C], creates an mapping of A -> A, B -> A, C -> A
-	; shared_deviations_features_lists <- list of lists of shared deviation feature groups
 	#!ProcessSharedDeviationsMap
-	(let
-		(assoc
-			shared_deviations_features_lists
-				(map
-					(lambda
-						;sort the list so duplicates can be removed
-						(sort (append [(current_value 1)] (get shared_deviations_map [(current_value 1) "shared_deviations"]) ))
-					)
-					(indices shared_deviations_map)
-				)
-			shared_deviations_key_map (assoc)
-		)
-
-		;get rid of duplicate groups
-		(assign (assoc shared_deviations_features_lists (values shared_deviations_features_lists (true))))
-
-		(map
-			(lambda (let
-				;each group of shared deviations features is already sorted
-				(assoc current_shared_features_list (current_value 1))
-				(map
-					(lambda
-						(accum
-							(assoc shared_deviations_key_map
-								(associate (current_value 2) (first current_shared_features_list))
+	(seq
+		(assign (assoc
+			shared_deviations_map
+				(append
+					(map
+						(lambda
+							(or
+								(get shared_deviations_map (current_index))
+								[(current_index  1)]
 							)
 						)
+						(zip (apply "append" (values shared_deviations_map)))
 					)
-					current_shared_features_list
+					shared_deviations_map
 				)
-			))
-			shared_deviations_features_lists
-		)
+		))
 
-		(assoc
-			"shared_deviations_key_map" shared_deviations_key_map
-			"shared_deviations_features_lists" shared_deviations_features_lists
-		)
+		;create lists of referenced features for each shared feature
+		(declare (assoc
+			shared_sets
+				(map
+					(lambda (let
+						(assoc
+							shared_features (current_value 1)
+							feature (current_index 1)
+						)
+						(append
+							feature
+							;keep lists of shared features that reference either this feature or any of its shared_features
+							(indices (filter
+								(lambda
+									(or
+										(contains_value shared_features (current_index))
+										(contains_value (current_value) feature)
+										(!=
+											(size shared_features)
+											(size (remove (zip shared_features) (current_value)) )
+										)
+									)
+								)
+								(remove shared_deviations_map feature)
+							))
+						)
+					))
+					shared_deviations_map
+				)
+		))
+
+
+		(declare (assoc
+			combined_shared_sets
+				(map
+					(lambda (let
+						(assoc
+							shared_set (zip (current_value 1))
+							num_features_in_set (size (current_value 1))
+							feature (current_index 1)
+						)
+
+						;append all the overlapping shared sets and make them unique by zipping up the appended features
+						(zip
+							(apply "append"
+								;if there's any overlap between shared_set and any other feature's shared_set, combine them
+								(values (filter
+									(lambda
+										(if (!= num_features_in_set (size (remove shared_set (current_value))))
+											(append shared_set (zip (current_value)))
+										)
+									)
+									(remove shared_sets feature)
+								))
+							)
+						)
+
+					))
+					shared_sets
+				)
+
+		))
+
+		(declare (assoc
+			unique_sets (values combined_shared_sets (true))
+		))
+
+		(declare (assoc
+			shared_deviations_key_map
+				(map
+					(lambda (let
+						(assoc feature (current_index 1))
+						;find the the shared set that this feature belongs to and output the first feature from that set
+						(first (indices
+							(first (filter
+								(lambda (contains_index (current_value) feature))
+								unique_sets
+							))
+						))
+					))
+					combined_shared_sets
+				)
+		))
+
+		(assoc "shared_deviations_key_map" shared_deviations_key_map)
 	)
 
-	;Validates the necessary parameters for shared deviations, making sure that each feature only belongs to one group of shared deviations,
-	; and that no shared deviations features are unique nominals.
+	;Validates the necessary parameters for shared deviations, making sure that no shared deviations features are unique nominals.
 	#!ValidateSharedDeviations
 	(let
-		(assoc
-			invalid_repeated_shared_deviations_features (list)
-			invalid_unique_shared_deviations_features (list)
-			error_message (list)
-			shared_deviations_features_flattened (list)
-		)
-
-		;check to make sure that each feature only shows up once in any shared deviations groups
-		;flatten all of the values in the groups of shared deviations
-		(map
-			(lambda (accum (assoc
-				shared_deviations_features_flattened (current_value 1)
-			)))
-			(get shared_deviations_map "shared_deviations_features_lists")
-		)
-
-		;sort the flattened list
-		(assign (assoc shared_deviations_features_flattened (sort shared_deviations_features_flattened)))
-		;see if any value appears twice in a row, indicating a duplicate value
-		(map
-			(lambda
-				(let
-					(assoc current_shared_deviation_feature (current_value 1))
-					(if
-						(=
-							current_shared_deviation_feature
-							(get shared_deviations_features_flattened (+ (current_index) 1))
-						)
-						(accum (assoc invalid_repeated_shared_deviations_features current_shared_deviation_feature ))
-					)
-				)
-			)
-			shared_deviations_features_flattened
-		)
+		(assoc invalid_unique_shared_deviations_features (list))
 
 		;check to see if any features in a shared deviations group is a unique nominal
 		(map
@@ -293,32 +322,18 @@
 			(get shared_deviations_map "shared_deviations_key_map")
 		)
 
-		;warns if any of the errors are present
-		(if (or (size invalid_repeated_shared_deviations_features) (size invalid_unique_shared_deviations_features))
+		;warns if the error is present
+		(if (size invalid_unique_shared_deviations_features)
 			(seq
-				(if (size invalid_repeated_shared_deviations_features)
-					(accum (assoc
-						error_message
-							(list (concat
-								"Features can only share deviations with one group, the following features are appear in "
-								"more than one shared deviations groups: "
-								(apply "concat" (trunc (weave (values invalid_repeated_shared_deviations_features (true)) ", ")))
-								"."
-							))
-					))
-				)
-				(if (size invalid_unique_shared_deviations_features)
-					(accum (assoc
-						error_message
-							(list (concat
-								"Features with shared deviations may not be unique nominals, as they have null deviations. "
-								"The following features are in a shared deviations group and is a unique nominal: "
-								(apply "concat" (trunc (weave invalid_unique_shared_deviations_features ", ")))
-								"."
-							))
-					))
-
-				)
+				(declare (assoc
+					error_message
+						(list (concat
+							"Features with shared deviations may not be unique nominals, as they have null deviations. "
+							"The following features are in a shared deviations group and is a unique nominal: "
+							(apply "concat" (trunc (weave invalid_unique_shared_deviations_features ", ")))
+							"."
+						))
+				))
 			    (conclude (call !Return (assoc errors error_message)))
 			)
 		)
