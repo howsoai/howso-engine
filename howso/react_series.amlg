@@ -9,18 +9,18 @@
 		(assoc
 			;{type "list" values "string"}
 			;list of features to condition just the first case in a series, overwrites context_features and
-			;		derived_context_features for that first case. All specified initial features must be in one of: context_features, action_features,
-			;		derived_context_features or derived_action_features. If provided a value that isn't in one of those lists, it will be ignored.
+			;	derived_context_features for that first case. All specified initial features must be in one of: context_features, action_features,
+			;	derived_context_features or derived_action_features. If provided a value that isn't in one of those lists, it will be ignored.
 			initial_features (list)
 			;{type "list"}
 			;list of values corresponding to the initial_features, used to condition just the first case in a series.
 			initial_values (null)
 			;{type "assoc"}
 			;assoc of feature -> stop conditions:
-			;		for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
-			;		for nominal features:  { feature:  { "values" : ['val1', 'val2' ]} }  - stops series when feature value matches any of the values listed
-			;	   specifying ".series_progress" with a value between 0 and 1.0 corresponding to percent completion e.g., { ".series_progress" : .95 } -
-			;			stops series when it progresses at or beyond 95%.
+			;	for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
+			;	for nominal features:  { feature:  { "values" : ['val1', 'val2' ]} }  - stops series when feature value matches any of the values listed
+			;	specifying ".series_progress" with a value between 0 and 1.0 corresponding to percent completion e.g., { ".series_progress" : .95 } -
+			;		stops series when it progresses at or beyond 95%.
 			series_stop_map (assoc)
 			;{type "boolean"}
 			;flag, default to True. If true, series ids are replaced with unique values on output.
@@ -44,14 +44,17 @@
 			;list of lists of values, when specified will continue this specific untrained series as defined by these values.
 			;	continue_series flag will be ignored and treated as true if this value is specified.
 			continue_series_values (null)
-
 			;{type "list" values "string"}
+			;list of feature names corresponding to values in each row of context_values
 			context_features (list)
 			;{type "list"}
+			;list of context feature values for non time-series features
 			context_values (list)
 			;{type "list" values "string"}
+			;list of feature names corresponding to values in each row of action_values
 			action_features (list)
 			;{type "list"}
+			;list of predicted feature values for non time-series features
 			action_values (list)
 			;{type "list" values "string"}
 			;list of action features whose values should be computed from the resulting last row in series, in the specified
@@ -64,37 +67,67 @@
 			;	Must be different than context_features.
 			derived_context_features (list)
 			;{type "list" values "string"}
-			;features corresponding to series_context_values
+			;list of features corresponding to series_context_values
 			series_context_features (list)
 			;{type "list" values {type "list"} }
 			;2d-list of values, context value for each feature for each row of the series.
 			;	If specified, max_series_length is ignored.
 			series_context_values (list)
 			;{type "list" values "string"}
+			;list of additional features to return with audit data from details
 			extra_features (list)
 			;{type "boolean"}
+			;flag, whether to use case weights or not. If unspecified will automatically select based on cached parameters
 			use_case_weights (null)
 			;{type "string"}
+			;name of the feature that stores case weights
 			weight_feature ".case_weight"
-			;{type "number"}
+			;{type "number" min 0}
+			;If null, will do a discriminative react. If specified, will do a generative react
+			;	For Generative React, value of desired avg conviction of generated cases, in the range of (0,infinity] with 1 as standard
+			;	larger values will increase the variance (or creativity) of the generated case from the existing model
+			;	smaller values will decrease the variance (or creativity) of the generated case from the existing model
 			desired_conviction (null)
 			;{type "number"}
 			;maximum size a series is allowed to be.  Default is 3 * model_size, a 0 or less is no limit.
 			;	If forecasting with 'continue_series', this defines the maximum length of the forecast.
 			max_series_length (null)
-
 			;{type "boolean"}
+			;flag, if false uses model feature residuals, if true recalculates regional model residuals.
 			use_regional_model_residuals (true)
 			;{type "assoc" values {type "assoc" indices {min "number" max "number" allow_null "boolean"} } }
+			;assoc of :
+			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
+			;	to ensure that specified features' generated values stay in bounds
+			;	for nominal features instead of min/max it's a set of allowed values, ie:
+			;	{ feature: { "allowed" : [ "value1", "value2" ... ] }, "allow_null": false/true }
+			;	allow_null - default is true, if true nulls may be generated per their distribution in the data
 			feature_bounds_map (assoc)
 			;{type "list" values "string"}
+			;list of features that will preserve their values from the case specified by case_indices, appending and
+			;	overwriting the specified context and context features as necessary.  For generative reacts, if case_indices isn't specified,
+			;	will preserve feature values of a random case.
 			preserve_feature_values (list)
 			;{type "string"}
+			;distance to determine privacy cutoff. Used to query the local minimum distance used in the distance ratio
+			; 	accepted values:
+			; 		'max': the maximum local distance
+			; 		'min': the minimum local distance
+			; 		'most_similar': the closest distance of the most similar case
+			; 		null: the minimum local distance
 			new_case_threshold "min"
 			;{type "boolean"}
+			;flag, default is true, only applicable if a substitution value map has been set. If set to false, will not substitute categorical feature values.
 			substitute_output (true)
 			;{type "boolean"}
+			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
 			input_is_substituted (false)
+			;{ref "GenerateNewCases"}
+			;enum, acceptable values are:
+			;	null or 'no' : output any generated case
+			;	'always' : only output original cases, outputs null for all feature values if unable to generate a new case
+			;	'attempt' : output any generated case only if generation fails all initial attempts to output original cases
+			generate_new_cases "no"
 		)
 		(call !ValidateParameters)
 
@@ -265,62 +298,101 @@
 	(declare
 		(assoc
 			;{type "list" values "string"}
+			;list of features to condition just the first case in a series, overwrites context_features and
+			;	derived_context_features for that first case. All specified initial features must be in one of: context_features, action_features,
+			;	derived_context_features or derived_action_features. If provided a value that isn't in one of those lists, it will be ignored.
 			initial_features (list)
 			;{type "list" values {type "list"}}
-			;see #react_series for description.
+			;2d-list of values corresponding to the initial_features, used to condition just the first case in a series. One list is used per series.
 			initial_values (null)
 			;{type "list" values {type "assoc"} }
-			;see #react_series for description.
+			;list of assocs of feature -> stop conditions:
+			;	for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
+			;	for nominal features:  { feature:  { "values" : ['val1', 'val2' ]} }  - stops series when feature value matches any of the values listed
+			;	specifying ".series_progress" with a value between 0 and 1.0 corresponding to percent completion e.g., { ".series_progress" : .95 } -
+			;		stops series when it progresses at or beyond 95%.
+			; one assoc is used per series.
 			series_stop_maps (list)
 			;{type "list" values "number"}
-			;see #react_series for description.
+			;list of maximum sizes each series is allowed to be.  Default is 3 * model_size, a 0 or less is no limit.
+			;	If forecasting with 'continue_series', this defines the maximum length of the forecast.
 			max_series_lengths (null)
 			;{type "boolean"}
+			;flag, if true series ids are replaced with unique values on output.
 			output_new_series_ids (true)
-
 			;{type "string" enum ["fixed" "dynamic" "no"]}
+			;Controls how closely generated series should follow existing series (plural).
+			;	Choices are: "fixed", "dynamic" or "no". If "fixed", tracks the particular relevant series ID. If "dynamic", tracks the particular
+			;	relevant series ID, but is allowed to change the series ID that it tracks based on its current context. If "no", does not track any particular series ID.
 			series_id_tracking "fixed"
 			;{type "boolean"}
+			;flag, default is false.  When true will attempt to continue existing series instead of starting new series.
+			;	If initial_values provide series IDs, it will continue those explicitly specified IDs, otherwise it will randomly select series to continue.
+			;	Note: terminated series with terminators cannot be continued and will result in null output.
 			continue_series (false)
 			;{type "list" values "string"}
+			;list of features corresponding to the values in each row of continue_series_values.
+			;	This value is ignored if continue_series_values is not specified.
 			continue_series_features (null)
 			;{type "list" values {type "list"}}
-			;see #react_series for description.
+			;3d-list of values, when specified will continue this specific untrained series as defined by these values.
+			;	continue_series flag will be ignored and treated as true if this value is specified.
 			continue_series_values (null)
 			;{type "list" values ["number" "string"]}
-			;time step value at which to begin synthesis, applicable only for time series.
+			;time step values at which to begin synthesis for each series, applicable only for time series.
 			init_time_steps (null)
 			;{type "list" values ["number" "string"]}
-			;time step value at which to end synthesis, applicable only for time series.
+			;time step values at which to end synthesis for each series, applicable only for time series.
 			final_time_steps (null)
-
 			;{type "list" values "string"}
+			;list of feature names corresponding to values in each row of context_values
 			context_features (list)
 			;{type "list" values {type "list"}}
+			;2d-list of context feature values for non time-series features, one list is used per series.
 			context_values (null)
 			;{type "list" values "string"}
+			;list of feature names corresponding to values in each row of action_values
 			action_features (list)
 			;{type "list" values {type "list"}}
+			;2d-list of predicted feature values for non time-series features, one list is used per series.
 			action_values (list)
 			;{type "list" values "string"}
+			;list of context features whose values should be computed from the entire series in the specified order.
+			;	Must be different than context_features.
 			derived_context_features (list)
 			;{type "list" values "string"}
+			;list of action features whose values should be computed from the resulting last row in series, in the specified
+			;	order. Must be a subset of action_features.
+			;	Note: both of these derived feature lists rely on the features' "derived_feature_code" attribute to compute the values.
+			;	If 'derived_feature_code' attribute is undefined or references non-existing feature indices, the derived value will be null.
 			derived_action_features (list)
 			;{type "list" values "string"}
+			;list of features corresponding to series_context_values
 			series_context_features (list)
 			;{type "list" values {type "list" values {type "list"}}}
 			;3d-list of values, context value for each feature for each row of a series.
 			;	If specified max_series_lengths are ignored.
 			series_context_values (null)
 			;{type "list" values "string"}
+			;list of additional features to return with audit data from details
 			extra_features (null)
 			;{type "boolean"}
+			;flag, whether to use case weights or not. If unspecified will automatically select based on cached parameters
 			use_case_weights (null)
 			;{type "string"}
+			;name of the feature that stores case weights
 			weight_feature ".case_weight"
 			;{type "number"}
+			;If null, will do a discriminative react. If specified, will do a generative react
+			;	For Generative React, value of desired avg conviction of generated cases, in the range of (0,infinity] with 1 as standard
+			;	larger values will increase the variance (or creativity) of the generated case from the existing model
+			;	smaller values will decrease the variance (or creativity) of the generated case from the existing model
 			desired_conviction (null)
 			;{ref "GenerateNewCases"}
+			;enum, acceptable values are:
+			;	null or 'no' : output any generated case
+			;	'always' : only output original cases, outputs null for all feature values if unable to generate a new case
+			;	'attempt' : output any generated case only if generation fails all initial attempts to output original cases
 			generate_new_cases "no"
 			;{type "number"}
 			;total number of series to generate, for generative reacts.
@@ -330,28 +402,52 @@
 			;
 			num_series_to_generate (null)
 			;{ref "ReactDetails"}
+			;see the description for the details parameter of #react
 			details (null)
 			;{type "boolean"}
+			;flag, if set to true and specified along with case_indices, will set ignore_case to the one specified by case_indices.
 			leave_case_out (null)
 			;{type "boolean"}
+			;flag, if true order of generated feature values will match the order of features
 			ordered_by_specified_features (null)
 			;{type "boolean"}
+			;If true will exclude sensitive features whose values will be
+			;	replaced after synthesis from uniqueness check.
 			exclude_novel_nominals_from_uniqueness_check (null)
 			;{ref "CaseIndices"}
+			;pair (list) of session id and index, where index is the original 0-based session_training_index of the case as it was
+			;			trained into the session. If this case does not exist, discriminative react outputs null, generative react ignores it.
 			case_indices (null)
 
-			;generate react specific parameters:
 			;{type "boolean"}
+			;flag, if false uses model feature residuals, if true recalculates regional model residuals.
 			use_regional_model_residuals (true)
 			;{type "assoc" values {type "assoc" indices {min ["number" "string"] max ["number" "string"] allow_null "boolean"} } }
+			;assoc of :
+			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
+			;	to ensure that specified features' generated values stay in bounds
+			;	for nominal features instead of min/max it's a set of allowed values, ie:
+			;	{ feature: { "allowed" : [ "value1", "value2" ... ] }, "allow_null": false/true }
+			;	allow_null - default is true, if true nulls may be generated per their distribution in the data
 			feature_bounds_map (assoc)
 			;{type "list" values "string"}
+			;list of features that will preserve their values from the case specified by case_indices, appending and
+			;	overwriting the specified context and context features as necessary.  For generative reacts, if case_indices isn't specified,
+			;	will preserve feature values of a random case.
 			preserve_feature_values (list)
 			;{ref "NewCaseThreshold"}
+			;distance to determine privacy cutoff. Used to query the local minimum distance used in the distance ratio
+			; 	accepted values:
+			; 		'max': the maximum local distance
+			; 		'min': the minimum local distance
+			; 		'most_similar': the closest distance of the most similar case
+			; 		null: the minimum local distance
 			new_case_threshold "min"
 			;{type "boolean"}
+			;flag, default is true, only applicable if a substitution value map has been set. If set to false, will not substitute categorical feature values.
 			substitute_output (true)
 			;{type "boolean"}
+			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
 			input_is_substituted (false)
 		)
 		(call !ValidateParameters)
