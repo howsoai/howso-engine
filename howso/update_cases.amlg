@@ -218,17 +218,103 @@
 		))
 
 		(if case_ids
-			(map
-				(lambda
-					(call !UpdateCaseWithHistory (assoc
-						case_id (current_value 1)
-						features features
-						feature_values feature_values
-						unencoded_feature_values unencoded_feature_values
-						session session
-					))
+			(seq
+				(map
+					(lambda
+						(call !UpdateCaseWithHistory (assoc
+							case_id (current_value 1)
+							features features
+							feature_values feature_values
+							unencoded_feature_values unencoded_feature_values
+							session session
+						))
+					)
+					case_ids
 				)
-				case_ids
+
+				;update derived features if necessary
+				(let
+					(assoc
+						affected_derived_features
+							;any features edited that are the source feature of a non-TS derived feature
+							(filter
+								(lambda
+									(and
+										;its not a time-series feature (lag, rate, etc.)
+										(not (contains_index (get !featureAttributes (current_value)) "ts_type"))
+										;this derived feature is generated upon training, others are not saved into cases
+										(size (get !featureAttributes [(current_value 1) "auto_derive_on_train"]) )
+										;at least one source feature that affects this derived feature was edited
+										(size (filter
+											(lambda
+												;"list of derived features contains this specific derived feature?""
+												(contains_value (current_value) (current_value 1))
+											)
+											;only iterate over sources features that were edited
+											(keep !sourceToDerivedFeatureMap features)
+										))
+									)
+								)
+								(indices !derivedFeaturesMap)
+							)
+					)
+
+					;most likely a no-op (when affected_derived_features is empty)
+					(map
+						(lambda
+							(let
+								(assoc
+									derived_feature (current_value 1)
+									necessary_features_offset_map
+										(get_all_labels (parse (get !featureAttributes (list (current_value 2) "auto_derive_on_train" "code"))))
+								)
+
+								;only re-derive features that only use features within their own case/row
+								;offsets other than zero indicate deriving from values of another row within a series
+								;tackling this problem for TS data is TODO: 21518
+								(if (=
+										[0]
+										(values necessary_features_offset_map (true))
+									)
+									(let
+										(assoc necessary_features (indices necessary_features_offset_map) )
+
+										(declare (assoc
+											necessary_values
+												(map
+													(lambda (retrieve_from_entity (current_value) necessary_features))
+													case_ids
+												)
+										))
+
+										(declare (assoc
+											updated_values
+												(call !AddDerivedCodeFeature (assoc
+													feature derived_feature
+													features necessary_features
+													series_data necessary_values
+												))
+										))
+
+										(call !StoreCaseValues (assoc
+											;map of case id -> value
+											case_values_map (zip case_ids updated_values)
+											label_name derived_feature
+											overwrite (true)
+										))
+									)
+								)
+
+							)
+						)
+						affected_derived_features
+					)
+
+					;update features if necessary so that data mass change is correct
+					(if (size affected_derived_features)
+						(assign (assoc features (append features affected_derived_features) ))
+					)
+				)
 			)
 		)
 
