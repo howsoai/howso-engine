@@ -240,9 +240,9 @@
 							(filter
 								(lambda
 									(and
-										;its not a time-series feature (lag, rate, etc.)
+										;not a time-series feature (lag, rate, etc.)
 										(not (contains_index (get !featureAttributes (current_value)) "ts_type"))
-										;this derived feature is generated upon training, others are not saved into cases
+										;generated upon training, otherwise not saved into cases
 										(size (get !featureAttributes [(current_value 1) "auto_derive_on_train"]) )
 										;at least one source feature that affects this derived feature was edited
 										(size (filter
@@ -253,6 +253,17 @@
 											;only iterate over sources features that were edited
 											(keep !sourceToDerivedFeatureMap features)
 										))
+										;the derivation code only uses values from within the same case (not other cases in the series)
+										;(get_all_labels) returns a map of all labels to their values from the code, in this case all feature names to their  offsets,
+										;offsets other than zero indicate deriving from values of another row within a series
+										;tackling this problem for TS data is TODO: 21518
+										(=
+											[0]
+											(values
+												(get_all_labels (parse (get !featureAttributes (list (current_value 1) "auto_derive_on_train" "code"))))
+												(true)
+											)
+										)
 									)
 								)
 								(indices !derivedFeaturesMap)
@@ -265,46 +276,33 @@
 							(let
 								(assoc
 									derived_feature (current_value 1)
-									necessary_features_offset_map
-										(get_all_labels (parse (get !featureAttributes (list (current_value 2) "auto_derive_on_train" "code"))))
+									necessary_features
+										(indices (get_all_labels (parse (get !featureAttributes (list (current_value 2) "auto_derive_on_train" "code")))))
 								)
 
-								;only re-derive features that only use features within their own case/row
-								;offsets other than zero indicate deriving from values of another row within a series
-								;tackling this problem for TS data is TODO: 21518
-								(if (=
-										[0]
-										(values necessary_features_offset_map (true))
-									)
-									(let
-										(assoc necessary_features (indices necessary_features_offset_map) )
+								(declare (assoc
+									necessary_values
+										(map
+											(lambda (retrieve_from_entity (current_value) necessary_features))
+											case_ids
+										)
+								))
 
-										(declare (assoc
-											necessary_values
-												(map
-													(lambda (retrieve_from_entity (current_value) necessary_features))
-													case_ids
-												)
+								(declare (assoc
+									updated_values
+										(call !AddDerivedCodeFeature (assoc
+											feature derived_feature
+											features necessary_features
+											series_data necessary_values
 										))
+								))
 
-										(declare (assoc
-											updated_values
-												(call !AddDerivedCodeFeature (assoc
-													feature derived_feature
-													features necessary_features
-													series_data necessary_values
-												))
-										))
-
-										(call !StoreCaseValues (assoc
-											;map of case id -> value
-											case_values_map (zip case_ids updated_values)
-											label_name derived_feature
-											overwrite (true)
-										))
-									)
-								)
-
+								(call !StoreCaseValues (assoc
+									;map of case id -> value
+									case_values_map (zip case_ids updated_values)
+									label_name derived_feature
+									overwrite (true)
+								))
 							)
 						)
 						affected_derived_features
