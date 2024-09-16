@@ -3,7 +3,7 @@
 ; (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
 ; (call assert_same (assoc obs assoc1 exp assoc2))
 ; (call assert_approximate (assoc obs (list 100 92) exp (list 95 94) percent 6))
-; (print "should be 1: " (call is_approximate (assoc obs (list 102 92) exp (list 94 92) percent 8)) "\n")
+; (print "should be 1: " (call !is_approximate (assoc obs (list 102 92) exp (list 94 92) percent 8)) "\n")
 
 (null
 
@@ -17,8 +17,11 @@
 	;counter of the number of failed asserts
 	#num_failed_asserts 0
 
-	;if set to true will auto-output verbose on any fail
-	#verbose_on_fail (true)
+	;if set to true will auto-output verbose on any fail, causing all assertion values to print after a failure
+	#verbose_on_fail (false)
+
+	;if set to true, exp and obs values will be printed when assertions fail
+	#print_values_on_fail (true)
 
 	;name of unit test
 	#unit_test_name (null)
@@ -37,33 +40,39 @@
 	;parameters
 	; name : string, optional name of unit test. If unspecified defaults to name of file.
 	#init_unit_test
-		(declare
-			(assoc name (null) )
+	(declare
+		(assoc name (null) )
 
-			;parse out filename being run to use as name if name isn't specified
-			(if (= (null) name)
-				(let
-					(assoc script_path (first argv) )
-					(assign (assoc
-						;split script path by backslash and slash since Windows allows both
-            			name (last (split (last (split script_path "/")) "\\\\"))
-					))
-				)
+		;parse out filename being run to use as name if name isn't specified
+		(if (= (null) name)
+			(let
+				(assoc script_path (first argv) )
+				(assign (assoc
+					;split script path by backslash and slash since Windows allows both
+					name (last (split (last (split script_path "/")) "\\\\"))
+				))
 			)
-
-			(assign_to_entities (assoc
-				unit_test_name name
-				unit_test_start_time (system_time)
-			))
-			(print ">> " unit_test_name " >> unit test loaded:\n")
-
-			;self-check
-			(call assert_true (assoc obs (!= (null) unit_test_name)))
-			(call assert_false (assoc obs (= (null) unit_test_name)))
-			(call exit_if_failures (assoc quiet_pass (true) msg "Unit test framework Failed to load!"))
-
-			(print "=====================================\n")
 		)
+
+		(assign_to_entities (assoc
+			unit_test_name name
+			unit_test_start_time (system_time)
+		))
+		(print ">> " unit_test_name " >> unit test loaded:\n")
+
+		;self-check
+		(call assert_true (assoc obs (!= (null) unit_test_name)))
+		(call assert_false (assoc obs (= (null) unit_test_name)))
+		(call exit_if_failures (assoc quiet_pass (true) msg "Unit test framework Failed to load!"))
+
+		(print "=====================================\n")
+	)
+
+	;helper function that prints failure output when a non-null value is not given for exp, skips check if called within a recursive assertion
+	#!verify_exp
+	(if (and (= (null) exp) (not inner))
+		(call !failed_assert_output (assoc msg "FAILED: A non-null value was not given for exp. If the expected value is (null), use #assert_null."))
+	)
 
 	; returns true (1) if the passed in numbers are within the specified percent of each other, otherwise returns false (0)
 	; note: when comparing lists, compares each number at each index as an individual pair of numbers, not the two lists as a whole
@@ -72,97 +81,101 @@
 	; percent : the allowed relative error (eg, 0.056 = obs  must be within 5.6% of exp)
 	; thresh : the allowed absolute error (eg, 0.56 = obs must be +/- 0.56 of exp, if specified, percent is ignored. may be an assoc with same keys as obs.
 	; infinity_threshold : when we can approximately consider numbers higher than this threshold to be infinity
-	#is_approximate
-		(declare
-			(assoc
-				percent .05
-				thresh (null)
-				infinity_threshold 1e200
-			)
-
-			(assign (assoc threshhold (abs percent)))
-
-			;if it's a string, convert it to number
-			(if (= (get_type_string obs) "string")
-				(assign (assoc obs (+ obs)))
-			)
-			(if (= (get_type_string exp) "string")
-				(assign (assoc exp (+ exp)))
-			)
-
-			(if (= (get_type_string obs) "number")
-				(if (!= thresh (null)) ;if absolute threshhold is specified, the difference in the numbers must be less than that
-					(<= (abs (- exp obs)) (abs thresh))
-
-					(and (= obs .infinity) (= exp .infinity))
-					(true)
-
-					(and (= obs -.infinity) (= exp -.infinity))
-					(true)
-
-					;treat numbers that should be infinity but instead are really large due to floating point errors as infinity
-					(and (= obs .infinity) (>= exp infinity_threshold))
-					(true)
-
-					;treat numbers that should be infinity but instead are really large due to floating point errors as infinity
-					(and (= exp .infinity) (>= obs infinity_threshold))
-					(true)
-
-					(= 0 exp obs)
-					(true)
-
-					(let
-						(assign (assoc diff (/ (abs (- exp obs)) exp)))
-						(>= threshhold diff)
-					)
-				)
-
-				;else if list, iterate over the list and remove all values from obs that approximately match those in exp
-				;if resulting list has no items, both lists are approximately same
-				(or (= (get_type_string obs) "list") (= (get_type_string obs) "assoc"))
-				(and
-					;size must match
-					(= (size obs) (size exp))
-					;contents must match
-					(= 0
-						(size (filter
-							(lambda (let
-								(assoc
-									threshold_amount
-										(if (= "number" (get_type_string thresh))
-											thresh
-											;else it's a list or assoc, use corresponding threshold for index
-											(get thresh (current_index 1))
-										)
-
-								)
-								(!= (true)
-									(call is_approximate (assoc
-										obs (current_value 1)
-										exp (get exp (current_index 1))
-										percent percent
-										thresh threshold_amount
-										infinity_threshold infinity_threshold
-									))
-								)
-							))
-							obs
-						))
-					)
-				)
-
-				;all are null
-				(= (null) obs exp)
-				(true)
-
-				;else booleans, check if same
-				(= obs exp)
-				(true)
-
-				;else not valid
-				(false)
-			)
+	#!is_approximate
+	(declare
+		(assoc
+			exp (null)
+			obs (null)
+			percent .05
+			thresh (null)
+			infinity_threshold 1e200
 		)
+		(call !verify_exp)
+
+		(assign (assoc threshhold (abs percent)))
+
+		;if it's a string, convert it to number
+		(if (= (get_type_string obs) "string")
+			(assign (assoc obs (+ obs)))
+		)
+		(if (= (get_type_string exp) "string")
+			(assign (assoc exp (+ exp)))
+		)
+
+		(if (= (get_type_string obs) "number")
+			(if (!= thresh (null)) ;if absolute threshhold is specified, the difference in the numbers must be less than that
+				(<= (abs (- exp obs)) (abs thresh))
+
+				(and (= obs .infinity) (= exp .infinity))
+				(true)
+
+				(and (= obs -.infinity) (= exp -.infinity))
+				(true)
+
+				;treat numbers that should be infinity but instead are really large due to floating point errors as infinity
+				(and (= obs .infinity) (>= exp infinity_threshold))
+				(true)
+
+				;treat numbers that should be infinity but instead are really large due to floating point errors as infinity
+				(and (= exp .infinity) (>= obs infinity_threshold))
+				(true)
+
+				(= 0 exp obs)
+				(true)
+
+				(let
+					(assign (assoc diff (/ (abs (- exp obs)) exp)))
+					(>= threshhold diff)
+				)
+			)
+
+			;else if list, iterate over the list and remove all values from obs that approximately match those in exp
+			;if resulting list has no items, both lists are approximately same
+			(or (= (get_type_string obs) "list") (= (get_type_string obs) "assoc"))
+			(and
+				;size must match
+				(= (size obs) (size exp))
+				;contents must match
+				(= 0
+					(size (filter
+						(lambda (let
+							(assoc
+								threshold_amount
+									(if (= "number" (get_type_string thresh))
+										thresh
+										;else it's a list or assoc, use corresponding threshold for index
+										(get thresh (current_index 1))
+									)
+
+							)
+							(!= (true)
+								(call !is_approximate (assoc
+									obs (current_value 1)
+									exp (get exp (current_index 1))
+									percent percent
+									thresh threshold_amount
+									infinity_threshold infinity_threshold
+									inner (true)
+								))
+							)
+						))
+						obs
+					))
+				)
+			)
+
+			;all are null
+			(= (null) obs exp)
+			(true)
+
+			;else booleans, check if same
+			(= obs exp)
+			(true)
+
+			;else not valid
+			(false)
+		)
+	)
 
 	;return true if either verbose_mode is set or a text failed with verbose_on_fail to auto-print the last failed assertion
 	#verbose_output (or verbose_mode (and verbose_on_fail (> num_failed_asserts 0)))
@@ -173,34 +186,45 @@
 	; percent : the allowed relative error  (eg, 0.056 = must be within 5.6% of exp)
 	; thresh : the allowed absolute error (eg, 0.56 = obs must be +/- 0.56 of exp, if specified, percent is ignored. may be an assoc with same keys as obs.
 	; infinity_threshold : when we can approximately consider numbers higher than this threshold to be infinity
+	; unordered : if true, order doesn't matter
 	#assert_approximate
-		(declare
-			(assoc
-				percent .05
-				thresh (null)
-				infinity_threshold 1e200
-			)
+	(declare
+		(assoc
+			obs (null)
+			exp (null)
+			percent .05
+			thresh (null)
+			infinity_threshold 1e200
+			unordered (false)
+		)
+		(call !verify_exp)
+		(declare (assoc failed_assert (false) ))
 
-			;for approximate comparison, order isn't important so we sort both inputs just in case
+		(if unordered
 			(assign (assoc
 				obs (sort obs)
 				exp (sort exp)
 			))
+		)
 
-			(if
-				(call is_approximate (assoc
-					obs obs
-					exp exp
-					percent percent
-					thresh thresh
-					infinity_threshold infinity_threshold
-				))
-				(print "PASSED (approximate)")
+		(if
+			(call !is_approximate (assoc
+				obs obs
+				exp exp
+				percent percent
+				thresh thresh
+				infinity_threshold infinity_threshold
+			))
+			(print "PASSED (approximate)")
 
-				(call failed_assert_output (assoc msg "FAILED: assert_approximate"))
+			(call !failed_assert_output (assoc msg "FAILED: assert_approximate"))
+		)
+
+		(if (or
+				(call verbose_output)
+				(and print_values_on_fail failed_assert)
 			)
-
-			(if (call verbose_output) (let
+			(let
 				(assoc
 					threshold_type
 						(if (!= (null) thresh)
@@ -214,188 +238,235 @@
 						)
 				)
 				(print ", Expected: " exp "  Observed: " obs "  " threshold_type threshold)
-			))
-			(print "\n")
-
+			)
 		)
+		(print "\n")
+	)
 
 	;asserts if two items are equal
 	; obs : item 1
 	; exp : item 2
 	; unordered : if true, order doesn't matter
 	#assert_same
-		(seq
-			;Check that exp was passed
-			(if (= exp (null))
-				(call failed_assert_output (assoc msg "FAILED: assert_same was not given a non-null value for exp. If the expected value is (null), use #assert_null."))
-			)
+	(declare
+		(assoc
+			exp (null)
+			obs (null)
+			unordered (false)
+		)
+		(call !verify_exp)
+		(declare (assoc failed_assert (false) ))
 
-			;when testing an unordered assoc, means its values can be unordered
-			(if (and unordered (= (get_type_string obs) "assoc"))
-				(let
-					(assoc
-						same_keys (= (sort (indices obs)) (sort (indices exp)) )
-					    differents
-							(filter
-								(lambda
-									;leave any values that don't match
-									(!= (sort (current_value)) (sort (get obs (current_index))) )
-								)
-								obs
+		;when testing an unordered assoc, means its values can be unordered
+		(if (and unordered (= (get_type_string obs) "assoc"))
+			(let
+				(assoc
+					same_keys (= (sort (indices obs)) (sort (indices exp)) )
+					differents
+						(filter
+							(lambda
+								;leave any values that don't match
+								(!= (sort (current_value)) (sort (get obs (current_index))) )
 							)
-					)
+							obs
+						)
+				)
 
-					;expect keys to be same and no differences
-					(if (and same_keys (= 0 (size differents)) )
-						(assign (assoc obs exp))
-					)
+				;expect keys to be same and no differences
+				(if (and same_keys (= 0 (size differents)) )
+					(assign (assoc obs exp))
 				)
 			)
-
-			(if unordered
-				;sort both lists so they can be compared using =
-				(assign (assoc obs (sort obs) exp (sort exp)))
-			)
-
-			(if (= obs exp)
-				(print "PASSED (same)")
-
-				(call failed_assert_output (assoc msg "FAILED: assert_same"))
-			)
-
-			(if (call verbose_output) (print ", Expected: " exp "  Observed: " obs))
-			(print "\n")
 		)
+
+		(if unordered
+			;sort both lists so they can be compared using =
+			(assign (assoc obs (sort obs) exp (sort exp)))
+		)
+
+		(if (= obs exp)
+			(print "PASSED (same)")
+
+			(call !failed_assert_output (assoc msg "FAILED: assert_same"))
+		)
+
+		(if (or
+				(call verbose_output)
+				(and print_values_on_fail failed_assert)
+			)
+			(print ", Expected: " exp "  Observed: " obs)
+		)
+		(print "\n")
+	)
 
 
 	;asserts that the obs parameter is true
 	; obs : item to check if true
 	#assert_true
-		(seq
-			(if obs
-				(print "PASSED (true)")
-
-				(call failed_assert_output (assoc msg "FAILED: assert_true"))
-			)
-			(if (call verbose_output) (print ", Expected: true  Observed: " obs))
-			(print "\n")
+	(declare
+		(assoc
+			obs (null)
 		)
+		(declare (assoc failed_assert (false) ))
+		(if (= (true) obs)
+			(print "PASSED (true)")
+
+			(call !failed_assert_output (assoc msg "FAILED: assert_true"))
+		)
+		(if (or
+				(and print_values_on_fail failed_assert)
+				(call verbose_output)
+			)
+			(print ", Expected: true  Observed: " obs)
+		)
+		(print "\n")
+	)
 
 
 	;asserts that the obs parameter is false
 	; obs : item to check if false
 	#assert_false
-		(seq
-			(if (not obs)
-				(print "PASSED (false)")
-
-				(call failed_assert_output (assoc msg "FAILED: assert_false"))
-			)
-			(if (call verbose_output) (print ", Expected: false  Observed: " obs))
-			(print "\n")
+	(declare
+		(assoc
+			obs (null)
 		)
+		(declare (assoc failed_assert (false) ))
+		(if (= (false) obs)
+			(print "PASSED (false)")
+
+			(call !failed_assert_output (assoc msg "FAILED: assert_false"))
+		)
+		(if (or
+				(and print_values_on_fail failed_assert)
+				(call verbose_output)
+			)
+			(print ", Expected: false  Observed: " obs)
+		)
+		(print "\n")
+	)
 
 
 	;asserts that the obs parameter is null
 	; obs : item to check if null
 	#assert_null
-		(seq
-			(if (= (null) obs)
-				(print "PASSED (null)")
-
-				(call failed_assert_output (assoc msg "FAILED: assert_null"))
-			)
-			(if (call verbose_output) (print ", Expected: null  Observed: " obs))
-			(print "\n")
+	(declare
+		(assoc
+			;intentionally not null
+			obs "You did not pass in a value for obs"
 		)
+		(declare (assoc failed_assert (false) ))
+		(if (= (null) obs)
+			(print "PASSED (null)")
+
+			(call !failed_assert_output (assoc msg "FAILED: assert_null"))
+		)
+		(if (or
+				(and print_values_on_fail failed_assert)
+				(call verbose_output)
+			)
+			(print ", Expected: null  Observed: " obs)
+		)
+		(print "\n")
+	)
+
 	;asserts that the obs parameter is not null
 	; obs : item to check if not null
 	#assert_not_null
-		(seq
-			(if (!= (null) obs)
-				(print "PASSED (not null)")
-
-				(call failed_assert_output (assoc msg "FAILED: assert_not_null"))
-			)
-			(if (call verbose_output) (print ", Expected: not null  Observed: " obs))
-			(print "\n")
+	(declare
+		(assoc
+			obs (null)
 		)
+		(declare (assoc failed_assert (false) ))
+		(if (!= (null) obs)
+			(print "PASSED (not null)")
+
+			(call !failed_assert_output (assoc msg "FAILED: assert_not_null"))
+		)
+		(if (or
+				(and print_values_on_fail failed_assert)
+				(call verbose_output)
+			)
+			(print ", Expected: not null  Observed: " obs)
+		)
+		(print "\n")
+	)
 
 
 	;exit run if there are any assert failures ( requires entity to run with root priveledge)
 	; msg : optional message to display, defaults to name of unit test
 	; quiet_pass : flag, optional. if true and there's no failure, will not print out passed.
 	#exit_if_failures
-		(if (> num_failed_asserts 0)
-			(seq
-				(print "Number of failed asserts: " num_failed_asserts " \n")
-				(if (!= (null) msg)
-					(print "[FAILED: " msg "]\n^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n")
-				)
-				(if unit_test_name
-					(print "\nFAILED >> " unit_test_name " <<\n\n")
-				)
-
-				(if unit_test_retries
-					(print "Retried test: " unit_test_retries "\n")
-				)
-
-				(if (and (!= allowed_retries unit_test_retries) (not (contains_value argv "no-retries")) )
-					(seq
-						(assign_to_entities (assoc num_failed_asserts 0))
-						(accum_to_entities (assoc unit_test_retries 1))
-						(print "RETRYING " unit_test_name " from the start...\nvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n")
-						(call retry_unit_test)
-					)
-
-					(system "exit")
-				)
+	(if (> num_failed_asserts 0)
+		(seq
+			(print "Number of failed asserts: " num_failed_asserts " \n")
+			(if (!= (null) msg)
+				(print "[FAILED: " msg "]\n^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n")
+			)
+			(if unit_test_name
+				(print "\nFAILED >> " unit_test_name " <<\n\n")
 			)
 
-			(if (and (!= (null) msg) (!= (true) quiet_pass))
+			(if unit_test_retries
+				(print "Retried test: " unit_test_retries "\n")
+			)
+
+			(if (and (> allowed_retries unit_test_retries) (not (contains_value argv "no-retries")) )
 				(seq
-					(print "[PASSED: " msg "]\n")
-					(if (= msg unit_test_name)
-						(print
-							"Total execution time: " (- (system_time) unit_test_start_time) " s\n"
-							(if unit_test_retries
-								(concat "Number of times this test was retried: " unit_test_retries "\n")
-								""
-							)
-						)
-					)
-					(print "\n")
+					(assign_to_entities (assoc num_failed_asserts 0))
+					(accum_to_entities (assoc unit_test_retries 1))
+					(print "RETRYING " unit_test_name " from the start...\nvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\n")
+					(call retry_unit_test)
 				)
+
+				(system "exit")
 			)
 		)
+
+		(if (and (!= (null) msg) (!= (true) quiet_pass))
+			(seq
+				(print "[PASSED: " msg "]\n")
+				(if (= msg unit_test_name)
+					(print
+						"Total execution time: " (- (system_time) unit_test_start_time) " s\n"
+						(if unit_test_retries
+							(concat "Number of times this test was retried: " unit_test_retries "\n")
+							""
+						)
+					)
+				)
+				(print "\n")
+			)
+		)
+	)
 
 	;method to automatically reload and re-run the unit test
 	;will load the unit test file by the unit_test_name
 	;and remove the code labeled with #unit_test from the loaded test to prevent infinite loops of retries
 	#retry_unit_test
-		(seq
-			(call (rewrite
-				(lambda
-					(if (!= (get_labels (current_value 1)) (list "unit_test"))
-						(current_value)
-					)
+	(seq
+		(call (rewrite
+			(lambda
+				(if (!= (get_labels (current_value 1)) (list "unit_test"))
+					(current_value)
 				)
-				(load unit_test_name)
-			))
-			;return a conclude to prevent execution of the rest of the original failed script if retrying
-			(conclude)
-		)
+			)
+			(load unit_test_name)
+		))
+		;return a conclude to prevent execution of the rest of the original failed script if retrying
+		(conclude)
+	)
 
 
 	;method used by others to display failure message and increase the number of failed asserts
 	; msg : the message to display
-	#failed_assert_output
-		(seq
-			(assign_to_entities (assoc num_failed_asserts (+ 1 num_failed_asserts)))
-			(print msg)
-			(if (= 2 verbose_mode)
-				(print " at\n" (stack)) ;TODO: figure out a less verbose/more concise way to give feedback as to where exactly the failure occured
-			)
+	#!failed_assert_output
+	(seq
+		(assign_to_entities (assoc num_failed_asserts (+ 1 num_failed_asserts)))
+		(assign (assoc failed_assert (true) ))
+		(print msg)
+		(if (= 2 verbose_mode)
+			(print " at\n" (stack))
 		)
+	)
 
 )

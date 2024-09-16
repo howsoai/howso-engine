@@ -53,7 +53,10 @@
 				(let
 					(assoc
 						cached_values
-							(if output_nominal_class_counts
+							(if (and output_instead_of_store output_nominal_class_counts)
+								(get !expectedValuesMap (list weight_feature_key feature))
+
+								output_nominal_class_counts
 								(get !expectedValuesMap (list weight_feature_key feature "class_counts"))
 
 								(contains_index !nominalsMap feature)
@@ -309,38 +312,19 @@
 				use_case_weights (false)
 			)
 
+			(declare (assoc num_cases (call !GetNumTrainingCases)))
+
 			(accum_to_entities (assoc
 				!expectedValuesMap
-					(assoc
-						".none"
-							||(map
-								(lambda (let
-									(assoc feature (current_index 1))
-									(call !CalculateFeatureExpectedValue (assoc
-										feature feature
-										weight_feature ".none"
-										output_instead_of_store (true)
-										;force all categoricals to compute counts
-										output_nominal_class_counts (contains_index !categoricalFeaturesSet feature)
-									))
-								))
-								;iterate over all unique provided context and action features
-								(zip features)
-							)
-					)
-			))
-
-			(if use_case_weights
-				(accum_to_entities (assoc
-					!expectedValuesMap
-						(associate
-							weight_feature
+					(append
+						(assoc
+							".none"
 								||(map
 									(lambda (let
 										(assoc feature (current_index 1))
 										(call !CalculateFeatureExpectedValue (assoc
 											feature feature
-											weight_feature weight_feature
+											weight_feature ".none"
 											output_instead_of_store (true)
 											;force all categoricals to compute counts
 											output_nominal_class_counts (contains_index !categoricalFeaturesSet feature)
@@ -350,48 +334,39 @@
 									(zip features)
 								)
 						)
-				))
-			)
-
-			(accum_to_entities (assoc
-				!nominalClassProbabilitiesMap
-					(assoc
-						".none"
-							||(map
-								(lambda (let
-									(assoc feature (current_index 1))
-									(call !ComputeModelNominalClassProbabilities (assoc
-										feature feature
-										weight_feature ".none"
-										store_global_probabilities (false)
-									))
-								))
-
-								;iterate over all unique provided context and action features that are categorical
-								(zip
-									(filter
-										(lambda (contains_index !categoricalFeaturesSet (current_value)))
-										features
+						(if use_case_weights
+							(associate
+								weight_feature
+									||(map
+										(lambda (let
+											(assoc feature (current_index 1))
+											(call !CalculateFeatureExpectedValue (assoc
+												feature feature
+												weight_feature weight_feature
+												output_instead_of_store (true)
+												;force all categoricals to compute counts
+												output_nominal_class_counts (contains_index !categoricalFeaturesSet feature)
+											))
+										))
+										;iterate over all unique provided context and action features
+										(zip features)
 									)
-								)
 							)
+							{}
+						)
 					)
-			))
-
-			(if use_case_weights
-				(accum_to_entities (assoc
-					!nominalClassProbabilitiesMap
-						(associate
-							weight_feature
+				!nominalClassProbabilitiesMap
+					(append
+						(assoc
+							".none"
 								||(map
 									(lambda (let
 										(assoc feature (current_index 1))
 										(call !ComputeModelNominalClassProbabilities (assoc
 											feature feature
-											weight_feature weight_feature
+											weight_feature ".none"
 											store_global_probabilities (false)
 										))
-
 									))
 
 									;iterate over all unique provided context and action features that are categorical
@@ -403,16 +378,33 @@
 									)
 								)
 						)
-				))
-			)
+						(if use_case_weights
+							(associate
+								weight_feature
+									||(map
+										(lambda (let
+											(assoc feature (current_index 1))
+											(call !ComputeModelNominalClassProbabilities (assoc
+												feature feature
+												weight_feature weight_feature
+												store_global_probabilities (false)
+											))
 
-			(declare (assoc num_cases (call !GetNumTrainingCases)))
-			(if (= (assoc) !featureMarginalStatsMap)
-				(call !CalculateMarginalStats)
-			)
+										))
 
-			;process all features, caching their min, max values as well as how many nulls there are and the ratio of cases / non-nulls
-			(accum_to_entities (assoc
+										;iterate over all unique provided context and action features that are categorical
+										(zip
+											(filter
+												(lambda (contains_index !categoricalFeaturesSet (current_value)))
+												features
+											)
+										)
+									)
+							)
+							{}
+						)
+					)
+				;process all features, caching their min, max values as well as how many nulls there are and the ratio of cases / non-nulls
 				!featureNullRatiosMap
 					(map
 						(lambda (let
@@ -477,6 +469,16 @@
 							)
 						))
 						(zip features)
+					)
+				!featureMarginalStatsMap
+					(if (= (assoc) !featureMarginalStatsMap)
+						(associate
+							(if weight_feature weight_feature ".none")
+							(call !CalculateMarginalStats (assoc store_stats (false)) )
+						)
+
+						;else don't accumulate anything because marginal stats are already stored
+						{}
 					)
 			))
 
@@ -546,29 +548,27 @@
 
 	;outputs all marginal stats (min, max, median, mean, mode, count, uniques, mean_absdev, variance, stddev, skew, kurtosis, entropy)
 	;for all features in the format of feature -> assoc stat -> value. The marginal stats can be computed for a subset of the data using condition, precision, and num_cases
-	;
-	;parameters:
-	; weight_feature: optional, name of case weight feature
-	; condition: assoc of feature->value(s)
-	;		no value = must have feature
-	;   	- for continuous or numeric ordinal features:
-	;			one value = must equal exactly the value or be close to it for fuzzy match
-	;			two values = inclusive between
-	;   	- for nominal or string ordinal features:
-	;			n values = must match any of these values exactly
-	; precision: optional string,  default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
-	; num_cases: optional, limit on the number of cases to use in calculating conditional prediction stats; If set to zero there will be no limit.
-	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
 	#get_marginal_stats
 	(declare
 		(assoc
 			;{type "string"}
+			;name of case weight feature
 			weight_feature (null)
 			;{ref "Condition"}
+			;assoc of feature->value(s)
+			;		no value = must have feature
+			;   	- for continuous or numeric ordinal features:
+			;			one value = must equal exactly the value or be close to it for fuzzy match
+			;			two values = inclusive between
+			;   	- for nominal or string ordinal features:
+			;			n values = must match any of these values exactly
 			condition (null)
 			;{ref "Precision"}
+			;default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
 			precision "exact"
 			;{type "number"}
+			;limit on the number of cases to use in calculating conditional prediction stats; If set to zero there will be no limit.
+			;	If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
 			num_cases (null)
 		)
 		(call !ValidateParameters)
@@ -618,11 +618,13 @@
 	;
 	;parameters:
 	; weight_feature: optional, name of case weight feature
+	; store_stats: optional, flag, default to true. when false will output stats without caching them
 	#!CalculateMarginalStats
 		(declare
 			(assoc
 				weight_feature (null)
 				filtering_queries (list)
+				store_stats (true)
 			)
 
 			(declare (assoc
@@ -797,7 +799,7 @@
 				(assign (assoc weight_feature ".none"))
 			)
 
-			(if (= (list) filtering_queries)
+			(if (and store_stats (= (list) filtering_queries))
 				(accum_to_entities (assoc
 					!featureMarginalStatsMap (associate weight_feature stats)
 				))
