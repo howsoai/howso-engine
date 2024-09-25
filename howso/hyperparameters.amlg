@@ -1112,12 +1112,15 @@
 							avg_probs_same_or_larger_than_predicted
 								(filter
 									(lambda (>= (current_value) predicted_class_prob))
-									(values
-										(append (zip (indices all_classes_map) 0) (current_value 1))
-									)
+									(values (current_value 1))
 								)
 						))
-						(/ (apply "+" avg_probs_same_or_larger_than_predicted) (size avg_probs_same_or_larger_than_predicted))
+						;if nothing is filtered out, average across all classes
+						(if (= 0 predicted_class_prob)
+							(/ (apply "+" avg_probs_same_or_larger_than_predicted) (size all_classes_map))
+
+							(/ (apply "+" avg_probs_same_or_larger_than_predicted) (size avg_probs_same_or_larger_than_predicted))
+						)
 					))
 					confusion_matrix
 				)
@@ -1133,12 +1136,26 @@
 				(map
 					(lambda (let
 						(assoc
-							predicted_class (current_index 1)
 							;probability of correct predicted class
 							class_probability (get (current_value 1) (current_index 1))
-							;total probability of the row
-							total_probability (apply "+" (values (current_value 1)) )
+							num_sparsified_values (- num_classes (size (current_value 1)))
 						)
+
+						;total probability of the row
+						(declare (assoc
+							total_probability
+								;sum all the probabilities in the row
+								;add the number of smallest_prob values equal to the number of sparsified values
+								(if num_sparsified_values
+									(+
+										(apply "+" (values (current_value 1)) )
+										(* num_sparsified_values smallest_prob)
+									)
+
+									;else sum up all the probabilities in the row as-is
+									(apply "+" (values (current_value 1)) )
+								)
+						))
 
 						;normalize each prediction probability by iterating over all the predictions
 						;in the row and dividing by total_probability
@@ -1156,19 +1173,29 @@
 				)
 		))
 
-		;store default class deviations for any classes that are not in the sparse confusion matrix
+		;store default class (row) deviations for any classes that are not in each row
 		(declare (assoc
 			leftover_class_deviation_map
 				(filter (map
-					(lambda
-						;only need default if a class isn't in the sparse confusion matrix
-						(if (< (size (current_value)) num_classes)
-							(first (values
-								(remove (get deviation_matrix (current_index)) (indices (current_value)))
+					(lambda (let
+						(assoc
+							num_sparsified_values (- num_classes (size (current_value 1)))
+						)
+
+						(if num_sparsified_values
+							(- 1 (/
+								smallest_prob
+								;sum all the probabilities in the row
+								;add the number of smallest_prob values equal to the number of sparsified values
+								(+
+									(apply "+" (values (current_value)) )
+									(* num_sparsified_values smallest_prob)
+								)
+
 							))
 						)
-					)
-					confusion_matrix
+					))
+					guessing_accuracy_matrix
 				))
 		))
 
@@ -1395,12 +1422,11 @@
 									;all other classes can't exceed the predicted class's probability
 									(min
 										(get prob_match_or_indistinguishable_map predicted_class)
-										(+ (or (get row_map (current_index))))
+										(+ (or (current_value)))
 									)
 								)
 							)
-							;iterate over all_classes since every row needs to have a value for every class even if it's 0
-							all_classes_map
+							row_map
 						)
 					))
 					confusion_matrix
@@ -1424,7 +1450,7 @@
 
 							;set floor for accuracy using random matching probability
 							(min
-								(replace (max smallest_prob (get row_map (current_index))))
+								(replace (max smallest_prob (current_value)))
 								;probability of guessing wrong is 1 - random guess
 								(- 1 (get rand_guess_accuracy_map predicted_class) )
 							)
