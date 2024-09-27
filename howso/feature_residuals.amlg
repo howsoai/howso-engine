@@ -329,7 +329,24 @@
 								(keep (remove !featureNullRatiosMap (indices !inactiveFeaturesMap)) features)
 							)
 						))
+					;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
+					ts_feature_lag_amount_map
+						(if !tsTimeFeature
+							(map
+								(lambda (or
+									;store value of 'max_row_lag' for lag features and 'ts_order' for delta or rate features
+									(get (current_value) "max_row_lag")
+									(get (current_value) "ts_order")
+								))
+								;only lag, delta and rate features have a ts_type defined
+								(filter
+									(lambda (get (current_value) "ts_type") )
+									!featureAttributes
+								)
+							)
+						)
 				)
+
 				;compute null deviations and update hyperparam_map with them
 				(if (size features_with_nulls)
 					(assign (assoc
@@ -353,6 +370,16 @@
 												(contained_entities (append
 													(query_exists (current_index))
 													(query_equals (current_index) (null))
+
+													;time series derived features only consider cases outside the null triangle at the start of a series
+													;e.g., a lag of 2 feature, will only consider nulls from cases with index >= 2
+													(if (and !tsTimeFeature (contains_index ts_feature_lag_amount_map (current_index)))
+														(query_greater_or_equal_to ".series_index" (get ts_feature_lag_amount_map (current_index)) )
+
+														;else don't append anything
+														[]
+													)
+
 													(query_sample 200)
 												))
 											)
@@ -629,11 +656,14 @@
 								(lambda
 									(zip
 										;all collisions will increase the count value
-										;e.g. zipping (list small medium small) will create (assoc small 1 medium 1)
-										;then accumulate a 1 for the second 'small' in the list since it's a key collision, resulting in (assoc small 2 medium 1)
+										;e.g. zipping ["small" "medium" "small"] will create { small 1 medium 1 } then accumulate a 1
+										;for the second "small" in the list since it's a key collision, resulting in { small 2 medium 1 }
 										(lambda (+ 1 (current_value 1)) )
-										;ensure to zip a list of classes by prepending an empty list
-										(append (list) (current_value))
+										;ensure to zip a list of classes instead of single value by converting it to a list if it isn't a list already
+										(if (~ [] (current_value))
+											(current_value)
+											[(current_value 1)]
+										)
 										;zip all classes with a value of 1 so that all clases in the predicted list are assigned a value of 1
 										(range
 											(lambda 1)
@@ -645,21 +675,33 @@
 										)
 									)
 								)
-								(map
-									;filter out the nulls out of the list of predicted values
-									(lambda (filter (replace (current_value))))
-									(zip
-										;iterate over pairs of (actual value, predicted value), this lambda is run when there is a
-										;key collision (actual value). In that case append the new predicted value to get an assoc of
-										; actual values to the list of values they are predicted as
-										(lambda
-											(append (replace (current_value 1)) (list (replace (current_value 1))))
+								;keep only those class values that had non-null counts
+								(filter
+									(lambda (size (current_value)))
+									;nominal prediction tuples are in the format of [diff, actual, predicted, C.A.P]
+									;thus this iterates over the two corresponding lists of [actual] and [predicted] values
+									;accruing into an assoc of lists of predicted classes for every provided actual class, e.g.,
+									;given actual ["a" "a" "x" "x" "x"] and predicted ["a" "a" "x" "a" "x"] results in:
+									; {
+									;	"a" [ "a" a" ]
+									;	"x" [ "x "a" "x"]
+									; }
+									(map
+										;filter out the nulls out of the list of predicted values
+										(lambda (filter (replace (current_value))))
+										(zip
+											;iterate over pairs of (actual value, predicted value), this lambda is run when there is a
+											;key collision (actual value). In that case append the new predicted value to get an assoc of
+											; actual values to the list of values they are predicted as
+											(lambda
+												(append (replace (current_value 1)) (list (replace (current_value 1))))
+											)
+											;(get (current_value) 1) refers to the actual case value in each react tuple
+											(map (lambda (replace (get (current_value) 1))) (current_value))
+											;and (get (current_value) 2) refers to the interpolated/predicted case value in
+											;each react tuple
+											(map (lambda (replace (get (current_value) 2))) (current_value))
 										)
-										;(get (current_value) 1) refers to the actual case value in each react tuple
-										(map (lambda (replace (get (current_value) 1))) (current_value))
-										;and (get (current_value) 2) refers to the interpolated/predicted case value in
-										;each react tuple
-										(map (lambda (replace (get (current_value) 2))) (current_value))
 									)
 								)
 							)
