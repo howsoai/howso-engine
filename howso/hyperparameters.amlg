@@ -426,7 +426,6 @@
 						)
 
 						(append (current_value) (assoc
-							"allFeatureResidualsCached" (false)
 							"featureWeights" feature_weights_map
 							"featureDeviations" feature_deviations_map
 						))
@@ -590,7 +589,7 @@
 
 	;return the full internal parameters map if no parameters are specified.
 	;if any of the parameters are specified, then GetHyperparameters is called, which uses the specified parameters to find the most suitable set of hyperparameters to return
-	;{read_only (true)}
+	;{read_only (true) idempotent (true)}
 	#get_params
 	(declare
 		(assoc
@@ -650,6 +649,7 @@
 	)
 
 	;sets internal hyperparameters
+	;{idempotent (true)}
 	#set_params
 	(declare
 		(assoc
@@ -770,6 +770,7 @@
 	)
 
 	;resets all hyperparameters and thresholds back to original values, while leaving feature definitions alone
+	;{idempotent (true)}
 	#reset_params
 	(seq
 		(assign_to_entities (assoc
@@ -783,7 +784,6 @@
 					"dt" -1
 					"featureWeights" (null)
 					"featureDeviations" (null)
-					"allFeatureResidualsCached" (false)
 				)
 		))
 		(accum_to_entities (assoc !revision 1))
@@ -791,6 +791,7 @@
 	)
 
 	;sets the model to auto-analyze by tracking its size and notifying the clients in train responses when it should be analyzed
+	;{idempotent (true)}
 	#set_auto_analyze_params
 	(declare
 		(assoc
@@ -927,7 +928,7 @@
 	)
 
 	;get auto-ablation parameters set by #set_auto_ablation_params
-	;{read_only (true)}
+	;{read_only (true) idempotent (true)}
 	#get_auto_ablation_params
 	(call !Return (assoc
 		payload
@@ -946,6 +947,7 @@
 	))
 
 	;sets the model to auto-ablate by tracking its size and training certain cases as weights
+	;{idempotent (true)}
 	#set_auto_ablation_params
 	(declare
 		(assoc
@@ -967,11 +969,11 @@
 			;list of features. for each of the features specified, will ablate a case if the prediction
 			;	matches exactly.
 			exact_prediction_features (null)
-			;{type "assoc" values {type "list" min_size 2 max_size 2}}
+			;{type "assoc" additional_indices {type "list" min_size 2 max_size 2}}
 			;assoc of feature -> [MIN, MAX]. for each of the features specified, will
 			;	ablate a case if the prediction >= (case value - MIN) and the prediction <= (case value + MAX)
 			tolerance_prediction_threshold_map (null)
-			;{type "assoc" values "number"}
+			;{type "assoc" additional_indices "number"}
 			;assoc of feature -> PERCENT. for each of the features specified, will
 			;	ablate a case if abs(prediction - case value) / prediction <= PERCENT
 			relative_prediction_threshold_map (null)
@@ -1079,17 +1081,6 @@
 		(declare (assoc
 			;map of class -> accuracy of random guessing
 			rand_guess_accuracy_map (map (lambda (/ (current_value) total_predictions)) predictions_per_class_map)
-			all_classes_map
-				(compute_on_contained_entities (list
-					(query_value_masses
-						feature
-						(if valid_weight_feature weight_feature)
-						(or
-							(not (contains_index !nominalsMap feature))
-							(contains_index !numericNominalFeaturesMap feature)
-						)
-					)
-				))
 		))
 
 		;filter out counts below threshold in confusion matrix and store as probabilities correct instead of counts
@@ -1100,7 +1091,24 @@
 			(conclude (null))
 		)
 
-		(declare (assoc num_classes (size all_classes_map) ))
+		(declare (assoc num_classes (size (get !expectedValuesMap [weight_feature feature "class_counts"])) ))
+		(if (= 0 num_classes)
+			(assign (assoc
+				num_classes
+					(size
+						(compute_on_contained_entities (list
+							(query_value_masses
+								feature
+								(if valid_weight_feature weight_feature)
+								(or
+									(not (contains_index !nominalsMap feature))
+									(contains_index !numericNominalFeaturesMap feature)
+								)
+							)
+						))
+					)
+			))
+		)
 
 		;average all probabilities for a class that are same as or more than the predicted class probability
 		(declare (assoc
@@ -1112,12 +1120,15 @@
 							avg_probs_same_or_larger_than_predicted
 								(filter
 									(lambda (>= (current_value) predicted_class_prob))
-									(values
-										(append (zip (indices all_classes_map) 0) (current_value 1))
-									)
+									(values (current_value 1))
 								)
 						))
-						(/ (apply "+" avg_probs_same_or_larger_than_predicted) (size avg_probs_same_or_larger_than_predicted))
+						;if nothing is filtered out, average across all classes
+						(if (= 0 predicted_class_prob)
+							(/ (apply "+" avg_probs_same_or_larger_than_predicted) num_classes)
+
+							(/ (apply "+" avg_probs_same_or_larger_than_predicted) (size avg_probs_same_or_larger_than_predicted))
+						)
 					))
 					confusion_matrix
 				)
@@ -1133,12 +1144,26 @@
 				(map
 					(lambda (let
 						(assoc
-							predicted_class (current_index 1)
 							;probability of correct predicted class
 							class_probability (get (current_value 1) (current_index 1))
-							;total probability of the row
-							total_probability (apply "+" (values (current_value 1)) )
+							num_sparsified_values (- num_classes (size (current_value 1)))
 						)
+
+						;total probability of the row
+						(declare (assoc
+							total_probability
+								;sum all the probabilities in the row
+								;add the number of smallest_prob values equal to the number of sparsified values
+								(if num_sparsified_values
+									(+
+										(apply "+" (values (current_value 1)) )
+										(* num_sparsified_values smallest_prob)
+									)
+
+									;else sum up all the probabilities in the row as-is
+									(apply "+" (values (current_value 1)) )
+								)
+						))
 
 						;normalize each prediction probability by iterating over all the predictions
 						;in the row and dividing by total_probability
@@ -1156,19 +1181,29 @@
 				)
 		))
 
-		;store default class deviations for any classes that are not in the sparse confusion matrix
+		;store default class (row) deviations for any classes that are not in each row
 		(declare (assoc
 			leftover_class_deviation_map
 				(filter (map
-					(lambda
-						;only need default if a class isn't in the sparse confusion matrix
-						(if (< (size (current_value)) num_classes)
-							(first (values
-								(remove (get deviation_matrix (current_index)) (indices (current_value)))
+					(lambda (let
+						(assoc
+							num_sparsified_values (- num_classes (size (current_value 1)))
+						)
+
+						(if num_sparsified_values
+							(- 1 (/
+								smallest_prob
+								;sum all the probabilities in the row
+								;add the number of smallest_prob values equal to the number of sparsified values
+								(+
+									(apply "+" (values (current_value)) )
+									(* num_sparsified_values smallest_prob)
+								)
+
 							))
 						)
-					)
-					confusion_matrix
+					))
+					guessing_accuracy_matrix
 				))
 		))
 
@@ -1196,13 +1231,13 @@
 		(lambda
 			;if there is a default deviation for the class, output a tuple of [sparse deviation map, default class deviation]
 			(if (contains_index leftover_class_deviation_map (current_index))
-				(list
-					(keep (current_value 1) (indices (get confusion_matrix (current_index 1))) )
+				[
+					(current_value 1)
 					(get leftover_class_deviation_map (current_index 1))
-				)
+				]
 
 				;just output the sdm assoc
-				(keep (current_value) (indices (get confusion_matrix (current_index))) )
+				(current_value)
 			)
 		)
 		deviation_matrix
@@ -1326,9 +1361,26 @@
 					;else if there aren't enough leftover counts to compute unknown class deviation, use weighted random chance
 					(> total_leftover_all_predictions total_leftover_correct_predictions)
 					(let
-						(assoc
-							non_sdm_classes (indices (remove all_classes_map (indices confusion_matrix)) )
+						(assoc all_classes_map (get !expectedValuesMap [weight_feature feature "class_counts"]) )
+						(if (= 0 (size all_classes_map))
+							(assign (assoc
+								all_classes_map
+									(compute_on_contained_entities (list
+										(query_value_masses
+											feature
+											(if valid_weight_feature weight_feature)
+											(or
+												(not (contains_index !nominalsMap feature))
+												(contains_index !numericNominalFeaturesMap feature)
+											)
+										)
+									))
+							))
 						)
+
+						(declare (assoc
+							non_sdm_classes (indices (remove all_classes_map (indices confusion_matrix)) )
+						))
 						;fallback #2, if there are classes in the dataset that weren't in the sdm, use random guess probability of those classes
 						(if (size non_sdm_classes)
 							(let
@@ -1395,12 +1447,11 @@
 									;all other classes can't exceed the predicted class's probability
 									(min
 										(get prob_match_or_indistinguishable_map predicted_class)
-										(+ (or (get row_map (current_index))))
+										(+ (or (current_value)))
 									)
 								)
 							)
-							;iterate over all_classes since every row needs to have a value for every class even if it's 0
-							all_classes_map
+							row_map
 						)
 					))
 					confusion_matrix
@@ -1424,7 +1475,7 @@
 
 							;set floor for accuracy using random matching probability
 							(min
-								(replace (max smallest_prob (get row_map (current_index))))
+								(replace (max smallest_prob (current_value)))
 								;probability of guessing wrong is 1 - random guess
 								(- 1 (get rand_guess_accuracy_map predicted_class) )
 							)
