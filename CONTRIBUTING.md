@@ -67,9 +67,8 @@ the parameter's type (or possible types), the types of its values, the types of 
 
 Return types of methods should be specified by comments on the assoc with the parameters. (This is currently in planning)
 
-- All parameters must have at least "type" or "ref" specified
-- Optionality will be automatically inferred by the default value. Nullable/Optional are the same here.
-
+- All parameters must have at least "type" or "ref" specified.
+- To specify a parameter is nullable, "null" should be listed as a possible type.
 
 ### Typing (assoc) keys and their values
 
