@@ -83,6 +83,7 @@ Return types of methods should be specified by comments on the assoc with the pa
 | min                 | Only applicable when `type` is "number". The minimum value.
 | max                 | Only applicable when `type` is "number". The maximum value.
 | indices             | Only applicable when `type` is "assoc". Value is an assoc of named indices to their expected types.
+| dynamic_indices     | Still WiP. Specified just like `indices`, but instead specify indices with patterns that use `${string}` or `${number}` to match found indices.
 | additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is defined for all unspecified indices.
 | required            | The value of this should be a boolean. If used under the type within an 'indices' (assoc), then that index must be present in the parent (assoc). If used in a top-level type, that parameter must be specified as a non-null value.
 
