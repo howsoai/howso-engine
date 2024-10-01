@@ -429,6 +429,23 @@
 			)
 		)
 
+		;store an assoc of lag/rate/delta feature -> lag/order amount
+		(declare (assoc
+			ts_feature_lag_amount_map
+				(map
+					(lambda (or
+						;store value of 'max_row_lag' for lag features and 'ts_order' for delta or rate features
+						(get (current_value) "max_row_lag")
+						(get (current_value) "ts_order")
+					))
+					;only lag, delta and rate features have a ts_type defined
+					(filter
+						(lambda (get (current_value) "ts_type") )
+						!featureAttributes
+					)
+				)
+		))
+
 		(if continue_series
 			(call !PrepContinueReactSeries)
 		)
@@ -639,6 +656,20 @@
 							)
 					))
 				)
+			)
+
+			;modify context features to not include any lag-dependent features whose lag
+			;amount is larger the current last_series_index
+			(if (< last_series_index largest_max_row_lag)
+				(assign (assoc
+					react_context_features
+						(filter
+							(lambda
+								(not (< last_series_index (get ts_feature_lag_amount_map (current_value))) )
+							)
+							react_context_features
+						)
+				))
 			)
 
 			;create a (unique if necessary) series case
@@ -1087,64 +1118,19 @@
 			)
 		)
 
+
+
 		;if user has provided series data to continue, populate series_data with the provided values
 		(if (size continue_series_values)
 			(let
-				(assoc continue_feature_indices_map (zip continue_series_features (indices continue_series_features)) )
-				(declare (assoc
-					feature_order (unzip continue_feature_indices_map features)
-				))
-
-				;reimpute values using this entire dataset since they were originally imputed
-				;only using the provided continue_series_values and are likely not as accurate as they could be
-				(assign (assoc
-					continue_series_values
-						(map
-							(lambda (let
-								(assoc imputed_features (last (current_value 1)))
-								(if (size imputed_features)
-									(let
-										(assoc row_values_map (zip continue_series_features (current_value 1)) )
-
-										(declare (assoc
-											imputed_values
-												(map
-													(lambda (let
-														(assoc impute_feature (current_value 1) )
-														(declare (assoc
-															impute_context_features (indices (remove feature_index_map impute_feature))
-														))
-														(first
-															(call !ReactDiscriminative (assoc
-																context_features impute_context_features
-																context_values (unzip row_values_map impute_context_features)
-																action_features (list impute_feature)
-																ignore_case (null)
-																return_action_values_only (true)
-																allow_nulls (false)
-															))
-														)
-													))
-													imputed_features
-												)
-										))
-
-										;overwrite originally imputed row values with the newly imputed row values
-										(unzip
-											(append row_values_map (zip imputed_features imputed_values))
-											continue_series_features
-										)
-									)
-
-									;else leave values as-is
-									(current_value)
-								)
-							))
-							continue_series_values
+				(assoc
+					feature_order
+						(unzip
+							(zip continue_series_features (indices continue_series_features))
+							features
 						)
-				))
-
-				;set series_data
+				)
+				;set series_data matrix to match features
 				(assign (assoc
 					series_data
 						(map
@@ -1153,14 +1139,26 @@
 						)
 				))
 
+				;figure out how many total rows are needed given needed lags of the provided continue series data
+				(declare (assoc
+					necessary_total_rows
+						(apply "max"
+							;grab all the lag values corresponding to features with values from the last row
+							(unzip
+								ts_feature_lag_amount_map
+								;keep only those features with values from the last row
+								(indices (filter (zip features (last series_data))) )
+							)
+						)
+				))
 				;prepend nulls if user hasn't provided enough previous rows to account for necessary lags
-				(if (> largest_max_row_lag (size series_data))
+				(if (> necessary_total_rows (size series_data))
 					(assign (assoc
 						series_data
 							(append
 								(map
 									(lambda (range (lambda (null)) 1 (size features) 1) )
-									(range 1 (- largest_max_row_lag (size series_data)))
+									(range 1 (- necessary_total_rows (size series_data)))
 								)
 								series_data
 							)
