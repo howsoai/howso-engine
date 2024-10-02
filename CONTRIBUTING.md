@@ -76,15 +76,15 @@ Return types of methods should be specified by comments on the assoc with the pa
 | Key                 | Values |
 | ------------------- | ------ |
 | type                | If single type, the type as a string. If multiple types, a list of types as strings. The available types are "list", "assoc", "number", "string", "boolean", "any".
-| values              | Only used when `type` is "list" or "assoc". Values should be similar to the values of `type` and should define the possible types of the values. This value can be an assoc if the type is a data structure/
+| values              | Only used when `type` is "list". Values should be similar to the values of `type` and should define the possible types of the values. This value can be an assoc if the type is a data structure.
 | min_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
 | max_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
 | enum                | Only applicable when `type` is "string". A list of possible values for the string
 | min                 | Only applicable when `type` is "number". The minimum value.
 | max                 | Only applicable when `type` is "number". The maximum value.
 | indices             | Only applicable when `type` is "assoc". Value is an assoc of named indices to their expected types.
-| additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is specified for indices that were not named in `indices`. This should only be used if `indices` is used as well.
-| optional            | The value of this should be a boolean, and this should only be specified for sub-types. This will be automatically added to the top level of type hints based on the default value of the parameter.
+| additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is defined for all unspecified indices.
+| required            | The value of this should be a boolean. If used under the type within an 'indices' (assoc), then that index must be present in the parent (assoc). If used in a top-level type, that parameter must be specified as a non-null value.
 
 
 ### Typing Examples

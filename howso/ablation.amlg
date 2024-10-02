@@ -109,8 +109,230 @@
 		(call !CreateCaseWeights (assoc feature_name weight_feature) )
 	)
 
+	;check the relative threshold map against the the current prediction stats map.
+	;
+	;parameters:
+	; abs_threshold_map: a map of measure to a map of feature name to absolute score
+	; prediction_stats_map: the prediction stats map.
+	#!CheckAbsThresholds
+	(declare
+		(assoc
+			abs_threshold_map (assoc)
+			prediction_stats_map (assoc)
+		)
+		(map
+			(lambda (map
+				(lambda
+					;If we are computing for rmse or r2 we check if we're over the threshold.
+					; Otherwise, check that we're under.
+
+					;(current_index 1) is the top-level index of abs_threshold_map, which is
+					; comprised of the different measures (accuracy, precision, recall, rsmse... etc.)
+					; that have thresholds defined.
+					(if (contains_value (list "rmse" "r2") (current_index 1))
+						;Use (current_index 2) and (current_index 1) to access the values in the prediction stats
+						; maps, which have the same structure as the threshold map.
+
+						;(current_value) is the numerical value of the threshold. Exceeding this should satisfy the
+						; threshold and stop reduction.
+						(>
+							(get prediction_stats_map (list (current_index 2) (current_index 1)))
+							(current_value)
+						)
+						(<
+							(get prediction_stats_map (list (current_index 2) (current_index 1)))
+							(current_value)
+						)
+					)
+				)
+				;(current_value) contains the threshold map for a specific measure, e.g. for accuracy {target 0.75}
+				; would indicate an accuracy value of less than 0.75 would satisfy the threshold and stop reduction.
+				(current_value)
+			))
+			abs_threshold_map
+		)
+	)
+
+	;check the relative threshold map against the the current and previous prediction stats maps.
+	;
+	;parameters:
+	; delta_threshold_map: a map of measure to a map of feature name to relative score
+	; prev_prediction_stats_map: the previous prediction stats map.
+	; new_prediction_stats_map: the new prediction stats map.
+	#!CheckDeltaThresholds
+	(declare
+		(assoc
+			delta_threshold_map (assoc)
+			prev_prediction_stats_map (assoc)
+			new_prediction_stats_map (assoc)
+		)
+		(map
+			(lambda (map
+				(lambda
+					(>
+						;If we are computing the delta on rmse or r2, subtract the prev from the new
+						; and vice versa if we are not to ensure a positive value to trigger any thresholds.
+
+						;(current_index 1) is the top-level index of delta_threshold_map, which is
+						; comprised of the different measures (accuracy, precision, recall, rsmse... etc.)
+						; that have thresholds defined.
+						(if (contains_value (list "rmse" "r2") (current_index 1))
+							;Use (current_index 2) and (current_index 1) to access the values in the prediction stats
+							; maps, which have the same structure as the threshold map.
+							(-
+								(get new_prediction_stats_map (list (current_index 2) (current_index 1)))
+								(get prev_prediction_stats_map (list (current_index 2) (current_index 1)))
+							)
+							(-
+								(get prev_prediction_stats_map (list (current_index 2) (current_index 1)))
+								(get new_prediction_stats_map (list (current_index 2) (current_index 1)))
+							)
+						)
+						;(current_value) is the numerical value of the threshold. Exceeding this should satisfy the
+						; threshold and stop reduction.
+						(current_value)
+					)
+				)
+				;(current_value) contains the threshold map for a specific measure, e.g. for accuracy {target 0.05}
+				; would indicate a delta of greater than 0.05 would satisfy the threshold and stop reduction.
+				(current_value)
+			))
+			delta_threshold_map
+		)
+	)
+
+	;check the relative threshold map against the the current and previous prediction stats maps.
+	;
+	;parameters:
+	; rel_threshold_map: a map of measure to a map of feature name to relative score
+	; prev_prediction_stats_map: the previous prediction stats map.
+	; new_prediction_stats_map: the new prediction stats map.
+	#!CheckRelThresholds
+	(declare
+		(assoc
+			rel_threshold_map (assoc)
+			prev_prediction_stats_map (assoc)
+			new_prediction_stats_map (assoc)
+		)
+		(map
+			(lambda
+				(map
+					(lambda
+						(>
+							;If we are computing relative change in rmse or r2, then compute the
+							; change as-is. If not, then we multiply the resulting % change by -1
+							; since a negative  % change needs to trigger the threshold.
+
+							;(current_index 1) is the top-level index of rel_threshold_map, which is
+							; comprised of the different measures (accuracy, precision, recall, rsmse... etc.)
+							; that have thresholds defined.
+							(if (contains_value (list "rmse" "r2") (current_index 1))
+								;Use (current_index 2) and (current_index 1) to access the values in the prediction stats
+								; maps, which have the same structure as the threshold map.
+								(/
+									(- 
+										(get new_prediction_stats_map (list (current_index 2) (current_index 1)))
+										(get prev_prediction_stats_map (list (current_index 2) (current_index 1)))
+									)
+									(get prev_prediction_stats_map (list (current_index 2) (current_index 1)))
+								)
+								(- (/
+									(- 
+										(get new_prediction_stats_map (list (current_index 2) (current_index 1)))
+										(get prev_prediction_stats_map (list (current_index 2) (current_index 1)))
+									)
+									(get prev_prediction_stats_map (list (current_index 2) (current_index 1)))
+								))
+							)
+							;(current_value) is the numerical value of the threshold. Exceeding this should satisfy the
+							; threshold and stop reduction.
+							(current_value)
+						)
+					)
+					;(current_value) contains the threshold map for a specific measure, e.g. for accuracy {target 0.05}
+					; would indicate a % change of greater than 5% would satisfy the threshold and stop reduction.
+					(current_value)
+				)
+			)
+			rel_threshold_map
+		)
+	)
+
+	;helper method which flattens the result of one of the !Check*Thresholds methods
+	; to determine whether at least one of the thresholds was violated (true) or not (false).
+	#!FlattenThresholdResultMap
+	(declare
+		(assoc
+			threshold_result_map (assoc)
+		)
+		(apply "or"
+			(values (map
+				(lambda
+					(apply "or" (values (current_value)))
+				)
+				threshold_result_map
+			))
+		)
+	)
+
+	;check all of the threshold maps against the current prediction stats map or the current
+	; and previous prediction stats maps. Returns the threshold map that failed.
+	;
+	;parameters:
+	; abs_threshold_map: a map of a measure to a map of feature name to absolute score threshold
+	; delta_threshold_map: a map of measure to a map of feature name to delta score threshold
+	; rel_threshold_map: a map of measure to a map of feature name to relative score threshold
+	; prev_prediction_stats_map: the previous prediction stats map.
+	; new_prediction_stats_map: the new prediction stats map.
+	#!CheckThresholds
+	(declare
+		(assoc
+			abs_threshold_map (assoc)
+			delta_threshold_map (assoc)
+			rel_threshold_map (assoc)
+			prev_prediction_stats_map (assoc)
+			new_prediction_stats_map (assoc)
+		)
+
+		(declare (assoc
+			abs_threshold_result_map
+				(call !CheckAbsThresholds (assoc
+					abs_threshold_map abs_threshold_map
+					prediction_stats_map new_prediction_stats_map
+				))
+			delta_threshold_result_map
+				(call !CheckDeltaThresholds (assoc
+					delta_threshold_map delta_threshold_map
+					prev_prediction_stats_map prev_prediction_stats_map
+					new_prediction_stats_map new_prediction_stats_map
+				))
+			rel_threshold_result_map
+				(call !CheckRelThresholds (assoc
+					rel_threshold_map rel_threshold_map
+					prev_prediction_stats_map prev_prediction_stats_map
+					new_prediction_stats_map new_prediction_stats_map
+				))
+		))
+
+		(append
+			(if (call !FlattenThresholdResultMap (assoc threshold_result_map abs_threshold_result_map))
+				{"abs" abs_threshold_result_map}
+				{}
+			)
+			(if (call !FlattenThresholdResultMap (assoc threshold_result_map delta_threshold_result_map))
+				{"delta" delta_threshold_result_map}
+				{}
+			)
+			(if (call !FlattenThresholdResultMap (assoc threshold_result_map rel_threshold_result_map))
+				{"rel" rel_threshold_result_map}
+				{}
+			)
+		)
+	)
+
 	;reduce the trained data by removing cases which have an influence weight entropy that falls above
 	; a threshold.
+	;{long_running (true)}
 	#reduce_data
 	(declare
 		(assoc
@@ -124,23 +346,51 @@
 			;numeric maximum threshold for influence weight entropy of cases to keep, defaults to the value
 			; influence weight entropy threshold stored within the Trainee
 			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; absolute thresholds will cause data reduction to stop when any of the measure values for any of
+			; the features for which a threshold is defined go avove the threshold (in the case of rmse and
+			; mae) or below the threshold (otherwise).
+			abs_threshold_map (assoc)
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; delta thresholds will cause data reduction to stop when the delta between any of the measure values
+			; for any of the features for which a threshold is defined and its previous value go avove the threshold
+			; (in the case of rmse and mae) or below the threshold (otherwise).
+			delta_threshold_map (assoc)
+			;{ref "AblationThresholdMap"}
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; relative thresholds will cause data reduction to stop when the relative change between any of the
+			; measure values for any of the features for which a threshold is defined and its previous value go
+			; avove the threshold (in the case of rmse and mae) or below the threshold (otherwise).
+			rel_threshold_map (assoc)
 			;{type "boolean"}
 			;skip auto analyzing as cases are removed
 			skip_auto_analyze (false)
+			;{type "number"}
+			;the number of cases to ablate between analyses and influence weight entropy recalculation
+			batch_size !ablationBatchSize
 		)
 		(call !ValidateParameters)
 
-		;variables for internal use.
+		;Declare variables for internal use.
 		(declare (assoc
 			max_influence_weight_entropy_to_keep .infinity
 			cases (list)
+			prev_prediction_stats_map (assoc)
+			thresholds_enabled (or (size abs_threshold_map) (size delta_threshold_map) (size rel_threshold_map) )
+			output (assoc)
 		))
 
+		;Ensure that ablation is initialized before we begin.
 		(if (not !hasPopulatedCaseWeight)
 			(call !InitializeAutoAblation (assoc
 				weight_feature distribute_weight_feature
 			))
 		)
+
+		;Also ensure that we have influence weight entropies.
 		(if (not !hasInfluenceWeightEntropies)
 			(call !ComputeAndStoreInfluenceWeightEntropies (assoc
 				features features
@@ -148,41 +398,85 @@
 				use_case_weights (true)
 			))
 		)
-		(while
-			(<= !autoAblationMinModelSize (call !GetNumTrainingCases))
 
-			(seq
-				(assign (assoc
-					max_influence_weight_entropy_to_keep
-						(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-							influence_weight_entropy_threshold influence_weight_entropy_threshold
-							weight_feature distribute_weight_feature
-							cache_value (false)
+		(if thresholds_enabled
+			(assign (assoc
+				prev_prediction_stats_map
+					(get (call !CalculateFeatureResiduals (assoc
+						weight_feature distribute_weight_feature
+						use_case_weights (true)
+						compute_all_statistics (true)
+					)) "prediction_stats")
+			))
+		)
+
+		;Begin looping on data removal. The ultimate end condition is if the model gets too small
+		; to continue removing cases.
+		(while (< !autoAblationMinModelSize (call !GetNumTrainingCases))
+			(assign (assoc
+				cases
+					(call !GetCasesByCondition (assoc
+						condition
+							(associate
+								!internalLabelInfluenceWeightEntropy 
+									(list
+										(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
+											influence_weight_entropy_threshold influence_weight_entropy_threshold
+											weight_feature distribute_weight_feature
+											cache_value (false)
+										))
+										.infinity
+									)
+							)
+						num_cases
+							(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinModelSize))
+					))
+			))
+
+			;if there are no cases which satisfy the criteria, then break.
+			(if (not (size cases)) (conclude))
+
+			(call !RemoveCases (assoc
+				cases cases
+				distribute_weight_feature distribute_weight_feature
+			))
+
+			(call !AutoAnalyzeIfNeeded (assoc
+				skip_auto_analyze skip_auto_analyze
+			))
+
+			(if thresholds_enabled
+				(let
+					(assoc
+						batch_threshold_info (null)
+						new_prediction_stats_map
+							(get (call !CalculateFeatureResiduals (assoc
+								weight_feature distribute_weight_feature
+								use_case_weights (true)
+								compute_all_statistics (true)
+								store_values (false)
+							)) "prediction_stats")
+					)
+					(assign (assoc
+						batch_threshold_info
+							(call !CheckThresholds (assoc
+								abs_threshold_map abs_threshold_map
+								delta_threshold_map delta_threshold_map
+								rel_threshold_map rel_threshold_map
+								prev_prediction_stats_map prev_prediction_stats_map
+								new_prediction_stats_map new_prediction_stats_map
+							))
+					))
+					(if (apply "or" (values batch_threshold_info))
+						(seq
+							(accum "output" ["threshold_info"] batch_threshold_info)
+							(conclude)
+						)
+						(assign (assoc
+							prev_prediction_stats_map new_prediction_stats_map
 						))
-					cases
-						(call !GetCasesByCondition (assoc
-							condition
-								(associate
-									!internalLabelInfluenceWeightEntropy
-										(list max_influence_weight_entropy_to_keep .infinity)
-								)
-							num_cases !autoAnalyzeThreshold
-						))
-				))
-
-				;if there are no cases which satisfy the criteria, then break.
-				(if (not (size cases)) (conclude) )
-
-				(call !RemoveCases (assoc
-					cases cases
-					distribute_weight_feature distribute_weight_feature
-				))
-
-				(call !AutoAnalyzeIfNeeded)
-
-				;if there are fewer cases to remove than the auto analyze threshold,
-				; then there is not enough to remove and we should break out of here.
-				(if (< !autoAnalyzeThreshold (size cases)) (conclude) )
+					)
+				)
 			)
 		)
 
@@ -192,7 +486,9 @@
 		))
 
 		(accum_to_entities (assoc !revision 1))
-		(call !Return)
+		(call !Return (assoc 
+			payload output
+		))
 	)
 
 	;helper method which queries and returns the specified quantile of influence weight entropies

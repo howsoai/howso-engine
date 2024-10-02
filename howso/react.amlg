@@ -2,6 +2,7 @@
 (null
 
 	;Run reacts in a batch, output a an assoc of list of outputs from each individual react.
+	;{long_running (true) statistically_idempotent (true)}
 	#react
 	(declare
 		(assoc
@@ -258,7 +259,7 @@
 			;{type "boolean"}
 			;flag, if false uses model feature residuals, if true recalculates regional model residuals. Only used when desired_conviction is specified
 			use_regional_model_residuals (true)
-			;{ref "FeatureBoundsMap"}
+			;{type "assoc" additional_indices {ref "FeatureBoundsMap"}}
 			;assoc of :
 			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
 			;	to ensure that specified features' generated values stay in bounds
@@ -405,14 +406,8 @@
 
 		(call !UpdateCaseWeightParameters (assoc set_valid_weight_feature (false) ))
 
-		;if expected values haven't been cached (i.e., analyze was skipped), do that here
-		(if (= 0 (size !expectedValuesMap))
-			(call !CacheExpectedValuesAndProbabilities (assoc
-				features !trainedFeatures
-				weight_feature (if (not use_case_weights) ".none" weight_feature)
-				use_case_weights use_case_weights
-			))
-		)
+		;check and update caches if necessary
+		(call !PreReactCacheChecks)
 
 		(declare (assoc
 			output_action_features
@@ -560,6 +555,7 @@
 	; 	Details example: { 'action_values': [2, "a", .75384], 'action_features' : ['width','name','height'], 'residual_conviction': 1.3,
 	;		'influential_cases' : etc... }
 	;	See API docs for documentation of all output properties
+	;{long_running (true) statistically_idempotent (true)}
 	#single_react
 	(declare
 		(assoc
@@ -645,7 +641,7 @@
 			;{type "boolean"}
 			;flag, if false uses model feature residuals, if true recalculates regional model residuals. Only used when desired_conviction is specified
 			use_regional_model_residuals (true)
-			;{ref "FeatureBoundsMap"}
+			;{type "assoc" additional_indices {ref "FeatureBoundsMap"}}
 			;assoc of :
 			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
 			;	to ensure that specified features' generated values stay in bounds
@@ -698,6 +694,31 @@
 				))
 			)
 		)
+
+		(declare (assoc
+			hyperparam_map
+				(if (= 1 (size action_features))
+					(call !GetHyperparameters (assoc
+						feature (first action_features)
+						context_features context_features
+						mode "full"
+						weight_feature weight_feature
+					))
+
+					(call !GetHyperparameters (assoc
+						feature ".targetless"
+						context_features context_features
+						mode "robust"
+						weight_feature weight_feature
+					))
+				)
+			constrained_features (null)
+		))
+
+		(call !UpdateCaseWeightParameters (assoc set_valid_weight_feature (false) ))
+
+		;check and update caches if necessary
+		(call !PreReactCacheChecks)
 
 		;assoc of feature -> unique value, pre-populated if there are unique features that need to be synthed
 		(declare (assoc
@@ -1312,6 +1333,68 @@
 				candidate_case_weights (get candidate_cases_lists 1)
 				candidate_case_values (last candidate_cases_lists)
 				allow_nulls allow_nulls
+			))
+		)
+	)
+
+	;helper method for React calls that checks marginal, expected value, and residuals caches
+	;requires the following vars on the stack:
+	; hyperparam_map, desired_conviction, weight_feature, use_case_weights
+	; These should be ready if !GetHyperparmeters and !UpdateCaseWeightParameters are called beforehand
+	#!PreReactCacheChecks
+	(seq
+		;if doing a generative react and global residuals have have not been calculated yet,
+		;recalculate them only if there are enough training cases
+		;they are needed regardless of which residual mode is being used
+		(if (and
+				(!= desired_conviction (null))
+				(= 0 (size (get hyperparam_map "featureResiduals")))
+				(>= (call !GetNumTrainingCases) 2)
+			)
+			(seq
+				(assign (assoc
+					hyperparam_map
+						(call !CalculateResidualsAndUpdateParameters (assoc
+							context_features !trainedFeatures
+							custom_hyperparam_map hyperparam_map
+							num_samples 1000
+							;robust with respect to the set of contexts used (across the power set of contexts), should match hyperparam map robust mode
+							robust_residuals (!= 1 (size action_features))
+							hyperparameter_feature
+								(if (= 1 (size action_features))
+									(first action_features)
+									".targetless"
+								)
+							weight_feature weight_feature
+							use_case_weights use_case_weights
+							compute_null_uncertainties (false)
+							compute_all_statistics (false)
+						))
+				))
+				(if (= (first (get hyperparam_map "paramPath")) ".default")
+					;updating default hyperparam set with featuredeviations
+					(assign_to_entities (assoc !defaultHyperparameters hyperparam_map) )
+
+					;update the appropriate hyperparameter set
+					(assign_to_entities (assoc !hyperparameterMetadataMap (set !hyperparameterMetadataMap (get hyperparam_map "paramPath") hyperparam_map)) )
+				)
+				(accum_to_entities (assoc !revision 1))
+			)
+		)
+
+		;compute and cache all min-max values for all features
+		(if (= 0 (size !featureMarginalStatsMap))
+			(call !CalculateMarginalStats (assoc
+				weight_feature (if use_case_weights weight_feature)
+			))
+		)
+
+		;if expected values haven't been cached (i.e., analyze was skipped), do that here
+		(if (= 0 (size !expectedValuesMap))
+			(call !CacheExpectedValuesAndProbabilities (assoc
+				features !trainedFeatures
+				weight_feature (if (not use_case_weights) ".none" weight_feature)
+				use_case_weights use_case_weights
 			))
 		)
 	)
