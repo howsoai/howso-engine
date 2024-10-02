@@ -79,8 +79,10 @@ Return types of methods should be specified by comments on the assoc with the pa
 | min_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
 | max_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
 | enum                | Only applicable when `type` is "string". A list of possible values for the string
-| min                 | Only applicable when `type` is "number". The minimum value.
-| max                 | Only applicable when `type` is "number". The maximum value.
+| min                 | Only applicable when `type` is "number". The inclusive minimum value.
+| exclusive_min       | Only applicable when `type` is "number". The exclusive minimum value.
+| max                 | Only applicable when `type` is "number". The inclusive maximum value.
+| exclusive_max       | Only applicable when `type` is "number". The exclusive maximum value.
 | indices             | Only applicable when `type` is "assoc". Value is an assoc of named indices to their expected types.
 | additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is defined for all unspecified indices. Also supports the value (false) to indicate there should be no additional indices.
 | dynamic_indices     | Still WiP. Specified just like `indices`, but instead specify indices with patterns that use `${string}` or `${number}` to match found indices.
