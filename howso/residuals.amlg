@@ -48,34 +48,76 @@
 		deviation_features_map
 	)
 
-	;helper method for CalculateFeatureResiduals to compute and cache min residuals
-	#!CacheFeatureMinResiduals
-	(assign_to_entities (assoc
-		!cachedFeatureMinResidualMap
-			(map
-				(lambda
-					;empty datasets set minimal residual to be half a gap
-					(if (= 0 num_training_cases)
-						0.5
+	;helper method for CalculateFeatureResiduals to compute and cache min gaps and min residuals
+	#!CacheFeatureMinGapAndResidual
+	(seq
+		(assign_to_entities (assoc
+			!cachedFeatureHalfMinGapMap
+				(map
+					(lambda (let
+						(assoc
+							smallest_gap
+								;gap is always 1 for nominals or strings
+								(if (or
+										(contains_index !nominalsMap (current_index 1))
+										(contains_value (list "string" "string_mixable") (get !editDistanceFeatureTypesMap (current_index 1)))
+									)
+									1
 
-						;For unique features:
-						;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
-						;estimating the probability of having no incorrect predictions. We chose .5 assuming the Jeffreys prior approach
-						;ensure value is not larger than 0.5
-						(contains_index !uniqueNominalsSet (current_index))
-						(min 0.5 (/ 1 (+ 0.5 num_training_cases)) )
+									;else compute the gap
+									(compute_on_contained_entities (list
+										(query_min_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
+									))
+								)
+						)
 
-						;else set nominal lower residual bound to:  gap / (num_cases + 1)
-						(contains_index !nominalsMap (current_index))
-						(/ (* 2 (current_value)) (+ 1 num_training_cases))
+						;infinity means there was no gap, set value to zero
+						(if (= .infinity smallest_gap)
+							0
 
-						;else set continuous lower residual bound to:  gap / ln(num_cases + 1)
-						(/ (* 2 (current_value)) (log (+ 1 num_training_cases)) )
-					)
+							;(null) means that all values are nulls and a gap couldn't be computed
+							;set it to be 0.1 for edit distance feature, and zero for all other continuous
+							(= (null) smallest_gap)
+							(if (contains_index !editDistanceFeatureTypesMap (current_index))
+								0.1
+								0
+							)
+
+							;else set the smallest gap to gap / 2
+							(/ smallest_gap 2)
+						)
+					))
+					(zip features)
 				)
-				!cachedFeatureHalfMinGapMap
-			)
-	))
+		))
+		(assign_to_entities (assoc
+			!cachedFeatureMinResidualMap
+				(map
+					(lambda
+						;empty datasets set minimal residual to be half a gap
+						(if (= 0 num_training_cases)
+							0.5
+
+							;For unique features:
+							;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
+							;estimating the probability of having no incorrect predictions. We chose .5 assuming the Jeffreys prior approach
+							;ensure value is not larger than 0.5
+							(contains_index !uniqueNominalsSet (current_index))
+							(min 0.5 (/ 1 (+ 0.5 num_training_cases)) )
+
+							;else set nominal lower residual bound to:  gap / (num_cases + 1)
+							(contains_index !nominalsMap (current_index))
+							(/ (* 2 (current_value)) (+ 1 num_training_cases))
+
+							;else set continuous lower residual bound to:  gap / ln(num_cases + 1)
+							(/ (* 2 (current_value)) (log (+ 1 num_training_cases)) )
+						)
+					)
+					!cachedFeatureHalfMinGapMap
+				)
+		))
+	)
+
 
 	;Limit computed residuals from feature_residuals_map to be the max of cached minimum residual, computed residual, and user-specified error
 	;outputs the passed in feature_residuals_map with limited values.
@@ -368,7 +410,7 @@
 					features
 				)
 			)
-			(call !CacheFeatureMinResiduals)
+			(call !CacheFeatureMinGapAndResidual)
 		)
 
 		;since residuals cannot be computed, return the max uncertainty for each feature
