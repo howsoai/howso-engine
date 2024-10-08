@@ -67,9 +67,8 @@ the parameter's type (or possible types), the types of its values, the types of 
 
 Return types of methods should be specified by comments on the assoc with the parameters. (This is currently in planning)
 
-- All parameters must have at least "type" or "ref" specified
-- Optionality will be automatically inferred by the default value. Nullable/Optional are the same here.
-
+- All parameters must have at least "type" or "ref" specified.
+- To specify a parameter is nullable, "null" should be listed as a possible type.
 
 ### Typing (assoc) keys and their values
 
@@ -80,12 +79,14 @@ Return types of methods should be specified by comments on the assoc with the pa
 | min_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
 | max_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
 | enum                | Only applicable when `type` is "string". A list of possible values for the string
-| min                 | Only applicable when `type` is "number". The minimum value.
-| max                 | Only applicable when `type` is "number". The maximum value.
+| min                 | Only applicable when `type` is "number". The inclusive minimum value.
+| exclusive_min       | Only applicable when `type` is "number". The exclusive minimum value.
+| max                 | Only applicable when `type` is "number". The inclusive maximum value.
+| exclusive_max       | Only applicable when `type` is "number". The exclusive maximum value.
 | indices             | Only applicable when `type` is "assoc". Value is an assoc of named indices to their expected types.
-| additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is defined for all unspecified indices.
-| required            | The value of this should be a boolean. If used under the type within an 'indices' (assoc), then that index must be present in the parent (assoc). If used in a top-level type, that parameter must be specified as a non-null value.
-
+| additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is defined for all unspecified indices. Also supports the value (false) to indicate there should be no additional indices.
+| dynamic_indices     | Still WiP. Specified just like `indices`, but instead specify indices with patterns that use `${string}` or `${number}` to match found indices.
+| required            | The value of this should be a boolean. If used under the type within an 'indices' (assoc), then that index must be present in the parent (assoc). If used in a top-level type, that parameter must be specified as a non-null value. Required parameters should have (null) as the default value.
 
 ### Typing Examples
 
@@ -102,7 +103,7 @@ Return types of methods should be specified by comments on the assoc with the pa
         ;{type "boolean"}
         ;some true/false value
         some_boolean (null)
-        ;{type "assoc" values "number"}
+        ;{type "assoc" additional_indices "number"}
         ;a map of numbers
         map_of_number_values (assoc)
     )
