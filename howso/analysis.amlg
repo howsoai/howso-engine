@@ -80,9 +80,9 @@
 			inverse_residuals_as_weights (null)
 
 			;{type "boolean"}
-			;when true, a submodel will be stored that will be used during queries to approximate deviations of the data around the query.
+			;when true, a subtrainee will be created that will be used during queries to approximate deviations of the data around the query.
 			; This incurs a penalty in speed, but can improve model performance in long tailed data, especially when using targetless parameters.
-			use_submodel (false)
+			use_dynamic_deviations (false)
 		)
 
 		(call !ValidateParameters)
@@ -223,7 +223,7 @@
 				residual_num_samples (if (> num_samples 0) num_samples 200)
 				use_case_weights use_case_weights
 				weight_feature weight_feature
-				use_submodel use_submodel
+				use_dynamic_deviations use_dynamic_deviations
 			))
 		)
 
@@ -488,8 +488,8 @@
 			;flag set to true if num_analysis_samples was passed in
 			user_specified_num_samples (!= (null) num_analysis_samples)
 
-			;name of deviation submodel, will be assigned if submodel is stored
-			deviation_submodel_name (null)
+			;name of deviation subtrainee, will be assigned if subtrainee is stored
+			deviation_subtrainee_name (null)
 		))
 		(call !InitAnalyze)
 
@@ -504,8 +504,8 @@
 				(call !BackupAnalyzedHyperparameters)
 				(if (= (false) use_deviations)
 					(seq
-						;IRW always needs submodel
-						(if (and use_submodel (not !dynamicDeviationsDuringAnalyze))
+						;IRW always needs subtrainee
+						(if (and use_dynamic_deviations (not !dynamicDeviationsDuringAnalyze))
 							; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
 							(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
 						)
@@ -518,8 +518,8 @@
 					(call !KeepOrRevertHyperparameters)
 				)
 
-				;IRW always needs submodel
-				(if (and use_submodel (not !dynamicDeviationsDuringAnalyze))
+				;IRW always needs subtrainee
+				(if (and use_dynamic_deviations (not !dynamicDeviationsDuringAnalyze))
 					; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
 					(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
 				)
@@ -566,8 +566,8 @@
 		)
 
 		(if (and
-				use_submodel
-				;need the submodel if using deviations
+				use_dynamic_deviations
+				;need the subtrainee if using deviations
 				(get baseline_hyperparameter_map "featureDeviations")
 				(not !dynamicDeviationsDuringAnalyze)
 			)
@@ -578,13 +578,13 @@
 		(call !SetModelHyperParameters)
 	)
 
-	;helper method for Analyze that stores a submodel of case residuals for each feature
+	;helper method for Analyze that stores a subtrainee of case residuals for each feature
 	;parameters:
 	;	custom_hyperparam_map: the hyperparam map within analyze that should be used to run the residuals
 	;	num_samples: the number of cases to put in the residual subtrainee, default 500
 	;assigns to:
-	;	deviation_submodel_name: this variable will store the name of the submodel, this name should be stored in the
-	;					resulting hyperparameter assoc under the key "submodelName"
+	;	deviation_subtrainee_name: this variable will store the name of the subtrainee, this name should be stored in the
+	;					resulting hyperparameter assoc under the key "subtraineeName"
 	#!StoreResidualSubTrainee
 	(declare
 		(assoc
@@ -623,30 +623,30 @@
 		(call !RunFullResiduals)
 
 		(assign (assoc
-			deviation_submodel_name
-				(if (contains_index custom_hyperparam_map "submodelName")
-					(get custom_hyperparam_map "submodelName")
+			deviation_subtrainee_name
+				(if (contains_index custom_hyperparam_map "subtraineeName")
+					(get custom_hyperparam_map "subtraineeName")
 
 					;TODO: do something a bit more robust/human here
 					(concat "ResidualSubTrainee-" (round (rand) 6))
 				)
 		))
 
-		;delete the previous submodel, might be smarter to just remove cases in the future
-		(if (contains_index (call !GetHierarchy) deviation_submodel_name)
+		;delete the previous subtrainee, might be smarter to just remove cases in the future
+		(if (contains_index (call !GetHierarchy) deviation_subtrainee_name)
 			(call delete_subtrainee (assoc
-				trainee deviation_submodel_name
+				trainee deviation_subtrainee_name
 			))
 		)
 
 		(call create_subtrainee (assoc
-			trainee deviation_submodel_name
+			trainee deviation_subtrainee_name
 		))
 
-		(set_entity_root_permission [!traineeContainer deviation_submodel_name] (true))
+		(set_entity_root_permission [!traineeContainer deviation_subtrainee_name] (true))
 
 		;add a method to remove !ValidateParameters
-		(accum_entity_roots [!traineeContainer deviation_submodel_name]
+		(accum_entity_roots [!traineeContainer deviation_subtrainee_name]
 			(zip_labels
 				(list "removeValidateParameters")
 				(list (lambda
@@ -660,13 +660,13 @@
 			)
 		)
 		;remove the methods
-		(call_entity [!traineeContainer deviation_submodel_name] "removeValidateParameters")
+		(call_entity [!traineeContainer deviation_subtrainee_name] "removeValidateParameters")
 
-		(call_entity [!traineeContainer deviation_submodel_name] "set_feature_attributes" (assoc
+		(call_entity [!traineeContainer deviation_subtrainee_name] "set_feature_attributes" (assoc
 			feature_attributes !featureAttributes
 		))
 
-		(call_entity [!traineeContainer deviation_submodel_name] "train" (assoc
+		(call_entity [!traineeContainer deviation_subtrainee_name] "train" (assoc
 			features
 				;a list of feature names and feature residual names
 				(append
@@ -700,16 +700,16 @@
 			allow_training_reserved_features (true)
 		))
 
-		;and analyze the submodel
-		(call_entity [!traineeContainer deviation_submodel_name] "analyze")
+		;and analyze the subtrainee
+		(call_entity [!traineeContainer deviation_subtrainee_name] "analyze")
 
 		; ;copy params in (cheaper but less accurate experimentally)
-		; (call_entity [!traineeContainer deviation_submodel_name] "set_params" (assoc
+		; (call_entity [!traineeContainer deviation_subtrainee_name] "set_params" (assoc
 		; 	hyperparam_map
 		; 		(set
 		; 			{}
 		; 			(get custom_hyperparam_map "paramPath")
-		; 			(remove custom_hyperparam_map ["submodelName"])
+		; 			(remove custom_hyperparam_map ["subtraineeName"])
 		; 		)
 		; ))
 	)
