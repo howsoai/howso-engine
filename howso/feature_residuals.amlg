@@ -282,6 +282,8 @@
 			accuracy_map (assoc)
 			precision_map (assoc)
 			recall_map (assoc)
+			adjusted_smape_map (assoc)
+			smape_map (assoc)
 			mcc_map (assoc)
 			confusion_matrix_map (assoc)
 			nominal_performance_map (assoc)
@@ -485,8 +487,8 @@
 		; 	(list react1 react2 ... react n) ; feature N reacts
 		; )
 		;
-		;where each react is a list of either:
-		; [diff, actual_value, categorical_probabilities] for nominals or
+		;where each react is a list of tuples of either:
+		; [diff, actual_value, predicted] for nominals or
 		; [diff, ordinal_diff, actual_value, predicted_value] for continuous (ordinal_diff is not there for non-ordinal features)
 
 		(assign (assoc
@@ -495,6 +497,7 @@
 			has_ordinals (> (size ordinal_features_map) 0)
 			;default index offset of where the actual case value is in each output react
 			actual_offset 1
+			predicted_offset 2
 		))
 
 		;if some of the features are edit distance types, r2 and spearman coefficient don't apply since there's no mean or relative sorting
@@ -520,6 +523,7 @@
 				;but if there are ordinals, it's stored as [diff, ordinal_diff, actual_value, predicted_value]
 				;if there are ardinals, the index offest for actual_value is 2 instead of 1
 				actual_offset 2
+				predicted_offset 3
 
 				ordinal_residuals_map
 					(filter (zip
@@ -677,6 +681,112 @@
 						(unzip feature_residuals_lists numeric_continuous_indices)
 					)
 				)
+			;smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100
+			smape_map
+				(zip
+					numeric_continuous_features
+					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda
+							(if (size (current_value))
+								(*
+									(/
+										;sum of the absolute percent errors
+										(apply "+"
+											(map
+												(lambda
+													(let
+														(assoc
+															smape_numerator
+																(abs (-
+																	(get (current_value 1) predicted_offset)
+																	(get (current_value 1) actual_offset)
+																))
+															smape_denominator
+																(/
+																	(+
+																		(abs (get (current_value 1) actual_offset))
+																		(abs (get (current_value 1) predicted_offset))
+																	)
+																	2
+																)
+														)
+														(if (= smape_denominator 0)
+															;if the denominator is 0, that means actual and predictd are both 0
+															; which should have a error of 0
+															0
+															(/ smape_numerator smape_denominator)
+														)
+													)
+												)
+												(current_value)
+											)
+										)
+										(size (current_value))
+									)
+									100
+								)
+							)
+						)
+						(unzip feature_residuals_lists numeric_continuous_indices)
+					)
+				)
+			;adjusted_smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100 where min gap / 2 is added to both the actual and predicted values.
+			adjusted_smape_map
+				(zip
+					numeric_continuous_features
+					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda
+							(if (size (current_value))
+								(let
+									(assoc
+										half_min_gap
+											(get !cachedFeatureHalfMinGapMap (get numeric_continuous_features (current_index 1)))
+									)
+									(*
+										(/
+											;sum of the absolute percent errors
+											(apply "+"
+												(map
+													(lambda
+														(let
+															(assoc
+																adjusted_smape_numerator
+																	(abs (-
+																		(+ (get (current_value 1) predicted_offset) half_min_gap)
+																		(+ (get (current_value 1) actual_offset) half_min_gap)
+																	))
+																adjusted_smape_denominator
+																	(/
+																		(+
+																			(+ (abs (get (current_value 1) actual_offset)) half_min_gap)
+																			(+ (abs (get (current_value 1) predicted_offset)) half_min_gap)
+																		)
+																		2
+																	)
+															)
+															(if (= adjusted_smape_denominator 0)
+																;if the denominator is 0, that means actual and predictd are both 0
+																; which should have a error of 0
+																0
+																(/ adjusted_smape_numerator adjusted_smape_denominator)
+															)
+														)
+													)
+													(current_value)
+												)
+											)
+											(size (current_value))
+										)
+										100
+									)
+								)
+							)
+						)
+						(unzip feature_residuals_lists numeric_continuous_indices)
+					)
+				)
 		))
 
 		(accum (assoc
@@ -734,7 +844,7 @@
 								;keep only those class values that had non-null counts
 								(filter
 									(lambda (size (current_value)))
-									;nominal prediction tuples are in the format of [diff, actual, predicted, C.A.P]
+									;nominal prediction tuples are in the format of [diff, actual, predicted]
 									;thus this iterates over the two corresponding lists of [actual] and [predicted] values
 									;accruing into an assoc of lists of predicted classes for every provided actual class, e.g.,
 									;given actual ["a" "a" "x" "x" "x"] and predicted ["a" "a" "x" "a" "x"] results in:
@@ -1073,6 +1183,8 @@
 			"mcc" mcc_map
 			"r2" r2_map
 			"rmse" rmse_map
+			"smape" smape_map
+			"adjusted_smape" adjusted_smape_map
 			"spearman_coeff" spearman_coeff_map
 			"confusion_matrix" confusion_matrix_map
 		)

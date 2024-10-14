@@ -276,6 +276,9 @@
 										typing_map (null)
 									)
 
+									;uncomment this line if looking for which type annotation has mismatching symbols
+									; (print method_name "-" parameter_name "\n")
+
 									(assign (assoc
 										typing_map
 											;regex to just capture the {} information, debugger adds more and there can be other comments on the parameters
@@ -289,6 +292,14 @@
 											(accum (assoc invalid_type_hints (list (concat method_name "/" parameter_name))))
 										)
 
+										(if
+											(not (call !SingleTypeCheck (assoc
+												given_value typing_map
+												specification {ref "TypeSchema"}
+											)))
+											(accum (assoc invalid_type_hints (list (concat method_name "/" parameter_name))))
+										)
+
 										(rewrite
 											(lambda
 												(if (or
@@ -296,10 +307,14 @@
 															;if a string value that should be a type, ensure it is a valid type
 															(~ "" (current_value))
 															(or
-																(contains_value ["type" "values" "additional_indices"] (current_index))
-																(= "indices" (current_index 1))
+																(contains_value ["type" "values" "additional_indices" "dynamic_indices"] (current_index))
+																(and
+																	(= "indices" (current_index 1))
+																	;double indices problem when indices => "indices" for TypeSchema schema
+																	(!= "indices" (current_index 2))
+																)
 															)
-															(not (contains_value ["boolean" "number" "string" "list" "assoc" "any"] (current_value) ))
+															(not (contains_value ["boolean" "number" "string" "list" "assoc" "null" "any"] (current_value) ))
 														)
 														(and
 															;if a string value reference, ensure that reference is in the !customTypes
@@ -308,13 +323,21 @@
 															(not (contains_index !customTypes (current_value)))
 														)
 														(and
-															;if an assoc (that's not the value of "indices"), it must have a type or ref
+															;if an assoc (that's not the value of "indices"), it must have a type, ref, or any_of
 															(~ (assoc) (current_value))
-															(!= "indices" (current_index))
+															(not (contains_value ["indices" "dynamic_indices"] (current_index)))
 															(and
 																(not (contains_index (current_value) "type"))
 																(not (contains_index (current_value) "ref"))
+																(not (contains_index (current_value) "any_of"))
 															)
+														)
+														(and
+															;type must be a string or list of strings
+															(!= (current_index 1) "indices")
+															(= (current_index) "type")
+															(!~ (current_value) "")
+															(!~ (current_value) [])
 														)
 													)
 													(accum (assoc invalid_type_hints (list (concat method_name "/" parameter_name))))
@@ -345,7 +368,7 @@
 		(map
 			(lambda
 				(call !CheckTypingMap (assoc
-					typing_map (current_value 1)
+					typing_map (call (current_value 1))
 					method_name "CustomTypes"
 					parameter_name (current_index 1)
 				))
@@ -400,10 +423,9 @@
 								specification (current_value 1)
 								exp_type (get (current_value 1) "type")
 								given_value (get (args 1) (current_index 1))
-								optional (true)
 							)
 
-							;requires exp_type, specification, given_value, optional
+							;requires exp_type, specification, given_value
 							#!SingleTypeCheck
 							(seq
 								(if (contains_index specification "ref")
@@ -418,30 +440,72 @@
 									)
 								)
 
-								(assign (assoc
-									optional
-										(if (contains_index specification "optional")
-											(get specification "optional")
-											(true) ;assume optional if unspecified, should only be nested types
+								(if (= (null) given_value)
+									(or
+										;not required
+										(or
+											;required not specified
+											(not (contains_index specification "required"))
+											;or its specifically false (this should never really be the case)
+											(= (get specification "required") (false))
 										)
-								))
+										;exp_type is null, or contains null
+										(= exp_type "null")
+										(and
+											(~ (list) exp_type)
+											(contains_value exp_type "null")
+										)
+									)
+									(and
+										(~ (assoc) specification)
+										(get specification "required")
+										(= (null) given_value)
+									)
+									(false)
 
-								(if (and optional (= (null) given_value))
-									(true)
+									;any_of logic
+									(contains_index specification "any_of")
+									(apply "or"
+										(map
+											(lambda
+												(call !SingleTypeCheck (append
+													{given_value given_value}
+													(if (~ (assoc) (current_value))
+														(assoc
+															specification (current_value 1)
+															exp_type (get (current_value 1) "type")
+														)
 
+														;otherwise, it should just be a string
+														(assoc
+															specification (assoc)
+															exp_type (current_value 1)
+														)
+													)
+												))
+											)
+											(get specification "any_of")
+										)
+									)
+
+
+									;else start checking exp_type
 									(if (~ exp_type (list))
 										;list of possible types logic
 										(apply "or"
 											(map
 												(lambda
 													(call !SingleTypeCheck (assoc
-														exp_type (current_value 1)
 														given_value given_value
+														exp_type (current_value 1)
 													))
 												)
 												exp_type
 											)
 										)
+
+										(= exp_type "null")
+										(~ (null) given_value)
 
 										(= exp_type "number")
 										(and
@@ -452,6 +516,14 @@
 											)
 											(if (contains_index specification "min")
 												(>= given_value (get specification "min"))
+												(true)
+											)
+											(if (contains_index specification "exclusive_max")
+												(< given_value (get specification "exclusive_max"))
+												(true)
+											)
+											(if (contains_index specification "exclusive_min")
+												(> given_value (get specification "exclusive_min"))
 												(true)
 											)
 										)
@@ -552,8 +624,7 @@
 											)
 											(if (and
 													(size given_value)
-													(contains_index specification "indices")
-													(not (contains_index specification "additional_indices"))
+													(= (false) (get specification "additional_indices"))
 												)
 												;if indices and no additional_indices, there should be no other indices
 												(=
@@ -566,6 +637,7 @@
 											(if (and
 													;if there is typing info for additional_indices, and there actually are additional indices
 													(contains_index specification "additional_indices")
+													(!= (false) (get specification "additional_indices"))
 													(size (remove given_value (indices (get specification "indices"))))
 												)
 												(apply "and"
