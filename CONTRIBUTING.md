@@ -75,9 +75,13 @@ Return types of methods should be specified by comments on the assoc with the pa
 | Key                 | Values |
 | ------------------- | ------ |
 | type                | If single type, the type as a string. If multiple types, a list of types as strings. The available types are "list", "assoc", "number", "string", "boolean", "any".
+| ref                 | Instead of a full type map, use this to specify the name of a custom schema defined in (assoc) with label #!customTypes.
+| any_of              | Used in place of 'type' or 'ref'. Value should be a list of strings or type (assocs) that the value must fit any of.
 | values              | Only used when `type` is "list". Values should be similar to the values of `type` and should define the possible types of the values. This value can be an assoc if the type is a data structure.
-| min_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
-| max_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
+| min_size            | Only applicable when `type` is "list". Value should be an integer.
+| max_indices         | Only applicable when `type` is "list". Value should be an integer.
+| min_indices         | Only applicable when `type` is "assoc". Value should be an integer.
+| max_size            | Only applicable when `type` is "assoc". Value should be an integer.
 | enum                | Only applicable when `type` is "string". A list of possible values for the string
 | min                 | Only applicable when `type` is "number". The inclusive minimum value.
 | exclusive_min       | Only applicable when `type` is "number". The exclusive minimum value.
