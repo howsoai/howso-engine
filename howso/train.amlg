@@ -328,7 +328,7 @@
 						(if
 							(and
 								!autoAblationEnabled
-								(> (+ num_cases new_possible_data_mass) !autoAblationMinModelSize)
+								(> (+ num_cases new_possible_data_mass) !autoAblationMinNumCases)
 							)
 							(assign (assoc skip_ablation (false) ))
 						)
@@ -723,10 +723,56 @@
 				batch_size 0
 				input_case_index 0
 				output_case_ids []
+
+				;threshold-related variables
+				thresholds_enabled
+					(or
+						(size !autoAblationAbsThresholdMap)
+						(size !autoAblationDeltaThresholdMap)
+						(size !autoAblationRelThresholdMap)
+					)
+				prev_prediction_stats_map {}
+				new_prediction_stats_map {}
+				thresholds_satisfied (false)
 			))
 
 			;split by batches of cases until next analyze
 			(while (< input_case_index (size cases))
+
+				(if (and thresholds_enabled (not skip_ablation))
+					(seq
+						(assign (assoc
+							prev_prediction_stats_map new_prediction_stats_map
+						))
+						(assign (assoc
+							new_prediction_stats_map
+								(get
+									(call !CalculateFeatureResiduals (assoc
+										features features
+										weight_feature !autoAblationWeightFeature
+										use_case_weights (true)
+										compute_all_statistics (true)
+										store_values (false)
+									))
+									"prediction_stats"
+								)
+						))
+						(assign (assoc
+							thresholds_satisfied
+								(apply "or"
+									(values
+										(call !CheckThresholds (assoc
+											abs_threshold_map !autoAblationAbsThresholdMap
+											delta_threshold_map !autoAblationDeltaThresholdMap
+											rel_threshold_map !autoAblationRelThresholdMap
+											prev_prediction_stats_map prev_prediction_stats_map
+											new_prediction_stats_map new_prediction_stats_map
+										))
+									)
+								)
+						))
+					)
+				)
 
 				(assign (assoc
 					;always train a few extra cases since some are expected to be ablated
@@ -789,36 +835,42 @@
 	(let
 		(assoc
 			indices_to_train
-				||(filter
-					(lambda  (let
-						(assoc
-							feature_values (get cases (current_value 1))
-							case_index (current_value 1)
-						)
-
-						(if encode_features_on_train
-							(assign (assoc
-								feature_values
-									(call !ConvertFromInput (assoc
-										feature_values feature_values
-										features features
-									))
-							))
-						)
-						;do not train on this case if it is null or all case values are null or it's within provided thresholds
-						;if one of the ablation methods returns false, then the case should be ablated.
-						(and
-							(call !CaseOutsideThresholds)
-							(call !ShouldNewCaseBeAblated (assoc
-								features features
-								feature_values feature_values
-								;always use the most current trained count to determine whether cases should be ablated
-								num_cases (+ ablation_trained_instance_count case_index)
-							))
-						)
-					))
+				(if thresholds_satisfied
+					;If one or more thresholds has been satisfied, just train all of the cases in this batch.
 					(indices cases)
+					;Otherwise, do the normal ablation filtering.
+					||(filter
+						(lambda  (let
+							(assoc
+								feature_values (get cases (current_value 1))
+								case_index (current_value 1)
+							)
+
+							(if encode_features_on_train
+								(assign (assoc
+									feature_values
+										(call !ConvertFromInput (assoc
+											feature_values feature_values
+											features features
+										))
+								))
+							)
+							;do not train on this case if it is null or all case values are null or it's within provided thresholds
+							;if one of the ablation methods returns false, then the case should be ablated.
+							(and
+								(call !CaseOutsideThresholds)
+								(call !ShouldNewCaseBeAblated (assoc
+									features features
+									feature_values feature_values
+									;always use the most current trained count to determine whether cases should be ablated
+									num_cases (+ ablation_trained_instance_count case_index)
+								))
+							)
+						))
+						(indices cases)
+					)
 				)
+
 		)
 
 		;ensure ablated indices are based off actual training index and not restarted at 0 every time this method is called
