@@ -92,10 +92,14 @@
 			label_name (or label_name !internalLabelInfluenceWeightEntropy)
 		))
 
-		(call !RecomputeAndCacheMaxInfluenceWeightEntropy)
+		(declare (assoc
+			quantile_value (call !RecomputeAndCacheMaxInfluenceWeightEntropy)
+		))
 
-		(accum_to_entities (assoc !revision 1))
-		(assign_to_entities (assoc !hasInfluenceWeightEntropies (true)))
+		(assign_to_entities (assoc
+			!autoAblationMaxInfluenceWeightEntropy quantile_value
+			!hasInfluenceWeightEntropies (true)
+		))
 	)
 
 	;initialize parameters and internal features related to auto ablation
@@ -104,8 +108,7 @@
 	(declare
 		(assoc weight_feature !autoAblationWeightFeature)
 
-		(assign_to_entities (assoc !hasPopulatedCaseWeight (true)) )
-		(accum_to_entities (assoc !revision 1) )
+		(assign_to_entities (assoc !hasPopulatedCaseWeight (true) ))
 		(call !CreateCaseWeights (assoc feature_name weight_feature) )
 	)
 
@@ -372,21 +375,20 @@
 			;{ref "AblationThresholdMap"}
 			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
 			; absolute thresholds will cause data reduction to stop when any of the measure values for any of
-			; the features for which a threshold is defined go avove the threshold (in the case of rmse and
+			; the features for which a threshold is defined go above the threshold (in the case of rmse and
 			; mae) or below the threshold (otherwise).
 			abs_threshold_map (assoc)
 			;{ref "AblationThresholdMap"}
 			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
 			; delta thresholds will cause data reduction to stop when the delta between any of the measure values
-			; for any of the features for which a threshold is defined and its previous value go avove the threshold
+			; for any of the features for which a threshold is defined and its previous value go above the threshold
 			; (in the case of rmse and mae) or below the threshold (otherwise).
 			delta_threshold_map (assoc)
-			;{ref "AblationThresholdMap"}
 			;{ref "AblationThresholdMap"}
 			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
 			; relative thresholds will cause data reduction to stop when the relative change between any of the
 			; measure values for any of the features for which a threshold is defined and its previous value go
-			; avove the threshold (in the case of rmse and mae) or below the threshold (otherwise).
+			; above the threshold (in the case of rmse and mae) or below the threshold (otherwise).
 			rel_threshold_map (assoc)
 			;{type "boolean"}
 			;skip auto analyzing as cases are removed
@@ -435,7 +437,7 @@
 
 		;Begin looping on data removal. The ultimate end condition is if the model gets too small
 		; to continue removing cases.
-		(while (< !autoAblationMinModelSize (call !GetNumTrainingCases))
+		(while (< !autoAblationMinNumCases (call !GetNumTrainingCases))
 			(assign (assoc
 				cases
 					(call !GetCasesByCondition (assoc
@@ -446,13 +448,12 @@
 										(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
 											influence_weight_entropy_threshold influence_weight_entropy_threshold
 											weight_feature distribute_weight_feature
-											cache_value (false)
 										))
 										.infinity
 									)
 							)
 						num_cases
-							(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinModelSize))
+							(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
 					))
 			))
 
@@ -503,15 +504,17 @@
 			)
 		)
 
-		(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-			influence_weight_entropy_threshold influence_weight_entropy_threshold
-			weight_feature distribute_weight_feature
+		(declare (assoc
+			quantile_value
+				(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
+					influence_weight_entropy_threshold influence_weight_entropy_threshold
+					weight_feature distribute_weight_feature
+				))
 		))
 
+		(assign_to_entities (assoc !autoAblationMaxInfluenceWeightEntropy quantile_value ))
 		(accum_to_entities (assoc !revision 1))
-		(call !Return (assoc
-			payload output
-		))
+		(call !Return (assoc payload output))
 	)
 
 	;helper method which queries and returns the specified quantile of influence weight entropies
@@ -519,34 +522,23 @@
 	; influence_weight_entropy_threshold: optional, default !autoAblationInfluenceWeightEntropyThreshold. cases with
 	; 	influence weight entropy above this quantile will be removed
 	; weight_feature: optional, default !autoAblationWeightFeature. name of feature whose values to use as case weights
-	; cache_value: flag, default true.  when true will cache the computed value
 	#!RecomputeAndCacheMaxInfluenceWeightEntropy
 	(declare
 		(assoc
 			influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
 			weight_feature !autoAblationWeightFeature
-			cache_value (true)
 		)
 
-		(declare (assoc
-			quantile_value
-				(compute_on_contained_entities (list
-					(query_exists !internalLabelInfluenceWeightEntropy)
-					(query_not_equals !internalLabelInfluenceWeightEntropy 0)
-					(query_quantile
-						!internalLabelInfluenceWeightEntropy
-						influence_weight_entropy_threshold
-						weight_feature
-					)
-				))
+		;output quantile value
+		(compute_on_contained_entities (list
+			(query_exists !internalLabelInfluenceWeightEntropy)
+			(query_not_equals !internalLabelInfluenceWeightEntropy 0)
+			(query_quantile
+				!internalLabelInfluenceWeightEntropy
+				influence_weight_entropy_threshold
+				weight_feature
+			)
 		))
-
-		(if cache_value
-			(assign_to_entities (assoc !autoAblationMaxInfluenceWeightEntropy quantile_value))
-		)
-
-		;output the value
-		quantile_value
 	)
 
 	;determine whether a new case (one that is not in the Trainee) should be ablated (trained as weights) or kept.
@@ -570,7 +562,7 @@
 		(if
 			(or
 				(not (and !hasInfluenceWeightEntropies !autoAblationEnabled) )
-				(< num_cases !autoAblationMinModelSize )
+				(< num_cases !autoAblationMinNumCases )
 			)
 			;return true, keep case / do not ablate
 			(conclude (true))
@@ -612,7 +604,7 @@
 	(and
 		(or
 			(not (and !hasInfluenceWeightEntropies !autoAblationEnabled) )
-			(< num_cases !autoAblationMinModelSize )
+			(< num_cases !autoAblationMinNumCases )
 		)
 		(= (null)
 			!autoAblationExactPredictionFeatures
@@ -675,7 +667,7 @@
 		(or ;evaluate in order and return the first true block
 
 			;if the model is too small, skip ablatement, return true to force training
-			(< (call !GetNumTrainingCases) !autoAblationMinModelSize)
+			(< (call !GetNumTrainingCases) !autoAblationMinNumCases)
 
 			;if we have action_features, need to react first
 			(if (!= (list) action_features)
