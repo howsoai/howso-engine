@@ -239,6 +239,7 @@
 						))
 				)
 
+				;remove old path befor adding the new one
 				(if (size old_params_key_to_remove)
 					(seq
 						(assign_to_entities (assoc
@@ -252,20 +253,26 @@
 									action_feature
 										(remove (get !hyperparameterMetadataMap action_feature) (get old_params_key_to_remove 1))
 								)
+							!hyperparameterParamPaths (list (list action_feature context_features_key robust_mode weight_feature))
 						))
 					)
-				)
 
-				(accum_to_entities (assoc !hyperparameterParamPaths (list (list action_feature context_features_key robust_mode weight_feature)) ))
+					;else add the new path
+					(accum_to_entities (assoc
+						!hyperparameterParamPaths (list (list action_feature context_features_key robust_mode weight_feature))
+					))
+				)
 			)
 		)
 
 		(if (= (get baseline_hyperparameter_map ["paramPath" 0]) ".default")
 			;updating default hyperparam set with featuredeviations
-			(assign_to_entities (assoc !defaultHyperparameters baseline_hyperparameter_map) )
+			(assign_to_entities (assoc !defaultHyperparameters baseline_hyperparameter_map ))
 
 			;update the appropriate hyperparameter set
-			(assign_to_entities (assoc !hyperparameterMetadataMap (set !hyperparameterMetadataMap (get baseline_hyperparameter_map "paramPath") baseline_hyperparameter_map)) )
+			(assign_to_entities (assoc
+				!hyperparameterMetadataMap (set !hyperparameterMetadataMap (get baseline_hyperparameter_map "paramPath") baseline_hyperparameter_map)
+			))
 		)
 		(accum_to_entities (assoc !revision 1))
 	)
@@ -702,7 +709,7 @@
 			;stores the threshold for the number of cases at which the model should be re-analyzed. default of 100.
 			analyze_threshold 100
 			;{type "number"}
-			;the factor by which to increase the analyze threshold everytime the model grows to the current threshold size
+			;the factor by which to increase the analyze threshold every time the model grows to the current threshold size
 			;	default of two orders of magnitude using the universal scaling factor e
 			analyze_growth_factor 7.389056
 		)
@@ -793,9 +800,7 @@
 			!autoAnalyzeThreshold analyze_threshold
 			!autoAnalyzeGrowthFactorAmount analyze_growth_factor
 		))
-
 		(accum_to_entities (assoc !revision 1))
-
 		(call !Return)
 	)
 
@@ -831,8 +836,8 @@
 			;{type "number"}
 			;stores the threshold for the number of cases at which the model should be re-analyzed. default of 100.
 			analyze_threshold 100
-			;{type "number"}
-			;the factor by which to increase the analyze threshold everytime the model grows to the current threshold size
+			;{type "number" exclusive_min 1.0}
+			;the factor by which to increase the analyze threshold every time the model grows to the current threshold size
 			;	default of two orders of magnitude using the universal scaling factor e
 			analyze_growth_factor 7.389056
 			;parameter for analyze
@@ -840,7 +845,7 @@
 			context_features (null)
 			;{type "list" values "string"}
 			action_features (null)
-			;{type "number"}
+			;{type "number" min 1}
 			;number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
 			k_folds 1
 			;{type "boolean"}
@@ -857,13 +862,13 @@
 			;whether to use deviations for LK metric in queries. When true forces the use
 			;	of deviations, when false will not use deviations. If unspecified, the better performing option will be selected.
 			use_deviations (null)
-			;{type "number"}
+			;{type "number" min 2}
 			;number of cases to use to approximate residuals
 			num_samples (null)
-			;{type "number"}
+			;{type "number" min 2}
 			;number of cases to sample during analysis. only applies for k_folds = 1
 			num_analysis_samples (null)
-			;{type "number"}
+			;{type "number" min 2}
 			;number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
 			analysis_sub_model_size (null)
 			;{type "list" values "number"}
@@ -872,7 +877,7 @@
 			;{type "list" values "number"}
 			;list of values for p (the parameter of the Lebesgue space) to grid search during analysis
 			p_values (null)
-			;{type "list" values "number"}
+			;{type "list" values ["number" "string"]}
 			;list of values for dt (the distance transform) to grid search during analysis
 			dt_values (null)
 			;{type "string" enum ["single_targeted" "omni_targeted" "targetless"]}
@@ -895,9 +900,15 @@
 		)
 		(call !ValidateParameters)
 
-		;growth factor must be more than 1
-		(if (<= analyze_growth_factor 1)
-			(assign (assoc analyze_growth_factor 2))
+		(if (and
+				(size action_features)
+				(= (size context_features) 0)
+			)
+			(conclude
+				(call !Return (assoc
+					errors ["`context_features` must be specified when `action_features` is specified."]
+				))
+			)
 		)
 
 		(declare (assoc num_cases (call !GetNumTrainingCases) ))
@@ -919,8 +930,6 @@
 				(assign (assoc analyze_threshold (/ analyze_threshold analyze_growth_factor )))
 			)
 		)
-
-		(accum_to_entities (assoc !revision 1))
 
 		(assign_to_entities (assoc
 			!autoAnalyzeEnabled auto_analyze_enabled
@@ -953,6 +962,8 @@
 			))
 		)
 
+		(accum_to_entities (assoc !revision 1))
+
 		(call !Return)
 	)
 
@@ -960,56 +971,7 @@
 	;{read_only (true) idempotent (true)}
 	#get_auto_ablation_params
 	(declare
-		;returns {
-		; 	type "assoc"
-		;	additional_indices (false)
-		; 	indices {
-		; 		"auto_ablation_enabled" {
-		; 			type "boolean"
-		; 			description "Flag indicating if automatic ablation is enabled."
-		; 		}
-		; 		"auto_ablation_weight_feature" {
-		; 			type "string"
-		; 			description "The name of the weight feature which is accumulated and used in automatic ablation."
-		; 		}
-		; 		"minimum_model_size" {
-		; 			type "number"
-		; 			description "The minimum number of cases to train before automatic ablation begins."
-		; 		}
-		; 		"influence_weight_entropy_threshold" {
-		; 			type "number"
-		; 			description "The minimum threshold of influence weight entropy for a case to be ablated in the process of automatic ablation."
-		; 		}
-		; 		"exact_prediction_features" {
-		; 			type "list"
-		; 			values "string"
-		; 			description "The list of features that if predicted correctly on a new case will trigger the ablation of the case."
-		; 		}
-		; 		"tolerance_prediction_threshold_map" {
-		; 			type "assoc"
-		; 			additional_indices "number"
-		; 			description "The map of features to absolute thresholds that if predicted within on a new case will trigger the ablation of the case."
-		; 		}
-		; 		"relative_prediction_threshold_map" {
-		; 			type "assoc"
-		; 			additional_indices "number"
-		; 			description "The map of features to relative thresholds that if predicted within on a new case will trigger the ablation of the case."
-		; 		}
-		; 		"residual_prediction_features" {
-		; 			type "list"
-		; 			values "string"
-		; 			description "The list of features that if predicted within their residual on a new case will trigger the ablation of the case."
-		; 		}
-		; 		"conviction_upper_threshold" {
-		; 			type "number"
-		; 			description "The conviction threshold below which cases will be ablated."
-		; 		}
-		; 		"conviction_lower_threshold" {
-		; 			type "number"
-		; 			description "The conviction threshold above which cases will be ablated."
-		; 		}
-		; 	}
-		; }
+		;returns {ref "GetAutoAblationParamsResponse"}
 		(assoc)
 
 
@@ -1018,8 +980,11 @@
 				(assoc
 					auto_ablation_enabled !autoAblationEnabled
 					auto_ablation_weight_feature !autoAblationWeightFeature
-					minimum_model_size !autoAblationMinModelSize
+					minimum_num_cases !autoAblationMinNumCases
 					influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+					abs_threshold_map !autoAblationAbsThresholdMap
+					delta_threshold_map !autoAblationDeltaThresholdMap
+					rel_threshold_map !autoAblationRelThresholdMap
 					exact_prediction_features !autoAblationExactPredictionFeatures
 					tolerance_prediction_threshold_map !autoAblationTolerancePredictionThresholdMap
 					relative_prediction_threshold_map !autoAblationRelativePredictionThresholdMap
@@ -1044,7 +1009,7 @@
 			;{type "number"}
 			;stores the threshold for the minimum number of cases at which the model should auto-ablate.
 			;	default of 1000.
-			minimum_model_size 1000
+			minimum_num_cases 1000
 			;{type "number"}
 			;the influence weight entropy quantile that a case must be beneath in order to be trained.
 			;	default of 0.6.
@@ -1077,6 +1042,24 @@
 			;{type "number"}
 			;the number of ablated cases to compute influence weights for distribution at a time
 			ablated_cases_distribution_batch_size 100
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; absolute thresholds will cause ablation to stop when any of the measure values for any of
+			; the features for which a threshold is defined go above the threshold (in the case of rmse and
+			; mae) or below the threshold (otherwise).
+			abs_threshold_map (assoc)
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; delta thresholds will cause ablation to stop when the delta between any of the measure values
+			; for any of the features for which a threshold is defined and its previous value go above the threshold
+			; (in the case of rmse and mae) or below the threshold (otherwise).
+			delta_threshold_map (assoc)
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; relative thresholds will cause ablation to stop when the relative change between any of the
+			; measure values for any of the features for which a threshold is defined and its previous value go
+			; above the threshold (in the case of rmse and mae) or below the threshold (otherwise).
+			rel_threshold_map (assoc)
 		)
 		(call !ValidateParameters)
 
@@ -1085,12 +1068,10 @@
 			(assign (assoc auto_ablation_entropy_threshold_quantile 1.0))
 		)
 
-		(accum_to_entities (assoc !revision 1))
-
 		(assign_to_entities (assoc
 			!autoAblationEnabled auto_ablation_enabled
 			!autoAblationWeightFeature auto_ablation_weight_feature
-			!autoAblationMinModelSize minimum_model_size
+			!autoAblationMinNumCases minimum_num_cases
 			!autoAblationInfluenceWeightEntropyThreshold influence_weight_entropy_threshold
 			!autoAblationExactPredictionFeatures exact_prediction_features
 			!autoAblationTolerancePredictionThresholdMap tolerance_prediction_threshold_map
@@ -1098,10 +1079,14 @@
 			!autoAblationResidualPredictionFeatures residual_prediction_features
 			!autoAblationConvictionUpperThreshold conviction_upper_threshold
 			!autoAblationConvictionLowerThreshold conviction_lower_threshold
+			!autoAblationAbsThresholdMap abs_threshold_map
+			!autoAblationDeltaThresholdMap delta_threshold_map
+			!autoAblationRelThresholdMap rel_threshold_map
 			!ablationBatchSize batch_size
 			!ablatedCasesDistributionBatchSize ablated_cases_distribution_batch_size
 		))
 
+		(accum_to_entities (assoc !revision 1))
 		(call !Return)
 	)
 
