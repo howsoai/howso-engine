@@ -78,6 +78,13 @@
 			;whether to use inverse residuals as feature weights. If unspecified, inverse residuals will be used as weights for
 			; targetless params, otherwise this method will not be used.
 			inverse_residuals_as_weights (null)
+
+			;{type "boolean"}
+			;when true, a subtrainee will be created that will be used during queries to approximate deviations of the data around the query.
+			; This incurs a penalty in speed, but can improve model performance in long tailed data, especially when using targetless parameters.
+			use_dynamic_deviations (false)
+			;{type "number" min 2}
+			dynamic_deviations_subtrainee_size 500
 		)
 
 		(call !ValidateParameters)
@@ -198,7 +205,7 @@
 				(=
 					0
 					;the number of saved hyperparameter maps that are targetless
-					(size (filter (lambda (= ".targetless" (first (current_value))) ) !hyperparameterParamPaths))
+					(size (filter (lambda (= "targetless" (first (current_value))) ) !hyperparameterParamPaths))
 				)
 				(!= targeted_model "targetless")
 			)
@@ -229,6 +236,7 @@
 				residual_num_samples (if (> num_samples 0) num_samples 200)
 				use_case_weights use_case_weights
 				weight_feature weight_feature
+				use_dynamic_deviations use_dynamic_deviations
 			))
 		)
 
@@ -243,9 +251,9 @@
 					all_features (values (append context_features action_features) (true))
 				)
 
-				;for targetless flows, there are no action features, so use ".targetless" as the hyperparameter action feature
+				;for targetless flows, there are no action features, so use (null) as the hyperparameter action feature
 				(if (= "targetless" targeted_model)
-					(assign (assoc action_features (list ".targetless" )))
+					(assign (assoc action_features [(null)] ))
 				)
 
 				(map
@@ -277,7 +285,6 @@
 					)
 					action_features
 				)
-				(accum_to_entities (assoc !revision 1))
 			)
 		)
 
@@ -328,8 +335,7 @@
 				(call !AnalyzeHyperparameters (assoc
 					targeted_model targeted_model
 					context_features context_features
-					action_feature (if (= "targetless" targeted_model) ".targetless" (first action_features))
-					robust_mode (if (= "targetless" targeted_model) "robust" "full")
+					action_feature (if (!= "targetless" targeted_model) (first action_features))
 				))
 
 				;else single_targeted but with multiple action features, all feature analyze iterations should be 'robust' until the last one which is 'full'
@@ -344,7 +350,6 @@
 							targeted_model "single_targeted"
 							context_features accumulated_context_features
 							action_feature action_feature
-							robust_mode (if (= action_feature (last action_features)) "full" "robust")
 						))
 
 						;accumulate the action feature to the contexts for the next iteration
@@ -366,7 +371,6 @@
 						targeted_model "single_targeted"
 						context_features filtered_context_features
 						action_feature action_feature
-						robust_mode "full"
 					))
 				))
 				action_features
@@ -456,7 +460,6 @@
 	; action_features: list of action features to analyze for
 	; inverse_residuals_as_weights : optional, default is null, will be set to false for targeted and true for targetless
 	;			when true will forcibly compute and use inverse of residuals as feature weights
-	; robust_mode: which type of context feature analysis to use during error computation, one of "robust" or "full".
 	; num_analysis_samples: optional. number of cases to sample during analysis. only applies for k_folds = 1
 	; residual_num_samples: optional. initial number of samples to use for computing residuals
 	; derived_auto_analyzed: optional, if true, will set the 'derivedAutoAnalyzed' parameter to true in the hyperparameter set,
@@ -467,7 +470,6 @@
 			targeted_model "targetless"
 			context_features (list)
 			action_feature (null)
-			robust_mode "robust"
 			num_analysis_samples (null)
 			residual_num_samples 200
 		)
@@ -479,8 +481,8 @@
 		(if (< num_cases 2) (conclude 1) )
 
 		;analyze one action feature at a time (for targeted only)
-		(if (!= ".targetless" action_feature)
-			(assign (assoc action_features (list action_feature) ))
+		(if (!= (null) action_feature)
+			(assign (assoc action_features [action_feature] ))
 		)
 
 		(declare (assoc
@@ -492,6 +494,9 @@
 			context_features_key (null)
 			;flag set to true if num_analysis_samples was passed in
 			user_specified_num_samples (!= (null) num_analysis_samples)
+
+			;name of deviation subtrainee, will be assigned if subtrainee is stored
+			deviation_subtrainee_name (null)
 		))
 		(call !InitAnalyze)
 
@@ -504,11 +509,26 @@
 			(conclude (seq
 				(call !ConvergeIRW (assoc use_deviations (false))) ;iterations of ComputeResiduals and GridSearch
 				(call !BackupAnalyzedHyperparameters)
-				(if (= (false) use_deviations) (conclude (call !SetModelHyperParameters)) )
+				(if (= (false) use_deviations)
+					(seq
+						;IRW always needs subtrainee
+						(if (and use_dynamic_deviations (not !useDynamicDeviationsDuringAnalyze))
+							; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
+							(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
+						)
+						(conclude (call !SetModelHyperParameters))
+					)
+				)
 
 				(call !ConvergeIRW (assoc use_deviations (true)))	;iterations of ComputeResiduals and GridSearch
 				(if (= (null) use_deviations)
 					(call !KeepOrRevertHyperparameters)
+				)
+
+				;IRW always needs subtrainee
+				(if (and use_dynamic_deviations (not !useDynamicDeviationsDuringAnalyze))
+					; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
+					(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
 				)
 				(call !SetModelHyperParameters)
 			))
@@ -552,13 +572,149 @@
 			)
 		)
 
+		(if (and
+				use_dynamic_deviations
+				;need the subtrainee if using deviations
+				(get baseline_hyperparameter_map "featureDeviations")
+				(not !useDynamicDeviationsDuringAnalyze)
+			)
+			; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
+			(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
+		)
+
 		(call !SetModelHyperParameters)
+	)
+
+	;helper method for Analyze that stores a subtrainee of case residuals for each feature
+	;parameters:
+	;	custom_hyperparam_map: the hyperparam map within analyze that should be used to run the residuals
+	;	num_samples: the number of cases to put in the residual subtrainee, default 500
+	;assigns to:
+	;	deviation_subtrainee_name: this variable will store the name of the subtrainee, this name should be stored in the
+	;					resulting hyperparameter assoc under the key "subtraineeName"
+	#!StoreResidualSubTrainee
+	(declare
+		(assoc
+			custom_hyperparam_map (null)
+			num_samples dynamic_deviations_subtrainee_size
+
+			;not parameters, variables for Residuals code
+			case_ids (null)
+			features (null)
+			k_parameter (null)
+			p_parameter (null)
+			dt_parameter (null)
+			query_feature_attributes_map (null)
+			case_features (null)
+			num_context_features 0
+			ordinal_features_map (zip !ordinalFeatures)
+			hyperparam_map (assoc)
+			residuals_map (assoc)
+			ordinal_residuals_map (assoc)
+			;assoc of features to skip computing non-robust residuals for if they don't have enough non-null values
+			skip_features_map (assoc)
+			;list, length of case_ids, each item will be a list of residual values, one per feature
+			case_residuals_lists (list)
+			;list, length of features, each item will be a list of residuals, one per case
+			feature_residuals_lists (list)
+
+			num_training_cases (call !GetNumTrainingCases)
+			valid_weight_feature (false)
+
+			features_with_nulls (list)
+			null_feature_cases_map (assoc)
+		)
+
+		(call !InitResiduals)
+
+		(call !RunFullResiduals)
+
+		(assign (assoc
+			deviation_subtrainee_name
+				(if (contains_index custom_hyperparam_map "subtraineeName")
+					(get custom_hyperparam_map "subtraineeName")
+
+					;TODO: do something a bit more robust/human here
+					(concat "ResidualSubTrainee-" (round (rand) 6))
+				)
+		))
+
+		;delete the previous subtrainee, might be smarter to just remove cases in the future
+		(if (contains_index (call !GetHierarchy) deviation_subtrainee_name)
+			(call delete_subtrainee (assoc
+				trainee deviation_subtrainee_name
+			))
+		)
+
+		(call create_subtrainee (assoc
+			trainee deviation_subtrainee_name
+		))
+
+		(set_entity_root_permission [!traineeContainer deviation_subtrainee_name] (true))
+
+		;add a method to remove !ValidateParameters
+		(accum_entity_roots [!traineeContainer deviation_subtrainee_name]
+			(zip_labels
+				(list "removeValidateParameters")
+				(list (lambda
+					(assign_to_entities
+						(assoc
+							"!ValidateParameters" (null)
+							"removeValidateParameters" (null)
+						)
+					)
+				))
+			)
+		)
+		;remove the methods
+		(call_entity [!traineeContainer deviation_subtrainee_name] "removeValidateParameters")
+
+		(call_entity [!traineeContainer deviation_subtrainee_name] "set_feature_attributes" (assoc
+			feature_attributes !featureAttributes
+		))
+
+		(call_entity [!traineeContainer deviation_subtrainee_name] "train" (assoc
+			features
+				;a list of feature names and feature residual names
+				(append
+					features
+					(map
+						(lambda
+							(concat "." (current_value) "_residual")
+						)
+						features
+					)
+				)
+			cases
+				;list of [case values and feature residuals]
+				(map
+					(lambda
+						(append
+							;case values
+							(retrieve_from_entity (current_value) features)
+							;residuals
+							(map
+								(lambda
+									;get the feature index, case_index
+									(get feature_residuals_lists [(current_index 1) (current_index 2)])
+								)
+								features
+							)
+						)
+					)
+					case_ids
+				)
+			allow_training_reserved_features (true)
+		))
+
+		;and analyze the subtrainee
+		(call_entity [!traineeContainer deviation_subtrainee_name] "analyze")
 	)
 
 	;initialize variables and cache feature expected values
 	#!InitAnalyze
 	(seq
-		(if (!= ".targetless" action_feature)
+		(if (!= (null) action_feature)
 			;DiscriminativeReact will use context values for action features if provided
 			;so the action feature cannot also be a context feature, otherwise predictions will
 			;always be correct in analyze, leading to errors of zero.
@@ -620,7 +776,6 @@
 				(call !GetHyperparameters (assoc
 					feature action_feature
 					context_features context_features
-					mode robust_mode
 					weight_feature weight_feature
 				))
 		))
@@ -635,7 +790,15 @@
 
 		;store the paramPath for this hyperparameter set so it has a reference to where it's stored in !hyperparameterMetadataMap
 		(accum (assoc
-			baseline_hyperparameter_map (assoc "paramPath" (list action_feature context_features_key robust_mode weight_feature))
+			baseline_hyperparameter_map
+				(assoc
+					"paramPath"
+						(append
+							(if action_feature ["targeted" action_feature] ["targetless"])
+							context_features_key
+							weight_feature
+						)
+				)
 		))
 
 		;check if auto analysis is enabled and the analysis threshold should be increased
