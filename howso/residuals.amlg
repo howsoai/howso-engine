@@ -752,8 +752,8 @@
 		))
 
 		(declare (assoc
-			nominal_class_statistical_significant_count 30
-			max_samples_threshold 20000
+			nominal_class_statistical_significant_count 2 ;30
+			max_samples_threshold 15000
 		))
 
 		(declare (assoc
@@ -772,17 +772,21 @@
 						))
 
 						(declare (assoc
-							smallest_count_above_statistical_significance (first (sort class_counts))
+							smallest_count_above_statistical_significance (first (sort class_counts_above_stat_significance))
 						))
 
 						;min(15k or the max threshold, (3 / (smallest_count_above_statistical_significance / num_cases)))
 						(if smallest_count_above_statistical_significance
-							(min max_samples_threshold, (/ 3 (/ smallest_count_above_statistical_significance num_training_cases)))
+							(min max_samples_threshold (/ 3 (/ smallest_count_above_statistical_significance num_training_cases)))
 							0
 						)
 					))
 					!nominalsMap
 				)
+		))
+
+		(declare (assoc
+			feature_index_map (zip features (indices features))
 		))
 
 		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
@@ -800,11 +804,32 @@
 						)
 				)
 
+				(declare (assoc
+					;assoc of nominal feature -> number of needed extra samples
+					num_needed_nominal_values_per_feature_map
+						(filter
+							(lambda (> (current_value) 0))
+							(map
+								(lambda
+									(-
+										(get min_count_nominals_map (current_index))
+										;if this number will be padded due to nulls, discont that min amount, otherwise discount existing residual samples
+										(if (contains_index num_valid_values_per_feature_map (current_index))
+											min_value_count
+											(size (get feature_residuals_lists (get feature_index_map (current_index))) )
+										)
+									)
+								)
+								!nominalsMap
+							)
+						)
+				))
+
 				;some features did not have 50 values, accrue case_ids, then call !the main method agan
-				(if (size num_valid_values_per_feature_map)
+				(if (or (size num_valid_values_per_feature_map) (size num_needed_nominal_values_per_feature_map))
 					(seq
 						;create the resampled case_ids list that contains cases with enough necessary non-null feature values
-						(assign  (assoc
+						(assign (assoc
 							case_ids
 								;append all the lists of cases ids for each feature into one list
 								(apply "append"
@@ -822,6 +847,27 @@
 									))
 								)
 						))
+
+						(if (size num_needed_nominal_values_per_feature_map)
+							(let
+								(assoc
+									max_nominal_samples_needed
+										(* 2 (apply "max" (values num_needed_nominal_values_per_feature_map)) )
+								)
+								(if (= (null) case_ids) (assign (assoc case_ids [] )) )
+
+								(accum (assoc
+									case_ids
+										(contained_entities (list
+											(query_exists !internalLabelSession)
+											(if valid_weight_feature
+												(query_weighted_sample weight_feature max_nominal_samples_needed (rand))
+												(query_sample max_nominal_samples_needed (rand))
+											)
+										))
+								))
+							)
+						)
 
 						;re-compute residuals on these case_ids, store into case_residuals_lists
 						(call !AccumulateFeatureResiduals)
