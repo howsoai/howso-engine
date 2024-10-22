@@ -1353,69 +1353,38 @@
 			hyperparam_map (call !GetHyperparameters (assoc feature (null)))
 		))
 
+		;Compute the algorithm found on page 3 of https://arxiv.org/pdf/1803.06992
+
+		;mu = r2 / r1, the ratio of the distance to the second neighbor to the distance to the first neighbor,
+		; for each case.
 		(declare (assoc
-			latent_dimension_estimates
+			mus
 				(map
 					(lambda
 						(let
 							(assoc
 								case_id (current_value 1)
+								detail (null)
 							)
 
-							(declare (assoc
-								neighborhood_cases
-									(get
-										(call !RetrieveAuditData (assoc
-											context_features features
-											context_values (retrieve_from_entity case_id features)
-											filtering_queries [(query_not_in_entity_list [case_id])]
-											hyperparam_map hyperparam_map
-											details
-												{
-													most_similar_cases (true)
-													num_most_similar_cases (get hyperparam_map "k")
-												}
-										))
-										"most_similar_cases"
-									)
-							))
-
-							(declare (assoc
-								dist_to_kth_case (get (last neighborhood_cases) ".distance")
-							))
-
-							(declare (assoc
-								num_cases_double_dist
-									(compute_on_contained_entities (list
-										(query_exists !internalLabelSession)
-										(query_not_in_entity_list [case_id])
-										(query_within_generalized_distance
-											(* 2 dist_to_kth_case) ;scale by whatever?
-											features
-											(retrieve_from_entity case_id features)
-											(get hyperparam_map "featureWeights")
-											!queryDistanceTypeMap
-											(get hyperparam_map "featureDomainAttributes")
-											(get hyperparam_map "featureDeviations")
-											(get hyperparam_map "p")
-											(get hyperparam_map "dt")
-											weight_feature
-											"fixed_rand_seed"
-										)
-										(query_count)
+							(assign (assoc
+								details
+									(call !RetrieveAuditData (assoc
+										context_features features
+										context_values (retrieve_from_entity case_id features)
+										filtering_queries [(query_not_in_entity_list [case_id])]
+										hyperparam_map hyperparam_map
+										details
+											{
+												most_similar_cases (true)
+												num_most_similar_cases 2
+											}
 									))
 							))
 
-							;this is to be verified/further developed
-							;estimating latent dimensions as n = ln(2) / ln(num_cases_within_dist_to_k_*_2 / k)
 							(/
-								(log 2)
-								(log
-									(/
-										num_cases_double_dist
-										(get hyperparam_map "k")
-									)
-								)
+								(get details (list "most_similar_cases" 1 ".distance"))
+								(get details (list "most_similar_cases" 0 ".distance"))
 							)
 						)
 					)
@@ -1423,7 +1392,40 @@
 				)
 		))
 
-		latent_dimension_estimates
+		;Construct a list of points such that x_i is log(mu_i) and y_i is -log(1 - i/num_samples) for each i in 1 .. num_samples
+		; after sorting all of the mus.
+		(declare (assoc
+			points
+				(map
+					(lambda [
+						(log (current_value 1))
+						(- (log
+							(- 1 (/ (+ (current_index 1) 1) num_samples))
+						))
+					])
+					(sort
+						(lambda
+							(- (current_value) (current_value 1))
+						)
+						mus
+					)
+				)
+		))
+
+		;Compute the slope for each of these points m = y / x
+		(declare (assoc
+			slopes
+				(map
+					(lambda (/
+						(last (current_value))
+						(first (current_value))
+					))
+					(trunc points)
+				)
+		))
+
+		;The average of these slopes is the MLE of the slope.
+		(/ (apply "+" slopes) (size slopes))
 	)
 
 	#!ComputeHypersphereVolume
