@@ -698,4 +698,142 @@
 			(assign (assoc valid_weight_feature (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight"))))
 		)
 	)
+
+	;Computes the dynamic deviations for a set of context features and values by querying the deviation subtrainee.
+	;May assign to feature_weights or feature_deviations, according to the HPs
+	;params:
+	;  context_features: list of feature names to compute dynamic deviations for (also to query the subtrainee with)
+	;  context_values: list of values corresponding to context_features
+	;  hyperparam_map: the hyperparameters selected for the query
+	;
+	;assigns to:
+	;	feature_weights: the feature weights to be used in a query, only assigns if HPs are targetless
+	;	feature_deviations: the feature deviations to be used in a query, only assigns if HPs contain featureDeviations
+	#!UseDynamicDeviationsAndWeights
+	(declare
+		(assoc
+			context_features []
+			context_values []
+			hyperparam_map (null)
+
+			;not param
+			local_deviations (null)
+		)
+
+		(declare (assoc
+			continuous_context_features (filter (lambda (not (contains_index !nominalsMap (current_value)))) context_features)
+		))
+
+		(assign (assoc
+			local_deviations
+				(let
+					(assoc
+						inf_cases
+							(get
+								(call_entity [!traineeContainer (get hyperparam_map "subtraineeName")] "single_react" (assoc
+									context_features context_features
+									context_values context_values
+									extra_features (map (lambda (concat "." (current_value) "_residual") ) continuous_context_features)
+									details {influential_cases (true)}
+								))
+								[1 "payload" "influential_cases"]
+							)
+						total_weight (null)
+						case_weights (null)
+					)
+
+					(assign (assoc
+						case_weights (map (lambda (get (current_value) ".influence_weight")) inf_cases)
+					))
+
+					(assign (assoc
+						total_weight (apply "+" case_weights)
+					))
+
+					(map
+						(lambda
+							(/
+								(dot_product
+									(map (lambda (get (current_value) (concat "." (current_index 1) "_residual"))) inf_cases)
+									case_weights
+								)
+								total_weight
+							)
+						)
+						(zip continuous_context_features)
+					)
+				)
+		))
+
+		(assign (assoc
+			local_deviations
+				;bound the deviation so that it is not less than the min residual or user specified error
+				(map
+					(lambda
+						(max
+							(get !cachedFeatureMinResidualMap (current_index))
+							(current_value)
+							(get !userSpecifiedFeatureErrorsMap (current_index))
+						)
+					)
+					local_deviations
+				)
+		))
+
+		;if hyperparams are using deviations, overwrite feature_deviations with dynamic deviations
+		(if (get hyperparam_map "featureDeviations")
+			(assign (assoc
+				feature_deviations
+					(map
+						(lambda
+							(if (contains_index local_deviations (current_index))
+								;this feature has a local deviation
+								(if (~ 0 (current_value))
+									;if deviation is just a value, replace with local deviation
+									(get local_deviations (current_index))
+
+									;deviation is a list, overwrite first value with local deviation (don't clobber null-null, null-known, etc)
+									(~ [] (current_value))
+									(set (current_value) 0 (get local_deviations (current_index)) )
+
+									;otherwise its something else? fall back to original value
+									(current_value)
+								)
+
+								;else return original value
+								(current_value)
+							)
+						)
+						feature_deviations
+					)
+			))
+		)
+
+		;if targetless, overwrite feature weights with weights derived from dynamic deviations
+		(if (= "targetless" (get hyperparam_map ["paramPath" 0]))
+			(assign (assoc
+				feature_weights
+					(append
+						;original feature weights
+						feature_weights
+						;assoc of feature weights based on local deviations
+						(map
+							(lambda
+								;ensure that inactive features always maintain a feature weight of 0
+								(if (contains_index !inactiveFeaturesMap (current_index))
+									0
+
+									(call !ConvertDeviationToFeatureWeight (assoc
+										feature_deviation (current_value 1)
+										p_value (get hyperparam_map "p")
+									))
+								)
+
+							)
+							local_deviations
+						)
+					)
+			))
+		)
+	)
 )

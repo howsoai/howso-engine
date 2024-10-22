@@ -78,6 +78,13 @@
 			;whether to use inverse residuals as feature weights. If unspecified, inverse residuals will be used as weights for
 			; targetless params, otherwise this method will not be used.
 			inverse_residuals_as_weights (null)
+
+			;{type "boolean"}
+			;when true, a subtrainee will be created that will be used during queries to approximate deviations of the data around the query.
+			; This incurs a penalty in speed, but can improve model performance in long tailed data, especially when using targetless parameters.
+			use_dynamic_deviations (false)
+			;{type "number" min 2}
+			dynamic_deviations_subtrainee_size 500
 		)
 
 		(call !ValidateParameters)
@@ -229,6 +236,7 @@
 				residual_num_samples (if (> num_samples 0) num_samples 200)
 				use_case_weights use_case_weights
 				weight_feature weight_feature
+				use_dynamic_deviations use_dynamic_deviations
 			))
 		)
 
@@ -486,6 +494,9 @@
 			context_features_key (null)
 			;flag set to true if num_analysis_samples was passed in
 			user_specified_num_samples (!= (null) num_analysis_samples)
+
+			;name of deviation subtrainee, will be assigned if subtrainee is stored
+			deviation_subtrainee_name (null)
 		))
 		(call !InitAnalyze)
 
@@ -498,11 +509,26 @@
 			(conclude (seq
 				(call !ConvergeIRW (assoc use_deviations (false))) ;iterations of ComputeResiduals and GridSearch
 				(call !BackupAnalyzedHyperparameters)
-				(if (= (false) use_deviations) (conclude (call !SetModelHyperParameters)) )
+				(if (= (false) use_deviations)
+					(seq
+						;IRW always needs subtrainee
+						(if (and use_dynamic_deviations (not !useDynamicDeviationsDuringAnalyze))
+							; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
+							(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
+						)
+						(conclude (call !SetModelHyperParameters))
+					)
+				)
 
 				(call !ConvergeIRW (assoc use_deviations (true)))	;iterations of ComputeResiduals and GridSearch
 				(if (= (null) use_deviations)
 					(call !KeepOrRevertHyperparameters)
+				)
+
+				;IRW always needs subtrainee
+				(if (and use_dynamic_deviations (not !useDynamicDeviationsDuringAnalyze))
+					; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
+					(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
 				)
 				(call !SetModelHyperParameters)
 			))
@@ -546,7 +572,143 @@
 			)
 		)
 
+		(if (and
+				use_dynamic_deviations
+				;need the subtrainee if using deviations
+				(get baseline_hyperparameter_map "featureDeviations")
+				(not !useDynamicDeviationsDuringAnalyze)
+			)
+			; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
+			(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
+		)
+
 		(call !SetModelHyperParameters)
+	)
+
+	;helper method for Analyze that stores a subtrainee of case residuals for each feature
+	;parameters:
+	;	custom_hyperparam_map: the hyperparam map within analyze that should be used to run the residuals
+	;	num_samples: the number of cases to put in the residual subtrainee, default 500
+	;assigns to:
+	;	deviation_subtrainee_name: this variable will store the name of the subtrainee, this name should be stored in the
+	;					resulting hyperparameter assoc under the key "subtraineeName"
+	#!StoreResidualSubTrainee
+	(declare
+		(assoc
+			custom_hyperparam_map (null)
+			num_samples dynamic_deviations_subtrainee_size
+
+			;not parameters, variables for Residuals code
+			case_ids (null)
+			features (null)
+			k_parameter (null)
+			p_parameter (null)
+			dt_parameter (null)
+			query_feature_attributes_map (null)
+			case_features (null)
+			num_context_features 0
+			ordinal_features_map (zip !ordinalFeatures)
+			hyperparam_map (assoc)
+			residuals_map (assoc)
+			ordinal_residuals_map (assoc)
+			;assoc of features to skip computing non-robust residuals for if they don't have enough non-null values
+			skip_features_map (assoc)
+			;list, length of case_ids, each item will be a list of residual values, one per feature
+			case_residuals_lists (list)
+			;list, length of features, each item will be a list of residuals, one per case
+			feature_residuals_lists (list)
+
+			num_training_cases (call !GetNumTrainingCases)
+			valid_weight_feature (false)
+
+			features_with_nulls (list)
+			null_feature_cases_map (assoc)
+		)
+
+		(call !InitResiduals)
+
+		(call !RunFullResiduals)
+
+		(assign (assoc
+			deviation_subtrainee_name
+				(if (contains_index custom_hyperparam_map "subtraineeName")
+					(get custom_hyperparam_map "subtraineeName")
+
+					;TODO: do something a bit more robust/human here
+					(concat "ResidualSubTrainee-" (round (rand) 6))
+				)
+		))
+
+		;delete the previous subtrainee, might be smarter to just remove cases in the future
+		(if (contains_index (call !GetHierarchy) deviation_subtrainee_name)
+			(call delete_subtrainee (assoc
+				trainee deviation_subtrainee_name
+			))
+		)
+
+		(call create_subtrainee (assoc
+			trainee deviation_subtrainee_name
+		))
+
+		(set_entity_root_permission [!traineeContainer deviation_subtrainee_name] (true))
+
+		;add a method to remove !ValidateParameters
+		(accum_entity_roots [!traineeContainer deviation_subtrainee_name]
+			(zip_labels
+				(list "removeValidateParameters")
+				(list (lambda
+					(assign_to_entities
+						(assoc
+							"!ValidateParameters" (null)
+							"removeValidateParameters" (null)
+						)
+					)
+				))
+			)
+		)
+		;remove the methods
+		(call_entity [!traineeContainer deviation_subtrainee_name] "removeValidateParameters")
+
+		(call_entity [!traineeContainer deviation_subtrainee_name] "set_feature_attributes" (assoc
+			feature_attributes !featureAttributes
+		))
+
+		(call_entity [!traineeContainer deviation_subtrainee_name] "train" (assoc
+			features
+				;a list of feature names and feature residual names
+				(append
+					features
+					(map
+						(lambda
+							(concat "." (current_value) "_residual")
+						)
+						features
+					)
+				)
+			cases
+				;list of [case values and feature residuals]
+				(map
+					(lambda
+						(append
+							;case values
+							(retrieve_from_entity (current_value) features)
+							;residuals
+							(map
+								(lambda
+									;get the feature index, case_index
+									(get feature_residuals_lists [(current_index 1) (current_index 2)])
+								)
+								features
+							)
+						)
+					)
+					case_ids
+				)
+			allow_training_reserved_features (true)
+		))
+
+		;and analyze the subtrainee
+		(call_entity [!traineeContainer deviation_subtrainee_name] "analyze")
 	)
 
 	;initialize variables and cache feature expected values
