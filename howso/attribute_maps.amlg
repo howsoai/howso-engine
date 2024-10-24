@@ -205,6 +205,207 @@
 		full_dependents_map
 	)
 
+	;Creates shared deviations model attributes:
+	; shared_deviations_key_map:  mapping of shared deviations where the keys are each feature within a group of shared deviations, and the values are their
+	; 	corresponding primary feature. For each group of shared deviations, they are stored under the first sorted feature in their group, a.k.a. the primary feature.
+	;   e.g., a group of features with shared devations is [A, B, C], creates an mapping of {A : A, B : A, C : A}
+	; shared_deviations_group_by_primary: mapping of primary key -> list of shared deviation features in the group, e.g. {A : [A, B, C]}
+	; shared_deviations_primary_features: list of all primary features, e.g., [A]
+	; shared_deviations_non_primary_features: list of all non-primary features  e.g., [B, C]
+	#!ProcessSharedDeviationsMap
+	(seq
+		(assign (assoc
+			shared_deviations_map
+				(append
+					(map
+						(lambda
+							(or
+								(get shared_deviations_map (current_index))
+								[(current_index  1)]
+							)
+						)
+						(zip (apply "append" (values shared_deviations_map)))
+					)
+					shared_deviations_map
+				)
+		))
+
+		;create lists of referenced features for each shared feature
+		(declare (assoc
+			shared_sets
+				(map
+					(lambda (let
+						(assoc
+							shared_features (current_value 1)
+							feature (current_index 1)
+						)
+						(append
+							feature
+							;keep lists of shared features that reference either this feature or any of its shared_features
+							(indices (filter
+								(lambda
+									(or
+										(contains_value shared_features (current_index))
+										(contains_value (current_value) feature)
+										(!=
+											(size shared_features)
+											(size (remove (zip shared_features) (current_value)) )
+										)
+									)
+								)
+								(remove shared_deviations_map feature)
+							))
+						)
+					))
+					shared_deviations_map
+				)
+		))
+
+
+		(declare (assoc
+			combined_shared_sets
+				(map
+					(lambda (let
+						(assoc
+							shared_set (zip (current_value 1))
+							num_features_in_set (size (current_value 1))
+							feature (current_index 1)
+						)
+
+						;append all the overlapping shared sets and make them unique by zipping up the appended features
+						(zip
+							(apply "append"
+								;if there's any overlap between shared_set and any other feature's shared_set, combine them
+								(values (filter
+									(lambda
+										(if (!= num_features_in_set (size (remove shared_set (current_value))))
+											(append shared_set (zip (current_value)))
+										)
+									)
+									(remove shared_sets feature)
+								))
+							)
+						)
+
+					))
+					shared_sets
+				)
+
+		))
+
+		(declare (assoc
+			unique_sets (values combined_shared_sets (true))
+		))
+
+		(declare (assoc
+			shared_deviations_key_map
+				(map
+					(lambda (let
+						(assoc feature (current_index 1))
+						;find the the shared set that this feature belongs to and output the first feature from that set
+						(first (indices
+							(first (filter
+								(lambda (contains_index (current_value) feature))
+								unique_sets
+							))
+						))
+					))
+					combined_shared_sets
+				)
+		))
+
+		(declare (assoc
+			primary_features (indices (zip (values shared_deviations_key_map)))
+		))
+
+		(assoc
+			"shared_deviations_key_map" shared_deviations_key_map
+			"shared_deviations_primary_features" primary_features
+			"shared_deviations_group_by_primary"
+				(map
+					(lambda (indices (get combined_shared_sets (current_index))) )
+					(zip primary_features)
+				)
+			"shared_deviations_non_primary_features" (indices (remove shared_deviations_key_map primary_features))
+		)
+	)
+
+	;Validates the necessary parameters for shared deviations, making sure that no shared deviations features are unique nominals.
+	#!ValidateSharedDeviations
+	(let
+		(assoc
+			error_messages (list)
+			invalid_unique_shared_deviations_features (null)
+			invalid_nominals_non_nominals_shared_deviations (null)
+		)
+		;check to see if any features in a shared deviations group is a unique nominal
+		(if (size unique_nominals_set)
+			(assign (assoc
+				invalid_unique_shared_deviations_features
+					(filter
+						(lambda (contains_index unique_nominals_set (current_value)))
+						(indices (get shared_deviations_map "shared_deviations_key_map"))
+					)
+			))
+		)
+
+		(if (size invalid_unique_shared_deviations_features)
+			(accum (assoc
+				error_messages
+					(list (concat
+						"Features with shared deviations may not be unique nominals, as they have null deviations. "
+						"The following features are in a shared deviations group and is a unique nominal: "
+						(apply "concat" (trunc (weave invalid_unique_shared_deviations_features ", ")))
+						"."
+					))
+			))
+		)
+
+		;check to see if nominal features has shared deviations with non-nominal features
+		(if (size nominals)
+			(assign (assoc
+				invalid_nominals_non_nominals_shared_deviations
+					;returns at least an empty assoc for each group of shared deviations, append only keeps the assocs with values
+					(apply "append"
+						(values (map
+							;grab the type of the primary feature, and then filter out all the ones that match. Should be left
+							; with a list of size 0 as all of the features should share the same type
+							(lambda
+								(let
+									(assoc
+										;the nominal type of the primary feature in the group of shared deviations
+										is_primary_nominal (contains_value nominals (current_index 1))
+									)
+									(filter
+										;if the current value's nominal type does not match the first value's return it
+										(lambda
+											(!= is_primary_nominal (contains_value nominals (current_value)) )
+										)
+										;list of shared deviations in the group ["a", "b"]
+										(current_value)
+									)
+								)
+							)
+							;assoc of shared deviations groups, i.e. {"a": ["a", "b"], "c": ["c", "d"] }
+							(get shared_deviations_map "shared_deviations_group_by_primary")
+						))
+					)
+			))
+		)
+
+		(if (size invalid_nominals_non_nominals_shared_deviations)
+			(accum (assoc
+				error_messages (list "Nominal features may not share deviations with non-nominal features.")
+			))
+		)
+
+		;warns if errors are present
+		(if (size error_messages)
+			(conclude (call !Return (assoc errors error_messages)))
+		)
+	)
+
+
 	#!ComposeContinuousToNominalDependenciesMap
 	(let
 		(assoc
