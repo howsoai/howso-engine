@@ -218,22 +218,34 @@
 	)
 
 	;write baseline_hyperparameter_map out to the model's !hyperparameterMetadataMap
+	;null action feature assumes targetless hyperparameters
 	#!SetModelHyperParameters
 	(seq
 		(if derived_auto_analyzed
 			(accum (assoc baseline_hyperparameter_map (assoc "derivedAutoAnalyzed" (true)) ))
 		)
 
-		(if (not (contains_value !hyperparameterParamPaths (list action_feature context_features_key robust_mode weight_feature)) )
+		(declare (assoc
+			target_mode
+				(if action_feature
+					["targeted" action_feature]
+					["targetless"]
+				)
+			; param paths are: [targeted/less [action_feature] context_key weight_feature]
+			context_key_index (if action_feature 2 1)
+		))
+
+		(if (not (contains_value !hyperparameterParamPaths (append target_mode context_features_key weight_feature) ) )
 			(let
 				(assoc
-					;check if any hyperparameters exist that also match this action_feature robust_mode and weight_feature
+					;check if any hyperparameters exist that also match this action_feature and weight_feature
 					;if any exist that were derived_auto_analyzed, remove them because that means these new hyperparameters supercede them
 					old_params_key_to_remove
 						(first (filter
 							(lambda (and
 								(get !hyperparameterMetadataMap (append (current_value) "derivedAutoAnalyzed"))
-								(= (remove (current_value) 1) (list action_feature robust_mode weight_feature))
+								;check if it matches with removed context key
+								(= (remove (current_value) context_key_index) (append target_mode weight_feature) )
 							))
 							!hyperparameterParamPaths
 						))
@@ -247,22 +259,30 @@
 						))
 
 						;remove the old context features set
-						(accum_to_entities (assoc
+						(assign_to_entities (assoc
 							!hyperparameterMetadataMap
-								(associate
-									action_feature
-										(remove (get !hyperparameterMetadataMap action_feature) (get old_params_key_to_remove 1))
+								(set
+									!hyperparameterMetadataMap
+									target_mode
+									(remove (get !hyperparameterMetadataMap target_mode) (get old_params_key_to_remove context_key_index))
 								)
-							!hyperparameterParamPaths (list (list action_feature context_features_key robust_mode weight_feature))
+							!hyperparameterParamPaths (list (append target_mode context_features_key weight_feature))
 						))
 					)
 
 					;else add the new path
 					(accum_to_entities (assoc
-						!hyperparameterParamPaths (list (list action_feature context_features_key robust_mode weight_feature))
+						!hyperparameterParamPaths (list (append target_mode context_features_key weight_feature))
 					))
 				)
 			)
+		)
+
+		;add subtrainee ID
+		(if deviation_subtrainee_name
+			(assign (assoc
+				baseline_hyperparameter_map (append baseline_hyperparameter_map {"subtraineeName" deviation_subtrainee_name})
+			))
 		)
 
 		(if (= (get baseline_hyperparameter_map ["paramPath" 0]) ".default")
@@ -468,12 +488,13 @@
 
 	#!GetHyperparameters
 	(declare
-		(assoc
-			mode "robust"
-			weight_feature ".none"
-		)
+		(assoc weight_feature ".none")
 
-		(if (= 0 (size !hyperparameterParamPaths))
+		;if only one set of analyzed params, return them
+		(if (= 1 (size !hyperparameterParamPaths))
+			(conclude (get !hyperparameterMetadataMap (first !hyperparameterParamPaths)))
+
+			(= 0 (size !hyperparameterParamPaths))
 			(seq
 				(if (and (not !autoAnalyzeEnabled ) (>= (call !GetNumTrainingCases) 2))
 					(accum (assoc
@@ -488,10 +509,6 @@
 				;if no params, use defaults
 				(conclude !defaultHyperparameters)
 			)
-
-			(= 1 (size !hyperparameterParamPaths))
-			;if only one set of analyzed params, return them
-			(conclude (get !hyperparameterMetadataMap (first !hyperparameterParamPaths)))
 		)
 
 		;there are multiple sets of analyze params, we must determine the best
@@ -505,103 +522,63 @@
 				)
 		))
 
-
-		;determine value for feature
-		(if (or (= (null) feature) (not (contains_index !hyperparameterMetadataMap feature)))
-			(assign (assoc
-				feature
-					(if (contains_index !hyperparameterMetadataMap ".targetless")
-						".targetless"
+		;if feature is specified as "", this will default to ["targetless"] since "" can't be a targeted action feature
+		(declare (assoc
+			target_mode
+				(if (or (= (null) feature) (not (contains_index !hyperparameterMetadataMap ["targeted" feature])) )
+					(if (contains_index !hyperparameterMetadataMap "targetless")
+						["targetless"]
 
 						;else just use one of the targeted analyzed hyperparam sets
-						(first (indices !hyperparameterMetadataMap))
+						["targeted" (first (indices (get !hyperparameterMetadataMap "targeted")))]
 					)
-			))
-		)
+
+					["targeted" feature]
+				)
+		))
+
 
 		;if we have completely correct HPs, return them
-		(if (contains_index !hyperparameterMetadataMap (list feature context_key mode weight_feature))
-			(conclude (get !hyperparameterMetadataMap (list feature context_key mode weight_feature)) )
-
-			(declare (assoc other_mode (if (= mode "robust") "full" "robust") ))
-		)
-
-		;if we have the correct HPs, with the alternate mode, return them
-		(if (contains_index !hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
-			(conclude (get !hyperparameterMetadataMap (list feature context_key other_mode weight_feature)) )
+		(if (contains_index !hyperparameterMetadataMap (append target_mode context_key weight_feature))
+			(conclude (get !hyperparameterMetadataMap (append target_mode context_key weight_feature)) )
 		)
 
 		;we don't have the exact HPs, determine best context_key
 		(let
 			(assoc
-				;sort context keys in order of increasing length
+				;sort context keys in order of decreasing length
 				context_key_options
 					(sort
-						(lambda (> (size (current_value)) (size (current_value 1))))
-						(indices (get !hyperparameterMetadataMap feature) )
+						(lambda (< (size (current_value)) (size (current_value 1))))
+						(indices (get !hyperparameterMetadataMap target_mode) )
 					)
-
-				correct_mode (false)
-				correct_weight (false)
-				iterator 0
 			)
 
 			;naively set the context to the longest option
-			(assign (assoc context_key (last context_key_options) ))
+			(assign (assoc context_key (first context_key_options) ))
 
 
-			(while (< iterator (size context_key_options))
-				(assign (assoc candidate_context_key (get context_key_options iterator) ))
+			(while (< (current_index) (size context_key_options))
+				(assign (assoc candidate_context_key (get context_key_options (current_index 1)) ))
 
-				(if (contains_index !hyperparameterMetadataMap (list feature candidate_context_key mode weight_feature))
-					;correct mode and weight
-					(assign (assoc
-						context_key candidate_context_key
-						iterator (size context_key_options)
-						correct_mode (true)
-						correct_weight (true)
-					))
-
-					(contains_index !hyperparameterMetadataMap (list feature candidate_context_key other_mode weight_feature))
-					;incorrect mode, correct weight
-					(if (not correct_weight)
-						(assign (assoc
-							context_key candidate_context_key
-							correct_mode (true)
-							correct_weight (false)
-						))
+				(if (contains_index !hyperparameterMetadataMap (append target_mode candidate_context_key weight_feature))
+					(conclude
+						(assign (assoc context_key candidate_context_key))
 					)
 
-					(contains_index !hyperparameterMetadataMap (list feature candidate_context_key mode ".none"))
-					;correct mode, default weight
-					(if (and (not correct_mode) (not correct_weight))
-						(assign (assoc
-							context_key candidate_context_key
-							correct_mode (true)
-							correct_weight (false)
-						))
-					)
+					(contains_index !hyperparameterMetadataMap (append target_mode candidate_context_key ".none"))
+					(assign (assoc context_key candidate_context_key ))
 				)
-
-				(accum (assoc iterator 1 ))
 			)
 		)
 
-		;if we have the correct mode and weight for the action and context, return it
-		(if (contains_index !hyperparameterMetadataMap (list feature context_key mode weight_feature))
-			(get !hyperparameterMetadataMap (list feature context_key mode weight_feature))
+		;if we have the correct weight for the action and context, return it
+		(if (contains_index !hyperparameterMetadataMap (append target_mode context_key weight_feature))
+			(get !hyperparameterMetadataMap (append target_mode context_key weight_feature))
 
-			;if we have the correct weight for the action and context, return it
-			(contains_index !hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
-			(get !hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
-
-			;only correct mode, no case weight
-			(contains_index !hyperparameterMetadataMap (list feature context_key mode ".none"))
-			(get !hyperparameterMetadataMap (list feature context_key mode ".none"))
-
-			;in correct mode, no case weight, just feature is right basically
-			(contains_index !hyperparameterMetadataMap (list feature context_key other_mode ".none"))
-			(get !hyperparameterMetadataMap (list feature context_key other_mode ".none"))
+			;no case weight
+			(contains_index !hyperparameterMetadataMap (append target_mode context_key ".none"))
+			(get !hyperparameterMetadataMap (append target_mode context_key ".none"))
 
 			;else the case_weight and ".none" isn't in the map, return the default params
 			!defaultHyperparameters
@@ -622,7 +599,7 @@
 		; 	type "assoc"
 		;	additional_indices (false)
 		; 	indices {
-		; 		"hyperparameter_map" {any_of [{ref "HyperparameterMap"} {ref "HyperparameterMapTree"}] description "The full map of hyperparameters or a specific map of hyperparameters if any parameters were given"}
+		; 		"hyperparameter_map" {any_of [{ref "HyperparameterMap"} {ref "HyperparameterMapFull"}] description "The full map of hyperparameters or a specific map of hyperparameters if any parameters were given"}
 		; 		"default_hyperparameter_map" {ref "HyperparameterMap" description "The map of default hyperparameters"}
 		; 		"auto_analyze_enabled" {type "boolean" description "Flag indicating of auto-analysis is enabled."}
 		; 		"analyze_threshold" {type "number" description "The number of cases at which the auto-analysis is triggered."}
@@ -631,14 +608,13 @@
 		; }
 		(assoc
 			;{type "string"}
-			;the target feature of the desired hyperparameters
+			;the target feature of the desired hyperparameters, when specified as a feature name, outputs the matching "targeted" hyperparameters.
+			;	When empty string "" will output "targetless" hyperparameters. When unspecified defaults to whatever hyperparameters were analyzed,
+			;	prioritizing "targetless" hyperparameters if multiple parameters exist.
 			action_feature (null)
 			;{type "list" values "string"}
 			;the set of context features used for the desired hyperparameters
 			context_features (null)
-			;{type "string" enum ["robust" "full"]}
-			;the method of calculation used to find the desired hyperparameters
-			mode (null)
 			;{type "string"}
 			;the weight feature used in the calculation of the desired hyperparameters
 			weight_feature (null)
@@ -649,7 +625,7 @@
 			internal_parameters_map
 				(assoc
 					"hyperparameter_map"
-						(if (= (null) action_feature context_features mode weight_feature)
+						(if (= (null) action_feature context_features weight_feature)
 							!hyperparameterMetadataMap
 
 							;else one of these parameters were specified
@@ -659,10 +635,9 @@
 										feature action_feature
 										context_features context_features
 									)
-									;don't pass mode or weight_feature in if they weren't specified,
+									;don't pass weight_feature in if it wasn't specified,
 									;allowing GetHyperparameters to use its defaults
-									(if mode (assoc mode mode) (assoc))
-									(if weight_feature (assoc weight_feature weight_feature) (assoc))
+									(if weight_feature (assoc weight_feature weight_feature) {})
 								)
 							)
 						)
@@ -690,12 +665,12 @@
 	#set_params
 	(declare
 		(assoc
-			;{ref "HyperparameterMapTree"}
-			;must have at least an action feature (e.g., .targetless) -> a contexts key -> robust -> k, p and dt provided.
+			;{ref "HyperparameterMapFull"}
+			;must have at least an target_mode (e.g., "targetless") -> a contexts key -> weight feature -> k, p and dt provided.
 			;	example:
 			;   {
-			;	  	".targetless" { "featureA.featureB.": { "robust" : { "k" : number, "p" : number, "dt": number }}},
-			;		"featureA" : { "featureB.featureC.": { "full" : { "k" : number, "p" : number, "dt": number }}},
+			;	  	"targetless" { "featureA.featureB.": { ".none" : { "k" : number, "p" : number, "dt": number }}},
+			;		"targeted" : { "featureA" : { "featureB.featureC.": { ".none" : { "k" : number, "p" : number, "dt": number }}}},
 			;			...
 			;	}
 			hyperparameter_map (null)
@@ -715,23 +690,11 @@
 		)
 		(call !ValidateParameters)
 
-		(declare (assoc
-			;local var
-			bad_param (false)
-		))
 
 		(if (!= (null) default_hyperparameter_map)
-			(if (or
-					(not (contains_index default_hyperparameter_map "p"))
-					(not (contains_index default_hyperparameter_map "k"))
-					(not (contains_index default_hyperparameter_map "dt"))
-				)
-				(assign (assoc bad_param (true) ))
-
-				(seq
-					(accum (assoc default_hyperparameter_map (assoc "paramPath" (list ".default")) ))
-					(assign_to_entities (assoc !defaultHyperparameters default_hyperparameter_map) )
-				)
+			(seq
+				(accum (assoc default_hyperparameter_map {"paramPath" [".default"]} ))
+				(assign_to_entities (assoc !defaultHyperparameters default_hyperparameter_map) )
 			)
 		)
 
@@ -739,61 +702,37 @@
 		;iterate over action features
 		(if (!= (null) hyperparameter_map)
 			(let
-				(assoc param_paths (list))
-				(map
-					(lambda (if
-						(= 0 (size (current_value)))
-						(assign (assoc bad_param (true)))
-						;else iterate over context feature keys
-						(map
-							(lambda (if
-								(= 0 (size (current_value)))
-								(assign (assoc bad_param (true)))
-								;else iterate over robust / full
-								(map
-									(lambda (if
-										(= 0 (size (current_value)))
-										(assign (assoc bad_param (true)))
-										;else iterate over case weights
-										(map
-											(lambda
-												(if (or
-														(not (contains_index (current_value) "p"))
-														(not (contains_index (current_value) "k"))
-														(not (contains_index (current_value) "dt"))
-													)
-													(assign (assoc bad_param (true)))
+				(assoc
+					param_paths []
+					keys []
+				)
 
-													;else this HP assoc is good enough
-													(assign (assoc param_paths (append param_paths (list (list (current_index 6) (current_index 5) (current_index 4) (current_index 3))) ) ))
-												)
-											)
-											(current_value)
-										)
-									))
-									(current_value)
-								)
+				;populate all provided param_paths from the specified hyperparameter_map by appending all the indices recursively
+				#!RecursivelyAccumulateParamPaths
+				(map
+					(lambda
+						(if (and
+								(contains_index (current_value) "k")
+								(contains_index (current_value) "p")
+								(contains_index (current_value) "dt")
+							)
+							(accum (assoc param_paths [(append keys (current_index 2))] ))
+
+							(call !RecursivelyAccumulateParamPaths (assoc
+								keys (append keys (current_index 1))
+								hyperparameter_map (current_value 1)
 							))
-							(current_value)
 						)
-					))
+					)
 					hyperparameter_map
 				)
-				(if (not bad_param)
-					(assign_to_entities (assoc
-						!hyperparameterMetadataMap hyperparameter_map
-						!hyperparameterParamPaths param_paths
-					))
-				)
+
+				(assign_to_entities (assoc
+					!hyperparameterMetadataMap hyperparameter_map
+					!hyperparameterParamPaths param_paths
+				))
 			)
 		)
-
-		;return failure, invalid hyperparameter_map passed in
-		(if bad_param (conclude
-			(call !Return (assoc
-				errors (list "Failed to set parameters: invalid parameters specified.")
-			))
-		))
 
 		(assign_to_entities (assoc
 			!autoAnalyzeEnabled auto_analyze_enabled
