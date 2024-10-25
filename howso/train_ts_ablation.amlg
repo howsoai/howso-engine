@@ -9,7 +9,7 @@
 		(declare (assoc
 			one_id (= 1 (size id_indices))
 			id_index (first id_indices)
-			needs_sorting (false)
+			needs_grouping (false)
 		))
 
 		(if one_id
@@ -46,7 +46,7 @@
 							;new ids should still be in unique_ids_set, but if they are not they've been encountered before
 							(if (not (contains_index (previous_result 0 (true)) previous_id))
 								(conclude (conclude
-									(assign (assoc needs_sorting (true) ))
+									(assign (assoc needs_grouping (true) ))
 								))
 							)
 
@@ -95,7 +95,7 @@
 							;new ids should still be in unique_ids_list, but if they are not they've been encountered before
 							(if (not (contains_value (previous_result 0 (true)) previous_ids))
 								(conclude (conclude
-									(assign (assoc needs_sorting (true) ))
+									(assign (assoc needs_grouping (true) ))
 								))
 							)
 
@@ -113,22 +113,19 @@
 			)
 		)
 
-		;output true if data needs sorting
-		needs_sorting
+		;output true if data needs grouping
+		needs_grouping
 	)
 
 
+	;hepler method
+	;uses cases and id_indices to output cases grouped by ids in columns specified by id_indices
 	#!GroupDataByIndices
-	(declare
-		(assoc
-			data []
-			id_indices [0]
-		)
-
+	(seq
 		(declare (assoc
 			unique_ids_list
 				(values
-					(map (lambda (unzip (current_value) id_indices)) data)
+					(map (lambda (unzip (current_value) id_indices)) cases)
 					(true)
 				)
 		))
@@ -139,7 +136,7 @@
 					(assoc ids (current_value 1))
 					(filter
 						(lambda (= ids (unzip (current_value) id_indices)))
-						data
+						cases
 					)
 				))
 				unique_ids_list
@@ -147,32 +144,41 @@
 		)
 	)
 
-	#!TrainGroupedByIds
-	(declare
-		(assoc
-			data []
-			id_indices [0]
-		)
-
+	#!TrainTimeSeriesAblation
+	(seq
+		(declare (assoc
+			feature_index_map (zip feature (indices features))
+		))
 
 		(declare (assoc
 			lag_features
 				(filter
 					(lambda (and
-						(= "lag"  (get !featureAttributes (list (current_value 1) "ts_type")) )
-						(= "custom" (get !featureAttributes (list (current_value 1) "auto_derive_on_train" "derive_type")) )
+						(= "lag"  (get !featureAttributes [ (current_value 1) "ts_type"]) )
+						(= "custom" (get !featureAttributes [ (current_value 1) "auto_derive_on_train" "derive_type"]) )
 					))
 					derived_features
 				)
 			progress_features [".series_progress" ".series_index" ".series_progress_delta"]
 			ts_series_length_limit (retrieve_from_entity "!tsSeriesLimitLength")
-			time_feature_index (get (zip features (indices features)) !tsTimeFeature)
+			time_feature_index (get feature_index_map !tsTimeFeature)
+			id_features (get !tsModelFeaturesMap "series_id_features")
+			id_indices (unzip feature_index_map (get !tsModelFeaturesMap "series_id_features"))
 			original_features features
 		))
 		(declare (assoc
-			series_id_features (get !featureAttributes (list (first lag_features) "auto_derive_on_train" "series_id_features"))
-			series_ordered_by_features (get !featureAttributes (list (first lag_features) "auto_derive_on_train" "ordered_by_features"))
+			series_id_features (get !featureAttributes [(first lag_features) "auto_derive_on_train" "series_id_features"])
+			series_ordered_by_features (get !featureAttributes [(first lag_features) "auto_derive_on_train" "ordered_by_features"])
+			needs_grouping
+				(call !DoesDataNeedGroupingById (assoc
+					data cases
+					id_indices id_indices
+				))
 		))
+
+		(if needs_grouping
+			(assign (assoc cases (call !GroupDataByIndices) ))
+		)
 
 		;the non-lag 'custom' derivation type features below
 		(assign (assoc
@@ -192,18 +198,18 @@
 			previous_ids []
 			start_index 0
 			end_index 0
-			num_rows (size data)
+			num_rows (size cases)
 		))
 
 		(while (< (current_index) num_rows)
 			(if (= 0 (current_index))
-				(assign (assoc previous_ids (unzip (get data (current_index 1)) id_indices) ))
+				(assign (assoc previous_ids (unzip (get cases (current_index 1)) id_indices) ))
 			)
 
 			;encountering next id or at end of all cases, train on the previous list of cases
 			(if
 				(or
-					(!= previous_ids (unzip (get data (current_index)) id_indices) )
+					(!= previous_ids (unzip (get cases (current_index)) id_indices) )
 					(= (current_index) (- num_rows 1))
 				)
 				(let
@@ -218,11 +224,11 @@
 					)
 
 					(call !TrainTimeSeriesWithAblation (assoc
-						series_data (unzip data (range start_index end_index))
+						data (unzip cases (range start_index end_index))
 					))
 
 					(assign (assoc
-						previous_ids (unzip (get data (current_index 1)) id_indices)
+						previous_ids (unzip (get cases (current_index 1)) id_indices)
 						start_index (current_index 1)
 					))
 				)
@@ -233,6 +239,47 @@
 	;derive then ablate then train
 	#!TrainTimeSeriesWithAblation
 	(seq
+
+		;check if this series has already been trained, if so, pull those cases and prepend to these
+		(let
+			(assoc
+				id_values (unzip (first data) id_indices)
+			)
+
+			(declare (assoc
+				trained_series_cases
+					(contained_entities
+						(apply "append"
+							(map
+								(lambda
+									[(query_equals
+										(current_value 1)
+										(if (contains_index !numericNominalFeaturesMap (current_value 1))
+											(+ (get id_values (current_index 1)))
+											(get id_values (current_index 1))
+										)
+									)]
+								)
+								id_features
+							)
+						)
+					)
+			))
+
+			;existing cases for this series exist, prepend them to data
+			(if (size trained_series_cases)
+				(assign (assoc
+					data
+						(append
+							(map
+								(lambda (retrieve_from_entity (current_value) features))
+								trained_series_cases
+							)
+							data
+						)
+				))
+			)
+		)
 
 		;now that we know how long each new series is, ensure that ts_series_length_limit is e*(longest series)
 		(if (> (* 2.718281828459 (size data)) ts_series_length_limit)
@@ -287,10 +334,10 @@
 				)
 		))
 
-		;ablate todo
+		;ablate TODO
 		data
 
-		;train todo
+		;train TODO
 	)
 
 	#!DeriveLagFeaturesForData
