@@ -1,0 +1,371 @@
+(null
+	#!DoesDataNeedGroupingById
+	(declare
+		(assoc
+			data []
+			id_indices [0]
+		)
+
+		(declare (assoc
+			one_id (= 1 (size id_indices))
+			id_index (first id_indices)
+			needs_sorting (false)
+		))
+
+		(if one_id
+			(let
+				(assoc
+					unique_ids_set
+						(if one_id
+							(zip (map
+								(lambda (get (current_value) id_index) )
+								data
+							))
+						)
+					previous_id (null)
+				)
+
+				(while (< (current_index) (size data))
+					;first row sets previous_id and unique_ids_set into (previous_result)
+					(if (= 0 (current_index))
+						(seq
+							(assign (assoc
+								previous_id (get data [(current_index 2) id_index])
+							))
+							(remove unique_ids_set previous_id)
+						)
+
+						;if the current id doesn't match previous_id, check to see if it has
+						;already been encountered. if so, the data is out of order
+						(!= previous_id (get data [(current_index 1) id_index]))
+						(seq
+							(assign (assoc
+								previous_id (get data [(current_index 2) id_index])
+							))
+
+							;new ids should still be in unique_ids_set, but if they are not they've been encountered before
+							(if (not (contains_index (previous_result 0 (true)) previous_id))
+								(conclude (conclude
+									(assign (assoc needs_sorting (true) ))
+								))
+							)
+
+							;id has not been encountered before, remove it from unique_ids_set
+							(remove (previous_result) previous_id)
+						)
+
+						;else no change to unique_ids_set
+						(previous_result)
+					)
+				)
+			)
+
+			;else multiple ids, less efficient
+			(let
+				(assoc
+					unique_ids_list
+						(values
+							(map (lambda (unzip (current_value) id_indices)) data)
+							(true)
+						)
+					previous_ids []
+				)
+
+				(while (< (current_index) (size data))
+					;first row sets previous_id and unique_ids_list into (previous_result)
+					(if (= 0 (current_index))
+						(seq
+							(assign (assoc
+								previous_ids (unzip (get data (current_index 1)) id_indices)
+							))
+							(filter
+								(lambda (!= (current_value) previous_ids))
+								unique_ids_list
+							)
+						)
+
+						;if the current ids don't match previous_ids, check to see if they have
+						;already been encountered. if so, the data is out of order
+						(!= previous_ids (unzip (get data (current_index)) id_indices) )
+						(seq
+							(assign (assoc
+								previous_ids (unzip (get data (current_index 1)) id_indices)
+							))
+
+							;new ids should still be in unique_ids_list, but if they are not they've been encountered before
+							(if (not (contains_value (previous_result 0 (true)) previous_ids))
+								(conclude (conclude
+									(assign (assoc needs_sorting (true) ))
+								))
+							)
+
+							;id has not been encountered before, remove it from unique_ids_list
+							(filter
+								(lambda (!= (current_value) previous_ids))
+								(previous_result)
+							)
+						)
+
+						;else no change to unique_ids_list
+						(previous_result)
+					)
+				)
+			)
+		)
+
+		;output true if data needs sorting
+		needs_sorting
+	)
+
+
+	#!GroupDataByIndices
+	(declare
+		(assoc
+			data []
+			id_indices [0]
+		)
+
+		(declare (assoc
+			unique_ids_list
+				(values
+					(map (lambda (unzip (current_value) id_indices)) data)
+					(true)
+				)
+		))
+
+		(apply "append"
+			(map
+				(lambda (let
+					(assoc ids (current_value 1))
+					(filter
+						(lambda (= ids (unzip (current_value) id_indices)))
+						data
+					)
+				))
+				unique_ids_list
+			)
+		)
+	)
+
+	#!TrainGroupedByIds
+	(declare
+		(assoc
+			data []
+			id_indices [0]
+		)
+
+
+		(declare (assoc
+			lag_features
+				(filter
+					(lambda (and
+						(= "lag"  (get !featureAttributes (list (current_value 1) "ts_type")) )
+						(= "custom" (get !featureAttributes (list (current_value 1) "auto_derive_on_train" "derive_type")) )
+					))
+					derived_features
+				)
+			progress_features [".series_progress" ".series_index" ".series_progress_delta"]
+			ts_series_length_limit (retrieve_from_entity "!tsSeriesLimitLength")
+			time_feature_index (get (zip features (indices features)) !tsTimeFeature)
+			original_features features
+		))
+		(declare (assoc
+			series_id_features (get !featureAttributes (list (first lag_features) "auto_derive_on_train" "series_id_features"))
+			series_ordered_by_features (get !featureAttributes (list (first lag_features) "auto_derive_on_train" "ordered_by_features"))
+		))
+
+		;the non-lag 'custom' derivation type features below
+		(assign (assoc
+			derived_features
+				(filter
+					(lambda
+						(and
+							(not (contains_value lag_features (current_value)))
+							(= "custom" (get !featureAttributes [(current_value 1) "auto_derive_on_train" "derive_type"]) )
+						)
+					)
+					derived_features
+				)
+		))
+
+		(declare (assoc
+			previous_ids []
+			start_index 0
+			end_index 0
+			num_rows (size data)
+		))
+
+		(while (< (current_index) num_rows)
+			(if (= 0 (current_index))
+				(assign (assoc previous_ids (unzip (get data (current_index 1)) id_indices) ))
+			)
+
+			;encountering next id or at end of all cases, train on the previous list of cases
+			(if
+				(or
+					(!= previous_ids (unzip (get data (current_index)) id_indices) )
+					(= (current_index) (- num_rows 1))
+				)
+				(let
+					(assoc
+						end_index
+							;if last index, should be as-is
+							(if (= (current_index 1) (- num_rows 1))
+								(current_index 1)
+								(- (current_index 1) 1)
+							)
+						features original_features
+					)
+
+					(call !TrainTimeSeriesWithAblation (assoc
+						series_data (unzip data (range start_index end_index))
+					))
+
+					(assign (assoc
+						previous_ids (unzip (get data (current_index 1)) id_indices)
+						start_index (current_index 1)
+					))
+				)
+			)
+		)
+	)
+
+	;derive then ablate then train
+	#!TrainTimeSeriesWithAblation
+	(seq
+
+		;now that we know how long each new series is, ensure that ts_series_length_limit is e*(longest series)
+		(if (> (* 2.718281828459 (size data)) ts_series_length_limit)
+			(assign (assoc ts_series_length_limit (* 2.718281828459 (size data)) ))
+		)
+		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
+		(if (> ts_series_length_limit !tsSeriesLimitLength)
+			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))
+		)
+
+		;sort the data according to the specified features if ordering has been provided
+		(if (size series_ordered_by_features)
+			(assign (assoc
+				data
+					(call !MultiSortList (assoc
+						data data
+						column_order_indices (range 0 (size series_ordered_by_features))
+					))
+			))
+		)
+
+		;derive lag features and append to data
+		(call !DeriveLagFeaturesForData)
+
+		;derive custom code features
+		(declare (assoc
+			derived_custom_values_lists (call !DeriveCustomFeaturesForData)
+		))
+
+		;derive progress features
+		(declare (assoc
+			derived_progress_values_lists (call !DeriveProgressFeaturesForData)
+		))
+
+
+		;append all the custom and progress values to data
+		(assign (assoc
+			features (append features derived_features progress_features )
+			data
+				(map
+					(lambda (let
+						(assoc row_index (current_index 1))
+						(append
+							(current_value)
+							;for each derived feature, grab the corresponding value to the row being appended
+							(map (lambda (get (current_value) row_index)) derived_custom_values_lists)
+							;for each of the three progress features, grab the tuple of progress values
+							(get derived_progress_values_lists row_index)
+						)
+					))
+					data
+				)
+		))
+
+		;ablate todo
+		data
+
+		;train todo
+	)
+
+	#!DeriveLagFeaturesForData
+	(seq
+		(declare (assoc
+			derived_lag_values_lists
+				(call !AddDerivedIndependentCodeFeatures (assoc
+					derived_features lag_features
+					features features
+					series_data data
+				))
+		))
+
+		(assign (assoc
+			feature (append feature lag_features)
+			data
+				(map
+					(lambda
+						(append (first (current_value)) (last (current_value)))
+					)
+					data
+					derived_lag_values_lists
+				)
+		))
+	)
+
+	#!DeriveCustomFeaturesForData
+	;list of each feature's list of derived values
+	(map
+		(lambda
+			(call !AddDerivedCodeFeature (assoc
+				feature (current_value 1)
+				features features
+				series_data data
+			))
+		)
+		derived_features
+	)
+
+
+	;all the time values
+	#!DeriveProgressFeaturesForData
+	(declare
+		(assoc
+			sorted_time_values (map (lambda (get (current_value) time_feature_index)) data)
+		)
+		(declare (assoc
+			range (- (last sorted_time_values) (first sorted_time_values))
+			previous_value (first sorted_time_values)
+			first_value (first sorted_time_values)
+			fixed_delta (/ 1 (- (size sorted_time_values) 1))
+		))
+
+		;output a list of tuples [ progress%, index, delta_to_previous ] for each row in the data
+		(map
+			(lambda (let
+				(assoc
+					progress (/ (- (current_value 1) first_value) range)
+					;delta is the % change,  don't allow 0, use the fixed delta instead
+					delta (or (/ (- (current_value 1) previous_value) range) fixed_delta)
+				)
+
+				;if the series is of length 1, set progress and delta to be 1 and prevent a divide by 0
+				(if (= 0 range)
+					(assign (assoc
+						progress 1
+						delta 1
+					))
+				)
+				(assign (assoc previous_value (current_value 1)))
+				;output the tuple
+				[progress (current_index 1) delta]
+			))
+
+			sorted_time_values
+		)
+	)
+)
