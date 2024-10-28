@@ -120,7 +120,7 @@
 
 	;hepler method
 	;uses cases and id_indices to output cases grouped by ids in columns specified by id_indices
-	#!GroupDataByIndices
+	#!GroupDataByIds
 	(seq
 		(declare (assoc
 			unique_ids_list
@@ -147,7 +147,7 @@
 	#!TrainTimeSeriesAblation
 	(seq
 		(declare (assoc
-			feature_index_map (zip feature (indices features))
+			feature_index_map (zip features (indices features))
 		))
 
 		(declare (assoc
@@ -177,7 +177,7 @@
 		))
 
 		(if needs_grouping
-			(assign (assoc cases (call !GroupDataByIndices) ))
+			(assign (assoc cases (call !GroupDataByIds) ))
 		)
 
 		;the non-lag 'custom' derivation type features below
@@ -193,6 +193,21 @@
 					derived_features
 				)
 		))
+
+		(if encode_features_on_train
+			(assign (assoc
+				cases
+					(map
+						(lambda
+							(call !ConvertFromInput (assoc
+								feature_values (current_value 1)
+								features features
+							))
+						)
+						cases
+					)
+			))
+		)
 
 		(declare (assoc
 			previous_ids []
@@ -240,39 +255,134 @@
 	#!TrainTimeSeriesWithAblation
 	(seq
 
-		;check if this series has already been trained, if so, pull those cases and prepend to these
-		(let
-			(assoc
-				id_values (unzip (first data) id_indices)
-			)
+			;sort the data according to the specified features if ordering has been provided
+		(if (size series_ordered_by_features)
+			(assign (assoc
+				data
+					(call !MultiSortList (assoc
+						data data
+						column_order_indices (unzip feature_index_map series_ordered_by_features)
+					))
+			))
+		)
 
-			(declare (assoc
-				trained_series_cases
-					(contained_entities
-						(apply "append"
-							(map
-								(lambda
-									[(query_equals
-										(current_value 1)
-										(if (contains_index !numericNominalFeaturesMap (current_value 1))
-											(+ (get id_values (current_index 1)))
-											(get id_values (current_index 1))
-										)
-									)]
-								)
-								id_features
+		(declare (assoc
+			;series_index of each row, will be set to be non-zero if some series cases were already trained previously
+			previous_last_series_index 0
+			num_previous_cases 0
+			id_values (unzip (first data) id_indices)
+			has_previously_ablated_cases (false)
+			previous_range (null)
+		))
+
+		;check if this series has already been trained, if so, pull those cases and prepend to these
+		(declare (assoc
+			trained_series_case_ids
+				(contained_entities
+					(apply "append"
+						(map
+							(lambda
+								[(query_equals
+									(current_value 1)
+									(if (contains_index !numericNominalFeaturesMap (current_value 1))
+										(+ (get id_values (current_index 1)))
+										(get id_values (current_index 1))
+									)
+								)]
 							)
+							id_features
 						)
 					)
-			))
+				)
+			trained_series_cases []
+		))
 
-			;existing cases for this series exist, prepend them to data
-			(if (size trained_series_cases)
+		;if previously trained series cases exist for this series, prepend them to data
+		(if (size trained_series_case_ids)
+			(let
+				(assoc
+					features_indices (indices features)
+					prev_row_index 0
+				)
+
+				;overwrite trained_series_cases to contain each cases's feature values and all the progress_features values
+				(assign (assoc
+					trained_series_cases
+						(map
+							(lambda (retrieve_from_entity (current_value) (append features progress_features)) )
+							trained_series_case_ids
+						)
+					num_previous_cases (size trained_series_case_ids)
+					series_progress_feature_index (size features)
+					series_progress_index_feature_index (+ (size features) 1)
+				))
+
+
+				(declare (assoc
+					previous_range
+						(-
+							(get (last trained_series_cases) time_feature_index)
+							(get (first trained_series_cases) time_feature_index)
+						)
+					new_range
+						(-
+							(get (last data) time_feature_index)
+							(get (first data) time_feature_index)
+						)
+				))
+
+				(declare (assoc series_progress_ratio (/ previous_range new_range) ))
+
+				;recompute series progress for these existing cases and update them
+				(map
+					(lambda (let
+						(assoc
+							case_id (current_value1)
+							;.series_progress is the first feature in order after features, so its index is same as (size features)
+							series_progress_value (get trained_series_cases [(current_index 1) (size features)])
+						)
+
+						(accum_entity_roots
+							case_id
+							(zip_labels [".series_progress"] (* series_progress_value series_progress_ratio) )
+						)
+					))
+					trained_series_case_ids
+				)
+
+				(assign (assoc
+					previous_last_series_index (get (last trained_series_cases) series_progress_index_feature_index)
+				))
+
+				;previously trained series was ablated because the number of cases is less than the last series index
+				(if (<= (size trained_series_cases) previous_last_series_index)
+					(assign (assoc
+						trained_series_cases
+							;fill previously ablated cases with nulls
+							(range
+								(lambda
+									(if (= (current_index) (get trained_series_cases [prev_row_index series_progress_index_feature_index]))
+										(seq
+											(accum (assoc prev_row_index 1))
+											(get trained_series_cases [(- prev_row_index 1) series_progress_index_feature_index])
+										)
+
+										;else output (null)
+									)
+
+								)
+								0 series_continuation_index 1
+							)
+						has_previously_ablated_cases (true)
+					))
+				)
+
+				;prepend previously trained data to this new data
 				(assign (assoc
 					data
 						(append
 							(map
-								(lambda (retrieve_from_entity (current_value) features))
+								(lambda (unzip (current_value) features_indices))
 								trained_series_cases
 							)
 							data
@@ -288,17 +398,6 @@
 		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
 		(if (> ts_series_length_limit !tsSeriesLimitLength)
 			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))
-		)
-
-		;sort the data according to the specified features if ordering has been provided
-		(if (size series_ordered_by_features)
-			(assign (assoc
-				data
-					(call !MultiSortList (assoc
-						data data
-						column_order_indices (range 0 (size series_ordered_by_features))
-					))
-			))
 		)
 
 		;derive lag features and append to data
@@ -330,6 +429,7 @@
 							(get derived_progress_values_lists row_index)
 						)
 					))
+					;TODO; only grab original data indices from the end via (tail) ?
 					data
 				)
 		))
