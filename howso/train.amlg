@@ -433,7 +433,11 @@
 		)
 
 		;auto populate derived features if necessary
-		(if (> (size derived_features) 0)
+		(if (and
+				(> (size derived_features) 0)
+				;either non-time series or ablation was skipped and thus features were not derived yet
+				(or skip_ablation (= (null) !tsTimeFeature) )
+			)
 			(call !DeriveTrainFeatures (assoc
 				features features
 				;keep and derive only those features that are not in the features list
@@ -682,136 +686,140 @@
 		(call !TrainTimeSeriesAblation)
 
 		;else ablating cases during training
-		(let
-			(assoc
-				train_features
-					;if auto ablate is enabled, populate the weight feature for this case
-					(if !autoAblationEnabled
-						(append features (list !autoAblationWeightFeature))
-						features
+		(call !TrainCasesWithAblation)
+	)
+
+	#!TrainCasesWithAblation
+	(let
+		(assoc
+			train_features
+				;if auto ablate is enabled, populate the weight feature for this case
+				(if !autoAblationEnabled
+					(append features (list !autoAblationWeightFeature))
+					features
+				)
+		)
+
+		;if user explicitly specified to skip autoanalyze, send back "analyze" status so user knows an analyze is needed
+		(if skip_auto_analyze
+			(assign (assoc status_output "analyze"))
+		)
+
+		(declare (assoc
+			batch_data_mass_threshold 0
+			batch_data_mass 0
+			batch_size 0
+			input_case_index 0
+			output_case_ids []
+
+			;threshold-related variables
+			thresholds_enabled
+				(or
+					(size !autoAblationAbsThresholdMap)
+					(size !autoAblationDeltaThresholdMap)
+					(size !autoAblationRelThresholdMap)
+				)
+			prev_prediction_stats_map {}
+			new_prediction_stats_map {}
+			thresholds_satisfied (false)
+		))
+
+		;split by batches of cases until next analyze
+		(while (< input_case_index (size cases))
+
+			(if (and thresholds_enabled (not skip_ablation))
+				(seq
+					(assign (assoc
+						prev_prediction_stats_map new_prediction_stats_map
+					))
+					(assign (assoc
+						new_prediction_stats_map
+							(get
+								(call !CalculateFeatureResiduals (assoc
+									features features
+									weight_feature !autoAblationWeightFeature
+									use_case_weights (true)
+									compute_all_statistics (true)
+									store_values (false)
+								))
+								"prediction_stats"
+							)
+					))
+					(assign (assoc
+						thresholds_satisfied
+							(apply "or"
+								(values
+									(call !CheckThresholds (assoc
+										abs_threshold_map !autoAblationAbsThresholdMap
+										delta_threshold_map !autoAblationDeltaThresholdMap
+										rel_threshold_map !autoAblationRelThresholdMap
+										prev_prediction_stats_map prev_prediction_stats_map
+										new_prediction_stats_map new_prediction_stats_map
+									))
+								)
+							)
+					))
+				)
+			)
+
+			(assign (assoc
+				;always train a few extra cases since some are expected to be ablated
+				;to prevent this threshold value from dropping down to very small values
+				;but also limit to how much is trained at a time
+				batch_data_mass_threshold
+					(max
+						10
+						(min
+							(+ 10 (- !autoAnalyzeThreshold !dataMassChangeSinceLastAnalyze))
+							!ablationBatchSize
+						)
 					)
-			)
-
-			;if user explicitly specified to skip autoanalyze, send back "analyze" status so user knows an analyze is needed
-			(if skip_auto_analyze
-				(assign (assoc status_output "analyze"))
-			)
-
-			(declare (assoc
-				batch_data_mass_threshold 0
 				batch_data_mass 0
 				batch_size 0
-				input_case_index 0
-				output_case_ids []
-
-				;threshold-related variables
-				thresholds_enabled
-					(or
-						(size !autoAblationAbsThresholdMap)
-						(size !autoAblationDeltaThresholdMap)
-						(size !autoAblationRelThresholdMap)
-					)
-				prev_prediction_stats_map {}
-				new_prediction_stats_map {}
-				thresholds_satisfied (false)
 			))
 
-			;split by batches of cases until next analyze
-			(while (< input_case_index (size cases))
-
-				(if (and thresholds_enabled (not skip_ablation))
-					(seq
-						(assign (assoc
-							prev_prediction_stats_map new_prediction_stats_map
-						))
-						(assign (assoc
-							new_prediction_stats_map
-								(get
-									(call !CalculateFeatureResiduals (assoc
-										features features
-										weight_feature !autoAblationWeightFeature
-										use_case_weights (true)
-										compute_all_statistics (true)
-										store_values (false)
-									))
-									"prediction_stats"
-								)
-						))
-						(assign (assoc
-							thresholds_satisfied
-								(apply "or"
-									(values
-										(call !CheckThresholds (assoc
-											abs_threshold_map !autoAblationAbsThresholdMap
-											delta_threshold_map !autoAblationDeltaThresholdMap
-											rel_threshold_map !autoAblationRelThresholdMap
-											prev_prediction_stats_map prev_prediction_stats_map
-											new_prediction_stats_map new_prediction_stats_map
-										))
-									)
-								)
-						))
-					)
-				)
-
+			(while (and (< batch_data_mass batch_data_mass_threshold) (< (+ input_case_index (current_index)) (size cases)) )
 				(assign (assoc
-					;always train a few extra cases since some are expected to be ablated
-					;to prevent this threshold value from dropping down to very small values
-					;but also limit to how much is trained at a time
-					batch_data_mass_threshold
-						(max
-							10
-							(min
-								(+ 10 (- !autoAnalyzeThreshold !dataMassChangeSinceLastAnalyze))
-								!ablationBatchSize
+					batch_data_mass
+						(+
+							(or (previous_result 1) 0)
+							(if accumulate_weight_feature
+								(or (get cases [(+ input_case_index (current_index 2)) weight_feature_index ]) 1)
+								1
 							)
 						)
-					batch_data_mass 0
-					batch_size 0
+					batch_size (+ 1 (current_index 1))
 				))
-
-				(while (and (< batch_data_mass batch_data_mass_threshold) (< (+ input_case_index (current_index)) (size cases)) )
-					(assign (assoc
-						batch_data_mass
-							(+
-								(or (previous_result 1) 0)
-								(if accumulate_weight_feature
-									(or (get cases [(+ input_case_index (current_index 2)) weight_feature_index ]) 1)
-									1
-								)
-							)
-						batch_size (+ 1 (current_index 1))
-					))
-					batch_data_mass
-				)
-				(assign (assoc
-					output_case_ids
-						(call !TrainCasesWithAblation (assoc
-							cases (unzip cases (range input_case_index (+ input_case_index batch_size -1)) )
-							;ensure that starting training index value is updated for each batch
-							session_training_index (+ trained_instance_count input_case_index)
-						))
-				))
-
-				(if (and run_autoanalyze_check (not skip_auto_analyze))
-					(call !AutoAnalyzeIfNeeded)
-				)
-
-				(accum (assoc input_case_index batch_size ))
-
-				(if (> (current_index) 0)
-					(assign (assoc output_case_ids (append (previous_result 1) output_case_ids) ))
-				)
-
+				batch_data_mass
+			)
+			(assign (assoc
 				output_case_ids
+					(call !AblateCases (assoc
+						cases (unzip cases (range input_case_index (+ input_case_index batch_size -1)) )
+						;ensure that starting training index value is updated for each batch
+						session_training_index (+ trained_instance_count input_case_index)
+					))
+			))
+
+			(if (and run_autoanalyze_check (not skip_auto_analyze))
+				(call !AutoAnalyzeIfNeeded)
+			)
+
+			(accum (assoc input_case_index batch_size ))
+
+			(if (> (current_index) 0)
+				(assign (assoc output_case_ids (append (previous_result 1) output_case_ids) ))
 			)
 
 			output_case_ids
 		)
+
+		output_case_ids
 	)
 
+
 	;Helper method to train cases with an ablation check
-	#!TrainCasesWithAblation
+	#!AblateCases
 	(let
 		(assoc
 			indices_to_train

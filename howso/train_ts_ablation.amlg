@@ -214,6 +214,11 @@
 			start_index 0
 			end_index 0
 			num_rows (size cases)
+			output_case_ids []
+			;map of sorted case index -> original case index used to lookup which original rows were ablated after data is sorted
+			ablated_indices_map (null)
+			;number of cases to be trained from each series, accumulated to keep track of session training index
+			num_previously_trained_cases 0
 		))
 
 		(while (< (current_index) num_rows)
@@ -238,8 +243,14 @@
 						features original_features
 					)
 
-					(call !TrainTimeSeriesWithAblation (assoc
-						data (unzip cases (range start_index end_index))
+					;train one entire series at a time
+					(accum (assoc
+						output_case_ids
+							(call !TrainTimeSeriesWithAblation (assoc
+								data (unzip cases (range start_index end_index))
+								num_previously_trained_cases num_previously_trained_cases
+							))
+						num_previously_trained_cases (+ 1 (- end_index start_index))
 					))
 
 					(assign (assoc
@@ -249,27 +260,46 @@
 				)
 			)
 		)
+
+		;return trained case_ids
+		output_case_ids
 	)
 
-	;derive then ablate then train
+	;derive then train with ablation
 	#!TrainTimeSeriesWithAblation
 	(seq
 
-			;sort the data according to the specified features if ordering has been provided
+		;sort the data according to the specified features if ordering has been provided
 		(if (size series_ordered_by_features)
-			(assign (assoc
-				data
-					(call !MultiSortList (assoc
-						data data
-						column_order_indices (unzip feature_index_map series_ordered_by_features)
-					))
-			))
+			(seq
+				(assign (assoc
+					data
+						(call !MultiSortList (assoc
+							;set first column to be the original index of the data
+							data (map (lambda (append (current_index) (current_value))) data)
+							column_order_indices (unzip feature_index_map series_ordered_by_features)
+						))
+				))
+
+				;map of sorted index -> original index
+				(assign (assoc
+					ablated_indices_map
+						(zip
+							(indices data)
+							(map (lambda (first (current_value))) data)
+						)
+				))
+
+				;drop that first 'index' column
+				(assign (assoc
+					data (map (lambda (tail (current_value))) data)
+				))
+			)
 		)
 
 		(declare (assoc
 			;series_index of each row, will be set to be non-zero if some series cases were already trained previously
-			previous_last_series_index 0
-			;;;num_previous_cases 0
+			continue_series_index 0
 			id_values (unzip (first data) id_indices)
 			previous_range (null)
 		))
@@ -311,7 +341,6 @@
 							(lambda (retrieve_from_entity (current_value) (append features progress_features)) )
 							trained_series_case_ids
 						)
-					;;;num_previous_cases (size trained_series_case_ids)
 					series_progress_feature_index (size features)
 					series_progress_index_feature_index (+ (size features) 1)
 				))
@@ -352,12 +381,13 @@
 					trained_series_case_ids
 				)
 
+				;set continue_series_index to the would-be next index value
 				(assign (assoc
-					previous_last_series_index (get (last trained_series_cases) series_progress_index_feature_index)
+					continue_series_index (+ 1 (get (last trained_series_cases) series_progress_index_feature_index) )
 				))
 
-				;previously trained series was ablated because the number of cases is less than the last series index
-				(if (<= (size trained_series_cases) previous_last_series_index)
+				;previously trained series was ablated because the number of cases is less than the continue series index
+				(if (< (size trained_series_cases) continue_series_index)
 					(assign (assoc
 						trained_series_cases
 							;fill previously ablated cases with nulls
@@ -418,7 +448,7 @@
 			data
 				(map
 					(lambda (let
-						(assoc row_index (+ previous_last_series_index (current_index 1)))
+						(assoc row_index (+ continue_series_index (current_index 1)))
 						(append
 							(current_value)
 							;for each of the three progress features, grab the tuple of progress values
@@ -428,14 +458,15 @@
 
 					;since data is combined with all the previously trained cases,
 					;only use the non-trained data indices from the end
-					(tail data  (- previous_last_series_index))
+					(tail data (- continue_series_index))
 				)
 		))
 
-		;ablate TODO
-		data
-
-		;train TODO
+		;train and ablate cases and output created case ids
+		(call !TrainCasesWithAblation (assoc
+			cases data
+			trained_instance_count (+ trained_instance_count num_previously_trained_cases)
+		))
 	)
 
 	#!DeriveLagFeaturesForData
