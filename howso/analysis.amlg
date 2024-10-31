@@ -14,6 +14,45 @@
 		)
 	)
 
+	;Commit the result of a previous analyze call
+	#commit_analyze
+	(seq
+		(assoc
+			;{type "assoc"}
+			;parameters to the analyze call
+			saved_analyze_parameter_map (assoc)
+			;{type ["assoc", "null"]}
+			;new hyperparameters to store
+			default_hyperparameters (null)
+			;{type ["assoc", "null"]}
+			;extended hyperparameter metadata map
+			hyperparameter_metadata_map (null)
+		)
+		(assign_to_entities (assoc
+			!dataMassChangeSinceLastAnalyze 0.0
+			!expectedValuesMap (assoc)
+			!nominalClassProbabilitiesMap (assoc)
+			!cachedFeatureMinResidualMap (assoc)
+			!cachedFeatureHalfMinGapMap (assoc)
+			!featureNullRatiosMap (assoc)
+		))
+		(if (!= (null) saved_analyze_parameter_map)
+			(assign_to_entities (assoc
+				!savedAnalyzeParameterMap saved_analyze_parameter_map
+			))
+		)
+		(if (!= (null) default_hyperparameters)
+			(assign_to_entities (assoc
+				!defaultHyperparameters default_hyperparameters
+			))
+		)
+		(if (!= (null) hyperparameter_metadata_map)
+			(assign_to_entities (assoc
+				!hyperparameterMetadataMap hyperparameter_metadata_map
+			))
+		)
+		(accum_to_entities (assoc !revision 1))
+	)
 
 	;Analyzes the data to compute the appropriate statistics, uncertainties, and select parameters as appropriate.
 	;{long_running (true) statistically_idempotent (true)}
@@ -89,6 +128,9 @@
 			use_dynamic_deviations (false)
 			;{type "number" min 2}
 			dynamic_deviations_subtrainee_size 500
+			;{type "boolean"}
+			;when true, do analysis and return the results without updating the entity
+			readonly (false)
 		)
 
 		(call !ValidateParameters)
@@ -145,8 +187,8 @@
 		)
 
 		;save the parameters that analyze was called with
-		(assign_to_entities (assoc
-			!savedAnalyzeParameterMap
+		(declare (assoc
+			saved_analyze_parameter_map
 				(assoc
 					"context_features" context_features
 					"action_features" action_features
@@ -263,6 +305,10 @@
 		)
 
 		;only calculate feature residuals if they aren't being bypassed and haven't been calculated above
+		(declare (assoc
+			default_hyperparameters (null)
+			hyperparameter_metadata_map (null)
+		))
 		(if (and
 				(= (false) bypass_calculate_feature_residuals)
 				(or bypass_hyperparameter_analysis (!= "targetless" targeted_model))
@@ -298,10 +344,10 @@
 
 							(if (= (first (get hyperparam_map "paramPath")) ".default")
 								;updating default hyperparam set with featuredeviations
-								(assign_to_entities (assoc !defaultHyperparameters hyperparam_map) )
+								(assign (assoc default_hyperparameters hyperparam_map) )
 
 								;update the appropriate hyperparameter set
-								(assign_to_entities (assoc !hyperparameterMetadataMap (set !hyperparameterMetadataMap (get hyperparam_map "paramPath") hyperparam_map)) )
+								(assign (assoc hyperparameter_metadata_map (set !hyperparameterMetadataMap (get hyperparam_map "paramPath") hyperparam_map)) )
 							)
 						)
 					)
@@ -314,9 +360,23 @@
 			(call !RestoreHeldOutCases (assoc holdout_entity_name holdout_entity_name))
 		)
 
-		(accum_to_entities (assoc !revision 1))
-
-		(call !Return (assoc warnings (if (size analyze_warnings) (indices analyze_warnings)) ))
+		(let
+			(assoc
+				warnings (if (size analyze_warnings) (indices analyze_warnings))
+				payload (assoc 
+					saved_analyze_parameter_map saved_analyze_parameter_map
+					default_hyperparameters default_hyperparameters
+					hyperparameter_metadata_map hyperparameter_metadata_map
+				)
+			)
+			(if readonly
+				(call !Return (assoc warnings warnings payload payload))
+				(seq
+					(call commit_analyze payload)
+					(call !Return (assoc warnings warnings))
+				)
+			)
+		)
 	)
 
 	;helper method to run the targeted or targetless analyze
@@ -1507,5 +1567,4 @@
 		))
 		p_values
 	)
-
 )
