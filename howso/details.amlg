@@ -259,6 +259,10 @@
 			(call !ComputeBoundaryCases)
 		)
 
+		(if (get details "boundary_values")
+			(call !ComputeBoundaryValues)
+		)
+
 		;a dict of feature -> dict of local_min/local_max and input_case_value for features whose context values are outside the locals' min-max
 		(if (get details "outlying_feature_values")
 			(call !ComputeOutlyingFeatureValues)
@@ -836,5 +840,247 @@
 			(zip details)
 			["num_most_similar_cases" "num_most_similar_case_indices" "num_boundary_cases" "selected_prediction_stats"]
 		)
+	)
+
+	;Compute the values for context features that would perturb the prediction action values
+	#!ComputeBoundaryValues
+	(let
+		(assoc
+			;assoc of this react case
+			react_case (zip features (append context_values action_values))
+			context_feature_index_map (zip context_features (indices context_features))
+
+			;features to compute boundary values for
+			boundary_values_features (get details "boundary_values")
+
+			;TODO: not feasible long term, but for now assuming one action features
+			desired_action_value (get details "boundary_values_action_value")
+		)
+
+
+		(declare (assoc
+			boundary_values
+				(if desired_action_value
+					(seq
+						;flow where there is a specified action value
+						(zip boundary_values_features)
+					)
+
+
+					(seq
+						;flow where there must just be some difference in the action_value
+						(map
+							(lambda
+								(let
+									(assoc
+										query_feature (current_index 1)
+										query_feature_index (get context_feature_index_map (current_index 1))
+										remaining_context_features (filter (lambda (!= (current_index 2) (current_value))) context_features)
+										feature_bounds (get !featureBoundsMap (current_index 1))
+										new_action_values (null)
+
+										center (null)
+										left (null)
+										right (null)
+										lesser_boundary_value (null)
+										greater_boundary_value (null)
+									)
+
+									(if (contains_index !nominalsMap query_feature)
+										(seq
+											;nominals flow, try other classes and find the most similar class that results in a change?
+										)
+
+										(contains_index !ordinalNumericFeaturesSet query_feature)
+										(seq
+											;numeric ordinals land
+										)
+
+										(contains_index !editDistanceFeatureTypesMap query_feature)
+										(seq
+											;I want no part of this
+											(null)
+										)
+
+										;else will assume continuous... TODO: this probably isn't exactly correct, the not of all previous conditions might not imply its continuous
+										(seq
+											;continuous flow, try bounds and binary search between
+											(if (= 0 (size feature_bounds))
+												(assign (assoc
+													feature_bounds
+														(assoc
+															"min"
+																(retrieve_from_entity
+																	(contained_entities [
+																		(query_exists query_feature)
+																		(query_min query_feature 1)
+																	])
+																	query_feature
+																)
+															"max"
+																(retrieve_from_entity
+																	(contained_entities [
+																		(query_exists query_feature)
+																		(query_max query_feature 1)
+																	])
+																	query_feature
+																)
+														)
+												))
+											)
+
+											;try min bound?
+											(assign (assoc
+												new_action_values
+													(get
+														(call !ReactDiscriminative (assoc
+															action_features action_features
+															context_features context_features
+															context_values (set context_values query_feature_index (get feature_bounds "min"))
+															details {}
+															return_action_values_only (true)
+														))
+														"action_values"
+													)
+											))
+
+											;different predictions (with precise continuous values, this will likely always be true?)
+											(if (!= new_action_values action_values)
+												(seq
+													;but now binary search between min bound and context value
+													(assign (assoc
+														left (get feature_bounds "min")
+														center (/ (+ (get feature_bounds "min") (get context_values query_feature_index)) 2)
+														right (get context_values query_feature_index)
+													))
+
+													;binary search until within a residual
+													#!BinarySearchForBoundaryValue
+													(while
+														(>
+															(- right center)
+															; (get hyperparam_map ["featureResiduals" query_feature])
+															0.1
+														)
+														(assign (assoc
+															new_action_values
+																(get
+																	(call !ReactDiscriminative (assoc
+																		action_features action_features
+																		context_features context_features
+																		context_values (set context_values query_feature_index center)
+																		details {}
+																		return_action_values_only (true)
+																	))
+																	"action_values"
+																)
+														))
+
+														(if (= new_action_values action_values)
+															;now the same, check lesser than
+															(assign (assoc right center ))
+
+
+															;still different, check greater than
+															(assign (assoc left center ))
+														)
+														(assign (assoc center (/ (+ right left) 2) ))
+													)
+
+													(assign (assoc lesser_boundary_value center))
+												)
+											)
+
+											(map
+												(lambda
+													(get
+														(call !ReactDiscriminative (assoc
+															action_features action_features
+															context_features context_features
+															context_values (set context_values query_feature_index (current_value 1))
+															details {}
+															return_action_values_only (true)
+														))
+														"action_values"
+													)
+												)
+												(zip (range lesser_boundary_value greater_boundary_value 0.1))
+											)
+
+											;try max bound!
+											(assign (assoc
+												new_action_values
+													(get
+														(call !ReactDiscriminative (assoc
+															action_features action_features
+															context_features context_features
+															context_values (set context_values query_feature_index (get feature_bounds "max"))
+															details {}
+															return_action_values_only (true)
+														))
+														"action_values"
+													)
+											))
+
+											;different predictions (with precise continuous values, this will likely always be true?)
+											(if (!= new_action_values action_values)
+												(seq
+													;but now binary search between min bound and context value
+													(assign (assoc
+														left (get context_values query_feature_index)
+														center (/ (+ (get feature_bounds "max") (get context_values query_feature_index)) 2)
+														right (get feature_bounds "max")
+													))
+
+													;binary search until within a residual
+													(while
+														(>
+															(- right center)
+															; (get hyperparam_map ["featureResiduals" query_feature])
+															0.1
+														)
+														(assign (assoc
+															new_action_values
+																(get
+																	(call !ReactDiscriminative (assoc
+																		action_features action_features
+																		context_features context_features
+																		context_values (set context_values query_feature_index center)
+																		details {}
+																		return_action_values_only (true)
+																	))
+																	"action_values"
+																)
+														))
+
+														(if (= new_action_values action_values)
+															;now the same, check greater than
+															(assign (assoc left center ))
+
+															;still different, check lesser than
+															(assign (assoc right center ))
+														)
+														(assign (assoc center (/ (+ right left) 2) ))
+													)
+
+													(assign (assoc greater_boundary_value center))
+												)
+											)
+											[lesser_boundary_value greater_boundary_value]
+										)
+
+
+
+									)
+								)
+							)
+							(zip boundary_values_features)
+						)
+					)
+				)
+		))
+
+
+		(accum (assoc output (assoc "boundary_values" boundary_values)))
 	)
 )
