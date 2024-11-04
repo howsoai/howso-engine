@@ -857,6 +857,36 @@
 			desired_action_value (get details "boundary_values_action_value")
 		)
 
+		;define condition_function, a piece of code that can be called which will return (true) if `new_action_values`
+		;represent new action values that indicate either the boundary is crossed or the user-specified conditions
+		;are met
+		(declare (assoc
+			condition_function
+				(if (= (size action_features) 1)
+					;only one action feature
+					(if (contains_index !nominalsMap (first action_features))
+						;one nominal action feature, just check if values differ
+						(lambda (!= (first action_values) (first new_action_values)))
+
+						(contains_index !editDistanceFeatureTypesMap (first action_features))
+						(lambda
+							(edit_distance
+								(first action_values)
+								(first new_action_values)
+								(= "string_mixable" (get !editDistanceFeatureTypesMap (first action_features)))
+							)
+						)
+					)
+				)
+
+					(if (= num_nominal_features (size action_features))
+						;all nominals, any change is significant enough to be a boundary
+						(lambda (!= action_values new_action_values))
+
+
+					)
+		))
+
 
 		(declare (assoc
 			boundary_values
@@ -877,18 +907,27 @@
 										query_feature_index (get context_feature_index_map (current_index 1))
 										remaining_context_features (filter (lambda (!= (current_index 2) (current_value))) context_features)
 										feature_bounds (get !featureBoundsMap (current_index 1))
-										new_action_values (null)
+										feature_residual (get hyperparam_map ["featureResiduals" (current_index 2)])
 
+										;used for numeric binary search
 										center (null)
 										left (null)
 										right (null)
+
+										;used for initial exponential search
+										query_delta (null)
+										feature_value (get context_values (get context_feature_index_map (current_index 1)))
+
+										;outputs for continuous
 										lesser_boundary_value (null)
 										greater_boundary_value (null)
 									)
 
 									(if (contains_index !nominalsMap query_feature)
+										;nominals flow, try other classes and find the most similar class that results in a change?
 										(seq
-											;nominals flow, try other classes and find the most similar class that results in a change?
+											(+ 22)
+											(null)
 										)
 
 										(contains_index !ordinalNumericFeaturesSet query_feature)
@@ -929,60 +968,71 @@
 												))
 											)
 
-											;try min bound?
-											(assign (assoc
-												new_action_values
-													(get
-														(call !ReactDiscriminative (assoc
-															action_features action_features
-															context_features context_features
-															context_values (set context_values query_feature_index (get feature_bounds "min"))
-															details {}
-															return_action_values_only (true)
-														))
-														"action_values"
-													)
-											))
-
-											;different predictions (with precise continuous values, this will likely always be true?)
-											(if (!= new_action_values action_values)
-												(seq
-													;but now binary search between min bound and context value
-													(assign (assoc
-														left (get feature_bounds "min")
-														center (/ (+ (get feature_bounds "min") (get context_values query_feature_index)) 2)
-														right (get context_values query_feature_index)
-													))
-
-													;binary search until within a residual
-													#!BinarySearchForBoundaryValue
-													(while
-														(>
-															(- right center)
-															; (get hyperparam_map ["featureResiduals" query_feature])
-															0.1
-														)
-														(assign (assoc
+											;check lower side. start half a residual below and keep doubling the distance from the case value
+											;until the condition is met (or bound passed)
+											(assign (assoc query_delta (/ feature_residual 2) ))
+											(while
+												(and
+													(> (- feature_value query_delta) (get feature_bounds "min"))
+													(not
+														(call condition_function (assoc
 															new_action_values
 																(get
 																	(call !ReactDiscriminative (assoc
 																		action_features action_features
 																		context_features context_features
-																		context_values (set context_values query_feature_index center)
+																		context_values
+																			(set context_values query_feature_index (- feature_value query_delta))
 																		details {}
 																		return_action_values_only (true)
 																	))
 																	"action_values"
 																)
 														))
+													)
+												)
+												(assign (assoc query_delta (* 2 query_delta) ))
+											)
 
-														(if (= new_action_values action_values)
-															;now the same, check lesser than
-															(assign (assoc right center ))
 
+											;if the query_value is still greater than the min bound, then we must have crossed the boundary
+											(if (> (- feature_value query_delta) (get feature_bounds "min"))
+												(seq
+													;but now binary search between min bound and context value
+													(assign (assoc
+														left (- feature_value query_delta)
+														right (- feature_value (/ query_delta 2))
+													))
+													(assign (assoc center (/ (+ left right) 2) ))
 
-															;still different, check greater than
+													;binary search until within a residual
+													(while
+														(>
+															(- right center)
+															; (get hyperparam_map ["featureResiduals" query_feature])
+															0.1
+														)
+
+														(if
+															(call condition_function (assoc
+																new_action_values
+																	(get
+																		(call !ReactDiscriminative (assoc
+																			action_features action_features
+																			context_features context_features
+																			context_values
+																				(set context_values query_feature_index center)
+																			details {}
+																			return_action_values_only (true)
+																		))
+																		"action_values"
+																	)
+															))
+															;boundary still crossed, check right side
 															(assign (assoc left center ))
+
+															;else, boundary uncrossed, check left side
+															(assign (assoc right center ))
 														)
 														(assign (assoc center (/ (+ right left) 2) ))
 													)
@@ -991,46 +1041,42 @@
 												)
 											)
 
-											(map
-												(lambda
-													(get
-														(call !ReactDiscriminative (assoc
-															action_features action_features
-															context_features context_features
-															context_values (set context_values query_feature_index (current_value 1))
-															details {}
-															return_action_values_only (true)
+											;check upper side. start half a residual above and keep doubling the distance from the case value
+											;until the condition is met (or bound passed)
+											(assign (assoc query_delta (/ feature_residual 2) ))
+											(while
+												(and
+													(< (+ feature_value query_delta) (get feature_bounds "max"))
+													(not
+														(call condition_function (assoc
+															new_action_values
+																(get
+																	(call !ReactDiscriminative (assoc
+																		action_features action_features
+																		context_features context_features
+																		context_values
+																			(set context_values query_feature_index (+ feature_value query_delta))
+																		details {}
+																		return_action_values_only (true)
+																	))
+																	"action_values"
+																)
 														))
-														"action_values"
 													)
 												)
-												(zip (range lesser_boundary_value greater_boundary_value 0.1))
+												(assign (assoc query_delta (* 2 query_delta) ))
 											)
 
-											;try max bound!
-											(assign (assoc
-												new_action_values
-													(get
-														(call !ReactDiscriminative (assoc
-															action_features action_features
-															context_features context_features
-															context_values (set context_values query_feature_index (get feature_bounds "max"))
-															details {}
-															return_action_values_only (true)
-														))
-														"action_values"
-													)
-											))
 
-											;different predictions (with precise continuous values, this will likely always be true?)
-											(if (!= new_action_values action_values)
+											;if the query_value is still greater than the min bound, then we must have crossed the boundary
+											(if (< (+ feature_value query_delta) (get feature_bounds "max"))
 												(seq
 													;but now binary search between min bound and context value
 													(assign (assoc
-														left (get context_values query_feature_index)
-														center (/ (+ (get feature_bounds "max") (get context_values query_feature_index)) 2)
-														right (get feature_bounds "max")
+														left (+ feature_value (/ query_delta 2))
+														right (+ feature_value query_delta)
 													))
+													(assign (assoc center (/ (+ left right) 2) ))
 
 													;binary search until within a residual
 													(while
@@ -1039,26 +1085,27 @@
 															; (get hyperparam_map ["featureResiduals" query_feature])
 															0.1
 														)
-														(assign (assoc
-															new_action_values
-																(get
-																	(call !ReactDiscriminative (assoc
-																		action_features action_features
-																		context_features context_features
-																		context_values (set context_values query_feature_index center)
-																		details {}
-																		return_action_values_only (true)
-																	))
-																	"action_values"
-																)
-														))
 
-														(if (= new_action_values action_values)
-															;now the same, check greater than
-															(assign (assoc left center ))
-
-															;still different, check lesser than
+														(if
+															(call condition_function (assoc
+																new_action_values
+																	(get
+																		(call !ReactDiscriminative (assoc
+																			action_features action_features
+																			context_features context_features
+																			context_values
+																				(set context_values query_feature_index center)
+																			details {}
+																			return_action_values_only (true)
+																		))
+																		"action_values"
+																	)
+															))
+															;boundary still crossed, check left side
 															(assign (assoc right center ))
+
+															;else, boundary uncrossed, check right side
+															(assign (assoc left center ))
 														)
 														(assign (assoc center (/ (+ right left) 2) ))
 													)
@@ -1066,11 +1113,11 @@
 													(assign (assoc greater_boundary_value center))
 												)
 											)
+
+
+											;return tuple of lower boundary value and greater boundary value
 											[lesser_boundary_value greater_boundary_value]
 										)
-
-
-
 									)
 								)
 							)
