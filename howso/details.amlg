@@ -865,11 +865,26 @@
 			desired_action_value (get details "boundary_values_action_value")
 		)
 
-		;define condition_function, a piece of code that can be called which will return (true) if `new_action_values`
-		;represent new action values that indicate either the boundary is crossed or the user-specified conditions
-		;are met
 		(declare (assoc
-			condition_function
+			feature_deviations  (get hyperparam_map "featureDeviations")
+			feature_weights (get hyperparam_map "featureWeights")
+		))
+
+		(if (get hyperparam_map "subtraineeName")
+			(call !UseDynamicDeviationsAndWeights (assoc
+				context_features context_features
+				context_values context_values
+				hyperparam_map hyperparam_map
+			))
+		)
+
+		;define eval_function, a piece of code that can be called which will either return:
+		; 1. a boolean if `new_action_values` represent new action values that indicate either
+		;  the boundary is crossed or the user-specified conditions are met
+		; 2. a value representing the ratio of the difference in context & action values
+		;   (`new_context_values` & `new_action_values`) to the difference in just the context values
+		(declare (assoc
+			eval_function
 				(if (= (size action_features) 1)
 					;only one action feature
 					(if (contains_index !nominalsMap (first action_features))
@@ -884,16 +899,46 @@
 								(= "string_mixable" (get !editDistanceFeatureTypesMap (first action_features)))
 							)
 						)
+
+						;else continuous of some kind, need ratio of change in context/action to change in context
+						(lambda
+							(/
+								;difference from original context/action to updated context/action
+								(generalized_distance
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									p_parameter
+									(append context_values action_values)
+									(append new_context_values new_action_values)
+									(append context_features action_features)
+									(null)
+								)
+								;difference from original context to updated context
+								(generalized_distance
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									p_parameter
+									context_values
+									new_context_values
+									context_features
+									(null)
+								)
+							)
+						)
 					)
+
+					"multiple action features not supported yet."
 				)
-
-					(if (= num_nominal_features (size action_features))
-						;all nominals, any change is significant enough to be a boundary
-						(lambda (!= action_values new_action_values))
-
-
-					)
 		))
+
+		;if well_defined_boundary is true, then eval_function returns a boolean indicating if a/the boundary has
+		;been crossed. If false, eval_function returns a ratio of the difference in context/action to difference in context
+		;and the boundary_values returned will attempt to maximize this ratio.
+		(declare (assoc well_defined_boundary (contains_value ["=" "!=" "<" ">"] (get_type_string eval_function)) ))
 
 
 		(declare (assoc
@@ -979,11 +1024,38 @@
 											;check lower side. start half a residual below and keep doubling the distance from the case value
 											;until the condition is met (or bound passed)
 											(assign (assoc query_delta (/ feature_residual 2) ))
+
+											(map
+												(lambda
+													[
+														(current_value 1)
+
+														(call eval_function (assoc
+															new_action_values
+																(get
+																	(call !ReactDiscriminative (assoc
+																		action_features action_features
+																		context_features context_features
+																		context_values
+																			(set context_values query_feature_index (current_value 3))
+																		details {}
+																		return_action_values_only (true)
+																	))
+																	"action_values"
+																)
+															new_context_values
+																(set context_values query_feature_index (current_value 2))
+														))
+													]
+												)
+												(range (get feature_bounds "min") (get feature_bounds "max") 0.4)
+											)
+
 											(while
 												(and
 													(> (- feature_value query_delta) (get feature_bounds "min"))
 													(not
-														(call condition_function (assoc
+														(call eval_function (assoc
 															new_action_values
 																(get
 																	(call !ReactDiscriminative (assoc
@@ -1022,7 +1094,7 @@
 														)
 
 														(if
-															(call condition_function (assoc
+															(call eval_function (assoc
 																new_action_values
 																	(get
 																		(call !ReactDiscriminative (assoc
@@ -1056,7 +1128,7 @@
 												(and
 													(< (+ feature_value query_delta) (get feature_bounds "max"))
 													(not
-														(call condition_function (assoc
+														(call eval_function (assoc
 															new_action_values
 																(get
 																	(call !ReactDiscriminative (assoc
@@ -1095,7 +1167,7 @@
 														)
 
 														(if
-															(call condition_function (assoc
+															(call eval_function (assoc
 																new_action_values
 																	(get
 																		(call !ReactDiscriminative (assoc
