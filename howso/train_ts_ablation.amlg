@@ -306,8 +306,10 @@
 		(declare (assoc
 			;series_index of each row, will be set to be non-zero if some series cases were already trained previously
 			continue_series_index 0
+			trained_cases_reversed_order (false)
 			id_values (unzip (first data) id_indices)
 			previous_range (null)
+			untrained_data_size (size data)
 		))
 
 		;check if this series has already been trained, if so, pull those cases and prepend to these
@@ -344,48 +346,35 @@
 				(assign (assoc
 					trained_series_cases
 						(map
-							(lambda (retrieve_from_entity (current_value) (append features progress_features)) )
+							(lambda
+								(append
+									(retrieve_from_entity (current_value) (append features ".series_index") )
+									(current_value)
+								)
+							)
 							trained_series_case_ids
 						)
-					series_progress_feature_index (size features)
-					series_progress_index_feature_index (+ (size features) 1)
+					series_progress_index_feature_index (size features)
 				))
 
-
-				(declare (assoc
-					previous_range
-						(-
-							(get (last trained_series_cases) time_feature_index)
-							(get (first trained_series_cases) time_feature_index)
-						)
-					new_range
-						(-
-							(get (last data) time_feature_index)
-							(get (first trained_series_cases) time_feature_index)
-						)
+				(assign (assoc
+					trained_series_cases
+						(call !MultiSortList (assoc
+							data trained_series_cases
+							column_order_indices [ time_feature_index ]
+						))
 				))
 
-				;the ratio by which to multiply existing series progress values since the new combined series is longer
-				;e.g., if the old range was 10 and the new one is 20, all the existing series progress should be halved
-				(declare (assoc series_progress_ratio (/ previous_range new_range) ))
-
-				;recompute series progress for these existing cases
-				;edit cases in place, updating their .series_progress values
-				(map
-					(lambda (let
-						(assoc
-							case_id (current_value 1)
-							;.series_progress is the first feature in order after features, so its index is same as (size features)
-							series_progress_value (get trained_series_cases [(current_index 2) (size features)])
+				(assign (assoc
+					;flag set to true if previously trained cases were trained in reverse order,
+					;i.e., they come later in the series than the cases being trained now
+					trained_cases_reversed_order
+						(>
+							(get (first trained_series_cases) time_feature_index)
+							(get (first data) time_feature_index)
 						)
-
-						(assign_to_entities
-							case_id
-							(zip [".series_progress"] (* series_progress_value series_progress_ratio) )
-						)
-					))
-					trained_series_case_ids
-				)
+					trained_series_case_ids (map (lambda (last (current_value))) trained_series_cases)
+				))
 
 				;set continue_series_index to the would-be next index value
 				(assign (assoc
@@ -414,15 +403,25 @@
 					))
 				)
 
-				;prepend previously trained data to this new data
+				;combine previously trained data with this new data
 				(assign (assoc
 					data
-						(append
-							(map
-								(lambda (unzip (current_value) features_indices))
-								trained_series_cases
+						(if trained_cases_reversed_order
+							(append
+								data
+								(map
+									(lambda (unzip (current_value) features_indices))
+									trained_series_cases
+								)
 							)
-							data
+
+							(append
+								(map
+									(lambda (unzip (current_value) features_indices))
+									trained_series_cases
+								)
+								data
+							)
 						)
 				))
 			)
@@ -448,13 +447,36 @@
 			derived_progress_values_lists (call !DeriveProgressFeaturesForData)
 		))
 
+		;there were existing cases, update their progress values
+		(if (size trained_series_case_ids)
+			(map
+				(lambda
+					(assign_to_entities
+						(current_value)
+						(zip
+							progress_features
+							(get derived_progress_values_lists (+ (current_index) (if trained_cases_reversed_order untrained_data_size 0)) )
+						)
+					)
+				)
+				trained_series_case_ids
+			)
+		)
+
+
 		;append all the progress values to data
 		(assign (assoc
 			features (append features progress_features )
 			data
 				(map
 					(lambda (let
-						(assoc row_index (+ continue_series_index (current_index 1)))
+						(assoc
+							row_index
+								(if trained_cases_reversed_order
+									(current_index 1)
+									(+ continue_series_index (current_index 1))
+								)
+						)
 						(append
 							(current_value)
 							;for each of the three progress features, grab the tuple of progress values
@@ -463,8 +485,11 @@
 					))
 
 					;since data is combined with all the previously trained cases,
-					;only use the non-trained data indices from the end
-					(tail data (- continue_series_index))
+					;only use the non-trained data indices
+					(if trained_cases_reversed_order
+						(trunc data (- continue_series_index))
+						(tail data (- continue_series_index))
+					)
 				)
 		))
 
@@ -472,6 +497,8 @@
 		(call !TrainCasesWithAblation (assoc
 			cases data
 			trained_instance_count (+ trained_instance_count num_previously_trained_cases)
+			;features have already been encoded
+			encode_features_on_train (false)
 		))
 	)
 
