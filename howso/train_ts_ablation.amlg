@@ -1,0 +1,602 @@
+(null
+	;Since all cases are expected for a series to be trained together as a group, this checks if there are any
+	;cases from one series that are between cases of another series. If it finds a case that is not grouped
+	;together with others of its series, this method will return true.
+	#!DoesDataNeedGroupingById
+	(declare
+		(assoc
+			data []
+			id_indices [0]
+		)
+
+		(declare (assoc
+			one_id (= 1 (size id_indices))
+			id_index (first id_indices)
+			needs_grouping (false)
+		))
+
+		;This flow creates a set of all unique ids, then iterates over all cases, looking at each case's id
+		;if a different id is encontered it is removed from that unique set
+		;if an id that has already been removed from the set is encontered again,
+		;that means the case is out of order and the data needs to be grouped
+		(if one_id
+			(let
+				(assoc
+					unique_ids_set
+						(zip (map
+							(lambda (get (current_value) id_index) )
+							data
+						))
+					previous_id (null)
+				)
+
+				(while (< (current_index) (size data))
+					;first row sets previous_id and unique_ids_set into (previous_result)
+					(if (= 0 (current_index))
+						(seq
+							(assign (assoc
+								previous_id (get data [(current_index 2) id_index])
+							))
+							(remove unique_ids_set previous_id)
+						)
+
+						;if the current id doesn't match previous_id, check to see if it has
+						;already been encountered. if so, the data is out of order
+						(!= previous_id (get data [(current_index 1) id_index]))
+						(seq
+							(assign (assoc
+								previous_id (get data [(current_index 2) id_index])
+							))
+
+							;new ids should still be in unique_ids_set, but if they are not they've been encountered before
+							(if (not (contains_index (previous_result 0 (true)) previous_id))
+								(conclude (conclude
+									(assign (assoc needs_grouping (true) ))
+								))
+							)
+
+							;id has not been encountered before, remove it from unique_ids_set
+							(remove (previous_result) previous_id)
+						)
+
+						;else no change to unique_ids_set
+						(previous_result)
+					)
+				)
+			)
+
+			;else multiple ids, less efficient
+			(let
+				(assoc
+					unique_ids_list
+						(values
+							(map (lambda (unzip (current_value) id_indices)) data)
+							(true)
+						)
+					previous_ids []
+				)
+
+				(while (< (current_index) (size data))
+					;first row sets previous_id and unique_ids_list into (previous_result)
+					(if (= 0 (current_index))
+						(seq
+							(assign (assoc
+								previous_ids (unzip (get data (current_index 1)) id_indices)
+							))
+							(filter
+								(lambda (!= (current_value) previous_ids))
+								unique_ids_list
+							)
+						)
+
+						;if the current ids don't match previous_ids, check to see if they have
+						;already been encountered. if so, the data is out of order
+						(!= previous_ids (unzip (get data (current_index)) id_indices) )
+						(seq
+							(assign (assoc
+								previous_ids (unzip (get data (current_index 1)) id_indices)
+							))
+
+							;new ids should still be in unique_ids_list, but if they are not they've been encountered before
+							(if (not (contains_value (previous_result 0 (true)) previous_ids))
+								(conclude (conclude
+									(assign (assoc needs_grouping (true) ))
+								))
+							)
+
+							;id has not been encountered before, remove it from unique_ids_list
+							(filter
+								(lambda (!= (current_value) previous_ids))
+								(previous_result)
+							)
+						)
+
+						;else no change to unique_ids_list
+						(previous_result)
+					)
+				)
+			)
+		)
+
+		;output true if data needs grouping
+		needs_grouping
+	)
+
+
+	;helper method
+	;outputs a sorted list of cases where any case for a specific series that was among cases of a different series,
+	;will be moved to be together among other cases of its own series, while mantaining the original order of different series
+	;e.g., if these are series IDS of cases: A A A B A A B B C B C C C the result would be: A A A A A B B B B C C C C
+	#!GroupDataByIds
+	(seq
+		(declare (assoc
+			unique_ids_list
+				(values
+					(map (lambda (unzip (current_value) id_indices)) cases)
+					(true)
+				)
+		))
+
+		(apply "append"
+			(map
+				(lambda (let
+					(assoc ids (current_value 1))
+					(filter
+						(lambda (= ids (unzip (current_value) id_indices)))
+						cases
+					)
+				))
+				unique_ids_list
+			)
+		)
+	)
+
+	#!TrainTimeSeriesAblation
+	(seq
+		(declare (assoc
+			feature_index_map (zip features (indices features))
+		))
+
+		(declare (assoc
+			lag_features
+				(filter
+					(lambda (and
+						(= "lag"  (get !featureAttributes [ (current_value 1) "ts_type"]) )
+						(= "custom" (get !featureAttributes [ (current_value 1) "auto_derive_on_train" "derive_type"]) )
+					))
+					derived_features
+				)
+			progress_features [".series_progress" ".series_index" ".series_progress_delta"]
+			ts_series_length_limit (retrieve_from_entity "!tsSeriesLimitLength")
+			time_feature_index (get feature_index_map !tsTimeFeature)
+			id_features (get !tsModelFeaturesMap "series_id_features")
+			id_indices (unzip feature_index_map (get !tsModelFeaturesMap "series_id_features"))
+			original_features (replace features)
+		))
+		(declare (assoc
+			series_id_features (get !featureAttributes [(first lag_features) "auto_derive_on_train" "series_id_features"])
+			series_ordered_by_features (get !featureAttributes [(first lag_features) "auto_derive_on_train" "ordered_by_features"])
+			;check if the incoming cases are group sorted by series_id
+			needs_grouping
+				(call !DoesDataNeedGroupingById (assoc
+					data cases
+					id_indices id_indices
+				))
+		))
+
+		;set last column to be the original index of the cases
+		(assign (assoc
+			cases (map (lambda (append (current_value) (current_index))) cases)
+			features (append features ".original_index")
+			feature_index_map (append feature_index_map { ".original_index" (size feature_index_map)} )
+		))
+
+		;if the cases aren't ordered together by series ids, shuffle them around so they are grouped by ids
+		(if needs_grouping
+			(assign (assoc cases (call !GroupDataByIds) ))
+		)
+
+		;the non-lag 'custom' derivation type features below
+		(assign (assoc
+			derived_features
+				(filter
+					(lambda
+						(and
+							(not (contains_value lag_features (current_value)))
+							(= "custom" (get !featureAttributes [(current_value 1) "auto_derive_on_train" "derive_type"]) )
+						)
+					)
+					derived_features
+				)
+		))
+
+		(if encode_features_on_train
+			(assign (assoc
+				cases
+					(map
+						(lambda
+							(call !ConvertFromInput (assoc
+								feature_values (current_value 1)
+								features features
+							))
+						)
+						cases
+					)
+			))
+		)
+
+		(declare (assoc
+			previous_ids []
+			start_index 0
+			end_index 0
+			num_rows (size cases)
+			output_case_ids []
+			;map of sorted case index -> original case index used to lookup which original rows were ablated after data is sorted
+			ts_ablated_indices_map (null)
+			;number of cases to be trained from each series, accumulated to keep track of session training index
+			num_previously_trained_cases 0
+		))
+
+		(while (< (current_index) num_rows)
+			(if (= 0 (current_index))
+				(assign (assoc previous_ids (unzip (get cases (current_index 1)) id_indices) ))
+			)
+
+			;encountering next id or at end of all cases, train on the previous list of cases
+			(if
+				(or
+					(!= previous_ids (unzip (get cases (current_index)) id_indices) )
+					(= (current_index) (- num_rows 1))
+				)
+				(let
+					(assoc
+						end_index
+							;if last index, should be as-is
+							(if (= (current_index 1) (- num_rows 1))
+								(current_index 1)
+								(- (current_index 1) 1)
+							)
+						features original_features
+					)
+
+					;train one entire series at a time
+					(accum (assoc
+						output_case_ids
+							(call !TrainSingleSeriesWithAblation (assoc
+								data (unzip cases (range start_index end_index))
+							))
+					))
+
+					(assign (assoc
+						previous_ids (unzip (get cases (current_index 1)) id_indices)
+						start_index (current_index 1)
+						num_previously_trained_cases (+ num_previously_trained_cases 1 (- end_index start_index))
+					))
+				)
+			)
+		)
+
+		;return trained case_ids
+		output_case_ids
+	)
+
+	;derive then train with ablation
+	#!TrainSingleSeriesWithAblation
+	(seq
+
+		;TODO: do this only if sorting in `needs_grouping` has not been done already
+		;sort the data according to the specified features if ordering has been provided
+		(if (size series_ordered_by_features)
+			(assign (assoc
+				data
+					(call !MultiSortList (assoc
+						data data
+						column_order_indices (unzip feature_index_map series_ordered_by_features)
+					))
+			))
+		)
+		;map of index -> original index
+		(assign (assoc
+			ts_ablated_indices_map
+				(zip
+					(indices data)
+					(map (lambda (last (current_value))) data)
+				)
+		))
+
+		;drop that last 'index' column
+		(assign (assoc
+			data (map (lambda (trunc (current_value))) data)
+		))
+
+		(declare (assoc
+			;series_index of each row, will be set to be non-zero if some series cases were already trained previously
+			continue_series_index 0
+			trained_cases_reversed_order (false)
+			id_values (unzip (first data) id_indices)
+			previous_range (null)
+			untrained_data_size (size data)
+		))
+
+		;check if this series has already been trained, if so, pull those cases and prepend to these
+		(declare (assoc
+			trained_series_case_ids
+				(contained_entities
+					(apply "append"
+						(map
+							(lambda
+								[(query_equals
+									(current_value 1)
+									(if (contains_index !numericNominalFeaturesMap (current_value 1))
+										(+ (get id_values (current_index 1)))
+										(get id_values (current_index 1))
+									)
+								)]
+							)
+							id_features
+						)
+					)
+				)
+			trained_series_cases []
+		))
+
+		;if previously trained series cases exist for this series, prepend them to data
+		(if (size trained_series_case_ids)
+			(let
+				(assoc
+					features_indices (indices features)
+					prev_row_index 0
+				)
+
+				;overwrite trained_series_cases to contain each cases's feature values and all the progress_features values
+				(assign (assoc
+					trained_series_cases
+						(map
+							(lambda
+								(append
+									(retrieve_from_entity (current_value) (append features ".series_index") )
+									(current_value)
+								)
+							)
+							trained_series_case_ids
+						)
+					series_progress_index_feature_index (size features)
+				))
+
+				(assign (assoc
+					trained_series_cases
+						(call !MultiSortList (assoc
+							data trained_series_cases
+							column_order_indices [ time_feature_index ]
+						))
+				))
+
+				(assign (assoc
+					;flag set to true if previously trained cases were trained in reverse order,
+					;i.e., they come later in the series than the cases being trained now
+					trained_cases_reversed_order
+						(>
+							(get (first trained_series_cases) time_feature_index)
+							(get (first data) time_feature_index)
+						)
+					trained_series_case_ids (map (lambda (last (current_value))) trained_series_cases)
+				))
+
+				;set continue_series_index to the would-be next index value
+				(assign (assoc
+					continue_series_index (+ 1 (get (last trained_series_cases) series_progress_index_feature_index) )
+				))
+
+				;previously trained series was ablated because the number of cases is less than the continue series index
+				(if (< (size trained_series_cases) continue_series_index)
+					(assign (assoc
+						trained_series_cases
+							;fill previously ablated cases with nulls
+							(range
+								(lambda
+									(if (= (current_index) (get trained_series_cases [prev_row_index series_progress_index_feature_index]))
+										(seq
+											(accum (assoc prev_row_index 1))
+											(get trained_series_cases [(- prev_row_index 1) series_progress_index_feature_index])
+										)
+
+										;else output (null)
+									)
+
+								)
+								0 series_continuation_index 1
+							)
+					))
+				)
+
+				;combine previously trained data with this new data
+				(assign (assoc
+					data
+						(if trained_cases_reversed_order
+							(append
+								data
+								(map
+									(lambda (unzip (current_value) features_indices))
+									trained_series_cases
+								)
+							)
+
+							(append
+								(map
+									(lambda (unzip (current_value) features_indices))
+									trained_series_cases
+								)
+								data
+							)
+						)
+				))
+			)
+		)
+
+		;now that the length of each new series is known, ensure that ts_series_length_limit is e*(longest series)
+		(if (> (* 2.718281828459 (size data)) ts_series_length_limit)
+			(assign (assoc ts_series_length_limit (* 2.718281828459 (size data)) ))
+		)
+		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
+		(if (> ts_series_length_limit !tsSeriesLimitLength)
+			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))
+		)
+
+		;derive lag features and append to data
+		(call !DeriveLagFeaturesForData)
+
+		;derive custom code features
+		(call !DeriveCustomFeaturesForData)
+
+		;derive progress features
+		(declare (assoc
+			derived_progress_values_lists (call !DeriveProgressFeaturesForData)
+		))
+
+		;there were existing cases, update their progress values
+		(if (size trained_series_case_ids)
+			(map
+				(lambda
+					(assign_to_entities
+						(current_value)
+						(zip
+							progress_features
+							(get derived_progress_values_lists (+ (current_index) (if trained_cases_reversed_order untrained_data_size 0)) )
+						)
+					)
+				)
+				trained_series_case_ids
+			)
+		)
+
+
+		;append all the progress values to data
+		(assign (assoc
+			features (append features progress_features )
+			data
+				(map
+					(lambda (let
+						(assoc
+							row_index
+								(if trained_cases_reversed_order
+									(current_index 1)
+									(+ continue_series_index (current_index 1))
+								)
+						)
+						(append
+							(current_value)
+							;for each of the three progress features, grab the tuple of progress values
+							(get derived_progress_values_lists row_index)
+						)
+					))
+
+					;since data is combined with all the previously trained cases,
+					;only use the non-trained data indices
+					(if trained_cases_reversed_order
+						(trunc data (- continue_series_index))
+						(tail data (- continue_series_index))
+					)
+				)
+		))
+
+		;train and ablate cases and output created case ids
+		(call !TrainCasesWithAblation (assoc
+			cases data
+			trained_instance_count (+ trained_instance_count num_previously_trained_cases)
+			;features have already been encoded
+			encode_features_on_train (false)
+		))
+	)
+
+	#!DeriveLagFeaturesForData
+	(seq
+		(declare (assoc
+			derived_lag_values_lists
+				(call !AddDerivedIndependentCodeFeatures (assoc
+					derived_features lag_features
+					features features
+					series_data data
+				))
+		))
+
+		(assign (assoc
+			features (append features lag_features)
+			data
+				(map
+					(lambda
+						(append (first (current_value)) (last (current_value)))
+					)
+					data
+					derived_lag_values_lists
+				)
+		))
+	)
+
+	;every derived feature must be immediately fed back into data because it may be needed by the next derived feature
+	#!DeriveCustomFeaturesForData
+	(map
+		(lambda (let
+			(assoc feature (current_value 1))
+			(declare (assoc
+				derived_custom_values
+					(call !AddDerivedCodeFeature (assoc
+						feature feature
+						features features
+						series_data data
+					))
+			))
+
+			(assign (assoc
+				features (append features feature)
+				data
+					(map
+						(lambda
+							(append (first (current_value)) (last (current_value)))
+						)
+						data
+						derived_custom_values
+					)
+			))
+		))
+		derived_features
+	)
+
+
+	;all the time values
+	#!DeriveProgressFeaturesForData
+	(declare
+		(assoc
+			sorted_time_values (map (lambda (get (current_value) time_feature_index)) data)
+		)
+		(declare (assoc
+			range (- (last sorted_time_values) (first sorted_time_values))
+			previous_value (first sorted_time_values)
+			first_value (first sorted_time_values)
+			fixed_delta (/ 1 (- (size sorted_time_values) 1))
+		))
+
+		;output a list of tuples [ progress%, index, delta_to_previous ] for each row in the data
+		(map
+			(lambda (let
+				(assoc
+					progress (/ (- (current_value 1) first_value) range)
+					;delta is the % change,  don't allow 0, use the fixed delta instead
+					delta (or (/ (- (current_value 1) previous_value) range) fixed_delta)
+				)
+
+				;if the series is of length 1, set progress and delta to be 1 and prevent a divide by 0
+				(if (= 0 range)
+					(assign (assoc
+						progress 1
+						delta 1
+					))
+				)
+				(assign (assoc previous_value (current_value 1)))
+				;output the tuple
+				[progress (current_index 1) delta]
+			))
+
+			sorted_time_values
+		)
+	)
+)
