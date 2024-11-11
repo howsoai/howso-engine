@@ -7,6 +7,8 @@
 	; case_id: optional case id in the model to react to
 	; use_case_weights: optional flag default true. if false, case weights will not be used during the react
 	; weight_feature: optional, default '.case_weight'. name of feature whose values to use as case weights
+	; output_most_influential: optional, boolean, default false. when false outputs influential cases' entropy,
+	;	when true will output a pair of [ entropy, most influential case values ]
 	#!ComputeInfluenceWeightEntropy
 	(declare
 		(assoc
@@ -15,28 +17,31 @@
 			case_id (null)
 			use_case_weights (true)
 			weight_feature !autoAblationWeightFeature
+			output_most_influential (false)
 
 			;internal only
 			react_kwargs (assoc)
 		)
 
-        (if (not use_case_weights)
-            (assign (assoc weight_feature ".none"))
-        )
+		(if (not use_case_weights)
+			(assign (assoc weight_feature ".none"))
+		)
 
-        (assign (assoc
-            react_kwargs
-                (assoc
-                    context_features features
-                    use_case_weights use_case_weights
-                    weight_feature weight_feature
-                    details (assoc influential_cases (true) )
-                )
-        ))
+		(assign (assoc
+			react_kwargs
+				(assoc
+					context_features features
+					use_case_weights use_case_weights
+					weight_feature weight_feature
+					details (assoc influential_cases (true) influential_cases_raw_weights (true))
+					skip_encoding (true)
+					skip_decoding (true)
+				)
+		))
 
-        (if
-            ;if context_values are not null, we are reacting to a new case
-            (!= feature_values (null))
+		(if
+			;if context_values are not null, we are reacting to a new case
+			(!= feature_values (null))
 			(accum "react_kwargs" (assoc context_values feature_values) )
 			;elif case_id is not null, we are reacting to an existing case
 			(!= case_id (null))
@@ -48,23 +53,30 @@
 		)
 
 		(declare (assoc
-			influential_cases (get (call !SingleReact react_kwargs) "influential_cases")
+			influential_cases (get (call !ReactDiscriminative react_kwargs) "influential_cases")
 		))
 
-        (if
-            ;if feature_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
-            (!= feature_values (null))
+		(if
+			;if feature_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
+			(!= feature_values (null))
 			(if (= feature_values (unzip (first influential_cases) features))
-				;this concludes out through #ShouldNewCaseBeAblated directly into #TrainCreateCases.
-				(conclude (conclude (false)))
+				(conclude [ .infinity (null) ])
 			)
 		)
 
 		;compute the entropy of the influence weights as retrieved by react
-		(entropy (map
-			(lambda (get (current_value) ".influence_weight") )
-			influential_cases
+		(declare (assoc
+			influence_weight_entropy
+				(entropy (map
+					(lambda (get (current_value) ".influence_weight") )
+					influential_cases
+				))
 		))
+
+		(if output_most_influential
+			[ influence_weight_entropy (first influential_cases) ]
+			influence_weight_entropy
+		)
 	)
 
 	;used to compute and store the influence weight entropies for all cases contained in the Trainee in #Analyze
@@ -399,6 +411,15 @@
 		)
 		(call !ValidateParameters)
 
+		;don't allow ablation of data if rebalance_features have been specified for analyze
+		(if (size (get !savedAnalyzeParameterMap "rebalance_features"))
+			(conclude
+				(call !Return (assoc
+					errors ["Cannot reduce data if `rebalance_features` have been specified for analyze."]
+				))
+			)
+		)
+
 		;Declare variables for internal use.
 		(declare (assoc
 			max_influence_weight_entropy_to_keep .infinity
@@ -579,15 +600,55 @@
 			)
 		)
 
+		(declare (assoc
+			influentials_entropy_pair
+				(call !ComputeInfluenceWeightEntropy (assoc
+					features features
+					feature_values feature_values
+					output_most_influential (true)
+				))
+		))
+
 		(+
 			(or
-				(> max_influence_weight_entropy_to_keep
-					(call !ComputeInfluenceWeightEntropy (assoc
-						features features
-						feature_values feature_values
-					))
+				;case should be kept because influentials are not evenly distributed (their entropy is low)
+				(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_pair))
+					(true)
 
+					;always ablate perfect matches/identical cases
+					(= .infinity (first influentials_entropy_pair))
+					(false)
+
+					;else ablate? check distance to closest vs its distance to its K'th closest
+					(let
+						(assoc
+							dist_to_closest_case (/ 1 (get influentials_entropy_pair [1 ".raw_influence_weight"]))
+							react_kwargs
+								(assoc
+								 	use_case_weights use_case_weights
+									weight_feature weight_feature
+									details (assoc influential_cases (true) influential_cases_raw_weights (true))
+									context_features features
+									case_indices (unzip (last influentials_entropy_pair) [".session" ".session_training_index"] )
+									preserve_feature_values features
+									leave_case_out (true)
+									skip_encoding (true)
+								)
+						)
+
+						(declare (assoc
+							neighbor_influential_cases (get (call !ReactDiscriminative react_kwargs) "influential_cases")
+						))
+
+						(declare (assoc
+							neighbor_dist_to_farthest_case (/ 1 (get (last neighbor_influential_cases) ".raw_influence_weight"))
+						))
+
+						;keep case if its distance to closest existing case is relatively large
+						(> dist_to_closest_case neighbor_dist_to_farthest_case)
+					)
 				)
+
 				; This is probably unnecessary but in case we cannot compute the requested influence weight
 				; quantile return 1 as well.
 				(= max_influence_weight_entropy_to_keep (null))
@@ -604,7 +665,7 @@
 	(and
 		(or
 			(not (and !hasInfluenceWeightEntropies !autoAblationEnabled) )
-			(< num_cases !autoAblationMinNumCases )
+			(< (+ num_cases (size cases)) !autoAblationMinNumCases )
 		)
 		(= (null)
 			!autoAblationExactPredictionFeatures
