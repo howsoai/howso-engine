@@ -140,52 +140,7 @@
 								(null)
 
 								;else will assume continuous... TODO: this probably isn't exactly correct, the not of all previous conditions might not imply its continuous
-								(let
-									(assoc
-										feature_bounds (get !featureBoundsMap query_feature)
-										feature_residual (get hyperparam_map ["featureResiduals" query_feature])
-										rounding_tuple (get !featureRoundingMap query_feature)
-
-										;outputs
-										lesser_boundary_value (null)
-										greater_boundary_value (null)
-									)
-
-									;get bounds if undefined
-									(if (= 0 (size feature_bounds))
-										(assign (assoc
-											feature_bounds
-												(assoc
-													"min"
-														(retrieve_from_entity
-															(contained_entities [
-																(query_exists query_feature)
-																(query_min query_feature 1)
-															])
-															query_feature
-														)
-													"max"
-														(retrieve_from_entity
-															(contained_entities [
-																(query_exists query_feature)
-																(query_max query_feature 1)
-															])
-															query_feature
-														)
-												)
-										))
-									)
-
-									(if well_defined_boundary
-										;if the boundary is known and need not be found, use this func
-										(call !ComputeContinuousBoundaryValuesKnownBoundary)
-
-										;else the boundary needs to be determined and the value selected accordingly
-										(call !ComputeContinuousBoundaryValuesUnknownBoundary)
-									)
-									;return a tuple of lower boundary value and greater boundary value, both may be (null)
-									[lesser_boundary_value greater_boundary_value]
-								)
+								(call !ComputeContinuousBoundaryValues)
 							)
 						)
 					)
@@ -323,14 +278,54 @@
 				)
 			)
 
-			;numeric ordinal, TODO
-			(null)
+			;numeric ordinals. Leverage the continuous feature code but with strict rounding to the integer level
+			(let
+				(assoc
+					rounding_tuple [(null) 0]
+					feature_bounds (get !featureBoundsMap query_feature)
+					feature_residual (get hyperparam_map ["featureResiduals" query_feature])
+				)
+
+				;get bounds if undefined
+				(if (= 0 (size feature_bounds))
+					(assign (assoc
+						feature_bounds
+							(assoc
+								"min"
+									(retrieve_from_entity
+										(contained_entities [
+											(query_exists query_feature)
+											(query_min query_feature 1)
+										])
+										query_feature
+									)
+								"max"
+									(retrieve_from_entity
+										(contained_entities [
+											(query_exists query_feature)
+											(query_max query_feature 1)
+										])
+										query_feature
+									)
+							)
+					))
+				)
+
+				(if well_defined_boundary
+					;if the boundary is known and need not be found, use this func
+					(call !ComputeContinuousBoundaryValuesKnownBoundary)
+
+					;else the boundary needs to be determined and the value selected accordingly
+					(call !ComputeContinuousBoundaryValuesUnknownBoundary)
+				)
+			)
 
 		)
-
+		;return the lesser/greater boundary values as a tuple for the feature
 		[lesser_boundary_value greater_boundary_value]
 	)
 
+	;helper function for ComputeBoundaryValues that computes boundary values for nominal features
 	#!ComputeNominalBoundaryValues
 	(let
 		(assoc
@@ -486,6 +481,54 @@
 		boundary_value
 	)
 
+	;helper function for ComputeBoundaryValues that find the boundary values for continuous features
+	#!ComputeContinuousBoundaryValues
+	(let
+		(assoc
+			feature_bounds (get !featureBoundsMap query_feature)
+			feature_residual (get hyperparam_map ["featureResiduals" query_feature])
+			rounding_tuple (get !featureRoundingMap query_feature)
+
+			;outputs
+			lesser_boundary_value (null)
+			greater_boundary_value (null)
+		)
+
+		;get bounds if undefined
+		(if (= 0 (size feature_bounds))
+			(assign (assoc
+				feature_bounds
+					(assoc
+						"min"
+							(retrieve_from_entity
+								(contained_entities [
+									(query_exists query_feature)
+									(query_min query_feature 1)
+								])
+								query_feature
+							)
+						"max"
+							(retrieve_from_entity
+								(contained_entities [
+									(query_exists query_feature)
+									(query_max query_feature 1)
+								])
+								query_feature
+							)
+					)
+			))
+		)
+
+		(if well_defined_boundary
+			;if the boundary is known and need not be found, use this func
+			(call !ComputeContinuousBoundaryValuesKnownBoundary)
+
+			;else the boundary needs to be determined and the value selected accordingly
+			(call !ComputeContinuousBoundaryValuesUnknownBoundary)
+		)
+		;return a tuple of lower boundary value and greater boundary value, both may be (null)
+		[lesser_boundary_value greater_boundary_value]
+	)
 
 	;helper function for ComputeBoundaryValues that finds the boundary values for a continuous context
 	;feature when the boundary is well defined (a change in a nominal action or a specified threshold for
@@ -524,7 +567,13 @@
 					left (- feature_value query_delta)
 					right (- feature_value (/ query_delta 2))
 				))
-				(assign (assoc center (/ (+ left right) 2) ))
+				(assign (assoc
+					center
+						(if rounding_tuple
+							(apply "round" (append (/ (+ left right) 2) rounding_tuple))
+							(/ (+ left right) 2)
+						)
+				))
 
 				;binary search until within a residual
 				(while
@@ -540,7 +589,13 @@
 						;else, boundary uncrossed, check left side
 						(assign (assoc right center ))
 					)
-					(assign (assoc center (/ (+ right left) 2) ))
+					(assign (assoc
+						center
+							(if rounding_tuple
+								(apply "round" (append (/ (+ left right) 2) rounding_tuple))
+								(/ (+ left right) 2)
+							)
+					))
 				)
 
 				(assign (assoc lesser_boundary_value center))
@@ -569,7 +624,13 @@
 					left (+ feature_value (/ query_delta 2))
 					right (+ feature_value query_delta)
 				))
-				(assign (assoc center (/ (+ left right) 2) ))
+				(assign (assoc
+					center
+						(if rounding_tuple
+							(apply "round" (append (/ (+ left right) 2) rounding_tuple))
+							(/ (+ left right) 2)
+						)
+				))
 
 				;binary search until within a residual
 				(while
@@ -586,7 +647,13 @@
 						;else, boundary uncrossed, check right side
 						(assign (assoc left center ))
 					)
-					(assign (assoc center (/ (+ right left) 2) ))
+					(assign (assoc
+						center
+							(if rounding_tuple
+								(apply "round" (append (/ (+ left right) 2) rounding_tuple))
+								(/ (+ left right) 2)
+							)
+					))
 				)
 
 				(assign (assoc greater_boundary_value center))
@@ -624,12 +691,10 @@
 					;difference between the feature value and the minimum bound
 					(range
 						-1
-						(floor
-							(log
-								(/ (- feature_value (get feature_bounds "min")) feature_residual)
-								2
-							)
-						)
+						(floor (log
+							(/ (- feature_value (get feature_bounds "min")) feature_residual)
+							2
+						))
 						1
 					)
 				)
@@ -664,9 +729,7 @@
 				(assoc
 					query_value (get lesser_side_value_diff_ratio_tuples [first_negative_index 0])
 				)
-				(declare (assoc
-					query_delta (/ (- feature_value query_value) 2)
-				))
+				(declare (assoc query_delta (/ (- feature_value query_value) 2) ))
 				;to find the maxima, start at the selected value and check both sides
 				; then do the same on the side that was greater iterating to smaller and smaller regions
 				#!BinarySearchForMaxima
@@ -681,19 +744,21 @@
 						)
 
 						;left side had greater value, iterate there
-						(assign (assoc
-							query_value (- query_value (/ query_delta 2))
-						))
+						(assign (assoc query_value (- query_value (/ query_delta 2)) ))
 
 						;right side had greater value, iterate there
-						(assign (assoc
-							query_value (+ query_value (/ query_delta 2))
-						))
+						(assign (assoc query_value (+ query_value (/ query_delta 2)) ))
 					)
 					(assign (assoc query_delta (/ query_delta 2) ))
 				)
 
-				(assign (assoc lesser_boundary_value query_value ))
+				(assign (assoc
+					lesser_boundary_value
+						(if rounding_tuple
+							(apply "round" query_value rounding_tuple)
+							query_value
+						)
+				))
 			)
 		)
 
@@ -716,12 +781,10 @@
 					;difference between the feature value and the minimum bound
 					(range
 						-1
-						(floor
-							(log
-								(/ (- (get feature_bounds "max") feature_value) feature_residual)
-								2
-							)
-						)
+						(floor (log
+							(/ (- (get feature_bounds "max") feature_value) feature_residual)
+							2
+						))
 						1
 					)
 				)
@@ -756,14 +819,18 @@
 				(assoc
 					query_value (get greater_side_value_diff_ratio_tuples [first_negative_index 0])
 				)
-				(declare (assoc
-					query_delta (/ (- query_value feature_value) 2)
-				))
+				(declare (assoc query_delta (/ (- query_value feature_value) 2) ))
 				;to find the maxima, start at the selected value and check both sides
 				; then do the same on the side that was greater iterating to smaller and smaller regions
 				(call !BinarySearchForMaxima)
 
-				(assign (assoc greater_boundary_value query_value ))
+				(assign (assoc
+					greater_boundary_value
+						(if rounding_tuple
+							(apply "round" query_value rounding_tuple)
+							query_value
+						)
+				))
 			)
 		)
 	)
