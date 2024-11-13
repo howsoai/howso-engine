@@ -14,6 +14,9 @@
 		(declare (assoc
 			feature_deviations  (get hyperparam_map "featureDeviations")
 			feature_weights (get hyperparam_map "featureWeights")
+
+			;base used in exponential searches for boundaries (continuous and numeric ordinals)
+			exp_search_base 1.1
 		))
 
 		(if (get hyperparam_map "subtraineeName")
@@ -69,7 +72,7 @@
 					;no specified boundary, define a function that will indicate a boundary based on action values
 					(let
 						(assoc
-							num_nominal_features (size (filter (lambda (= "nominal" (get !featureAttributes [(current_value 1) "type"]))) action_features))
+							num_nominal_features (size (filter (lambda (contains_index !nominalsMap (current_value))) action_features))
 						)
 						(if (= (size action_features) num_nominal_features)
 							;if just nominals, any change will indicate a boundary crossed
@@ -251,7 +254,7 @@
 						;find the first of the lesser values to cross the boundary (if any)
 						(while
 							(and
-								(= (null) boundary_value)
+								(= (null) lesser_boundary_value)
 								(< (current_index) (size lesser_other_values))
 							)
 							(if (call !DoesNewValueCrossKnownBoundary (assoc new_feature_value (get lesser_other_values (current_index 1)) ))
@@ -262,11 +265,11 @@
 						;find the first of the greater values to cross the boundary (if any)
 						(while
 							(and
-								(= (null) boundary_value)
+								(= (null) greater_boundary_value)
 								(< (current_index) (size greater_other_values))
 							)
 							(if (call !DoesNewValueCrossKnownBoundary (assoc new_feature_value (get greater_other_values (current_index 1)) ))
-								(assign (assoc lesser_boundary_value (get greater_other_values (current_index 1)) ))
+								(assign (assoc greater_boundary_value (get greater_other_values (current_index 1)) ))
 							)
 						)
 					)
@@ -394,6 +397,7 @@
 
 						(while
 							(and
+								;expand the local data search up to 3 times (or until all classes have been observed)
 								(< (current_index) 3)
 								(!=
 									;the unique classes of the feature observed in the neighborhood
@@ -430,7 +434,7 @@
 							))
 						)
 						;(values X (true)) maintains the order still
-						(values (get similar_cases_lists 2) (true))
+						(values (last similar_cases_lists) (true))
 					)
 
 					;otherwise some of the other classes are more similar to the feature value
@@ -568,7 +572,7 @@
 		)
 	)
 
-	;helper function for ComputeBoundaryValues that finds the boundary values for a continuous context
+	;helper function for ComputeBoundaryValues that finds the boundary values for a continuous context (and numeric continuous)
 	;feature when the boundary is well defined (a change in a nominal action or a specified threshold for
 	;a continuous action, and eval_function returns a boolean value).
 	;assigns to lesser_boundary_value and greater_boundary_value
@@ -593,7 +597,7 @@
 					(call !DoesNewValueCrossKnownBoundary (assoc new_feature_value (- feature_value query_delta) ))
 				)
 			)
-			(assign (assoc query_delta (* 2 query_delta) ))
+			(assign (assoc query_delta (* exp_search_base query_delta) ))
 		)
 
 
@@ -603,21 +607,15 @@
 				;but now binary search between min bound and context value
 				(assign (assoc
 					left (- feature_value query_delta)
-					right (- feature_value (/ query_delta 2))
+					right (- feature_value (/ query_delta exp_search_base))
 				))
-				(assign (assoc
-					center
-						(if rounding_tuple
-							(apply "round" (append (/ (+ left right) 2) rounding_tuple))
-							(/ (+ left right) 2)
-						)
-				))
+				(assign (assoc center (/ (+ left right) 2) ))
 
-				;binary search until within a residual
+				;binary search until within half a residual
 				(while
 					(>
 						(- right center)
-						(get hyperparam_map ["featureResiduals" query_feature])
+						(/ feature_residual 2)
 					)
 
 					(if (call !DoesNewValueCrossKnownBoundary (assoc new_feature_value center))
@@ -627,16 +625,28 @@
 						;else, boundary uncrossed, check left side
 						(assign (assoc right center ))
 					)
-					(assign (assoc
-						center
-							(if rounding_tuple
-								(apply "round" (append (/ (+ left right) 2) rounding_tuple))
-								(/ (+ left right) 2)
-							)
-					))
+					(assign (assoc center (/ (+ left right) 2) ))
 				)
 
-				(assign (assoc lesser_boundary_value center))
+				(assign (assoc
+					lesser_boundary_value
+						(if (contains_value !ordinalFeatures query_feature)
+							;ordinal, need to be sure we round in a way that still crosses the boundary
+							;prioritize the ceiling version as we are searching downward
+							(if (call !DoesNewValueCrossKnownBoundary (assoc new_feature_value (ceil center) ))
+								(ceil center)
+
+								;else use the floor
+								(floor center)
+							)
+
+							;else standard continuous, just round normally
+							(if rounding_tuple
+								(apply "round" (append center rounding_tuple))
+								center
+							)
+						)
+				))
 			)
 		)
 
@@ -650,7 +660,7 @@
 					(call !DoesNewValueCrossKnownBoundary (assoc new_feature_value (+ feature_value query_delta) ))
 				)
 			)
-			(assign (assoc query_delta (* 2 query_delta) ))
+			(assign (assoc query_delta (* exp_search_base query_delta) ))
 		)
 
 
@@ -659,23 +669,16 @@
 			(seq
 				;but now binary search between min bound and context value
 				(assign (assoc
-					left (+ feature_value (/ query_delta 2))
+					left (+ feature_value (/ query_delta exp_search_base))
 					right (+ feature_value query_delta)
 				))
-				(assign (assoc
-					center
-						(if rounding_tuple
-							(apply "round" (append (/ (+ left right) 2) rounding_tuple))
-							(/ (+ left right) 2)
-						)
-				))
+				(assign (assoc center (/ (+ left right) 2) ))
 
 				;binary search until within a residual
 				(while
 					(>
 						(- right center)
-						; (get hyperparam_map ["featureResiduals" query_feature])
-						0.1
+						(/ feature_residual 2)
 					)
 
 					(if (call !DoesNewValueCrossKnownBoundary (assoc new_feature_value center))
@@ -685,16 +688,28 @@
 						;else, boundary uncrossed, check right side
 						(assign (assoc left center ))
 					)
-					(assign (assoc
-						center
-							(if rounding_tuple
-								(apply "round" (append (/ (+ left right) 2) rounding_tuple))
-								(/ (+ left right) 2)
-							)
-					))
+					(assign (assoc center (/ (+ left right) 2) ))
 				)
 
-				(assign (assoc greater_boundary_value center))
+				(assign (assoc
+					greater_boundary_value
+						(if (contains_value !ordinalFeatures query_feature)
+							;ordinal, need to be sure we round in a way that still crosses the boundary
+							;prioritize the floor version as we are searching upward
+							(if (call !DoesNewValueCrossKnownBoundary (assoc new_feature_value (floor center) ))
+								(floor center)
+
+								;else use the ceiling
+								(ceil center)
+							)
+
+							;else standard continuous, just round normally
+							(if rounding_tuple
+								(apply "round" (append center rounding_tuple))
+								center
+							)
+						)
+				))
 			)
 		)
 	)
@@ -714,7 +729,7 @@
 			lesser_side_candidate_values
 				(map
 					(lambda
-						(- feature_value (* feature_residual (pow 2 (current_value))))
+						(- feature_value (* feature_residual (pow exp_search_base (current_value))))
 					)
 					;range from -1 to max exponent of 2 which multiplied by feature residual is less than the
 					;difference between the feature value and the minimum bound
@@ -722,7 +737,7 @@
 						-1
 						(floor (log
 							(/ (- feature_value (get feature_bounds "min")) feature_residual)
-							2
+							exp_search_base
 						))
 						1
 					)
@@ -774,7 +789,7 @@
 			greater_side_candidate_values
 				(map
 					(lambda
-						(+ feature_value (* feature_residual (pow 2 (current_value))))
+						(+ feature_value (* feature_residual (pow exp_search_base (current_value))))
 					)
 					;range from -1 to max exponent of 2 which multiplied by feature residual is less than the
 					;difference between the feature value and the minimum bound
@@ -782,7 +797,7 @@
 						-1
 						(floor (log
 							(/ (- (get feature_bounds "max") feature_value) feature_residual)
-							2
+							exp_search_base
 						))
 						1
 					)
