@@ -16,10 +16,11 @@ for feature in nom_features:
 
 t = Trainee(features=features)
 t.train(df)
-t.analyze()
+t.analyze(p_values=[2])
 
 print(t.react_aggregate(
-    details={"intrinsic_dimensionality": True}
+    details={"local_fill": True},
+    new_case_threshold="max",
 ))
 
 # print("Actual num features               : ", len(features))
