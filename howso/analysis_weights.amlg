@@ -26,6 +26,11 @@
 			residuals_map (list)
 		))
 
+		;possibly increase the number of samples if nominals are present
+		(if (size (keep !nominalsMap features))
+			(assign (assoc num_samples (call !ComputeRequiredNumSamplesForNominals (assoc num_samples num_samples)) ))
+		)
+
 		(while (< iteration num_iterations)
 			(assign (assoc
 				residuals_map
@@ -41,7 +46,7 @@
 										(min num_samples (* 10 (size features)))
 
 										;on the last iteration use the larger of 1000 or the specified samples to attain more accurate residuals
-										(= 2 iteration)
+										(= (- num_iterations 1) iteration)
 										(max num_samples 1000)
 
 										num_samples
@@ -207,6 +212,88 @@
 		weights_map
 	)
 
+	;helper function for the residuals computing methods used within Analysis (ConvergeResiduals and ConvergeIRW)
+	;inspects the distribution of classes for nominal features being analyzed as well as their ratio of null values
+	;to make an estimate at the bare minimum number of samples needed to observe and predict each significant class
+	;sufficiently
+	;parameters:
+	; num_samples: the number of samples that were to be used in convergence, will not output less than this value
+	#!ComputeRequiredNumSamplesForNominals
+	(let
+		(assoc
+			nominal_class_statistical_significant_count 30
+			max_samples_threshold 15000
+		)
+
+		(declare (assoc
+			;the minimum number of samples needed for each nominal feature
+			min_necessary_samples_nominals_map
+				(map
+					(lambda (let
+						(assoc feature (current_index 1) )
+						(declare (assoc
+							class_counts_above_stat_significance
+								(filter
+									(lambda (>= (current_value) nominal_class_statistical_significant_count))
+									(values (get !expectedValuesMap [weight_feature feature "class_counts"]))
+								)
+						))
+
+						(declare (assoc
+							smallest_count_above_statistical_significance (apply "min" class_counts_above_stat_significance)
+						))
+
+						;min(15k or the max threshold, (3 / (smallest_count_above_statistical_significance / num_cases)))
+						(if smallest_count_above_statistical_significance
+							(min max_samples_threshold (/ 3 (/ smallest_count_above_statistical_significance num_cases)))
+							0
+						)
+					))
+					(keep !nominalsMap features)
+				)
+			nominal_feature_null_ratio_map
+				(map
+					(lambda
+						(- 1 (/ 1 (get !featureNullRatiosMap [(current_index 1) "non_null_ratio"])))
+					)
+					(keep !nominalsMap features)
+				)
+		))
+
+		(declare (assoc
+			;adjust the number of required samples for each nominal feature by the ratio of cases that are null
+			;for each feature.
+			;for example, if a case's distribution demanded 100 samples, but 50% of the cases were null, then ~200 samples
+			;should actually be used
+			estimated_necessary_samples
+				(map
+					(lambda
+						(if (!= 0 (get nominal_feature_null_ratio_map (current_index)))
+							(ceil (/
+								(get min_necessary_samples_nominals_map (current_index))
+								(get nominal_feature_null_ratio_map (current_index))
+							))
+
+							(ceil (get min_necessary_samples_nominals_map (current_index)))
+						)
+					)
+					(keep !nominalsMap features)
+				)
+		))
+
+
+		;use either the maximum amount of estimated necessary samples to guarantee
+		;each feature gets enough samples, or instead fallback to the max threshold
+		(min
+			max_samples_threshold
+			(max
+				(apply "max" (values estimated_necessary_samples))
+				num_samples
+			)
+		)
+	)
+
+
 	;output initial deviations to be the smallest gaps for each feature scaled by the number of features
 	#!ComputeInitialDeviations
 	(let
@@ -244,6 +331,11 @@
 				)
 			residuals_map (list)
 		))
+
+		;possibly increase the number of samples if nominals are present
+		(if (size (keep !nominalsMap features))
+			(assign (assoc num_samples_converge (call !ComputeRequiredNumSamplesForNominals (assoc num_samples num_samples_converge)) ))
+		)
 
 		;when calculating IRW and LK deviations, compute the initial residual values if necessary
 		(if (= (null) initial_residual_values_map)
