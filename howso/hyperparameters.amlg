@@ -32,44 +32,63 @@
 		)
 
 		(if (size confusion_matrix_map)
-			(assign (assoc
-				feature_deviations
-					(map
-						;convert deviations for nominals that had a confusion matrix computed from a single value into an assoc
-						;containing the nominal deviation as 'expected_deviation' and a sparse deviation matrix as 'sdm'
-						(lambda
-							(if (contains_index confusion_matrix_map (current_index))
-								(let
-									(assoc feature (current_index 1) )
-									(declare (assoc
-										sdm
-											##SparseDeviationMatrix
-											(call !ConfusionMatrixToSDM (assoc
-												confusion_matrix (get confusion_matrix_map [feature "matrix"])
-												feature feature
-												expected_deviation (current_value 2)
-											))
-									))
+			(seq
+				(assign (assoc
+					feature_deviations
+						(map
+							;convert deviations for nominals that had a confusion matrix computed from a single value into an assoc
+							;containing the nominal deviation as 'expected_deviation' and a sparse deviation matrix as 'sdm'
+							(lambda
+								(if (contains_index confusion_matrix_map (current_index))
+									(let
+										(assoc feature (current_index 1) )
+										(declare (assoc
+											sdm
+												##SparseDeviationMatrix
+												(call !ConfusionMatrixToSDM (assoc
+													confusion_matrix (get confusion_matrix_map [feature "matrix"])
+													feature feature
+													expected_deviation (current_value 2)
+												))
+										))
 
-									;output an assoc of sdm and expected deviation
-									(if sdm
-										(assoc
-											"sdm" sdm
-											"expected_deviation" (current_value 1)
+										;output an assoc of sdm and expected deviation
+										(if sdm
+											(assoc
+												"sdm" sdm
+												"expected_deviation" (current_value 1)
+											)
+
+											;else there is no sdm, return just the value
+											(current_value)
 										)
-
-										;else there is no sdm, return just the value
-										(current_value)
 									)
-								)
 
-								;else leave deviation value as-is
-								(current_value)
+									;else leave deviation value as-is
+									(current_value)
+								)
+							)
+							;if there are shared deviations, don't store or compute SDM for deviations for the non-primary shared features
+							(if (size !sharedDeviationsMap)
+								(remove feature_deviations !sharedDeviationsNonPrimaryFeatures)
+								feature_deviations
 							)
 						)
+				))
+
+				;append the shared deviations as a duplicate of their primary feature shared deviation
+				(if (size !sharedDeviationsMap)
+					(accum (assoc
 						feature_deviations
-					)
-			))
+							(map
+								(lambda
+									(get feature_deviations (get !sharedDeviationsMap (current_index)))
+								)
+								(zip !sharedDeviationsNonPrimaryFeatures)
+							)
+					))
+				)
+			)
 		)
 
 		(accum (assoc
@@ -1103,6 +1122,11 @@
 			leftover_confusion_matrix (assoc)
 			leftover_unknown_class_deviation (null)
 			valid_weight_feature (and use_case_weights (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight")) )
+			feature_grouping
+				(if (get !sharedDeviationsMap feature)
+					(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve feature))
+					[feature]
+				)
 		))
 
 		(declare (assoc
@@ -1118,24 +1142,42 @@
 			(conclude (null))
 		)
 
-		(declare (assoc num_classes (size (get !expectedValuesMap [weight_feature feature "class_counts"])) ))
-		(if (= 0 num_classes)
-			(assign (assoc
-				num_classes
-					(size
-						(compute_on_contained_entities (list
-							(query_value_masses
-								feature
-								(if valid_weight_feature weight_feature)
-								(or
-									(not (contains_index !nominalsMap feature))
-									(contains_index !numericNominalFeaturesMap feature)
+		;pull the number of classes for this feature from !expectedValuesMap if it was cached, otherwise compute it here
+		;if feature is in a shared deviation feature_grouping, counts the total number of unique classes from all the features in the group
+		(declare (assoc
+			num_classes
+				(size (values
+					(apply "append"
+						(map
+							(lambda
+								(let
+									(assoc
+										feature_classes (indices (get !expectedValuesMap [weight_feature (current_value 2) "class_counts"]))
+										current_feature (current_value 1)
+									)
+									(if (= 0 (size feature_classes))
+										(indices
+											(compute_on_contained_entities (list
+												(query_value_masses
+													current_feature
+													(if valid_weight_feature weight_feature)
+													(or
+														(not (contains_index !nominalsMap current_feature))
+														(contains_index !numericNominalFeaturesMap current_feature)
+													)
+												)
+											))
+										)
+										feature_classes
+									)
 								)
 							)
-						))
+							feature_grouping
+						)
 					)
-			))
-		)
+					(true)
+				))
+		))
 
 		;average all probabilities for a class that are same as or more than the predicted class probability
 		(declare (assoc
