@@ -32,44 +32,63 @@
 		)
 
 		(if (size confusion_matrix_map)
-			(assign (assoc
-				feature_deviations
-					(map
-						;convert deviations for nominals that had a confusion matrix computed from a single value into an assoc
-						;containing the nominal deviation as 'expected_deviation' and a sparse deviation matrix as 'sdm'
-						(lambda
-							(if (contains_index confusion_matrix_map (current_index))
-								(let
-									(assoc feature (current_index 1) )
-									(declare (assoc
-										sdm
-											##SparseDeviationMatrix
-											(call !ConfusionMatrixToSDM (assoc
-												confusion_matrix (get confusion_matrix_map [feature "matrix"])
-												feature feature
-												expected_deviation (current_value 2)
-											))
-									))
+			(seq
+				(assign (assoc
+					feature_deviations
+						(map
+							;convert deviations for nominals that had a confusion matrix computed from a single value into an assoc
+							;containing the nominal deviation as 'expected_deviation' and a sparse deviation matrix as 'sdm'
+							(lambda
+								(if (contains_index confusion_matrix_map (current_index))
+									(let
+										(assoc feature (current_index 1) )
+										(declare (assoc
+											sdm
+												##SparseDeviationMatrix
+												(call !ConfusionMatrixToSDM (assoc
+													confusion_matrix (get confusion_matrix_map [feature "matrix"])
+													feature feature
+													expected_deviation (current_value 2)
+												))
+										))
 
-									;output an assoc of sdm and expected deviation
-									(if sdm
-										(assoc
-											"sdm" sdm
-											"expected_deviation" (current_value 1)
+										;output an assoc of sdm and expected deviation
+										(if sdm
+											(assoc
+												"sdm" sdm
+												"expected_deviation" (current_value 1)
+											)
+
+											;else there is no sdm, return just the value
+											(current_value)
 										)
-
-										;else there is no sdm, return just the value
-										(current_value)
 									)
-								)
 
-								;else leave deviation value as-is
-								(current_value)
+									;else leave deviation value as-is
+									(current_value)
+								)
+							)
+							;if there are shared deviations, don't store or compute SDM for deviations for the non-primary shared features
+							(if (size !sharedDeviationsMap)
+								(remove feature_deviations !sharedDeviationsNonPrimaryFeatures)
+								feature_deviations
 							)
 						)
+				))
+
+				;append the shared deviations as a duplicate of their primary feature shared deviation
+				(if (size !sharedDeviationsMap)
+					(accum (assoc
 						feature_deviations
-					)
-			))
+							(map
+								(lambda
+									(get feature_deviations (get !sharedDeviationsMap (current_index)))
+								)
+								(zip !sharedDeviationsNonPrimaryFeatures)
+							)
+					))
+				)
+			)
 		)
 
 		(accum (assoc
@@ -914,8 +933,10 @@
 				(assoc
 					auto_ablation_enabled !autoAblationEnabled
 					auto_ablation_weight_feature !autoAblationWeightFeature
-					minimum_num_cases !autoAblationMinNumCases
-					influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+					min_num_cases !autoAblationMinNumCases
+					max_num_cases !autoAblationMaxNumCases
+					auto_ablation_influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+					reduce_data_influence_weight_entropy_threshold !reduceDataInfluenceWeightEntropyThreshold
 					abs_threshold_map !autoAblationAbsThresholdMap
 					delta_threshold_map !autoAblationDeltaThresholdMap
 					rel_threshold_map !autoAblationRelThresholdMap
@@ -943,11 +964,19 @@
 			;{type "number"}
 			;stores the threshold for the minimum number of cases at which the model should auto-ablate.
 			;	default of 1000.
-			minimum_num_cases 1000
+			min_num_cases 1000
+			;{type "number"}
+			;stores the threshold for the number of cases at which the model should automatically reduce data.
+			;	default of 500,000.
+			max_num_cases 500000
 			;{type "number"}
 			;the influence weight entropy quantile that a case must be beneath in order to be trained.
-			;	default of 0.6.
-			influence_weight_entropy_threshold 0.15
+			;	default of 1/e^2.
+			auto_ablation_influence_weight_entropy_threshold 0.135335283
+			;{type "number"}
+			;the influence weight entropy quantile that a case must be beneath in order to not be removed.
+			;	default of 1-1/e.
+			reduce_data_influence_weight_entropy_threshold 0.632120559
 			;{type "list" values "string"}
 			;list of features. for each of the features specified, will ablate a case if the prediction
 			;	matches exactly.
@@ -1010,15 +1039,17 @@
 		)
 
 		(if
-			(or (< influence_weight_entropy_threshold 0) (> influence_weight_entropy_threshold 1))
+			(or (< auto_ablation_influence_weight_entropy_threshold 0) (> auto_ablation_influence_weight_entropy_threshold 1))
 			(assign (assoc auto_ablation_entropy_threshold_quantile 1.0))
 		)
 
 		(assign_to_entities (assoc
 			!autoAblationEnabled auto_ablation_enabled
 			!autoAblationWeightFeature auto_ablation_weight_feature
-			!autoAblationMinNumCases minimum_num_cases
-			!autoAblationInfluenceWeightEntropyThreshold influence_weight_entropy_threshold
+			!autoAblationMinNumCases min_num_cases
+			!autoAblationMaxNumCases max_num_cases
+			!autoAblationInfluenceWeightEntropyThreshold auto_ablation_influence_weight_entropy_threshold
+			!reduceDataInfluenceWeightEntropyThreshold reduce_data_influence_weight_entropy_threshold
 			!autoAblationExactPredictionFeatures exact_prediction_features
 			!autoAblationTolerancePredictionThresholdMap tolerance_prediction_threshold_map
 			!autoAblationRelativePredictionThresholdMap relative_prediction_threshold_map
@@ -1091,6 +1122,11 @@
 			leftover_confusion_matrix (assoc)
 			leftover_unknown_class_deviation (null)
 			valid_weight_feature (and use_case_weights (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight")) )
+			feature_grouping
+				(if (get !sharedDeviationsMap feature)
+					(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve feature))
+					[feature]
+				)
 		))
 
 		(declare (assoc
@@ -1106,24 +1142,42 @@
 			(conclude (null))
 		)
 
-		(declare (assoc num_classes (size (get !expectedValuesMap [weight_feature feature "class_counts"])) ))
-		(if (= 0 num_classes)
-			(assign (assoc
-				num_classes
-					(size
-						(compute_on_contained_entities (list
-							(query_value_masses
-								feature
-								(if valid_weight_feature weight_feature)
-								(or
-									(not (contains_index !nominalsMap feature))
-									(contains_index !numericNominalFeaturesMap feature)
+		;pull the number of classes for this feature from !expectedValuesMap if it was cached, otherwise compute it here
+		;if feature is in a shared deviation feature_grouping, counts the total number of unique classes from all the features in the group
+		(declare (assoc
+			num_classes
+				(size (values
+					(apply "append"
+						(map
+							(lambda
+								(let
+									(assoc
+										feature_classes (indices (get !expectedValuesMap [weight_feature (current_value 2) "class_counts"]))
+										current_feature (current_value 1)
+									)
+									(if (= 0 (size feature_classes))
+										(indices
+											(compute_on_contained_entities (list
+												(query_value_masses
+													current_feature
+													(if valid_weight_feature weight_feature)
+													(or
+														(not (contains_index !nominalsMap current_feature))
+														(contains_index !numericNominalFeaturesMap current_feature)
+													)
+												)
+											))
+										)
+										feature_classes
+									)
 								)
 							)
-						))
+							feature_grouping
+						)
 					)
-			))
-		)
+					(true)
+				))
+		))
 
 		;average all probabilities for a class that are same as or more than the predicted class probability
 		(declare (assoc
