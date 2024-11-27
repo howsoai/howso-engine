@@ -198,6 +198,10 @@
 			;base path to Howso Engine Core installation
 			root_filepath (null)
 			;{type "string"}
+			;path from which to load previously exported amlg trainee
+			;	If specified, trainee_json_filepath is ignored
+			trainee_amlg_filepath (null)
+			;{type "string"}
 			;path from which to load previously exported meta.json and exp.json files.
 			;	If unspecified, expects them to be located in the base installation /migrations/ directory.
 			trainee_json_filepath (null)
@@ -235,8 +239,16 @@
 			import_cases_and_sessions_map (null)
 		))
 
-		;if not importing metadata from saved file, upgrade trainee in place
-		(if (= (null) trainee_json_filepath)
+		;if amalgam trainee is specified, load and upgrade it
+		(if trainee_amlg_filepath
+			(call !MigrateSubtrainee (assoc
+				migration_trainee (call (load (concat trainee_amlg_filepath trainee ".amlg") ))
+				contained_entity_path []
+				new_labels (call get_export_attributes)
+			))
+
+			;if not importing metadata from saved file, upgrade trainee in place
+			(= (null) trainee_json_filepath)
 			(let
 				(assoc
 					;create a list of all the matadata labels
@@ -379,6 +391,67 @@
 		)
 
 		(call !Return)
+	)
+
+	#!MigrateSubtrainee
+	(declare
+		(assoc
+			migration_trainee (null)
+			new_labels []
+			contained_entity_path []
+		)
+
+		(declare (assoc
+			old_labels (call_entity migration_trainee "get_export_attributes")
+			case_and_session_entities (filter (lambda (!= !traineeContainer (current_value))) (contained_entities migration_trainee))
+		))
+
+		(declare (assoc
+			import_metadata_map
+				(map
+					(lambda
+						(call_entity migration_trainee "debug_label" (assoc label (current_index 1) ))
+					)
+					(zip old_labels)
+				)
+		))
+
+		;set the attributes
+		(assign_to_entities contained_entity_path import_metadata_map)
+
+		(map
+			(lambda
+				(move_entities [migration_trainee (current_value 1)] contained_entity_path)
+			)
+			case_and_session_entities
+		)
+
+		;TODO: migrate on contained trainees
+		;iterate over all the applicable migration script versions and apply each one in order
+		(call !execute_migration_scripts)
+
+		;recreate custom derive feature code on trainee if it has derived features
+		(call !recreate_feature_custom_derived_methods)
+
+		;if there are subtrainees, need to recursively upgrade those as well
+		(if (size (contained_entities [migration_trainee !traineeContainer]))
+			(map
+				(lambda (let
+					(assoc new_contained_entity_path (append contained_entity_path !traineeContainer (current_value 1)) )
+
+					;create a new trainee with the same id and relative path
+					(clone_entities new_trainee_path new_contained_entity_path)
+
+					;recursively migrate all the attributes and contained entities
+					(call !MigrateSubtrainee (assoc
+						migration_trainee (current_value 1)
+						contained_entity_path new_contained_entity_path
+						new_labels new_labels
+					))
+				))
+				(contained_entities [migration_trainee !traineeContainer])
+			)
+		)
 	)
 
 
