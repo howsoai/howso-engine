@@ -4,6 +4,7 @@
 	;{idempotent (true)}
 	#set_feature_attributes
 	(declare
+		;returns {ref "FeatureAttributesIndex"}
 		(assoc
 			;{ref "FeatureAttributesIndex" required (true)}
 			;assoc of feature -> attributes, attributes defined below:
@@ -21,9 +22,10 @@
 			;	'cycle_length': integer, specifies cycle length of cyclic feature, default is no cycle length
 			;
 			;	'date_time_format': string datetime format, only applicable to continuous features. If specified, feature values
-			;						should match the date format specified by this string and sets 'data_type' to 'formatted_date_time'.
+			;						should match the date or time format specified by this string and sets 'data_type' to 'formatted_date_time'.
 			;						Example: "%Y-%m-%d". If unspecified but 'data_type' is 'formatted_date_time', this will be set to
-			;						ISO8601 format of "%Y-%m-%dT%H:%M:%S"
+			;						ISO8601 format of "%Y-%m-%dT%H:%M:%S", if 'data_type' is 'formatted_time', this will be
+			;						ISO8601 format of "%H:%M%S".
 			;
 			;	'locale': string, the date time format locale. If unspecified, uses platform default locale. Example: "en_US"
 			;
@@ -39,7 +41,7 @@
 			;	'data_type': string, specify the data type for features with a type of nominal or continuous
 			;				Defaults to 'string' for nominals and 'number' for continuous
 			;				Valid values for both are: 'string', 'number', 'json', 'amalgam', 'yaml'
-			;				'string_mixable' and 'formatted_date_time' are valid only when type is continuous
+			;				'string_mixable', 'formatted_time' and 'formatted_date_time' are valid only when type is continuous
 			;				'boolean' is valid only when type is nominal
 			;
 			;	'id_feature': boolean, Set to true only for nominal features containing nominal IDs to specify that this
@@ -90,6 +92,10 @@
 			;					available nominal subtype using the 'subtype' attribute. However, if the nominal
 			;					feature is non-sensitive, setting this parameter to true will bypass the 'subtype'
 			;					requirement. Only applicable to nominal features. Default is false
+			;
+			;	'shared_deviations': list or boolean, The shared deviations feature group. If a list, this feature will share deviations with
+			;					the features in this list. By default, derived lag values share deviations with the parent feature. If
+			;					false and a parent feature, derived lags of this feature will not share deviations.
 			;
 			;	'subtype': string, the type used in novel nominal substitution.
 			;
@@ -159,6 +165,12 @@
 
 		(call !ValidateParameters)
 
+		(if (contains_value (indices feature_attributes) "")
+			(conclude
+				(call !Return (assoc errors (list "Empty strings feature names are not allowed.")))
+			)
+		)
+
 		;filter out any features that start with reserved characters
 		(assign (assoc
 			feature_attributes
@@ -204,11 +216,21 @@
 			continuous_to_nominal_dependents_map (null)
 			nominal_to_nominal_dependents_map (null)
 			novel_substition_feature_set (null)
+			shared_deviations_map (null)
 		))
 
 		(call !UpdateAttributesForDateTimeDataTypes)
 
 		(assign (assoc
+			shared_deviations_map
+				(filter
+					;don't keep those that have (false) for "shared_deviations"
+					(lambda (or (current_value)))
+					(map
+						(lambda (get (current_value) "shared_deviations") )
+						feature_attributes
+					)
+				)
 			ordinals_map
 				(filter
 					(lambda (= "ordinal" (get (current_value) "type")))
@@ -412,6 +434,13 @@
 			))
 		)
 
+		(if (size shared_deviations_map)
+			(seq
+				(assign (assoc shared_deviations_map (call !ProcessSharedDeviationsMap)))
+				(call !ValidateSharedDeviations)
+			)
+		)
+
 		(if (size post_process_map)
 			(assign (assoc has_post_processing (true)))
 		)
@@ -545,6 +574,11 @@
 
 			!queryDistanceTypeMap query_distance_type_map
 			!tsTimeFeature time_series_feature
+			!sharedDeviationsMap (get shared_deviations_map "shared_deviations_key_map")
+			!sharedDeviationGroupByPrimaryMap (get shared_deviations_map "shared_deviations_group_by_primary")
+			!sharedDeviationsPrimaryFeatures (get shared_deviations_map "shared_deviations_primary_features")
+			!sharedDeviationsNonPrimaryFeatures (get shared_deviations_map "shared_deviations_non_primary_features")
+
 		))
 
 		(call !SetOrdinalFeatures (assoc ordinal_features ordinals))
@@ -571,11 +605,13 @@
 		))
 
 		;if time series, create TS features and attributes here if needed
-		(if (and create_ts_attributes time_series_feature) (call !CreateTimeSeriesFeatures) )
+		(if (and create_ts_attributes time_series_feature)
+			(call !CreateTimeSeriesFeatures)
 
-		(accum_to_entities trainee (assoc !revision 1))
+			(accum_to_entities (assoc !revision 1))
+		)
 
-		(call !Return (assoc payload !featureAttributes))
+		(call get_feature_attributes)
 	)
 
 	#!ComposeCustomDerivedMethods
@@ -678,7 +714,9 @@
 	;output all feature attributes
 	;{idempotent (true)}
 	#get_feature_attributes
-	(seq
+	(declare
+		;returns {ref "FeatureAttributesIndex"}
+		(assoc)
 		;if feature attributes is empty but there are feature definitions, manually populate !featureAttributes
 		(if (and
 				(!= (null) !trainedFeatures)
@@ -794,10 +832,7 @@
 		(if value_feature_nulls_are_dependent
 			;if this feature has any nulls, add (null) as a unique nominal feature value for which to compute boundaries
 			(if
-				(compute_on_contained_entities (list
-					(query_equals feature (null))
-					(query_count)
-				))
+				(size (contained_entities [ (query_equals feature (null)) ] ))
 				(accum (assoc feature_values (list (null)) ))
 			)
 		)
@@ -867,7 +902,9 @@
 						(if
 							(and
 								value_feature_nulls_are_dependent
-								(compute_on_contained_entities (append query_among_statements (query_equals value_feature (null)) (query_count) ))
+								(size
+									(contained_entities (append query_among_statements (query_equals value_feature (null)) ))
+								)
 							)
 							;output a tuple of [min, (null), max]
 							(list

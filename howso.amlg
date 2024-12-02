@@ -45,7 +45,7 @@
 	#!traineeContainer ".trainee_container"
 
 	;the supported prediction stats that users can request from react_aggregate
-	#!supportedPredictionStats (list "mae" "confusion_matrix" "r2" "rmse" "spearman_coeff" "precision" "recall" "accuracy" "mcc" "all" "missing_value_accuracy")
+	#!supportedPredictionStats (list "mae" "confusion_matrix" "r2" "rmse" "adjusted_smape" "smape" "spearman_coeff" "precision" "recall" "accuracy" "mcc" "all" "missing_value_accuracy")
 
 	;all the characters that may not be the first character of a feature when training a dataset
 	#!untrainableFeatureCharacterSet
@@ -111,8 +111,10 @@
 	#!seriesStore (null)
 	#!seriesFeatures (null)
 	#!autoAblationEnabled (null)
-	#!autoAblationMinModelSize (null)
+	#!autoAblationMinNumCases (null)
+	#!autoAblationMaxNumCases (null)
 	#!autoAblationInfluenceWeightEntropyThreshold (null)
+	#!reduceDataInfluenceWeightEntropyThreshold (null)
 	#!autoAblationExactPredictionFeatures (null)
 	#!autoAblationTolerancePredictionThresholdMap (null)
 	#!autoAblationRelativePredictionThresholdMap (null)
@@ -121,12 +123,16 @@
 	#!autoAblationConvictionUpperThreshold (null)
 	#!autoAblationWeightFeature (null)
 	#!autoAblationMaxInfluenceWeightEntropy (null)
+	#!autoAblationAbsThresholdMap (null)
+	#!autoAblationDeltaThresholdMap (null)
+	#!autoAblationRelThresholdMap (null)
 	#!autoAnalyzeEnabled (null)
 	#!autoAnalyzeThreshold (null)
 	#!autoAnalyzeGrowthFactorAmount (null)
 	#!ablationBatchSize (null)
 	#!ablatedCasesDistributionBatchSize (null)
 	#!dataMassChangeSinceLastAnalyze (null)
+	#!dataMassChangeSinceLastDataReduction (null)
 	#!savedAnalyzeParameterMap (null)
 	#!derivedFeaturesMap (null)
 	#!sourceToDerivedFeatureMap (null)
@@ -146,6 +152,10 @@
 	#!postProcessMap (null)
 	#!hasDependentFeatures (null)
 	#!dependentFeatureMap (null)
+	#!sharedDeviationsMap (null)
+	#!sharedDeviationGroupByPrimaryMap (null)
+	#!sharedDeviationsNonPrimaryFeatures (null)
+	#!sharedDeviationsPrimaryFeatures (null)
 	#!continuousToNominalDependenciesMap (null)
 	#!dependentsBoundaryMap (null)
 	#!dependentValuesCombinationsMap (null)
@@ -170,16 +180,19 @@
 	#!traineeId (null)
 
 	;The major version of the Trainee
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) attribute "number"}
 	#major_version 0
 
 	;The minor version of the Trainee
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) attribute "number"}
 	#minor_version 0
 
 	;The point version of the Trainee
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) attribute "number"}
 	#point_version 0
+
+	;flag to indicate if DD submodel should be created and used during each residual computation iteration within analyze
+	#!useDynamicDeviationsDuringAnalyze (null)
 
 	;list of modules for trainee template
 	#!traineeTemplateModules
@@ -189,6 +202,7 @@
 		"attribute_maps"
 		"analysis"
 		"analysis_weights"
+		"boundary_values"
 		"contributions"
 		"conviction"
 		"custom_codes"
@@ -222,14 +236,17 @@
 		"remove_cases"
 		"research"
 		"residuals"
+		"return_types"
 		"series_store"
+		"shared_deviations"
 		"substitution"
 		"synthesis"
 		"synthesis_bounds"
 		"synthesis_utilities"
 		"synthesis_validation"
 		"train"
-		"typing"
+		"train_ts_ablation"
+		"types"
 		"update_cases"
 		"upgrade"
 	)
@@ -541,13 +558,27 @@
 				)
 
 			;list of supported details for react series
-			!tsSupportedDetails (list "categorical_action_probabilities" "influential_cases")
+			!tsSupportedDetails (list "categorical_action_probabilities" "influential_cases" "generate_attempts")
 
 			;flag set to true if there are features that are dependent on others
 			!hasDependentFeatures (false)
 
 			;assoc of feature -> { 'dependent_features' : [ list of dependent features ] }
 			!dependentFeatureMap (assoc)
+
+			;assoc of feature ->  primary feature key from group of shared deviations features
+			;  This primary feature key is the first sorted feature in the group of features
+			!sharedDeviationsMap (assoc)
+
+			;list of all primary shared features
+			!sharedDeviationsPrimaryFeatures (list)
+
+			;list of all non-primary shared features in a group
+			!sharedDeviationsNonPrimaryFeatures (list)
+
+			;assoc of primary group feature -> list of shared features in its group
+			; e.g.,  { "a": ["a", "b"], "c": ["c", "d"] }
+			!sharedDeviationGroupByPrimaryMap (assoc)
 
 			;assoc of continuous feature -> [ list of sorted nominal dependents ]
 			!continuousToNominalDependenciesMap (assoc)
@@ -568,12 +599,19 @@
 			; during analyze.
 			!autoAblationEnabled (false)
 
-			;if !autoAablateEnabled is set, stores the minimum number of cases required to ablate.
-			!autoAblationMinModelSize 1000
+			;if !autoAblationEnabled is set, stores the minimum number of cases required to ablate.
+			!autoAblationMinNumCases 1000
+
+			;if !autoAblationEnabled is set, stores the minimum number of cases required to reduce data.
+			!autoAblationMaxNumCases 500000
 
 			;the influence weight entropy threshold quantile that a case's influence weight entropy must be less than in order to
-			; not be ablated.
-			!autoAblationInfluenceWeightEntropyThreshold 0.15
+			; not be ablated. Default 1/e^2.
+			!autoAblationInfluenceWeightEntropyThreshold 0.135335283
+
+			;the influence weight entropy threshold quantile that a case's influence weight entropy must be less than in order to
+			; not be removed in reduce_data. Default 1-1/e.
+			!reduceDataInfluenceWeightEntropyThreshold 0.632120559
 
 			;number of cases in a batch to consider for ablation prior to training and to recompute influence weight entropy.
 			!ablationBatchSize 2000
@@ -605,6 +643,15 @@
 			;cached value of the max influence weight entropy to keep cases cases during ablation
 			!autoAblationMaxInfluenceWeightEntropy (null)
 
+			;absolute threshold map for auto-ablation, if these are satisfied then auto-ablation will cease.
+			!autoAblationAbsThresholdMap (assoc)
+
+			;delta threshold map for auto-ablation, if these are satisfied then auto-ablation will cease.
+			!autoAblationDeltaThresholdMap (assoc)
+
+			;relative threshold map for auto-ablation, if these are satisfied then auto-ablation will cease.
+			!autoAblationRelThresholdMap (assoc)
+
 			;whether this Trainee has had influence weight entropies computed and stored for its trained cases.
 			!hasInfluenceWeightEntropies (false)
 
@@ -614,14 +661,14 @@
 			;if specified, stores the threshold for the change in data mass since the last analyze at which the model should be re-analyzed
 			!autoAnalyzeThreshold 100
 
-			;if !autoAnalyzeEnabledis set, the factor by which to increase that threshold everytime the model grows to that threshold size
+			;if !autoAnalyzeEnabledis set, the factor by which to increase that threshold every time the model grows to that threshold size
 			!autoAnalyzeGrowthFactorAmount 7.389056
 
 			;map of parameters used when analyze was called on this model
 			!savedAnalyzeParameterMap (null)
 
 			;hyperparameters stored in nested assocs, where full paths are
-			;(list action_feature/.targetless context_features robust/full case_weight_feature/.none)
+			; [ targeted/targetless [action_feature] context_features case_weight_feature/.none)
 			!hyperparameterMetadataMap (assoc)
 
 			;list of param paths to Hyperparameter assocs in !hyperparameterMetadataMap
@@ -644,23 +691,32 @@
 			!featureMarginalStatsMap (assoc)
 
 			;cumulative count of the data mass changed since analyze was last called. this is accumulated to by any operations
-			; which add, remove, or edit cases.
+			;which add, remove, or edit cases.
 			!dataMassChangeSinceLastAnalyze 0.0
+
+			;cumulative count of the data mass changed since reduce_data was last called. this is accumulated to by any operations
+			;which add, remove, or edit cases.
+			!dataMassChangeSinceLastDataReduction 0.0
+
+			;flag to indicate if the DD subtrainee should be recreated and used with each iteration of residuals within Analyze
+			!useDynamicDeviationsDuringAnalyze (false)
 		))
+
+		(call !Return)
 	)
 
 	;default value to use for filepath when calling save or load
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) attribute "string"}
 	#filepath "./"
 
 	;location of Howso Engine files, used for upgrading trainees (referencing
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) attribute "string"}
 	#root_filepath "./"
 
 	#!migration_folder "migrations/"
 
 	;default value to use for filename when calling save or load
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) attribute "string"}
 	#filename "default_trainee"
 
 	;location of trainee template
@@ -672,22 +728,30 @@
 	#!file_extension "amlg"
 
 	;The version of the trainee set externally
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) payload (false)}
 	#version (get (load (concat filepath "version.json")) "version")
 
 	;The version stored in trainee
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) payload (false)}
 	#get_trainee_version
-	(concat
-		(retrieve_from_entity "major_version") "."
-		(retrieve_from_entity "minor_version") "."
-		(retrieve_from_entity "point_version")
+	(declare
+		;returns {type "string"}
+		(assoc)
+		(concat
+			(retrieve_from_entity "major_version") "."
+			(retrieve_from_entity "minor_version") "."
+			(retrieve_from_entity "point_version")
+		)
 	)
 
 	;returns the trainee's unique id
-	;{read_only (true) idempotent (true)}
+	;{read_only (true) idempotent (true) payload (false)}
 	#get_trainee_id
-	(retrieve_from_entity "!traineeId")
+	(declare
+		;returns {type "string"}
+		(assoc)
+		(retrieve_from_entity "!traineeId")
+	)
 
 	;set trainee's unique id
 	;{idempotent (true)}
@@ -705,7 +769,7 @@
 	)
 
 	;set trainee's unique parent id
-	;{idempotent (true)}
+	;{idempotent (true) protected (true)}
 	#set_parent_id
 	(declare
 		(assoc
@@ -719,13 +783,22 @@
 		(call !Return)
 	)
 
+	;get trainee's unique parent id
+	;{read_only (true) idempotent (true) }
+	#get_parent_id
+	(declare
+		;returns {type ["string" "null"]}
+		(assoc)
+		(call !Return (assoc payload (retrieve_from_entity "!parentId")  ))
+	)
+
 	;set metadata for model
 	;{idempotent (true)}
 	#set_metadata
 	(declare
 		(assoc
 			;{type ["assoc" "null"] required (true)}
-			;arbitary map of metadata to store in a trainee
+			;arbitrary map of metadata to store in a trainee
 			metadata (null)
 		)
 		(call !ValidateParameters)
@@ -737,7 +810,11 @@
 	;get metadata for model
 	;{read_only (true) idempotent (true)}
 	#get_metadata
-	(call !Return (assoc payload (retrieve_from_entity "!metaData") ))
+	(declare
+		;returns {type ["assoc" "null"]}
+		(assoc)
+		(call !Return (assoc payload (retrieve_from_entity "!metaData") ))
+	)
 
 	;set the random seed on a trainee
 	#set_random_seed
@@ -777,44 +854,58 @@
 	;returns the trainee's !revision
 	;{read_only (true) idempotent (true)}
 	#get_revision
-	(call !Return (assoc payload (assoc "count" (retrieve_from_entity "!revision")) ))
+	(declare
+		;returns {
+		; 	type "assoc"
+		; 	description "Map containing the revision count of the trainee."
+		;	additional_indices (false)
+		; 	indices {
+		; 		"count" {
+		;			type "number"
+		;			required (true)
+		;		}
+		; 	}
+		; }
+		(assoc)
+		(call !Return (assoc payload (assoc "count" (retrieve_from_entity "!revision")) ))
+	)
 
 	;returns a structure containing all of the API details for this module
 	;{read_only (true) idempotent (true)}
 	#get_api
-	(let
-		(assoc
-			api
-				(assoc
-					"description"
-					(get_entity_comments)
+	(declare
+		;returns {ref "GetAPIResponse"}
+		(assoc)
 
-					"version"
-					(call get_trainee_version)
+		(let
+			(assoc
+				api
+					(assoc
+						"description"
+						(get_entity_comments)
 
-					"labels"
-					(map
-						(lambda
-							(let
-								(assoc
-									label_flags_map
-										(parse
-											;need to revert to empty string if no matches are found
-											(or (last (substr (current_value 1) "\\{.+\\}" "all"))) ""
-										)
-								)
+						"version"
+						(call get_trainee_version)
 
-								(append
+						"labels"
+						(map
+							(lambda
+								(let
 									(assoc
-										"description"
-											;replace the flags assoc with an empty string, only get description
-											(substr
-												(current_value 1)
-												"\\{.+\\}"
-												(null)
-												""
+										label_flags_map
+											(let
+												(assoc
+													rgx_match (last (substr (current_value 2) "\\{.+\\}" "all"))
+												)
+
+												(if (!= (null) rgx_match)
+													(parse rgx_match)
+
+													;else use an empty assoc
+													{}
+												)
 											)
-										"parameters"
+										parameters
 											;when debugging, comments are injected to all lines, these must be removed
 											;some parameters may have comments other than the type hint as well
 											(map
@@ -824,12 +915,12 @@
 														;regex to just capture the {} information
 														(or (parse (substr (first (current_value)) "\\{.+\\}")) (assoc) )
 														(assoc
-															default (last (current_value 1))
+															default (call (last (current_value 1)))
 															description
 																;replace the typing assoc with an empty string, only get description
 																(substr
 																	(first (current_value 1))
-																	"\\{.+\\}\\r\\n"
+																	"^\\{.+\\}\\r?\\n?"
 																	(null)
 																	""
 																)
@@ -841,20 +932,66 @@
 											)
 									)
 
-									;appending the label's flags map if defined
-									(or label_flags_map {})
+									(append
+										(assoc
+											"description"
+												;replace the flags assoc with an empty string, only get description
+												(substr
+													(current_value 1)
+													"\\{.+\\}"
+													(null)
+													""
+												)
+											"parameters"
+												(if (size parameters)
+													parameters
+												)
+
+											"returns"
+												(let
+													(assoc
+														return_type_map
+															(parse
+																(substr
+																	(substr
+																		;last item is the comment on the (assoc)
+																		(last (get_entity_comments (null) (current_index 2) (true)))
+																		;replace special chars with spaces
+																		"[\\r\\t\\n]"
+																		(null)
+																		" "
+																	)
+																	"\\{.+\\}"
+																)
+															)
+													)
+
+													(if (and
+															(contains_index return_type_map "ref")
+															(contains_index !returnTypes (get return_type_map "ref"))
+														)
+														(call (get !returnTypes (get return_type_map "ref")))
+
+														;otherwise just return the type
+														(call return_type_map)
+													)
+												)
+										)
+
+										label_flags_map
+									)
 								)
 							)
+							(get_entity_comments (null) (null) (true))
 						)
-						(get_entity_comments (null) (null) (true))
+
+						"schemas"
+						(call (retrieve_from_entity "!customTypes"))
 					)
+			)
 
-					"schemas"
-					(call (retrieve_from_entity "!customTypes"))
-				)
+			(call !Return (assoc payload api))
 		)
-
-		(call !Return (assoc payload api))
 	)
 
 	;debug method to output any internal label, used by unit tests and debugging

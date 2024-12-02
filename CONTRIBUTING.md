@@ -29,6 +29,16 @@ Howso Engine. This extension supports debugging Amalgam scripts as well as trace
 by [amalgam-lang-py](https://github.com/howsoai/amalgam-lang-py). Please see these projects to
 get further information about debugging Amalgam.
 
+
+### Tracefiles
+If using the Howso Engine through the Python API, [howso-engine-py](https://github.com/howsoai/howso-engine-py),
+you may be producing tracefiles through the Python API for Amalgam, [amalgam-lang-py](https://github.com/howsoai/amalgam-lang-py).
+To use these tracefiles to debug the Amalgam code of the Howso Engine, the tracefile must be edited to load the Amalgam
+files rather than the compressed Amalgam (.caml) files commonly used in the Python packages. We provide a utility Amalgam script,
+`prep_tracefile.amlg` in the "utilities" directory which when run with Amalgam and the path to a tracefile specified as an argument,
+will edit the tracefile accordingly to load `howso.amlg` from the current directory and make a necessary adjustment to the `LOAD_ENTITY`
+call.
+
 ## Testing
 
 The Howso Engine has a suite of unit tests and performance tests. To run the full set of unit tests, simply
@@ -75,9 +85,13 @@ Return types of methods should be specified by comments on the assoc with the pa
 | Key                 | Values |
 | ------------------- | ------ |
 | type                | If single type, the type as a string. If multiple types, a list of types as strings. The available types are "list", "assoc", "number", "string", "boolean", "any".
+| ref                 | Instead of a full type map, use this to specify the name of a custom schema defined in (assoc) with label #!customTypes.
+| any_of              | Used in place of 'type' or 'ref'. Value should be a list of strings or type (assocs) that the value must fit any of.
 | values              | Only used when `type` is "list". Values should be similar to the values of `type` and should define the possible types of the values. This value can be an assoc if the type is a data structure.
-| min_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
-| max_size            | Only applicable when `type` is "list" or "assoc". Value should be an integer.
+| min_size            | Only applicable when `type` is "list". Value should be an integer.
+| max_indices         | Only applicable when `type` is "list". Value should be an integer.
+| min_indices         | Only applicable when `type` is "assoc". Value should be an integer.
+| max_size            | Only applicable when `type` is "assoc". Value should be an integer.
 | enum                | Only applicable when `type` is "string". A list of possible values for the string
 | min                 | Only applicable when `type` is "number". The inclusive minimum value.
 | exclusive_min       | Only applicable when `type` is "number". The exclusive minimum value.

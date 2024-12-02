@@ -32,44 +32,63 @@
 		)
 
 		(if (size confusion_matrix_map)
-			(assign (assoc
-				feature_deviations
-					(map
-						;convert deviations for nominals that had a confusion matrix computed from a single value into an assoc
-						;containing the nominal deviation as 'expected_deviation' and a sparse deviation matrix as 'sdm'
-						(lambda
-							(if (contains_index confusion_matrix_map (current_index))
-								(let
-									(assoc feature (current_index 1) )
-									(declare (assoc
-										sdm
-											##SparseDeviationMatrix
-											(call !ConfusionMatrixToSDM (assoc
-												confusion_matrix (get confusion_matrix_map [feature "matrix"])
-												feature feature
-												expected_deviation (current_value 2)
-											))
-									))
+			(seq
+				(assign (assoc
+					feature_deviations
+						(map
+							;convert deviations for nominals that had a confusion matrix computed from a single value into an assoc
+							;containing the nominal deviation as 'expected_deviation' and a sparse deviation matrix as 'sdm'
+							(lambda
+								(if (contains_index confusion_matrix_map (current_index))
+									(let
+										(assoc feature (current_index 1) )
+										(declare (assoc
+											sdm
+												##SparseDeviationMatrix
+												(call !ConfusionMatrixToSDM (assoc
+													confusion_matrix (get confusion_matrix_map [feature "matrix"])
+													feature feature
+													expected_deviation (current_value 2)
+												))
+										))
 
-									;output an assoc of sdm and expected deviation
-									(if sdm
-										(assoc
-											"sdm" sdm
-											"expected_deviation" (current_value 1)
+										;output an assoc of sdm and expected deviation
+										(if sdm
+											(assoc
+												"sdm" sdm
+												"expected_deviation" (current_value 1)
+											)
+
+											;else there is no sdm, return just the value
+											(current_value)
 										)
-
-										;else there is no sdm, return just the value
-										(current_value)
 									)
-								)
 
-								;else leave deviation value as-is
-								(current_value)
+									;else leave deviation value as-is
+									(current_value)
+								)
+							)
+							;if there are shared deviations, don't store or compute SDM for deviations for the non-primary shared features
+							(if (size !sharedDeviationsMap)
+								(remove feature_deviations !sharedDeviationsNonPrimaryFeatures)
+								feature_deviations
 							)
 						)
+				))
+
+				;append the shared deviations as a duplicate of their primary feature shared deviation
+				(if (size !sharedDeviationsMap)
+					(accum (assoc
 						feature_deviations
-					)
-			))
+							(map
+								(lambda
+									(get feature_deviations (get !sharedDeviationsMap (current_index)))
+								)
+								(zip !sharedDeviationsNonPrimaryFeatures)
+							)
+					))
+				)
+			)
 		)
 
 		(accum (assoc
@@ -199,27 +218,40 @@
 	)
 
 	;write baseline_hyperparameter_map out to the model's !hyperparameterMetadataMap
+	;null action feature assumes targetless hyperparameters
 	#!SetModelHyperParameters
 	(seq
 		(if derived_auto_analyzed
 			(accum (assoc baseline_hyperparameter_map (assoc "derivedAutoAnalyzed" (true)) ))
 		)
 
-		(if (not (contains_value !hyperparameterParamPaths (list action_feature context_features_key robust_mode weight_feature)) )
+		(declare (assoc
+			target_mode
+				(if action_feature
+					["targeted" action_feature]
+					["targetless"]
+				)
+			; param paths are: [targeted/less [action_feature] context_key weight_feature]
+			context_key_index (if action_feature 2 1)
+		))
+
+		(if (not (contains_value !hyperparameterParamPaths (append target_mode context_features_key weight_feature) ) )
 			(let
 				(assoc
-					;check if any hyperparameters exist that also match this action_feature robust_mode and weight_feature
+					;check if any hyperparameters exist that also match this action_feature and weight_feature
 					;if any exist that were derived_auto_analyzed, remove them because that means these new hyperparameters supercede them
 					old_params_key_to_remove
 						(first (filter
 							(lambda (and
 								(get !hyperparameterMetadataMap (append (current_value) "derivedAutoAnalyzed"))
-								(= (remove (current_value) 1) (list action_feature robust_mode weight_feature))
+								;check if it matches with removed context key
+								(= (remove (current_value) context_key_index) (append target_mode weight_feature) )
 							))
 							!hyperparameterParamPaths
 						))
 				)
 
+				;remove old path befor adding the new one
 				(if (size old_params_key_to_remove)
 					(seq
 						(assign_to_entities (assoc
@@ -227,26 +259,40 @@
 						))
 
 						;remove the old context features set
-						(accum_to_entities (assoc
+						(assign_to_entities (assoc
 							!hyperparameterMetadataMap
-								(associate
-									action_feature
-										(remove (get !hyperparameterMetadataMap action_feature) (get old_params_key_to_remove 1))
+								(set
+									!hyperparameterMetadataMap
+									target_mode
+									(remove (get !hyperparameterMetadataMap target_mode) (get old_params_key_to_remove context_key_index))
 								)
+							!hyperparameterParamPaths (list (append target_mode context_features_key weight_feature))
 						))
 					)
-				)
 
-				(accum_to_entities (assoc !hyperparameterParamPaths (list (list action_feature context_features_key robust_mode weight_feature)) ))
+					;else add the new path
+					(accum_to_entities (assoc
+						!hyperparameterParamPaths (list (append target_mode context_features_key weight_feature))
+					))
+				)
 			)
+		)
+
+		;add subtrainee ID
+		(if deviation_subtrainee_name
+			(assign (assoc
+				baseline_hyperparameter_map (append baseline_hyperparameter_map {"subtraineeName" deviation_subtrainee_name})
+			))
 		)
 
 		(if (= (get baseline_hyperparameter_map ["paramPath" 0]) ".default")
 			;updating default hyperparam set with featuredeviations
-			(assign_to_entities (assoc !defaultHyperparameters baseline_hyperparameter_map) )
+			(assign_to_entities (assoc !defaultHyperparameters baseline_hyperparameter_map ))
 
 			;update the appropriate hyperparameter set
-			(assign_to_entities (assoc !hyperparameterMetadataMap (set !hyperparameterMetadataMap (get baseline_hyperparameter_map "paramPath") baseline_hyperparameter_map)) )
+			(assign_to_entities (assoc
+				!hyperparameterMetadataMap (set !hyperparameterMetadataMap (get baseline_hyperparameter_map "paramPath") baseline_hyperparameter_map)
+			))
 		)
 		(accum_to_entities (assoc !revision 1))
 	)
@@ -442,12 +488,13 @@
 
 	#!GetHyperparameters
 	(declare
-		(assoc
-			mode "robust"
-			weight_feature ".none"
-		)
+		(assoc weight_feature ".none")
 
-		(if (= 0 (size !hyperparameterParamPaths))
+		;if only one set of analyzed params, return them
+		(if (= 1 (size !hyperparameterParamPaths))
+			(conclude (get !hyperparameterMetadataMap (first !hyperparameterParamPaths)))
+
+			(= 0 (size !hyperparameterParamPaths))
 			(seq
 				(if (and (not !autoAnalyzeEnabled ) (>= (call !GetNumTrainingCases) 2))
 					(accum (assoc
@@ -462,10 +509,6 @@
 				;if no params, use defaults
 				(conclude !defaultHyperparameters)
 			)
-
-			(= 1 (size !hyperparameterParamPaths))
-			;if only one set of analyzed params, return them
-			(conclude (get !hyperparameterMetadataMap (first !hyperparameterParamPaths)))
 		)
 
 		;there are multiple sets of analyze params, we must determine the best
@@ -479,103 +522,63 @@
 				)
 		))
 
-
-		;determine value for feature
-		(if (or (= (null) feature) (not (contains_index !hyperparameterMetadataMap feature)))
-			(assign (assoc
-				feature
-					(if (contains_index !hyperparameterMetadataMap ".targetless")
-						".targetless"
+		;if feature is specified as "", this will default to ["targetless"] since "" can't be a targeted action feature
+		(declare (assoc
+			target_mode
+				(if (or (= (null) feature) (not (contains_index !hyperparameterMetadataMap ["targeted" feature])) )
+					(if (contains_index !hyperparameterMetadataMap "targetless")
+						["targetless"]
 
 						;else just use one of the targeted analyzed hyperparam sets
-						(first (indices !hyperparameterMetadataMap))
+						["targeted" (first (indices (get !hyperparameterMetadataMap "targeted")))]
 					)
-			))
-		)
+
+					["targeted" feature]
+				)
+		))
+
 
 		;if we have completely correct HPs, return them
-		(if (contains_index !hyperparameterMetadataMap (list feature context_key mode weight_feature))
-			(conclude (get !hyperparameterMetadataMap (list feature context_key mode weight_feature)) )
-
-			(declare (assoc other_mode (if (= mode "robust") "full" "robust") ))
-		)
-
-		;if we have the correct HPs, with the alternate mode, return them
-		(if (contains_index !hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
-			(conclude (get !hyperparameterMetadataMap (list feature context_key other_mode weight_feature)) )
+		(if (contains_index !hyperparameterMetadataMap (append target_mode context_key weight_feature))
+			(conclude (get !hyperparameterMetadataMap (append target_mode context_key weight_feature)) )
 		)
 
 		;we don't have the exact HPs, determine best context_key
 		(let
 			(assoc
-				;sort context keys in order of increasing length
+				;sort context keys in order of decreasing length
 				context_key_options
 					(sort
-						(lambda (> (size (current_value)) (size (current_value 1))))
-						(indices (get !hyperparameterMetadataMap feature) )
+						(lambda (< (size (current_value)) (size (current_value 1))))
+						(indices (get !hyperparameterMetadataMap target_mode) )
 					)
-
-				correct_mode (false)
-				correct_weight (false)
-				iterator 0
 			)
 
 			;naively set the context to the longest option
-			(assign (assoc context_key (last context_key_options) ))
+			(assign (assoc context_key (first context_key_options) ))
 
 
-			(while (< iterator (size context_key_options))
-				(assign (assoc candidate_context_key (get context_key_options iterator) ))
+			(while (< (current_index) (size context_key_options))
+				(assign (assoc candidate_context_key (get context_key_options (current_index 1)) ))
 
-				(if (contains_index !hyperparameterMetadataMap (list feature candidate_context_key mode weight_feature))
-					;correct mode and weight
-					(assign (assoc
-						context_key candidate_context_key
-						iterator (size context_key_options)
-						correct_mode (true)
-						correct_weight (true)
-					))
-
-					(contains_index !hyperparameterMetadataMap (list feature candidate_context_key other_mode weight_feature))
-					;incorrect mode, correct weight
-					(if (not correct_weight)
-						(assign (assoc
-							context_key candidate_context_key
-							correct_mode (true)
-							correct_weight (false)
-						))
+				(if (contains_index !hyperparameterMetadataMap (append target_mode candidate_context_key weight_feature))
+					(conclude
+						(assign (assoc context_key candidate_context_key))
 					)
 
-					(contains_index !hyperparameterMetadataMap (list feature candidate_context_key mode ".none"))
-					;correct mode, default weight
-					(if (and (not correct_mode) (not correct_weight))
-						(assign (assoc
-							context_key candidate_context_key
-							correct_mode (true)
-							correct_weight (false)
-						))
-					)
+					(contains_index !hyperparameterMetadataMap (append target_mode candidate_context_key ".none"))
+					(assign (assoc context_key candidate_context_key ))
 				)
-
-				(accum (assoc iterator 1 ))
 			)
 		)
 
-		;if we have the correct mode and weight for the action and context, return it
-		(if (contains_index !hyperparameterMetadataMap (list feature context_key mode weight_feature))
-			(get !hyperparameterMetadataMap (list feature context_key mode weight_feature))
+		;if we have the correct weight for the action and context, return it
+		(if (contains_index !hyperparameterMetadataMap (append target_mode context_key weight_feature))
+			(get !hyperparameterMetadataMap (append target_mode context_key weight_feature))
 
-			;if we have the correct weight for the action and context, return it
-			(contains_index !hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
-			(get !hyperparameterMetadataMap (list feature context_key other_mode weight_feature))
-
-			;only correct mode, no case weight
-			(contains_index !hyperparameterMetadataMap (list feature context_key mode ".none"))
-			(get !hyperparameterMetadataMap (list feature context_key mode ".none"))
-
-			;in correct mode, no case weight, just feature is right basically
-			(contains_index !hyperparameterMetadataMap (list feature context_key other_mode ".none"))
-			(get !hyperparameterMetadataMap (list feature context_key other_mode ".none"))
+			;no case weight
+			(contains_index !hyperparameterMetadataMap (append target_mode context_key ".none"))
+			(get !hyperparameterMetadataMap (append target_mode context_key ".none"))
 
 			;else the case_weight and ".none" isn't in the map, return the default params
 			!defaultHyperparameters
@@ -592,16 +595,26 @@
 	;{read_only (true) idempotent (true)}
 	#get_params
 	(declare
+		;returns {
+		; 	type "assoc"
+		;	additional_indices (false)
+		; 	indices {
+		; 		"hyperparameter_map" {any_of [{ref "HyperparameterMap"} {ref "HyperparameterMapFull"}] description "The full map of hyperparameters or a specific map of hyperparameters if any parameters were given"}
+		; 		"default_hyperparameter_map" {ref "HyperparameterMap" description "The map of default hyperparameters"}
+		; 		"auto_analyze_enabled" {type "boolean" description "Flag indicating of auto-analysis is enabled."}
+		; 		"analyze_threshold" {type "number" description "The number of cases at which the auto-analysis is triggered."}
+		; 		"analyze_growth_factor" {type "number" description "The scalar rate at which the number of cases to trigger an auto-analysis grows with each iteration"}
+		; 	}
+		; }
 		(assoc
 			;{type "string"}
-			;the target feature of the desired hyperparameters
+			;the target feature of the desired hyperparameters, when specified as a feature name, outputs the matching "targeted" hyperparameters.
+			;	When empty string "" will output "targetless" hyperparameters. When unspecified defaults to whatever hyperparameters were analyzed,
+			;	prioritizing "targetless" hyperparameters if multiple parameters exist.
 			action_feature (null)
 			;{type "list" values "string"}
 			;the set of context features used for the desired hyperparameters
 			context_features (null)
-			;{type "string" enum ["robust" "full"]}
-			;the method of calculation used to find the desired hyperparameters
-			mode (null)
 			;{type "string"}
 			;the weight feature used in the calculation of the desired hyperparameters
 			weight_feature (null)
@@ -612,7 +625,7 @@
 			internal_parameters_map
 				(assoc
 					"hyperparameter_map"
-						(if (= (null) action_feature context_features mode weight_feature)
+						(if (= (null) action_feature context_features weight_feature)
 							!hyperparameterMetadataMap
 
 							;else one of these parameters were specified
@@ -622,10 +635,9 @@
 										feature action_feature
 										context_features context_features
 									)
-									;don't pass mode or weight_feature in if they weren't specified,
+									;don't pass weight_feature in if it wasn't specified,
 									;allowing GetHyperparameters to use its defaults
-									(if mode (assoc mode mode) (assoc))
-									(if weight_feature (assoc weight_feature weight_feature) (assoc))
+									(if weight_feature (assoc weight_feature weight_feature) {})
 								)
 							)
 						)
@@ -653,12 +665,12 @@
 	#set_params
 	(declare
 		(assoc
-			;{ref "FullHyperparameterMap"}
-			;must have at least an action feature (e.g., .targetless) -> a contexts key -> robust -> k, p and dt provided.
+			;{ref "HyperparameterMapFull"}
+			;must have at least an target_mode (e.g., "targetless") -> a contexts key -> weight feature -> k, p and dt provided.
 			;	example:
 			;   {
-			;	  	".targetless" { "featureA.featureB.": { "robust" : { "k" : number, "p" : number, "dt": number }}},
-			;		"featureA" : { "featureB.featureC.": { "full" : { "k" : number, "p" : number, "dt": number }}},
+			;	  	"targetless" { "featureA.featureB.": { ".none" : { "k" : number, "p" : number, "dt": number }}},
+			;		"targeted" : { "featureA" : { "featureB.featureC.": { ".none" : { "k" : number, "p" : number, "dt": number }}}},
 			;			...
 			;	}
 			hyperparameter_map (null)
@@ -672,29 +684,17 @@
 			;stores the threshold for the number of cases at which the model should be re-analyzed. default of 100.
 			analyze_threshold 100
 			;{type "number"}
-			;the factor by which to increase the analyze threshold everytime the model grows to the current threshold size
+			;the factor by which to increase the analyze threshold every time the model grows to the current threshold size
 			;	default of two orders of magnitude using the universal scaling factor e
 			analyze_growth_factor 7.389056
 		)
 		(call !ValidateParameters)
 
-		(declare (assoc
-			;local var
-			bad_param (false)
-		))
 
 		(if (!= (null) default_hyperparameter_map)
-			(if (or
-					(not (contains_index default_hyperparameter_map "p"))
-					(not (contains_index default_hyperparameter_map "k"))
-					(not (contains_index default_hyperparameter_map "dt"))
-				)
-				(assign (assoc bad_param (true) ))
-
-				(seq
-					(accum (assoc default_hyperparameter_map (assoc "paramPath" (list ".default")) ))
-					(assign_to_entities (assoc !defaultHyperparameters default_hyperparameter_map) )
-				)
+			(seq
+				(accum (assoc default_hyperparameter_map {"paramPath" [".default"]} ))
+				(assign_to_entities (assoc !defaultHyperparameters default_hyperparameter_map) )
 			)
 		)
 
@@ -702,70 +702,44 @@
 		;iterate over action features
 		(if (!= (null) hyperparameter_map)
 			(let
-				(assoc param_paths (list))
-				(map
-					(lambda (if
-						(= 0 (size (current_value)))
-						(assign (assoc bad_param (true)))
-						;else iterate over context feature keys
-						(map
-							(lambda (if
-								(= 0 (size (current_value)))
-								(assign (assoc bad_param (true)))
-								;else iterate over robust / full
-								(map
-									(lambda (if
-										(= 0 (size (current_value)))
-										(assign (assoc bad_param (true)))
-										;else iterate over case weights
-										(map
-											(lambda
-												(if (or
-														(not (contains_index (current_value) "p"))
-														(not (contains_index (current_value) "k"))
-														(not (contains_index (current_value) "dt"))
-													)
-													(assign (assoc bad_param (true)))
+				(assoc
+					param_paths []
+					keys []
+				)
 
-													;else this HP assoc is good enough
-													(assign (assoc param_paths (append param_paths (list (list (current_index 6) (current_index 5) (current_index 4) (current_index 3))) ) ))
-												)
-											)
-											(current_value)
-										)
-									))
-									(current_value)
-								)
+				;populate all provided param_paths from the specified hyperparameter_map by appending all the indices recursively
+				#!RecursivelyAccumulateParamPaths
+				(map
+					(lambda
+						(if (and
+								(contains_index (current_value) "k")
+								(contains_index (current_value) "p")
+								(contains_index (current_value) "dt")
+							)
+							(accum (assoc param_paths [(append keys (current_index 2))] ))
+
+							(call !RecursivelyAccumulateParamPaths (assoc
+								keys (append keys (current_index 1))
+								hyperparameter_map (current_value 1)
 							))
-							(current_value)
 						)
-					))
+					)
 					hyperparameter_map
 				)
-				(if (not bad_param)
-					(assign_to_entities (assoc
-						!hyperparameterMetadataMap hyperparameter_map
-						!hyperparameterParamPaths param_paths
-					))
-				)
+
+				(assign_to_entities (assoc
+					!hyperparameterMetadataMap hyperparameter_map
+					!hyperparameterParamPaths param_paths
+				))
 			)
 		)
-
-		;return failure, invalid hyperparameter_map passed in
-		(if bad_param (conclude
-			(call !Return (assoc
-				errors (list "Failed to set parameters: invalid parameters specified.")
-			))
-		))
 
 		(assign_to_entities (assoc
 			!autoAnalyzeEnabled auto_analyze_enabled
 			!autoAnalyzeThreshold analyze_threshold
 			!autoAnalyzeGrowthFactorAmount analyze_growth_factor
 		))
-
 		(accum_to_entities (assoc !revision 1))
-
 		(call !Return)
 	)
 
@@ -801,16 +775,17 @@
 			;{type "number"}
 			;stores the threshold for the number of cases at which the model should be re-analyzed. default of 100.
 			analyze_threshold 100
-			;{type "number"}
-			;the factor by which to increase the analyze threshold everytime the model grows to the current threshold size
+			;{type "number" exclusive_min 1.0}
+			;the factor by which to increase the analyze threshold every time the model grows to the current threshold size
 			;	default of two orders of magnitude using the universal scaling factor e
 			analyze_growth_factor 7.389056
-			;parameter for analyze
 			;{type "list" values "string"}
+			;the features to use as contexts in the analysis
 			context_features (null)
 			;{type "list" values "string"}
+			;the features that the analysis should target
 			action_features (null)
-			;{type "number"}
+			;{type "number" min 1}
 			;number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
 			k_folds 1
 			;{type "boolean"}
@@ -827,13 +802,13 @@
 			;whether to use deviations for LK metric in queries. When true forces the use
 			;	of deviations, when false will not use deviations. If unspecified, the better performing option will be selected.
 			use_deviations (null)
-			;{type "number"}
+			;{type "number" min 2}
 			;number of cases to use to approximate residuals
 			num_samples (null)
-			;{type "number"}
+			;{type "number" min 2}
 			;number of cases to sample during analysis. only applies for k_folds = 1
 			num_analysis_samples (null)
-			;{type "number"}
+			;{type "number" min 2}
 			;number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
 			analysis_sub_model_size (null)
 			;{type "list" values "number"}
@@ -842,7 +817,7 @@
 			;{type "list" values "number"}
 			;list of values for p (the parameter of the Lebesgue space) to grid search during analysis
 			p_values (null)
-			;{type "list" values "number"}
+			;{type "list" values ["number" "string"]}
 			;list of values for dt (the distance transform) to grid search during analysis
 			dt_values (null)
 			;{type "string" enum ["single_targeted" "omni_targeted" "targetless"]}
@@ -862,12 +837,31 @@
 			;whether to use inverse residuals as feature weights. If unspecified, inverse residuals will be used as weights for
 			; targetless params, otherwise this method will not be used.
 			inverse_residuals_as_weights (null)
+			;{type "list" values "string"}
+			;list of features whose values to use to rebalance case weighting of the data and to store into weight_feature
+			;cannot be used when auto ablation is enabled
+			rebalance_features (null)
 		)
 		(call !ValidateParameters)
 
-		;growth factor must be more than 1
-		(if (<= analyze_growth_factor 1)
-			(assign (assoc analyze_growth_factor 2))
+		(if (and
+				(size action_features)
+				(= (size context_features) 0)
+			)
+			(conclude
+				(call !Return (assoc
+					errors ["`context_features` must be specified when `action_features` is specified."]
+				))
+			)
+		)
+
+		;don't allow rebalance_features to be specified if auto ablation is enabled
+		(if (and (size rebalance_features) !autoAblationEnabled)
+			(conclude
+				(call !Return (assoc
+					errors ["`rebalance_features` must not be specified when auto ablation is enabled."]
+				))
+			)
 		)
 
 		(declare (assoc num_cases (call !GetNumTrainingCases) ))
@@ -889,8 +883,6 @@
 				(assign (assoc analyze_threshold (/ analyze_threshold analyze_growth_factor )))
 			)
 		)
-
-		(accum_to_entities (assoc !revision 1))
 
 		(assign_to_entities (assoc
 			!autoAnalyzeEnabled auto_analyze_enabled
@@ -919,9 +911,12 @@
 						"inverse_residuals_as_weights" inverse_residuals_as_weights
 						"weight_feature" weight_feature
 						"use_case_weights" use_case_weights
+						"rebalance_features" rebalance_features
 					)
 			))
 		)
+
+		(accum_to_entities (assoc !revision 1))
 
 		(call !Return)
 	)
@@ -929,21 +924,32 @@
 	;get auto-ablation parameters set by #set_auto_ablation_params
 	;{read_only (true) idempotent (true)}
 	#get_auto_ablation_params
-	(call !Return (assoc
-		payload
-			(assoc
-				auto_ablation_enabled !autoAblationEnabled
-				auto_ablation_weight_feature !autoAblationWeightFeature
-				minimum_model_size !autoAblationMinModelSize
-				influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
-				exact_prediction_features !autoAblationExactPredictionFeatures
-				tolerance_prediction_threshold_map !autoAblationTolerancePredictionThresholdMap
-				relative_prediction_threshold_map !autoAblationRelativePredictionThresholdMap
-				residual_prediction_features !autoAblationResidualPredictionFeatures
-				conviction_upper_threshold !autoAblationConvictionUpperThreshold
-				conviction_lower_threshold !autoAblationConvictionLowerThreshold
-			)
-	))
+	(declare
+		;returns {ref "GetAutoAblationParamsResponse"}
+		(assoc)
+
+
+		(call !Return (assoc
+			payload
+				(assoc
+					auto_ablation_enabled !autoAblationEnabled
+					auto_ablation_weight_feature !autoAblationWeightFeature
+					min_num_cases !autoAblationMinNumCases
+					max_num_cases !autoAblationMaxNumCases
+					auto_ablation_influence_weight_entropy_threshold !autoAblationInfluenceWeightEntropyThreshold
+					reduce_data_influence_weight_entropy_threshold !reduceDataInfluenceWeightEntropyThreshold
+					abs_threshold_map !autoAblationAbsThresholdMap
+					delta_threshold_map !autoAblationDeltaThresholdMap
+					rel_threshold_map !autoAblationRelThresholdMap
+					exact_prediction_features !autoAblationExactPredictionFeatures
+					tolerance_prediction_threshold_map !autoAblationTolerancePredictionThresholdMap
+					relative_prediction_threshold_map !autoAblationRelativePredictionThresholdMap
+					residual_prediction_features !autoAblationResidualPredictionFeatures
+					conviction_upper_threshold !autoAblationConvictionUpperThreshold
+					conviction_lower_threshold !autoAblationConvictionLowerThreshold
+				)
+		))
+	)
 
 	;sets the model to auto-ablate by tracking its size and training certain cases as weights
 	;{idempotent (true)}
@@ -959,11 +965,19 @@
 			;{type "number"}
 			;stores the threshold for the minimum number of cases at which the model should auto-ablate.
 			;	default of 1000.
-			minimum_model_size 1000
+			min_num_cases 1000
+			;{type "number"}
+			;stores the threshold for the number of cases at which the model should automatically reduce data.
+			;	default of 500,000.
+			max_num_cases 500000
 			;{type "number"}
 			;the influence weight entropy quantile that a case must be beneath in order to be trained.
-			;	default of 0.6.
-			influence_weight_entropy_threshold 0.15
+			;	default of 1/e^2.
+			auto_ablation_influence_weight_entropy_threshold 0.135335283
+			;{type "number"}
+			;the influence weight entropy quantile that a case must be beneath in order to not be removed.
+			;	default of 1-1/e.
+			reduce_data_influence_weight_entropy_threshold 0.632120559
 			;{type "list" values "string"}
 			;list of features. for each of the features specified, will ablate a case if the prediction
 			;	matches exactly.
@@ -992,31 +1006,65 @@
 			;{type "number"}
 			;the number of ablated cases to compute influence weights for distribution at a time
 			ablated_cases_distribution_batch_size 100
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; absolute thresholds will cause ablation to stop when any of the measure values for any of
+			; the features for which a threshold is defined go above the threshold (in the case of rmse and
+			; mae) or below the threshold (otherwise).
+			abs_threshold_map (assoc)
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; delta thresholds will cause ablation to stop when the delta between any of the measure values
+			; for any of the features for which a threshold is defined and its previous value go above the threshold
+			; (in the case of rmse and mae) or below the threshold (otherwise).
+			delta_threshold_map (assoc)
+			;{ref "AblationThresholdMap"}
+			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
+			; relative thresholds will cause ablation to stop when the relative change between any of the
+			; measure values for any of the features for which a threshold is defined and its previous value go
+			; above the threshold (in the case of rmse and mae) or below the threshold (otherwise).
+			rel_threshold_map (assoc)
 		)
 		(call !ValidateParameters)
 
-		(if
-			(or (< influence_weight_entropy_threshold 0) (> influence_weight_entropy_threshold 1))
-			(assign (assoc auto_ablation_entropy_threshold_quantile 1.0))
+		;don't allow auto_ablation to be enabled if rebalance_features have been specified for analyze
+		(if (and
+				auto_ablation_enabled
+				(size (get !savedAnalyzeParameterMap "rebalance_features"))
+			)
+			(conclude
+				(call !Return (assoc
+					errors ["Cannot enable ablation if `rebalance_features` have been specified for analyze."]
+				))
+			)
 		)
 
-		(accum_to_entities (assoc !revision 1))
+		(if
+			(or (< auto_ablation_influence_weight_entropy_threshold 0) (> auto_ablation_influence_weight_entropy_threshold 1))
+			(assign (assoc auto_ablation_entropy_threshold_quantile 1.0))
+		)
 
 		(assign_to_entities (assoc
 			!autoAblationEnabled auto_ablation_enabled
 			!autoAblationWeightFeature auto_ablation_weight_feature
-			!autoAblationMinModelSize minimum_model_size
-			!autoAblationInfluenceWeightEntropyThreshold influence_weight_entropy_threshold
+			!autoAblationMinNumCases min_num_cases
+			!autoAblationMaxNumCases max_num_cases
+			!autoAblationInfluenceWeightEntropyThreshold auto_ablation_influence_weight_entropy_threshold
+			!reduceDataInfluenceWeightEntropyThreshold reduce_data_influence_weight_entropy_threshold
 			!autoAblationExactPredictionFeatures exact_prediction_features
 			!autoAblationTolerancePredictionThresholdMap tolerance_prediction_threshold_map
 			!autoAblationRelativePredictionThresholdMap relative_prediction_threshold_map
 			!autoAblationResidualPredictionFeatures residual_prediction_features
 			!autoAblationConvictionUpperThreshold conviction_upper_threshold
 			!autoAblationConvictionLowerThreshold conviction_lower_threshold
+			!autoAblationAbsThresholdMap abs_threshold_map
+			!autoAblationDeltaThresholdMap delta_threshold_map
+			!autoAblationRelThresholdMap rel_threshold_map
 			!ablationBatchSize batch_size
 			!ablatedCasesDistributionBatchSize ablated_cases_distribution_batch_size
 		))
 
+		(accum_to_entities (assoc !revision 1))
 		(call !Return)
 	)
 
@@ -1075,6 +1123,11 @@
 			leftover_confusion_matrix (assoc)
 			leftover_unknown_class_deviation (null)
 			valid_weight_feature (and use_case_weights (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight")) )
+			feature_grouping
+				(if (get !sharedDeviationsMap feature)
+					(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve feature))
+					[feature]
+				)
 		))
 
 		(declare (assoc
@@ -1090,24 +1143,42 @@
 			(conclude (null))
 		)
 
-		(declare (assoc num_classes (size (get !expectedValuesMap [weight_feature feature "class_counts"])) ))
-		(if (= 0 num_classes)
-			(assign (assoc
-				num_classes
-					(size
-						(compute_on_contained_entities (list
-							(query_value_masses
-								feature
-								(if valid_weight_feature weight_feature)
-								(or
-									(not (contains_index !nominalsMap feature))
-									(contains_index !numericNominalFeaturesMap feature)
+		;pull the number of classes for this feature from !expectedValuesMap if it was cached, otherwise compute it here
+		;if feature is in a shared deviation feature_grouping, counts the total number of unique classes from all the features in the group
+		(declare (assoc
+			num_classes
+				(size (values
+					(apply "append"
+						(map
+							(lambda
+								(let
+									(assoc
+										feature_classes (indices (get !expectedValuesMap [weight_feature (current_value 2) "class_counts"]))
+										current_feature (current_value 1)
+									)
+									(if (= 0 (size feature_classes))
+										(indices
+											(compute_on_contained_entities (list
+												(query_value_masses
+													current_feature
+													(if valid_weight_feature weight_feature)
+													(or
+														(not (contains_index !nominalsMap current_feature))
+														(contains_index !numericNominalFeaturesMap current_feature)
+													)
+												)
+											))
+										)
+										feature_classes
+									)
 								)
 							)
-						))
+							feature_grouping
+						)
 					)
-			))
-		)
+					(true)
+				))
+		))
 
 		;average all probabilities for a class that are same as or more than the predicted class probability
 		(declare (assoc
