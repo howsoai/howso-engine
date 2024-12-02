@@ -206,8 +206,8 @@
 			;	If unspecified, expects them to be located in the base installation /migrations/ directory.
 			trainee_json_filepath (null)
 			;{type "boolean"}
-			;flag, if true will load each case from its individual file
-			separate_files (false)
+			;if true, then will import and use the trainee information in the subtrainee named ".old_trainee"
+			preloaded (false)
 		)
 		(call !ValidateParameters)
 
@@ -240,13 +240,28 @@
 		))
 
 		;if amalgam trainee is specified, load and upgrade it
-		(if trainee_amlg_filepath
+		(if (or trainee_amlg_filepath preloaded)
 			(let
-				(assoc t (call (load (concat trainee_amlg_filepath trainee ".amlg") )) )
+				(assoc
+					;t (call (load (concat trainee_amlg_filepath trainee ".amlg") ))
+					t
+						(if preloaded
+							[!traineeContainer ".old_trainee"]
 
-				(call !MigrateSubtrainee (assoc
-					migration_trainee (first (first t))
-					contained_entity_path []
+							;else must load the old trainee properly
+							(load_entity
+								(concat trainee_amlg_filepath trainee ".amlg")
+								[!traineeContainer ".old_trainee"]
+								"amlg"
+								(false)
+								;assume flattened
+								{execute_on_load (true)}
+							)
+						)
+				)
+
+				(call !UpgradeFromSubTrainee (assoc
+					migration_trainee t
 					new_labels (call get_export_attributes)
 				))
 
@@ -381,12 +396,12 @@
 		(call !Return)
 	)
 
-	#!MigrateSubtrainee
+	#!UpgradeFromSubTrainee
 	(declare
 		(assoc
+			;entity id to "import" from
 			migration_trainee (null)
 			new_labels []
-			contained_entity_path []
 		)
 
 		(declare (assoc
@@ -394,6 +409,7 @@
 			case_and_session_entities (filter (lambda (!= !traineeContainer (current_value))) (contained_entities migration_trainee))
 		))
 
+		;get all the old labels
 		(declare (assoc
 			import_metadata_map
 				(map
@@ -403,19 +419,15 @@
 					(zip old_labels)
 				)
 		))
-
-		;set the attributes
-		;TODO: make this work for private labels of contained entities
-		(assign_to_entities contained_entity_path import_metadata_map)
+		;assign all the old labels into the current entity/trainee
+		(assign_to_entities import_metadata_map)
 
 		(map
 			(lambda
-				(move_entities (append migration_trainee (current_value)) (append contained_entity_path (current_value)))
+				(move_entities (append migration_trainee (current_value)) [(current_value)])
 			)
 			case_and_session_entities
 		)
-
-		(declare (assoc new_trainee_entity contained_entity_path))
 
 		;iterate over all the applicable migration script versions and apply each one in order
 		(call !execute_migration_scripts)
@@ -427,17 +439,26 @@
 		(if (size (contained_entities (append migration_trainee !traineeContainer)))
 			(map
 				(lambda (let
-					(assoc new_contained_entity_path (append contained_entity_path !traineeContainer (current_value 1)) )
+					(assoc new_contained_entity_path (append !traineeContainer (current_value 1)) )
 
-					;create a new trainee with the same id and relative path
+					;create a new trainee with the same id and relative path to the current entity
 					(clone_entities new_trainee_path new_contained_entity_path)
 
-					;recursively migrate all the attributes and contained entities
-					(call !MigrateSubtrainee (assoc
-						migration_trainee (append migration_trainee !traineeContainer (current_value 1))
-						contained_entity_path new_contained_entity_path
-						new_labels new_labels
+					;move the subtrainee that needs upgrading into the trainee that will do its upgrading
+					(move_entities
+						(append migration_trainee !traineeContainer (current_value))
+						(append new_contained_entity_path !traineeContainer ".old_trainee")
+					)
+
+					;recursively upgrade that subtrainee and any subtrainees it may have
+					(set_entity_root_permission new_contained_entity_path (true))
+					(call_entity new_contained_entity_path "upgrade_trainee" (assoc
+						trainee (current_value 1)
+						;specify its already preloaded with the ".old_trainee" subtrainee
+						preloaded (true)
+						root_filepath root_filepath
 					))
+					(set_entity_root_permission new_contained_entity_path (false))
 				))
 				(contained_entities (append migration_trainee !traineeContainer))
 			)
