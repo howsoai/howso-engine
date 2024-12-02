@@ -702,4 +702,219 @@
 		)
 	)
 
+	#react_series_stationary
+	(declare
+		;{type "any"}
+		(assoc
+			;{type "list" values "string"}
+			series_data_features (list)
+			;{type "any"}
+			series_data (null)
+			;{type "list" values "string"}
+			action_features (list)
+			;{type "list" values "string"}
+			context_features (list)
+			;{ref "ReactDetails"}
+			details (null)
+		)
+
+		(let
+			(assoc
+				original_series_data_features series_data_features
+				time_feature_index 0
+				time_feature (retrieve_from_entity "!tsTimeFeature")
+			)
+
+			(if (= 0 (size series_data_features))
+				(conclude (conclude
+					(call !Return (assoc
+						errors (list "continue_series_values is provided without continue_series_features, please specify continue_series_features")
+					))
+				))
+			)
+
+			;use all the features including all the derived ones
+			(assign (assoc series_data_features !trainedFeatures ))
+
+			(assign (assoc
+				series_data
+					(map
+						(lambda (let
+							(assoc series_values (current_value 1) )
+							(declare (assoc trainee_clone (first (create_entities (null))) ))
+
+							;create a shallow copy (no contained entities, just the trainee data)
+							(assign_entity_roots trainee_clone (retrieve_entity_root ) )
+
+							;train and derive all the lags and other features as necessary
+							(call_entity trainee_clone "train" (assoc
+								cases series_values
+								features original_series_data_features
+								session "temp"
+								input_is_substituted input_is_substituted
+							))
+
+							(assign (assoc
+								series_values
+									(get
+										(call_entity trainee_clone "get_cases" (assoc
+											features series_data_features
+											session "temp"
+										))
+										(list 1 "payload" "cases")
+									)
+								time_feature_index
+									(get
+										(zip series_data_features (indices series_data_features))
+										time_feature
+									)
+							))
+
+							;sort the passed in data by the time feature to ensure its order
+							(assign (assoc
+								series_values
+									(call !MultiSortList (assoc
+										data series_values
+										column_order_indices (list time_feature_index)
+									))
+							))
+
+							(destroy_entities trainee_clone)
+
+							series_values
+						))
+						series_data
+					)
+			))
+		)
+
+		(call !Return (assoc
+			payload
+				(call !BatchReactSeriesStationary (assoc
+					series_data series_data
+					series_data_features series_data_features
+					context_features context_features
+					action_features action_features
+				))
+		))
+	)
+
+	#!BatchReactSeriesStationary
+	(declare
+		(assoc
+			;lists of lists of lists, multiple series
+			series_data (null)
+			series_data_features (null)
+			context_features (null)
+			action_features (null)
+		)
+
+		(declare (assoc
+			per_series_output
+				||(map
+					(lambda
+						(let
+							(assoc
+								individual_series (current_value 1)
+							)
+
+							(call !ReactSeriesStationary (assoc
+								series_data individual_series
+								series_data_features series_data_features
+								context_features context_features
+								action_features action_features
+							))
+						)
+					)
+					series_data
+				)
+		))
+
+		;convert per_series_output to a dict of details key -> lists of values (one per series)
+		(map
+			(lambda (let
+				(assoc details_key (current_index 1))
+				(map
+					(lambda (get (current_value) details_key) )
+					per_series_output
+				)
+			))
+			(if (size per_series_output)
+				(first per_series_output)
+				(assoc)
+			)
+		)
+	)
+
+	#!ReactSeriesStationary
+	(declare
+		(assoc
+			;lists of lists, one series
+			series_data (null)
+			series_data_features (null)
+			context_features (null)
+			action_features (null)
+		)
+
+		;series_data should already be very derived
+		(if (= 0 (size context_features))
+			(assign (assoc
+				context_features
+					(filter
+						(lambda (not (contains_value action_features (current_value))))
+						series_data_features
+					)
+			))
+		)
+
+		(declare (assoc
+			context_feature_indices
+				(unzip
+					(zip series_data_features (indices series_data_features))
+					context_features
+				)
+		))
+
+		(declare (assoc
+			per_row_reactions
+				(map
+					(lambda
+						(let
+							(assoc
+								row_contexts (unzip (current_value 1) context_feature_indices)
+							)
+
+							(call !SingleReact (assoc
+								context_features context_features
+								context_values row_contexts
+								action_features action_features
+								details details
+							))
+						)
+					)
+					series_data
+				)
+		))
+
+		;convert per_row_reactions to a dict of details key -> lists of values (one per row)
+		(declare (assoc
+			output_map
+				(map
+					(lambda (let
+						(assoc details_key (current_index 1))
+						(map
+							(lambda (get (current_value) details_key) )
+							per_row_reactions
+						)
+					))
+					(if (size per_row_reactions)
+						(first per_row_reactions)
+						(assoc)
+					)
+				)
+		))
+
+		output_map
+	)
+
 )
