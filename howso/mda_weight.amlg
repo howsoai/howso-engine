@@ -1,0 +1,568 @@
+(null
+
+	;helper method for CalculateFeatureResiduals to calculate 'superfull' accurate residuals
+	#!RunAccurateResiduals
+	(seq
+		;keep a copy of all originally specified features
+		(assign (assoc case_features features))
+
+		;if we only collected residuals for this one feature, set the residuals features list to have only target_residual_feature
+		(if target_residual_feature
+			(assign (assoc features (list target_residual_feature) ))
+		)
+
+		;create a map of feature -> flag, set to true if the feature has any null values
+		;that way there's no need to explicitly filter nulls out when querying for a feature that no nulls
+		(declare (assoc
+			feature_may_have_nulls_map
+				(map
+					(lambda (!= (false) (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) ) )
+					(zip
+						(if target_residual_feature
+							(list target_residual_feature)
+							features
+						)
+					)
+				)
+			series_id_features (if !tsTimeFeature (get !tsModelFeaturesMap "series_id_features") )
+		))
+
+		;iterate over each case and accumulate residuals for all the feature(s)
+		#!AccumulateAccurateFeatureResiduals
+		(assign (assoc
+			case_residuals_lists
+				||(map
+					(lambda (let
+						(assoc
+							;assoc of all features to their residual values
+							feature_residual_map (assoc)
+							local_cases_map (assoc)
+							case_id (current_value 1)
+							;map of feature -> value for all the case values
+							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+							time_series_filter_query (list)
+						)
+
+						(if !tsTimeFeature
+							(if (contains_index case_values_map !tsTimeFeature)
+								(assign (assoc
+									time_series_filter_query (call !ComputeTimeSeriesFilterQuery (assoc context_map case_values_map))
+								))
+							)
+						)
+
+						(assign (assoc
+							local_cases_map
+								(compute_on_contained_entities (append
+									(if focal_case
+										(query_not_in_entity_list (list case_id focal_case))
+										(query_not_in_entity_list (list case_id))
+									)
+									time_series_filter_query
+									(query_nearest_generalized_distance
+										k_parameter
+										case_features
+										(unzip case_values_map case_features)
+										(get hyperparam_map "featureWeights")
+										!queryDistanceTypeMap
+										query_feature_attributes_map
+										(get hyperparam_map "featureDeviations")
+										p_parameter
+										dt_parameter
+										(if valid_weight_feature weight_feature (null))
+										tie_break_random_seed
+										(null) ;radius
+										!numericalPrecision
+									)
+								))
+						))
+
+						;create a map of feature -> residual value for each feature
+						(assign (assoc
+							feature_residual_map
+								(map
+									(lambda (let
+										(assoc
+											feature (get_value (current_index 1))
+											case_feature_value (get case_values_map (current_index 1))
+											feature_is_nominal (contains_index !nominalsMap (current_index 1))
+											interpolated_value 0
+											diff 0
+											output_categorical_action_probabilities (true)
+											categorical_action_probabilities_map (assoc)\
+											max_gap (null)
+										)
+										;create the feature-specific candidate_cases_lists tuple for intepolation
+										(declare (assoc
+											candidate_cases_lists
+												(if (!= (null) local_cases_map)
+													(list
+														(indices local_cases_map)
+														(values local_cases_map)
+														(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
+													)
+												)
+										))
+
+										; (if (and (not feature_is_nominal) mda)
+										; 	(seq
+										; 		(assign (assoc
+										; 			max_gap
+										; 				(compute_on_contained_entities (list
+										; 					(query_in_entity_list (indices local_cases_map))
+										; 					(query_max_difference feature (get !cyclicFeaturesMap feature))
+										; 				))
+										; 		))
+										; 		(if (or (= (null) max_gap) (= .infinity max_gap) (= 0 max_gap))
+										; 			(assign (assoc max_gap (get !cachedFeatureMinResidualMap feature) ))
+										; 		)
+										; 	)
+										; )
+
+										(if (get feature_may_have_nulls_map feature)
+											(let
+												(assoc
+													null_indices
+														(filter
+															(lambda (= (null) (get candidate_cases_lists (list 2 (current_value 1))) ) )
+															(indices (last candidate_cases_lists))
+														)
+												)
+												(if (size null_indices)
+													(assign (assoc
+														candidate_cases_lists
+															;only remove cases with null values if there are going to be some remaining
+															(if (< (size null_indices) (size (first candidate_cases_lists)))
+																(list
+																	(remove (first candidate_cases_lists) null_indices)
+																	(remove (get candidate_cases_lists 1) null_indices)
+																	(remove (last candidate_cases_lists) null_indices)
+																)
+															)
+													))
+												)
+											)
+										)
+
+										;stores error into diff
+										(call !InterpolateAndComputeDiffToCase)
+
+										; (if mda
+										; 	(seq
+										; 		(if (= 0 diff)
+										; 			(assign (assoc diff (get !cachedFeatureMinResidualMap feature) ))
+										; 		)
+
+										; 		;output surprisal
+										; 		(if feature_is_nominal
+										; 			(- (log diff))
+
+										; 			(/ max_gap diff)
+										; 		)
+										; 	)
+
+										; 	diff
+										; )
+									))
+									(zip features)
+								)
+						))
+
+						;return the computed values as a list
+						(unzip feature_residual_map features)
+					))
+					case_ids
+				)
+		))
+
+
+		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
+		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
+		(assign (assoc
+			feature_residuals_lists (call !TransposeResidualLists)
+			;need to have at least 2.5% (that's a value of 50 using default sample of 2000) non-null values for a feature
+			min_value_count (ceil (* 0.025 (size case_ids)))
+		))
+
+		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
+		;applicable only to global models
+		(if (!= (true) regional_model_only)
+			(let
+				(assoc
+					num_valid_values_per_feature_map
+						(filter
+							(lambda (< (current_value) min_value_count) )
+							(zip
+								features
+								(map (lambda (size (current_value))) feature_residuals_lists)
+							)
+						)
+				)
+
+				;some features did not have 50 values, accrue case_ids, then call the main method agan
+				(if (size num_valid_values_per_feature_map)
+					(seq
+						;create the resampled case_ids list that contains cases with enough necessary non-null feature values
+						(assign  (assoc
+							case_ids
+								;append all the lists of cases ids for each feature into one list
+								(apply "append"
+									;for each (current_index) feature, need to find 50 - (current_value) cases to have enough values for those features
+									(values (map
+										(lambda (contained_entities
+											(query_not_equals (current_index) (null))
+
+											(if valid_weight_feature
+												(query_weighted_sample weight_feature (- min_value_count (current_value)) (rand))
+												(query_sample (- min_value_count (current_value)) (rand))
+											)
+										))
+										num_valid_values_per_feature_map
+									))
+								)
+						))
+
+						;re-compute residuals on these case_ids, store into case_residuals_lists
+						(call !AccumulateAccurateFeatureResiduals)
+
+						;transpose case_residuals_lists into a list the length of features and append the results into feature_residuals_lists
+						(assign (assoc
+							feature_residuals_lists
+								(map
+									(lambda (append (first (current_value)) (last (current_value))))
+									feature_residuals_lists
+									(call !TransposeResidualLists)
+								)
+						))
+					)
+				)
+			)
+		)
+	)
+
+
+	#!ComputeRobustTargetlessMDA
+	(declare
+		(assoc
+			features features
+			case_residuals_lists case_residuals_lists
+		)
+
+		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
+		;where each value matches a feature, and is comprised of each feature's residuals
+		(declare (assoc
+			feature_residuals_lists
+				(map
+					(lambda (let
+						(assoc feature_index (current_index 1) )
+						;get each column
+						(map
+							(lambda (get (current_value) feature_index) )
+							case_residuals_lists
+						)
+					))
+					features
+				)
+		))
+
+		; (declare (assoc
+		; 	dropped_feature_matrix
+		; 		(map
+		; 			(lambda (let
+		; 				(assoc dropped_feature_index (current_index 1) )
+
+		; 				;assoc of index -> robust residual for dropped feature
+		; 				(declare (assoc
+		; 					dropped_feature_indices
+		; 						(indices (filter
+		; 							;only keep those residual values that were computed because feature was dropped
+		; 							(lambda (!~ (assoc) (current_value)))
+		; 							;zip indices of every residual to their values
+		; 							(zip
+		; 								(indices (current_value 1))
+		; 								(current_value 1)
+		; 							)
+		; 						))
+		; 				))
+
+		; 				(map
+		; 					(lambda (let
+		; 						(assoc
+		; 							target_feature_index (current_index 1)
+		; 							target_feature (get features (current_index 1))
+		; 						)
+		; 						(if (= target_feature_index dropped_feature_index)
+		; 							0
+
+		; 							(let
+		; 								(assoc
+		; 									target_feature_values (unzip (current_value 1) dropped_feature_indices)
+		; 								)
+
+		; 								(max
+		; 									0
+		; 									(-
+		; 										;avg residual for target feature from those values where dropped feature was missing
+		; 										(/
+		; 											(apply "+"
+		; 												(map
+		; 													(lambda
+		; 														(if (~ (assoc) current_value)
+		; 															(get (current_value) "delta")
+		; 															(current_value)
+		; 														)
+		; 													)
+		; 													target_feature_values
+		; 												)
+		; 											)
+		; 											(size target_feature_values)
+		; 										)
+		; 										(get residuals_map target_feature)
+		; 									)
+		; 								)
+		; 							)
+		; 						)
+
+		; 					))
+		; 					feature_residuals_lists
+		; 				)
+
+		; 			))
+		; 			feature_residuals_lists
+		; 		)
+		; ))
+
+		; (declare (assoc
+		; 	dropped_total_per_feature_map
+		; 		(zip
+		; 			features
+		; 			(map
+		; 				(lambda (let
+		; 					(assoc feature_index (current_index 1))
+		; 					(apply "+" (map
+		; 						(lambda (get (current_value) feature_index))
+		; 						dropped_feature_matrix
+		; 					))
+		; 				))
+		; 				features
+		; 			)
+		; 		)
+		; ))
+
+		; (declare (assoc
+		; 	dropped_mda_matrix
+		; 		(zip
+		; 			features
+		; 			(map
+		; 				(lambda (let
+		; 					(assoc
+		; 						feature_index (current_index 1)
+		; 						feature (current_value 1)
+		; 					)
+		; 					(zip
+		; 						features
+		; 						(let
+		; 							(assoc
+		; 								values_list
+		; 									(map
+		; 										(lambda
+		; 											(if (= 0 (get dropped_total_per_feature_map feature))
+		; 												0
+		; 												(/ (get (current_value) feature_index) (get dropped_total_per_feature_map feature))
+		; 											)
+		; 										)
+		; 										dropped_feature_matrix
+		; 									)
+		; 							)
+		; 							(if (= 0 (apply "+" values_list))
+		; 								(range (/ 1 (size values_list)) 1 (size values_list) 1)
+		; 								values_list
+		; 							)
+		; 						)
+		; 					)
+		; 				))
+		; 				features
+		; 			)
+		; 		)
+		; ))
+
+		; dropped_mda_matrix
+
+		;for each feature, create a list, also length of features, where each column value is the mda
+		;for the column feature computed with and without the row feature
+		(declare (assoc
+			mda_matrix
+				(map
+					(lambda (let
+						(assoc
+							feature (current_value 1)
+							;all the residual values for this feature
+							feature_residuals (get feature_residuals_lists (current_index 1))
+						)
+
+						(declare (assoc
+							;keep only indices of cases where feature was used in query and its residual is null
+							case_indices_with_feature
+								(filter
+									(lambda (= (null) (get feature_residuals (current_value))) )
+									(indices feature_residuals)
+								)
+							;keep only indices of cases where feature was not used in query and has a residual value
+							case_indices_without_feature
+								(filter
+									(lambda (!= (null) (get feature_residuals (current_value))) )
+									(indices feature_residuals)
+								)
+						))
+						(map
+							(lambda (let
+								(assoc
+									mda_feature (current_value 1)
+									mda_feature_residuals (get feature_residuals_lists (current_index 1))
+								)
+								(if (= mda_feature feature) (conclude 0) )
+
+								(declare (assoc
+									with_feature_residuals (filter (unzip mda_feature_residuals case_indices_with_feature))
+									without_feature_residuals (filter (unzip mda_feature_residuals case_indices_without_feature))
+								))
+
+								(declare (assoc
+									avg_without_residuals
+										(max
+											(get !cachedFeatureMinResidualMap mda_feature)
+											(/ (apply "+" without_feature_residuals) (size without_feature_residuals))
+											(get !userSpecifiedFeatureErrorsMap mda_feature)
+										)
+									avg_with_residuals
+										(max
+											(get !cachedFeatureMinResidualMap mda_feature)
+											(/ (apply "+" with_feature_residuals) (size with_feature_residuals))
+											(get !userSpecifiedFeatureErrorsMap mda_feature)
+										)
+								))
+								;output ratio of the (expectedly) larger residual computed without this feature / residual computed with this feature
+								(if (= 0 avg_without_residuals avg_with_residuals)
+									0
+
+									(- avg_without_residuals avg_with_residuals)
+								)
+							))
+							features
+						)
+					))
+					features
+
+				)
+			num_features_m_one (- (size features) 1)
+		))
+
+		;create an assoc MDA maps per feature
+		;eg, if there are three features, A[0-10], B[0-100], C[0-1000] with the following mda_matrix of residuals:
+		; [
+		;  	[0	20	300]
+		;	[4	0	100]
+		;	[-2	40	0  ]
+		; ]
+		;it would be transposed into:
+		; {
+		;	"A"	{ "A" 0   "B" 4   "C" -2 }
+		;	"B" { "A" 20  "B" 0   "C" 40 }
+		;	"C"	{ "A" 300 "B" 100 "C" 0  }
+		; }
+		(declare (assoc
+			individual_features_mda_map
+				(zip
+					features
+					;transpose the matrix, so every feature has its own (column) MDA values
+					(map
+						(lambda (let
+							(assoc feature_index (current_index 1))
+							(zip
+								features
+								(map
+									(lambda (get (current_value) feature_index))
+									mda_matrix
+								)
+							)
+						))
+						mda_matrix
+					)
+				)
+			has_all_zeros_features (false)
+		))
+
+		;create an assoc of normalized feature weights for each feature from the MDA, keeping only positive MDA values
+		; converting the above assoc into:
+		; {
+		;	"A" { "A" 0    "B" 1   "C" 0    }
+		;	"B" { "A" .333 "B" 0   "C" .667 }
+		;	"C" { "A" .75  "B" .25 "C" 0    }
+		; }
+		(assign (assoc
+			individual_features_mda_map
+				(map
+					(lambda (let
+						(assoc
+							important_values (filter (lambda (> (current_value) 0)) (values (current_value 1)))
+						)
+						(declare (assoc total_value (apply "+" important_values) ))
+						(declare (assoc avg_value (/ total_value (size important_values)) ))
+						(if (> total_value 0)
+							(map
+								(lambda
+									(if (> (current_value) 0)
+										(*
+											(/ (current_value) total_value)
+											(- 1 (exp (/ (- (current_value)) avg_value) ))
+										)
+										0
+									)
+								)
+								(current_value)
+							)
+
+							(seq
+								(assign (assoc has_all_zeros_features (true) ))
+								(map 0 (current_value))
+							)
+						)
+					))
+					individual_features_mda_map
+				)
+
+		))
+
+		;for any individual target feature, if all the context features have negative mda values, set them all to 1/num_features_m_one
+		;since removing any individually results in a better result than using the rest, so may as well use them all
+		(if has_all_zeros_features
+			(assign (assoc
+				individual_features_mda_map
+					(map
+						(lambda
+							(if (!= 0 (apply "+" (values (current_value))) )
+								(current_value)
+
+								;set all weights to 1 / for all other features
+								(map
+									(lambda
+										;keep this target's feature own weight as 0
+										(if (= (current_index) (current_index 1))
+											0
+											(/ 1 num_features_m_one)
+										)
+									)
+									(current_value)
+								)
+							)
+						)
+						individual_features_mda_map
+					)
+			))
+		)
+
+		individual_features_mda_map
+	)
+
+
+)

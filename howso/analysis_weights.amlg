@@ -297,8 +297,8 @@
 	(declare
 		(assoc
 			use_deviations (false)
-			num_iterations 3
-			num_samples_converge 2000
+			num_iterations 4
+			num_samples_mda 8000
 
 			;local method variables, not parameters
 			iteration 0
@@ -317,12 +317,17 @@
 					(values (append context_features action_features) (true))
 				)
 			residuals_map (list)
+			computing_mda (false)
 		))
 
 		;possibly increase the number of samples if nominals are present
 		(if (and !tsTimeFeature (size !sharedDeviationsMap))
 			(assign (assoc
-				num_samples_converge (call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature num_samples_converge))
+				num_samples_mda
+					(max
+						num_samples_mda
+						(call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature (/ num_samples_mda 4)))
+					)
 				residual_num_samples (call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature residual_num_samples))
 			))
 		)
@@ -404,6 +409,12 @@
 		;Last pass finds usable hyperparams using the improved residuals and then calculates usable residuals for weights.
 		;At this point the hyperparameters and residuals and weights are stable enough for use.
 		(while (< iteration num_iterations)
+
+			;compute mda on 2nd to last iteration
+			(assign (assoc
+				computing_mda (and (= robust_mode "robust") (= iteration (- num_iterations 2)))
+			))
+
 			(assign (assoc
 				residuals_map
 					(if (= 0 iteration)
@@ -422,13 +433,12 @@
 							feature_residuals_map
 								(call !CalculateFeatureResiduals (assoc
 									features features
-									robust_residuals (true)
+									robust_residuals computing_mda
+									superfull (true)
 									num_samples
-										(if (or (< iteration (- num_iterations 1)) (!= targeted_model "targetless"))
+										(if computing_mda
+											num_samples_mda
 											residual_num_samples
-
-											;else on the last iteration, use
-											(max residual_num_samples num_samples_converge)
 										)
 									custom_hyperparam_map baseline_hyperparameter_map
 									;must compute confusion matrix to use sparse deviation matrix
@@ -443,46 +453,53 @@
 					)
 			))
 
-			(call !UpdateHyperparameters (assoc
-				feature_deviations (get residuals_map "residual_map")
-				confusion_matrix_map (if use_deviations (get residuals_map (list "prediction_stats" "confusion_matrix")) )
-				ordinal_feature_deviations (get residuals_map "ordinal_residual_map")
-				null_deviations (get residuals_map "null_uncertainty_map")
-				use_deviations use_deviations
-				feature_weights
-					(map
-						(lambda
-							;ensure that inactive features always maintain a feature weight of 0
-							(if (contains_index !inactiveFeaturesMap (current_index))
-								0
+			(if computing_mda
+				(accum (assoc
+					baseline_hyperparameter_map (assoc "feature_mda_map" (get residuals_map "feature_mda_map") )
+					analyzed_hp_map (assoc "feature_mda_map" (get residuals_map "feature_mda_map") )
+				))
 
-								(call !ConvertDeviationToFeatureWeight (assoc
-									feature_deviation (current_value 1)
-									p_value (get baseline_hyperparameter_map "p")
-								))
+				(seq
+					(call !UpdateHyperparameters (assoc
+						feature_deviations (get residuals_map "residual_map")
+						confusion_matrix_map (if use_deviations (get residuals_map (list "prediction_stats" "confusion_matrix")) )
+						ordinal_feature_deviations (get residuals_map "ordinal_residual_map")
+						null_deviations (get residuals_map "null_uncertainty_map")
+						use_deviations use_deviations
+						feature_weights
+							(map
+								(lambda
+									;ensure that inactive features always maintain a feature weight of 0
+									(if (contains_index !inactiveFeaturesMap (current_index))
+										0
+
+										1
+									)
+								)
+								(get residuals_map "residual_map")
 							)
-						)
-						(get residuals_map "residual_map")
-					)
-			))
-
-			(assign (assoc
-				analyzed_hp_map
-					(call !ComputeResidualsAcrossParametersAndSelectOptimal (assoc
-						context_features context_features
-						action_features action_features
-						k_folds k_folds
-						k_values k_values
-						p_values (filter (lambda (!= 0 (current_value))) p_values)
-						dt_values dt_values
-						k_folds_by_indices k_folds_by_indices
-						num_analysis_samples num_analysis_samples
-						targetless (= targeted_model "targetless")
-						baseline_hyperparameter_map baseline_hyperparameter_map
-						;this flag sets the weights to be inverse of the residuals and outputs them
-						use_inverse_weights (true)
 					))
-			))
+
+					(assign (assoc
+						analyzed_hp_map
+							(call !ComputeResidualsAcrossParametersAndSelectOptimal (assoc
+								context_features context_features
+								action_features action_features
+								k_folds k_folds
+								k_values k_values
+								p_values (filter (lambda (!= 0 (current_value))) p_values)
+								dt_values dt_values
+								k_folds_by_indices k_folds_by_indices
+								num_analysis_samples num_analysis_samples
+								targetless (= targeted_model "targetless")
+								baseline_hyperparameter_map baseline_hyperparameter_map
+								;this flag sets the weights to be inverse of the residuals and outputs them
+								use_inverse_weights (true)
+							))
+					))
+				)
+			)
+
 			(accum (assoc iteration 1))
 
 			(if (and
