@@ -2,9 +2,10 @@
 (null
 
 	;Run reacts in a batch, output a an assoc of list of outputs from each individual react.
-	;{long_running (true) statistically_idempotent (true)}
+	;{long_running (true) statistically_idempotent (true) read_only (true)}
 	#react
 	(declare
+		;returns {ref "ReactResponse"}
 		(assoc
 			;{type "list" values "string"}
 			;list of context features. For generative react, features used to condition the generated case
@@ -17,7 +18,7 @@
 			;full list of features to output values for the case
 			action_features (list)
 			;{type "list" values {type "list"}}
-			;;values of action features. If specified will bypass react and only do the explanation if details is set.
+			;values of action features. If specified will bypass react and only do the explanation if details is set.
 			;if specified must be either length of 1 or num_reacts. One list us used per individual reaction
 			action_values (null)
 			;{type "list" values "string"}
@@ -108,8 +109,20 @@
 			;						not specified) relevant number of boundary cases. Uses both context and action features
 			;						of the reacted case to determine the counterfactual boundary based on action features,
 			;						which maximize the dissimilarity of action features while maximizing the similarity of
-			;						context features. If action features aren't specified, uses familarity conviction to
+			;						context features. If action features aren't specified, uses familiarity conviction to
 			;						determine the boundary instead.
+			;
+			; 		 "boundary_value_context_features" list of strings. When specified, outputs a map of each specified feature to
+			;		 				possible boundary values under "boundary_values". If 'boundary_value_action_outcome' is
+			;		 				unspecified, then the returned values are values where the ratio of change in action to total
+			;		 				change is maximized. If 'boundary_value_action_outcome' is specified, then the boundary values
+			;		 				represent the closest found values for each context feature that shift the action to fulfill the condition.
+			;
+			;		"boundary_value_action_outcome" assoc of action_feature -> condition. When specified, outputs a map of each specified feature
+			;						to possible boundary values under "boundary_values". If 'boundary_value_action_outcome' is unspecified, then
+			;						the returned values are values where the ratio of change in action to total change is maximized. If
+			;						'boundary_value_action_outcome' is specified, then the boundary values represent the closest found values for
+			;						each context feature that shift the action to fulfill the condition.
 			;
 			;		 "num_boundary_cases" integer. Outputs this manually specified number of boundary cases.
 			;
@@ -134,7 +147,7 @@
 			;
 			;		 "categorical_action_probabilities" true or false. If true outputs probabilities for each class for the action
 			;						features. Applicable only to categorical action features. single_react_series calls additionally
-			;						output "aggregate_categorical_action_probabilities" for each series.
+			;						output "aggregated_categorical_action_probabilities" for each series.
 			;
 			;		 "observational_errors" true or false. If true outputs observational errors for all features as defined
 			;						in feature attributes.
@@ -149,11 +162,15 @@
 			;						determine that area. Uses full calculations, which uses leave-one-out context features for computations.
 			;
 			;		 "prediction_stats" true or false. If true outputs full feature prediction stats for all (context and action)
-			;						features locally around the prediction. The stats eligible to be returned are ("r2", "rmse", "spearman_coeff",
-			;						"precision", "recall", "accuracy", "mcc", "confusion_matrix", "missing_value_accuracy"). Confusion matrices
-			;						may also be returned by setting 'confusion_matrices' to true. Uses only the context features of the
-			;						reacted case to determine that area. Uses full calculations, which uses leave-one-out context features for
-			;						computations.
+			;						features locally around the prediction. The stats eligible to be returned are ("adjusted_smape", "smape",
+			;						"r2", "rmse", "spearman_coeff", "precision", "recall", "accuracy", "mcc", "confusion_matrix",
+			;						"missing_value_accuracy"). Confusion matrices may also be returned by setting 'confusion_matrices' to true.
+			;						Uses only the context features of the reacted case to determine that area. Uses full calculations, which
+			;						uses leave-one-out context features for computations.
+			;
+			;		 "selected_prediction_stats" list of strings. Types of stats to output. When unspecified, returns all except the confusion_matrix.
+			;                       If "all", then returns all including the confusion_matrix. Valid values are: "mae" "confusion_matrix" "r2" "rmse"
+			;						"adjusted_smape" "smape" "spearman_coeff" "precision" "recall" "accuracy" "mcc" "all" "missing_value_accuracy"
 			;
 			;		 "feature_mda_robust" true or false. If true outputs each context feature's robust mean decrease in accuracy of predicting
 			;						the action feature given the context. Uses only the context features of the reacted
@@ -259,7 +276,7 @@
 			;{type "boolean"}
 			;flag, if false uses model feature residuals, if true recalculates regional model residuals. Only used when desired_conviction is specified
 			use_regional_model_residuals (true)
-			;{type "assoc" additional_indices {ref "FeatureBoundsMap"}}
+			;{type "assoc" additional_indices {ref "FeatureBounds"}}
 			;assoc of :
 			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
 			;	to ensure that specified features' generated values stay in bounds
@@ -291,7 +308,7 @@
 			;	replaced after synthesis from uniqueness check.
 			; Only applicable when desired_conviction is specified.
 			exclude_novel_nominals_from_uniqueness_check (false)
-			;{type "string" enum ["min" "max" "most_similar"]}
+			;{ref "NewCaseThreshold"}
 			;distance to determine privacy cutoff. Used to query the local minimum distance used in the distance ratio
 			; 	accepted values:
 			; 		'max': the maximum local distance
@@ -386,21 +403,11 @@
 
 		(declare (assoc
 			hyperparam_map
-				(if (= 1 (size action_features))
-					(call !GetHyperparameters (assoc
-						feature (first action_features)
-						context_features context_features
-						mode "full"
-						weight_feature weight_feature
-					))
-
-					(call !GetHyperparameters (assoc
-						feature ".targetless"
-						context_features context_features
-						mode "robust"
-						weight_feature weight_feature
-					))
-				)
+				(call !GetHyperparameters (assoc
+					feature (if (= 1 (size action_features)) (first action_features) )
+					context_features context_features
+					weight_feature weight_feature
+				))
 			constrained_features (null)
 		))
 
@@ -555,7 +562,7 @@
 	; 	Details example: { 'action_values': [2, "a", .75384], 'action_features' : ['width','name','height'], 'residual_conviction': 1.3,
 	;		'influential_cases' : etc... }
 	;	See API docs for documentation of all output properties
-	;{long_running (true) statistically_idempotent (true)}
+	;{long_running (true) statistically_idempotent (true) read_only (true)}
 	#single_react
 	(declare
 		(assoc
@@ -641,7 +648,7 @@
 			;{type "boolean"}
 			;flag, if false uses model feature residuals, if true recalculates regional model residuals. Only used when desired_conviction is specified
 			use_regional_model_residuals (true)
-			;{type "assoc" additional_indices {ref "FeatureBoundsMap"}}
+			;{type "assoc" additional_indices {ref "FeatureBounds"}}
 			;assoc of :
 			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
 			;	to ensure that specified features' generated values stay in bounds
@@ -697,21 +704,12 @@
 
 		(declare (assoc
 			hyperparam_map
-				(if (= 1 (size action_features))
-					(call !GetHyperparameters (assoc
-						feature (first action_features)
-						context_features context_features
-						mode "full"
-						weight_feature weight_feature
-					))
+				(call !GetHyperparameters (assoc
+					feature (if (= 1 (size action_features)) (first action_features) )
+					context_features context_features
+					weight_feature weight_feature
+				))
 
-					(call !GetHyperparameters (assoc
-						feature ".targetless"
-						context_features context_features
-						mode "robust"
-						weight_feature weight_feature
-					))
-				)
 			constrained_features (null)
 		))
 
@@ -1046,8 +1044,7 @@
 						(declare (assoc
 							hyperparam_map
 								(call !GetHyperparameters (assoc
-									feature ".targetless"
-									mode "robust"
+									feature (null)
 									context_features context_features
 									weight_feature weight_feature
 								))
@@ -1231,6 +1228,7 @@
 						(get hyperparam_map "featureWeights")
 					)
 				)
+			feature_deviations (get hyperparam_map "featureDeviations")
 
 			;check if action_feature has nulls, if not, the no need to filter them out since they don't exist
 			;else action_feature does have nulls, filter them out since nulls function as true
@@ -1255,6 +1253,15 @@
 					)
 				)
 			)
+		)
+
+		;use dynamic deviations subtrainee if present
+		(if (get hyperparam_map "subtraineeName")
+			(call !UseDynamicDeviationsAndWeights (assoc
+				context_features context_features
+				context_values context_values
+				hyperparam_map hyperparam_map
+			))
 		)
 
 		(declare (assoc
@@ -1283,7 +1290,7 @@
 							react_feature_weights
 							!queryDistanceTypeMap
 							(get hyperparam_map "featureDomainAttributes")
-							(get hyperparam_map "featureDeviations")
+							feature_deviations
 							(get hyperparam_map "p")
 							(get hyperparam_map "dt")
 							(if valid_weight_feature weight_feature (null))
@@ -1358,12 +1365,11 @@
 							context_features !trainedFeatures
 							custom_hyperparam_map hyperparam_map
 							num_samples 1000
-							;robust with respect to the set of contexts used (across the power set of contexts), should match hyperparam map robust mode
+							;robust with respect to the set of contexts used (across the power set of contexts)
 							robust_residuals (!= 1 (size action_features))
 							hyperparameter_feature
 								(if (= 1 (size action_features))
 									(first action_features)
-									".targetless"
 								)
 							weight_feature weight_feature
 							use_case_weights use_case_weights
@@ -1378,7 +1384,6 @@
 					;update the appropriate hyperparameter set
 					(assign_to_entities (assoc !hyperparameterMetadataMap (set !hyperparameterMetadataMap (get hyperparam_map "paramPath") hyperparam_map)) )
 				)
-				(accum_to_entities (assoc !revision 1))
 			)
 		)
 

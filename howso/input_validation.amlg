@@ -86,7 +86,7 @@
 					)
 				)
 
-				(if (and (!= (null) action_feature) (!= action_feature ".targetless"))
+				(if (!= (null) action_feature)
 					(if (not (contains_value valid_features action_feature))
 						(accum (assoc
 							errors
@@ -292,6 +292,14 @@
 											(accum (assoc invalid_type_hints (list (concat method_name "/" parameter_name))))
 										)
 
+										(if
+											(size (call !SingleTypeCheck (assoc
+												given_value typing_map
+												specification {ref "TypeSchema"}
+											)))
+											(accum (assoc invalid_type_hints (list (concat method_name "/" parameter_name))))
+										)
+
 										(rewrite
 											(lambda
 												(if (or
@@ -300,7 +308,11 @@
 															(~ "" (current_value))
 															(or
 																(contains_value ["type" "values" "additional_indices" "dynamic_indices"] (current_index))
-																(= "indices" (current_index 1))
+																(and
+																	(= "indices" (current_index 1))
+																	;double indices problem when indices => "indices" for TypeSchema schema
+																	(!= "indices" (current_index 2))
+																)
 															)
 															(not (contains_value ["boolean" "number" "string" "list" "assoc" "null" "any"] (current_value) ))
 														)
@@ -311,13 +323,21 @@
 															(not (contains_index !customTypes (current_value)))
 														)
 														(and
-															;if an assoc (that's not the value of "indices"), it must have a type or ref
+															;if an assoc (that's not the value of "indices"), it must have a type, ref, or any_of
 															(~ (assoc) (current_value))
 															(not (contains_value ["indices" "dynamic_indices"] (current_index)))
 															(and
 																(not (contains_index (current_value) "type"))
 																(not (contains_index (current_value) "ref"))
+																(not (contains_index (current_value) "any_of"))
 															)
+														)
+														(and
+															;type must be a string or list of strings
+															(!= (current_index 1) "indices")
+															(= (current_index) "type")
+															(!~ (current_value) "")
+															(!~ (current_value) [])
 														)
 													)
 													(accum (assoc invalid_type_hints (list (concat method_name "/" parameter_name))))
@@ -348,7 +368,7 @@
 		(map
 			(lambda
 				(call !CheckTypingMap (assoc
-					typing_map (current_value 1)
+					typing_map (call (current_value 1))
 					method_name "CustomTypes"
 					parameter_name (current_index 1)
 				))
@@ -383,10 +403,20 @@
 		(if (size undefined_parameters)
 			(conclude (conclude
 				(call !Return (assoc
+					error_code "invalid"
 					errors
 						(list (concat
-							"The following given parameters are not supported for " label_name ": "
-							(apply "concat" (trunc (weave undefined_parameters ", ")))
+							"The following given parameters are not supported for \"" label_name "\": "
+							(apply
+								"concat"
+								(trunc (weave
+									(map
+										(lambda (concat "\"" (current_value) "\""))
+										undefined_parameters
+									)
+									", "
+								))
+							)
 							"."
 						))
 				))
@@ -421,86 +451,172 @@
 								)
 
 								(if (= (null) given_value)
-									(or
-										;not required
-										(or
-											;required not specified
-											(not (contains_index specification "required"))
-											;or its specifically false (this should never really be the case)
-											(= (get specification "required") (false))
+									(if (and
+											(get specification "required")
+											(not (contains_value exp_type "null"))
 										)
-										;exp_type is null, or contains null
-										(= exp_type "null")
-										(and
-											(~ (list) exp_type)
-											(contains_value exp_type "null")
-										)
+										[{ message "This field is required."}]
+										[]
 									)
-									(and
-										(~ (assoc) specification)
-										(get specification "required")
-										(= (null) given_value)
-									)
-									(false)
 
-									(if (~ exp_type (list))
-										;list of possible types logic
-										(apply "or"
+									;any_of logic
+									(contains_index specification "any_of")
+									(if (apply "or"
 											(map
 												(lambda
-													(call !SingleTypeCheck (assoc
-														given_value given_value
-														exp_type (current_value 1)
-													))
+													(= (size
+														(call !SingleTypeCheck (append
+															{given_value given_value}
+															(if (~ (assoc) (current_value))
+																(assoc
+																	specification (current_value 1)
+																	exp_type (get (current_value 1) "type")
+																)
+
+																;otherwise, it should just be a string
+																(assoc
+																	specification (assoc)
+																	exp_type (current_value 1)
+																)
+															)
+														))
+													) 0)
 												)
-												exp_type
+												(get specification "any_of")
 											)
+										)
+										[]
+
+										[{ message "The value does not match any of the valid types."}]
+									)
+
+									;else start checking exp_type
+									(if (~ exp_type (list))
+										;list of possible types logic
+										(if (apply "or"
+												(map
+													(lambda
+														;size of 0 indicates a passed type check
+														(= (size
+															(call !SingleTypeCheck (assoc
+																given_value given_value
+																exp_type (current_value 1)
+															))
+														) 0)
+													)
+													exp_type
+												)
+											)
+											[]
+
+											[{
+												message
+													(concat
+														"The value is not any of the following types: "
+														(apply
+															"concat"
+															(trunc (weave
+																exp_type
+																", "
+															))
+														)
+													)
+											}]
 										)
 
 										(= exp_type "null")
-										(~ (null) given_value)
+										(if (!~ (null) given_value)
+											[{ message "The value must be null."}]
+
+											[]
+										)
 
 										(= exp_type "number")
-										(and
-											(~ 0 given_value)
-											(if (contains_index specification "max")
-												(<= given_value (get specification "max"))
-												(true)
+										(if (!~ 0 given_value)
+											[{ message "The value must be a number."}]
+
+											(and
+												(contains_index specification "max")
+												(> given_value (get specification "max"))
 											)
-											(if (contains_index specification "min")
-												(>= given_value (get specification "min"))
-												(true)
+											[{ message (concat "The value must less than or equal to " (get specification "max") ".")}]
+
+											(and
+												(contains_index specification "min")
+												(< given_value (get specification "min"))
 											)
-											(if (contains_index specification "exclusive_max")
-												(< given_value (get specification "exclusive_max"))
-												(true)
+											[{ message (concat "The value must greater than or equal to " (get specification "min") ".")}]
+
+											(and
+												(contains_index specification "exclusive_max")
+												(>= given_value (get specification "exclusive_max"))
 											)
-											(if (contains_index specification "exclusive_min")
-												(> given_value (get specification "exclusive_min"))
-												(true)
+											[{ message (concat "The value must less than " (get specification "exclusive_max") ".")}]
+
+											(and
+												(contains_index specification "exclusive_min")
+												(<= given_value (get specification "exclusive_min"))
 											)
+											[{ message (concat "The value must greater than " (get specification "exclusive_min") ".")}]
+
+											[]
 										)
 
 										(= exp_type "string")
-										(if (contains_index specification "enum")
-											(contains_value
-												(get specification "enum")
-												given_value
-											)
+										(if (!~ "" given_value)
+											[{ message "The value must be a string."}]
 
-											;else just check if string
-											(~ "" given_value)
+											(and
+												(contains_index specification "enum")
+												(not (contains_value (get specification "enum") given_value))
+											)
+											[{
+												message
+													(concat
+														"The value: " given_value ", is not one of "
+														(apply
+															"concat"
+															(trunc (weave
+																(get specification "enum")
+																", "
+															))
+														)
+														"."
+													)
+											}]
+
+											[]
 										)
 
 										(= exp_type "boolean")
-										(contains_value (list (true) (false)) given_value)
+										(if (contains_value (list (true) (false)) given_value)
+											[]
+											[{ message "The value must be a boolean value." }]
+										)
+
 
 										(= exp_type "list")
-										(and
-											(~ (list) given_value)
+										(if (!~ (list) given_value)
+											[{ message "The value must be a list."}]
+
+											(and
+												(contains_index specification "max_size")
+												(> (size given_value) (get specification "max_size"))
+											)
+											[{ message (concat "The value must be no more than size: " (get specification "max_size") ".")}]
+
+											(and
+												(contains_index specification "min_size")
+												(< (size given_value) (get specification "min_size"))
+											)
+											[{ message (concat "The value must be of at least size: " (get specification "min_size") ".")}]
+
+											;else must start checking individual values
 											(if (and (contains_index specification "values") (size given_value))
 												;each type of the list must match the type defined by values
-												(apply "and"
+												(filter
+													;passing values will return an empty list or assoc, filter those out
+													(lambda (size (current_value)))
 													(map
 														(lambda
 															(call !SingleTypeCheck (append
@@ -519,117 +635,128 @@
 																)
 															))
 														)
-														given_value
+														(zip (indices given_value) given_value)
 													)
 												)
-												(true)
-											)
-											(if (contains_index specification "max_size")
-												(<= (size given_value) (get specification "max_size"))
-												(true)
-											)
-											(if (contains_index specification "min_size")
-												(>= (size given_value) (get specification "min_size"))
-												(true)
+
+												[]
 											)
 										)
 
 										(= exp_type "assoc")
-										(and
-											(~ (assoc) given_value)
-											(if (contains_index specification "indices")
-												(apply "and"
-													(values (map
-														(lambda
-															(if (contains_index given_value (current_index))
-																(call !SingleTypeCheck (append
-																	(assoc given_value (get given_value (current_index 1)))
-																	(if (~ (assoc) (current_value))
-																		(assoc
-																			specification (current_value 1)
-																			exp_type (get (current_value 1) "type")
-																		)
+										(if (!~ (assoc) given_value)
+											[{ message "The value must be a mapping."}]
 
-																		;otherwise, "values" should just be a string
-																		(assoc
-																			specification (assoc)
-																			exp_type (current_value 1)
-																		)
-																	)
-																))
-
-																;if the index is not present but it is required, then return false
-																(and
-																	(~ (assoc) (current_value))
-																	(get (current_value) "required")
-																)
-																(false)
-
-																(true)
-															)
-														)
-														(get specification "indices")
-													))
-												)
-
-												;else
-												(true)
+											(and
+												(contains_index specification "max_indices")
+												(> (size given_value) (get specification "max_indices"))
 											)
-											(if (and
-													(size given_value)
-													(= (false) (get specification "additional_indices"))
-												)
-												;if indices and no additional_indices, there should be no other indices
-												(=
+											[{ message (concat "The value must contain no more than " (get specification "max_indices") " indices.")}]
+
+											(and
+												(contains_index specification "min_indices")
+												(< (size given_value) (get specification "min_indices"))
+											)
+											[{ message (concat "The value must contain at least " (get specification "min_indices") " indices.")}]
+
+											;if indices and no additional_indices, there should be no other indices
+											(and
+												(size given_value)
+												(= (false) (get specification "additional_indices"))
+												(!=
 													0
 													(size (remove given_value (indices (get specification "indices"))))
 												)
-
-												(true)
 											)
-											(if (and
-													;if there is typing info for additional_indices, and there actually are additional indices
-													(contains_index specification "additional_indices")
-													(!= (false) (get specification "additional_indices"))
-													(size (remove given_value (indices (get specification "indices"))))
-												)
-												(apply "and"
-													(values (map
-														(lambda
-															;check the additional indices
-															(call !SingleTypeCheck (append
-																(assoc given_value (get given_value (current_index 1)))
-																(if (~ (assoc) (get specification "additional_indices"))
-																	(assoc
-																		specification (get specification "additional_indices")
-																		exp_type (get (get specification "additional_indices") "type")
-																	)
+											[{
+												message
+													(concat
+														"The following indices are not accepted within the given value: "
+														(apply "concat" (trunc (weave
+															(map
+																(lambda (concat "\"" (current_value) "\""))
+																(indices (remove given_value (indices (get specification "indices"))))
+															)
+															", "
+														)))
+														"."
+													)
+											}]
 
-																	;otherwise, "values" should just be a string (or list of string)
-																	(assoc
-																		specification (assoc)
-																		exp_type (get specification "additional_indices")
+											;else must start checking indices and return a map
+											(filter
+												;scrap any empty lists/assocs
+												(lambda (size (current_value)))
+												(append
+													(if (contains_index specification "indices")
+														(map
+															(lambda
+																(if (contains_index given_value (current_index))
+																	(call !SingleTypeCheck (append
+																		(assoc given_value (get given_value (current_index 1)))
+																		(if (~ (assoc) (current_value))
+																			(assoc
+																				specification (current_value 1)
+																				exp_type (get (current_value 1) "type")
+																			)
+
+																			;otherwise, "values" should just be a string
+																			(assoc
+																				specification (assoc)
+																				exp_type (current_value 1)
+																			)
+																		)
+																	))
+
+																	;if the index is not present but it is required, then return false
+																	(and
+																		(~ (assoc) (current_value))
+																		(get (current_value) "required")
 																	)
+																	[{ message "This field is required."}]
+
+																	[]
 																)
-															))
+															)
+															(get specification "indices")
 														)
-														(remove given_value (indices (get specification "indices")))
-													))
+														{}
+													)
+													(if (and
+															;if there is typing info for additional_indices, and there actually are additional indices
+															(contains_index specification "additional_indices")
+															(!= (false) (get specification "additional_indices"))
+															(size (remove given_value (indices (get specification "indices"))))
+														)
+														(map
+															(lambda
+																;check the additional indices
+																(call !SingleTypeCheck (append
+																	(assoc given_value (get given_value (current_index 1)))
+																	(if (~ (assoc) (get specification "additional_indices"))
+																		(assoc
+																			specification (get specification "additional_indices")
+																			exp_type (get (get specification "additional_indices") "type")
+																		)
+
+																		;otherwise, "values" should just be a string (or list of string)
+																		(assoc
+																			specification (assoc)
+																			exp_type (get specification "additional_indices")
+																		)
+																	)
+																))
+															)
+															(remove given_value (indices (get specification "indices")))
+														)
+														{}
+													)
 												)
-												(true)
-											)
-											(if (contains_index specification "max_size")
-												(<= (size given_value) (get specification "max_size"))
-												(true)
-											)
-											(if (contains_index specification "min_size")
-												(>= (size given_value) (get specification "min_size"))
-												(true)
 											)
 										)
 
 										(= exp_type "any")
-										(true)
+										[]
 									)
 								)
 							)
@@ -640,7 +767,7 @@
 		))
 
 		(declare (assoc
-			invalid_params (indices (filter (lambda (not (current_value))) parameter_validity_map))
+			invalid_params (indices (filter (lambda (size (current_value))) parameter_validity_map))
 		))
 
 		(if (size invalid_params)
@@ -649,9 +776,20 @@
 					errors
 						(list (concat
 							"The following parameters contain invalid values: "
-							(apply "concat" (trunc (weave invalid_params ", ")))
+							(apply
+								"concat"
+								(trunc (weave
+									(map
+										(lambda (concat "\"" (current_value) "\""))
+										invalid_params
+									)
+									", "
+								))
+							)
 							"."
 						))
+					error_details (keep parameter_validity_map invalid_params)
+					error_code "invalid"
 				))
 			)
 		)

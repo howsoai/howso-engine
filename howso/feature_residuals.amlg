@@ -13,7 +13,7 @@
 			focal_case (null)
 			num_samples (null)
 			robust_residuals (false)
-			hyperparameter_feature ".targetless"
+			hyperparameter_feature (null)
 			use_case_weights (null)
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
@@ -21,6 +21,7 @@
 			feature_with_nulls (null)
 			compute_null_uncertainties (true)
 			compute_all_statistics (true)
+			use_shared_deviations (false)
 		)
 
 		(if (= (null) context_features)
@@ -43,7 +44,6 @@
 					(call !GetHyperparameters (assoc
 						feature hyperparameter_feature
 						context_features context_features
-						mode (if (!= ".targetless" hyperparameter_feature) "full" "robust")
 						weight_feature weight_feature
 					))
 
@@ -55,19 +55,9 @@
 			param_path
 				;if the param_path is missing, create it here
 				(if (= (null) (get hyperparam_map "paramPath"))
-					(list
-						hyperparameter_feature
+					(append
+						(if hyperparameter_feature ["targeted" hyperparameter_feature] ["targetless"])
 						(call !BuildContextFeaturesKey (assoc context_features features))
-						(if robust_residuals
-							"robust"
-
-							;mode stays "full" only if it's there in the !hyperparameterMetadataMap along with the weight_feature
-							(contains_index !hyperparameterMetadataMap (list hyperparameter_feature "full" weight_feature))
-							"full"
-
-							;defaults back to robust
-							"robust"
-						)
 						weight_feature
 					)
 
@@ -105,6 +95,7 @@
 					compute_all_statistics compute_all_statistics
 					confusion_matrix_min_count confusion_matrix_min_count
 					compute_null_uncertainties compute_null_uncertainties
+					use_shared_deviations use_shared_deviations
 				))
 		))
 
@@ -211,7 +202,7 @@
 	; focal_case: optional case id of case for which to compute residuals for  is to be ignored during computation
 	; regional_model_only: flag, default to false. when set to true will only explicitly use the specified case_ids for computation.
 	; robust_residuals: flag, default to false. when true calculates residuals robust with respect to the set of contexts used (across the power set of contexts)
-	; hyperparameter_feature: optional  default '.targetless'.  feature whose hyperparameters to use
+	; hyperparameter_feature: optional  default (null).  feature whose hyperparameters to use
 	; use_case_weights: flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
 	;   			case weights will be used if the trainee has them.
 	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
@@ -221,6 +212,10 @@
 	; confusion_matrix_min_count: number, optional, default is 10. Applicable only to confusion matrices, the number of predictions a class should have
 	;		(value of a cell in the matrix) for it to remain in the confusion matrix. If the count is less than this value, it will be accumulated
 	;		into a single value of all insignificant predictions for the class and removed from the confusion matrix.
+	; use_shared_deviations: flag, optional, default false. If set to true, will return the residuals grouped by shared deviations group, otherwise will return the residuals
+	;		calculated on a per feature basis.
+	; expand_confusion_matrices: flag, optional, default true. When use_shared_deviations is true, if there are confusion matrices for shared features, they will be copied over
+	;		for all non-primary shared features. When false, confusion matrices will not be copied and remain only for the primary features.
 	#!CalculateFeatureResiduals
 	(declare
 		(assoc
@@ -239,13 +234,15 @@
 			context_condition_filter_query (list)
  			num_samples (null)
 
-			hyperparameter_feature ".targetless"
+			hyperparameter_feature (null)
 			use_case_weights (null)
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
 			compute_all_statistics (false)
 			compute_null_uncertainties (true)
 			confusion_matrix_min_count 15
+			use_shared_deviations (false)
+			expand_confusion_matrices (true)
 		)
 
 		(declare (assoc
@@ -274,11 +271,14 @@
 			accuracy_map (assoc)
 			precision_map (assoc)
 			recall_map (assoc)
+			adjusted_smape_map (assoc)
+			smape_map (assoc)
 			mcc_map (assoc)
 			confusion_matrix_map (assoc)
 			nominal_performance_map (assoc)
 
 			null_uncertainties_map (assoc)
+			null_accuracies_map (assoc)
 			;list of unique features to populate output at the end
 			unique_features_for_populating_output (null)
 
@@ -301,6 +301,23 @@
 			(call !RunFullResiduals)
 		)
 
+		(if use_shared_deviations
+			(if (size !sharedDeviationsMap)
+				(seq
+					(assign (assoc feature_residuals_lists (call !PrepSharedDeviations) ))
+					(assign (assoc
+						features (filter (lambda (not (contains_value !sharedDeviationsNonPrimaryFeatures (current_value)))) features)
+					))
+				)
+
+				;else there are no set shared residuals, ignore shared deviations
+				(assign (assoc use_shared_deviations (false)))
+			)
+		)
+
+		;if shared deviations, the prediction_stats returned will a fully expanded assoc of prediction stats,
+		; however the features list and feature_residuals_lists will be shortened to only features that do not belong
+		; to a shared deviations group, or are the primary key for a group of shared deviations.
 		(declare (assoc
 			prediction_stats
 				(if compute_all_statistics
@@ -319,10 +336,11 @@
 							;keep only features that have at least 2 nulls
 							(lambda
 								(>=
-									(compute_on_contained_entities (append
-										(query_exists (current_index))
-										(query_equals (current_index) (null))
-										(query_count)
+									(size (contained_entities
+										(append
+											(query_exists (current_index))
+											(query_equals (current_index) (null))
+										)
 									))
 									2
 								)
@@ -331,7 +349,14 @@
 								;only query features that have nulls
 								(lambda (get (current_value) "has_nulls"))
 								;ignore all inactive features (where all values are nulls)
-								(keep (remove !featureNullRatiosMap (indices !inactiveFeaturesMap)) features)
+								(keep
+									(remove !featureNullRatiosMap (indices !inactiveFeaturesMap))
+									;if shared deviations, the features list needs to be expanded to include features that were dropped for shared deviations calculations
+									(if use_shared_deviations
+										(call !ExpandForSharedDeviations (assoc compressed_values features))
+										features
+									)
+								)
 							)
 						))
 					;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
@@ -354,44 +379,44 @@
 
 				;compute null deviations and update hyperparam_map with them
 				(if (size features_with_nulls)
-					(assign (assoc
-						null_uncertainties_map
-							(call !ComputeNullUncertainties (assoc
-								features_with_nulls features_with_nulls
-								context_features context_features
-								null_cases_map
-									(map
-										(if regional_model_only
-											;if regional model only, just filter which of the case ids have nulls for each feature
-											(lambda
-												(filter
-													(lambda (= (null) (retrieve_from_entity (current_value) (current_index 1))))
-													case_ids
-												)
-											)
-
-											;otherwise sample null feature value cases from the model using queries
-											(lambda
-												(contained_entities (append
-													(query_exists (current_index))
-													(query_equals (current_index) (null))
-
-													;time series derived features only consider cases outside the null triangle at the start of a series
-													;e.g., a lag of 2 feature, will only consider nulls from cases with index >= 2
-													(if (and !tsTimeFeature (contains_index ts_feature_lag_amount_map (current_index)))
-														(query_greater_or_equal_to ".series_index" (get ts_feature_lag_amount_map (current_index)) )
-
-														;else don't append anything
-														[]
-													)
-
-													(query_sample 200)
-												))
-											)
-										)
-										(zip features_with_nulls)
+					(call !ComputeNullUncertainties (assoc
+						features_with_nulls features_with_nulls
+						context_features context_features
+						null_cases_map
+							(map
+								(if (or
+										regional_model_only
+										(< (size case_ids) 200)
 									)
-							))
+									;if regional model only or small dataset/sample, just filter which of the case ids have nulls for each feature
+									(lambda
+										(filter
+											(lambda (= (null) (retrieve_from_entity (current_value) (current_index 1))))
+											case_ids
+										)
+									)
+
+									;otherwise sample null feature value cases from the model using queries
+									(lambda
+										(contained_entities (append
+											(query_exists (current_index))
+											(query_equals (current_index) (null))
+
+											;time series derived features only consider cases outside the null triangle at the start of a series
+											;e.g., a lag of 2 feature, will only consider nulls from cases with index >= 2
+											(if (and !tsTimeFeature (contains_index ts_feature_lag_amount_map (current_index)))
+												(query_greater_or_equal_to ".series_index" (get ts_feature_lag_amount_map (current_index)) )
+
+												;else don't append anything
+												[]
+											)
+
+											(query_sample 200)
+										))
+									)
+								)
+								(zip features_with_nulls)
+							)
 					))
 				)
 			)
@@ -437,6 +462,30 @@
 			))
 		)
 
+
+		;for shared deviations, only one set of deviations are calculated for each group. At the end of the calculations,
+		; the deviations mapping is expanded to add back the other features whose deviations were not calculated and point them at the feature
+		; in which their shared deviations are stored under.
+		(if use_shared_deviations
+			(map
+				(lambda (let
+					(assoc
+						current_map_name (current_index 1)
+						current_map_value (current_value 1)
+					)
+					(assign (associate
+						current_map_name
+							(call !ExpandForSharedDeviations (assoc compressed_values current_map_value))
+					))
+				))
+				(assoc
+					"ordinal_residuals_map" ordinal_residuals_map
+					"residuals_map" residuals_map
+					"null_uncertainties_map" null_uncertainties_map
+				)
+			)
+		)
+
 		(assoc
 			"residual_map" residuals_map
 			"ordinal_residual_map" ordinal_residuals_map
@@ -445,6 +494,7 @@
 			"null_uncertainty_map" null_uncertainties_map
 			;"targetless_mda_map" (first targetless_mda_maps)
 			"feature_mda_map" (last targetless_mda_maps)
+			"null_accuracy_map" null_accuracies_map
 		)
 	)
 
@@ -479,6 +529,7 @@
 			has_ordinals (> (size ordinal_features_map) 0)
 			;default index offset of where the actual case value is in each output react
 			actual_offset 1
+			predicted_offset 2
 		))
 
 		;if some of the features are edit distance types, r2 and spearman coefficient don't apply since there's no mean or relative sorting
@@ -504,6 +555,7 @@
 				;but if there are ordinals, it's stored as [diff, ordinal_diff, actual_value, predicted_value]
 				;if there are ardinals, the index offest for actual_value is 2 instead of 1
 				actual_offset 2
+				predicted_offset 3
 
 				ordinal_residuals_map
 					(filter (zip
@@ -658,6 +710,112 @@
 								)
 							)
 						))
+						(unzip feature_residuals_lists numeric_continuous_indices)
+					)
+				)
+			;smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100
+			smape_map
+				(zip
+					numeric_continuous_features
+					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda
+							(if (size (current_value))
+								(*
+									(/
+										;sum of the absolute percent errors
+										(apply "+"
+											(map
+												(lambda
+													(let
+														(assoc
+															smape_numerator
+																(abs (-
+																	(get (current_value 1) predicted_offset)
+																	(get (current_value 1) actual_offset)
+																))
+															smape_denominator
+																(/
+																	(+
+																		(abs (get (current_value 1) actual_offset))
+																		(abs (get (current_value 1) predicted_offset))
+																	)
+																	2
+																)
+														)
+														(if (= smape_denominator 0)
+															;if the denominator is 0, that means actual and predictd are both 0
+															; which should have a error of 0
+															0
+															(/ smape_numerator smape_denominator)
+														)
+													)
+												)
+												(current_value)
+											)
+										)
+										(size (current_value))
+									)
+									100
+								)
+							)
+						)
+						(unzip feature_residuals_lists numeric_continuous_indices)
+					)
+				)
+			;adjusted_smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100 where min gap / 2 is added to both the actual and predicted values.
+			adjusted_smape_map
+				(zip
+					numeric_continuous_features
+					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
+					(map
+						(lambda
+							(if (size (current_value))
+								(let
+									(assoc
+										half_min_gap
+											(get !cachedFeatureHalfMinGapMap (get numeric_continuous_features (current_index 1)))
+									)
+									(*
+										(/
+											;sum of the absolute percent errors
+											(apply "+"
+												(map
+													(lambda
+														(let
+															(assoc
+																adjusted_smape_numerator
+																	(abs (-
+																		(+ (get (current_value 1) predicted_offset) half_min_gap)
+																		(+ (get (current_value 1) actual_offset) half_min_gap)
+																	))
+																adjusted_smape_denominator
+																	(/
+																		(+
+																			(+ (abs (get (current_value 1) actual_offset)) half_min_gap)
+																			(+ (abs (get (current_value 1) predicted_offset)) half_min_gap)
+																		)
+																		2
+																	)
+															)
+															(if (= adjusted_smape_denominator 0)
+																;if the denominator is 0, that means actual and predictd are both 0
+																; which should have a error of 0
+																0
+																(/ adjusted_smape_numerator adjusted_smape_denominator)
+															)
+														)
+													)
+													(current_value)
+												)
+											)
+											(size (current_value))
+										)
+										100
+									)
+								)
+							)
+						)
 						(unzip feature_residuals_lists numeric_continuous_indices)
 					)
 				)
@@ -993,6 +1151,41 @@
 				)
 		))
 
+
+		;copy over all the stats for non-primary shared features
+		(if use_shared_deviations
+			(map
+				(lambda (let
+					(assoc
+						current_map_name (current_index 1)
+						current_map_value (current_value 1)
+					)
+					;only expand shared devitaions that are not confusion_matrix_map
+					;if expand_confusion_matrices flag is true, will also expand confusion_matrix_map
+					(if (or
+							(!= "confusion_matrix_map" current_map_name)
+							expand_confusion_matrices
+						)
+						(assign (associate
+							current_map_name
+								(call !ExpandForSharedDeviations (assoc compressed_values current_map_value))
+						))
+					)
+				))
+				(assoc
+					"accuracy_map" accuracy_map
+					"precision_map" precision_map
+					"recall_map" recall_map
+					"mcc_map" mcc_map
+					"r2_map" r2_map
+					"rmse_map" rmse_map
+					"spearman_coeff_map" spearman_coeff_map
+					"confusion_matrix_map" confusion_matrix_map
+				)
+			)
+		)
+
+		;null out stats for unique features that don't apply
 		(if (size unique_features_for_populating_output)
 			(let
 				(assoc
@@ -1022,6 +1215,8 @@
 			"mcc" mcc_map
 			"r2" r2_map
 			"rmse" rmse_map
+			"smape" smape_map
+			"adjusted_smape" adjusted_smape_map
 			"spearman_coeff" spearman_coeff_map
 			"confusion_matrix" confusion_matrix_map
 		)
