@@ -265,129 +265,6 @@
 				)
 		))
 
-		; (declare (assoc
-		; 	dropped_feature_matrix
-		; 		(map
-		; 			(lambda (let
-		; 				(assoc dropped_feature_index (current_index 1) )
-
-		; 				;assoc of index -> robust residual for dropped feature
-		; 				(declare (assoc
-		; 					dropped_feature_indices
-		; 						(indices (filter
-		; 							;only keep those residual values that were computed because feature was dropped
-		; 							(lambda (!~ (assoc) (current_value)))
-		; 							;zip indices of every residual to their values
-		; 							(zip
-		; 								(indices (current_value 1))
-		; 								(current_value 1)
-		; 							)
-		; 						))
-		; 				))
-
-		; 				(map
-		; 					(lambda (let
-		; 						(assoc
-		; 							target_feature_index (current_index 1)
-		; 							target_feature (get features (current_index 1))
-		; 						)
-		; 						(if (= target_feature_index dropped_feature_index)
-		; 							0
-
-		; 							(let
-		; 								(assoc
-		; 									target_feature_values (unzip (current_value 1) dropped_feature_indices)
-		; 								)
-
-		; 								(max
-		; 									0
-		; 									(-
-		; 										;avg residual for target feature from those values where dropped feature was missing
-		; 										(/
-		; 											(apply "+"
-		; 												(map
-		; 													(lambda
-		; 														(if (~ (assoc) current_value)
-		; 															(get (current_value) "delta")
-		; 															(current_value)
-		; 														)
-		; 													)
-		; 													target_feature_values
-		; 												)
-		; 											)
-		; 											(size target_feature_values)
-		; 										)
-		; 										(get residuals_map target_feature)
-		; 									)
-		; 								)
-		; 							)
-		; 						)
-
-		; 					))
-		; 					feature_residuals_lists
-		; 				)
-
-		; 			))
-		; 			feature_residuals_lists
-		; 		)
-		; ))
-
-		; (declare (assoc
-		; 	dropped_total_per_feature_map
-		; 		(zip
-		; 			features
-		; 			(map
-		; 				(lambda (let
-		; 					(assoc feature_index (current_index 1))
-		; 					(apply "+" (map
-		; 						(lambda (get (current_value) feature_index))
-		; 						dropped_feature_matrix
-		; 					))
-		; 				))
-		; 				features
-		; 			)
-		; 		)
-		; ))
-
-		; (declare (assoc
-		; 	dropped_mda_matrix
-		; 		(zip
-		; 			features
-		; 			(map
-		; 				(lambda (let
-		; 					(assoc
-		; 						feature_index (current_index 1)
-		; 						feature (current_value 1)
-		; 					)
-		; 					(zip
-		; 						features
-		; 						(let
-		; 							(assoc
-		; 								values_list
-		; 									(map
-		; 										(lambda
-		; 											(if (= 0 (get dropped_total_per_feature_map feature))
-		; 												0
-		; 												(/ (get (current_value) feature_index) (get dropped_total_per_feature_map feature))
-		; 											)
-		; 										)
-		; 										dropped_feature_matrix
-		; 									)
-		; 							)
-		; 							(if (= 0 (apply "+" values_list))
-		; 								(range (/ 1 (size values_list)) 1 (size values_list) 1)
-		; 								values_list
-		; 							)
-		; 						)
-		; 					)
-		; 				))
-		; 				features
-		; 			)
-		; 		)
-		; ))
-
-		; dropped_mda_matrix
-
 		;for each feature, create a list, also length of features, where each column value is the mda
 		;for the column feature computed with and without the row feature
 		(declare (assoc
@@ -445,7 +322,10 @@
 								(if (= 0 avg_without_residuals avg_with_residuals)
 									0
 
-									(- avg_without_residuals avg_with_residuals)
+									(max
+										(- avg_without_residuals avg_with_residuals)
+										(get !cachedFeatureMinResidualMap mda_feature)
+									)
 								)
 							))
 							features
@@ -489,79 +369,67 @@
 						mda_matrix
 					)
 				)
-			has_all_zeros_features (false)
 		))
 
-		;create an assoc of normalized feature weights for each feature from the MDA, keeping only positive MDA values
-		; converting the above assoc into:
-		; {
-		;	"A" { "A" 0    "B" 1   "C" 0    }
-		;	"B" { "A" .333 "B" 0   "C" .667 }
-		;	"C" { "A" .75  "B" .25 "C" 0    }
-		; }
-		(assign (assoc
-			individual_features_mda_map
+		(declare (assoc
+			feature_mda_map
 				(map
-					(lambda (let
+					(lambda
 						(assoc
-							important_values (filter (lambda (> (current_value) 0)) (values (current_value 1)))
+							target_feature (current_index 1)
+							mda_map (current_value 1)
+							target_feature_residual (get hyperparam_map ["featureResiduals" (current_index 2)]) ;TODO: verify
 						)
-						(declare (assoc total_value (apply "+" important_values) ))
-						(declare (assoc avg_value (/ total_value (size important_values)) ))
-						(if (> total_value 0)
-							(map
-								(lambda
-									(if (> (current_value) 0)
-										(*
-											(/ (current_value) total_value)
-											(- 1 (exp (/ (- (current_value)) avg_value) ))
-										)
-										0
-									)
-								)
-								(current_value)
-							)
 
-							(seq
-								(assign (assoc has_all_zeros_features (true) ))
-								(map 0 (current_value))
-							)
-						)
-					))
-					individual_features_mda_map
-				)
-
-		))
-
-		;for any individual target feature, if all the context features have negative mda values, set them all to 1/num_features_m_one
-		;since removing any individually results in a better result than using the rest, so may as well use them all
-		(if has_all_zeros_features
-			(assign (assoc
-				individual_features_mda_map
-					(map
-						(lambda
-							(if (!= 0 (apply "+" (values (current_value))) )
-								(current_value)
-
-								;set all weights to 1 / for all other features
+						(declare (assoc
+							probabilities_of_contribution_map
 								(map
 									(lambda
-										;keep this target's feature own weight as 0
-										(if (= (current_index) (current_index 1))
-											0
-											(/ 1 num_features_m_one)
+										(assoc mda (current_value 1) )
+
+										;skip if mda_feature = target_feature
+										(if (= (current_index) target_feature) (conclude 0) )
+
+										;LK metric
+										;mda + 0.5 * e(-mda/residual) * (3 * residual + mda)
+										(declare (assoc
+											lk_value
+												(+
+													mda
+													(*
+														0.5
+														(exp (- (/ mda target_feature_residual)) )
+														(+ (* 3 target_feature_residual) mda)
+													)
+												)
+										))
+
+										;surprisal =  lk_value / target_feature_residual
+										;Surprisal (surprisal - assumption) = surprisal - 1.5
+										;prob of observation = e^(-Surprisal)
+										;prob of contribution = 1 - prob of observation
+										(-
+											1
+											(exp (- (- (/ lk_value target_feature_residual) 1.5)))
 										)
 									)
-									(current_value)
+									mda_map
 								)
-							)
-						)
-						individual_features_mda_map
-					)
-			))
-		)
+						))
 
-		individual_features_mda_map
+						(declare (assoc total_probs (apply "+" (values probabilities_of_contribution_map)) ))
+
+						;normalize probabilities for use as feature weights
+						(map
+							(lambda (/ (current_value) total_probs))
+							probabilities_of_contribution_map
+						)
+					)
+					individual_features_mda_map
+				)
+		))
+
+		feature_mda_map
 	)
 
 
