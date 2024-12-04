@@ -94,6 +94,8 @@ Return types of methods should be specified by comments on the assoc with the pa
 | max_size            | Only applicable when `type` is "assoc". Value should be an integer.
 | enum                | Only applicable when `type` is "string". A list of possible values for the string.
 | pattern             | Only applicable when `type` is "string". A string regex pattern that the given value must match on. (It is recommended to include the start of string and end of string symbols in this pattern.)
+| min_length          | Only applicable when `type` is "string". The inclusive minimum length of the given string.
+| max_length          | Only applicable when `type` is "string". The inclusive maximum length of the given string.
 | min                 | Only applicable when `type` is "number". The inclusive minimum value.
 | exclusive_min       | Only applicable when `type` is "number". The exclusive minimum value.
 | max                 | Only applicable when `type` is "number". The inclusive maximum value.
