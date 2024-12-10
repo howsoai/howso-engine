@@ -495,7 +495,7 @@
 			context_features (list)
 			action_feature (null)
 			num_analysis_samples (null)
-			residual_num_samples 200
+			residual_num_samples 1000
 		)
 
 		(declare (assoc
@@ -531,36 +531,15 @@
 
 		(if inverse_residuals_as_weights
 			(conclude (seq
-				;if use_deviations is (true), then IRW without deviations does not need to be computed at all
-				(if (!= use_deviations (true))
-					(seq
-						(call !ConvergeIRW (assoc use_deviations (false))) ;iterations of ComputeResiduals and GridSearch
-						(call !BackupAnalyzedHyperparameters)
-						(if (= (false) use_deviations)
-							(seq
-								;IRW always needs subtrainee
-								(if (and use_dynamic_deviations (not !useDynamicDeviationsDuringAnalyze))
-									; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
-									(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
-								)
-								(conclude (call !SetModelHyperParameters))
-							)
-						)
-					)
-				)
-
-				(call !ConvergeIRW (assoc use_deviations (true)))	;iterations of ComputeResiduals and GridSearch
-				(if (= (null) use_deviations)
-					(call !KeepOrRevertHyperparameters)
-
-					(assign (assoc baseline_hyperparameter_map analyzed_hp_map))
-				)
+				(call !ConvergeIRW (assoc use_deviations (true))) ;iterations of ComputeResiduals and GridSearch
+				(call !BackupAnalyzedHyperparameters)
 
 				;IRW always needs subtrainee
 				(if (and use_dynamic_deviations (not !useDynamicDeviationsDuringAnalyze))
 					; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
 					(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
 				)
+
 				(call !SetModelHyperParameters)
 			))
 		)
@@ -663,7 +642,12 @@
 
 		(call !InitResiduals)
 
-		(call !RunFullResiduals)
+		(if (= targeted_model "targetless")
+			(call !RunAccurateResiduals)
+
+			;targeted runs full residuals to match targeted flow
+			(call !RunFullResiduals)
+		)
 
 		(assign (assoc
 			deviation_subtrainee_name
@@ -808,12 +792,7 @@
 		)
 
 		(assign (assoc
-			baseline_hyperparameter_map
-				(call !GetHyperparameters (assoc
-					feature action_feature
-					context_features context_features
-					weight_feature weight_feature
-				))
+			baseline_hyperparameter_map (replace (retrieve_from_entity "!defaultHyperparameters"))
 		))
 
 		;if using default targetless hyperparameters, set p to 1 as the starting p value
@@ -821,7 +800,15 @@
 				(= "targetless" targeted_model)
 				(= [".default"] (get baseline_hyperparameter_map "paramPath"))
 			)
-			(assign (assoc baseline_hyperparameter_map (set baseline_hyperparameter_map "p" 1) ))
+			(assign (assoc
+				baseline_hyperparameter_map
+					(set
+						baseline_hyperparameter_map
+						"k" 21
+						"p" 1
+						"dt" "surprisal_to_prob"
+					)
+			))
 		)
 
 		;store the paramPath for this hyperparameter set so it has a reference to where it's stored in !hyperparameterMetadataMap
@@ -977,21 +964,33 @@
 				k_values
 					;grid search fibonacci sequence
 					(if (= targeted_model "targetless")
-						(list 5 8 13)
+						[5 21 34]
 
-						(list 3 5 8 13 21 34 55 89 144)
+						[3 5 8 13 21 34 55 89 144]
 					)
 			))
 		)
 		(if (= (null) p_values)
 			(assign (assoc
-				p_values (list 0.1 0.5 1 2)
+				p_values
+					(if (= targeted_model "targetless")
+						[1]
+
+						[0.1 0.5 1 2]
+					)
 			))
 		)
 
 		;if dt is null, default it to -1, if it's empty list set it to the recommended default search list
 		(if (= (null) dt_values )
-			(assign (assoc dt_values (list -1)))
+			(assign (assoc
+				dt_values
+					(if (= targeted_model "targetless")
+						["surprisal_to_prob"]
+
+						[-1]
+					)
+			))
 
 			(= (list) dt_values)
 			(assign (assoc dt_values (list -8 -2 -1 -0.5 0)))
@@ -1216,11 +1215,7 @@
 									(if (contains_index !inactiveFeaturesMap (current_index))
 										0
 
-										(call !ConvertDeviationToFeatureWeight (assoc
-											feature_is_nominal (contains_index !nominalsMap (current_index 1) )
-											feature_deviation (current_value 1)
-											p_value (get output_map "p")
-										))
+										1
 									)
 
 								)
@@ -1229,37 +1224,6 @@
 					)
 				)
 			)
-		)
-	)
-
-	;helper method to convert deviation value to feature weight given a deviation and p value
-	;parameters:
-	; feature_is_nominal: flag, set to true if feature is nominal
-	; feature_deviation: value or tuple as passed in from the hyperparameter map
-	; p_value: p value from the hyperarameter map
-	#!ConvertDeviationToFeatureWeight
-	(let
-		(assoc
-			deviation_value
-				(if feature_is_nominal
-					;if the deviation is an assoc containing a sparse deviation matrix, pull the expected deviation value from it
-					(if (~ (assoc) feature_deviation)
-						(get feature_deviation "expected_deviation")
-
-						feature_deviation
-					)
-
-					;else continuous
-					feature_deviation
-				)
-		)
-
-		;tiny values < 1e13 mean it's a floating point percision error, set IRW to 1 / residual ^ p
-		(if (> deviation_value 1e-13)
-			(/ 1 (pow deviation_value p_value))
-
-			;else set it to 1 because there is no residual
-			1
 		)
 	)
 
@@ -1405,11 +1369,7 @@
 								(if (contains_index !inactiveFeaturesMap (current_index))
 									0
 
-									(call !ConvertDeviationToFeatureWeight (assoc
-										feature_is_nominal (contains_index !nominalsMap (current_index 1) )
-										feature_deviation (current_value 1)
-										p_value p_value
-									))
+									1
 								)
 							)
 							(get baseline_hyperparameter_map "featureResiduals")
