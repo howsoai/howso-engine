@@ -110,7 +110,6 @@
 
 		(assign_to_entities (assoc
 			!autoAblationMaxInfluenceWeightEntropy quantile_value
-			!hasInfluenceWeightEntropies (true)
 		))
 	)
 
@@ -439,14 +438,13 @@
 			))
 		)
 
-		;Also ensure that we have influence weight entropies.
-		(if (not !hasInfluenceWeightEntropies)
-			(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-				features features
-				weight_feature distribute_weight_feature
-				use_case_weights (true)
-			))
-		)
+		;Also ensure that we have influence weight entropies and that they are as up-to-date
+		; as possible.
+		(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+			features features
+			weight_feature distribute_weight_feature
+			use_case_weights (true)
+		))
 
 		(if thresholds_enabled
 			(assign (assoc
@@ -553,16 +551,22 @@
 			weight_feature !autoAblationWeightFeature
 		)
 
-		;output quantile value
-		(compute_on_contained_entities (list
-			(query_exists !internalLabelInfluenceWeightEntropy)
-			(query_not_equals !internalLabelInfluenceWeightEntropy 0)
-			(query_quantile
-				!internalLabelInfluenceWeightEntropy
-				influence_weight_entropy_threshold
-				weight_feature
-			)
-		))
+		;output quantile value if influence weight entropies exist, otherwise output
+		; infinity, meaning that no cases will be ablated/reduced until this method
+		; is called when there exists one or more cases with defined influence weight entropies.
+		(if
+			(call !HasInfluenceWeightEntropies)
+			(compute_on_contained_entities (list
+				(query_exists !internalLabelInfluenceWeightEntropy)
+				(query_not_equals !internalLabelInfluenceWeightEntropy 0)
+				(query_quantile
+					!internalLabelInfluenceWeightEntropy
+					influence_weight_entropy_threshold
+					weight_feature
+				)
+			))
+			.infinity
+		)
 	)
 
 	;determine whether a new case (one that is not in the Trainee) should be ablated (trained as weights) or kept.
@@ -585,7 +589,9 @@
 		; are not enough cases in the model.
 		(if
 			(or
-				(not (and !hasInfluenceWeightEntropies !autoAblationEnabled) )
+				(not (and
+					(call !HasInfluenceWeightEntropies) !autoAblationEnabled
+				))
 				(< num_cases !autoAblationMinNumCases )
 			)
 			;return true, keep case / do not ablate
@@ -667,7 +673,9 @@
 	#!CanTrainAblationBeSkipped
 	(and
 		(or
-			(not (and !hasInfluenceWeightEntropies !autoAblationEnabled) )
+			(not (and
+				(call !HasInfluenceWeightEntropies) !autoAblationEnabled
+			))
 			(< (+ num_cases (size cases)) !autoAblationMinNumCases )
 		)
 		(= (null)
@@ -897,5 +905,19 @@
 				(false)
 			)
 		)
+	)
+
+	#!HasInfluenceWeightEntropies
+	;small query which determined whether or not the cases contained within this trainee have
+	; cached influence weight entropies.
+	(if
+		(size (contained_entities
+			[
+				(query_exists !internalLabelInfluenceWeightEntropy)
+				(query_not_equals !internalLabelInfluenceWeightEntropy (null))
+			]
+		))
+		(true)
+		(false)
 	)
 )
