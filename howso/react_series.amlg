@@ -707,9 +707,21 @@
 		;{type "any"}
 		(assoc
 			;{type "list" values "string"}
+			;The names of the features whose values are given in "series_data" in the same order within each row. Must be
+			;specified if "series_data" is specified.
 			series_data_features (list)
 			;{type "any"}
+			;A list of lists of lists of anything. A list of series, which are lists of rows, which are lists of feature values.
 			series_data (null)
+			;{type "list" values "string"}
+			;The names of the features whose values are given in "series_ids" in the same order within each sublist. Must be
+			;specified if "series_ids" is specified.
+			series_id_features (list)
+			;{type "any"}
+			;A list of lists. A list of series IDs, which are a list of ID feature values. Each sublist should specify a
+			;a unique set of ID feature values that uniquely select a trained series from the trained data. If "series_ids"
+			;is specified, then "series_id_features" must also be specified and series_data will be ignored.
+			series_ids (null)
 			;{type "list" values "string"}
 			action_features (list)
 			;{type "list" values "string"}
@@ -717,80 +729,84 @@
 			;{ref "ReactDetails"}
 			details (null)
 		)
+		(call !ValidateParameters)
 
 		;this is appended to later - so must not be (null)
 		(if (not details)
 			(assign (assoc details {}))
 		)
 
-		(let
-			(assoc
-				original_series_data_features series_data_features
-				time_feature_index 0
-				time_feature (retrieve_from_entity "!tsTimeFeature")
-			)
+		;if series_data is given, assume the derived feature are not included, so rederive those other features
+		(if series_data
+			(let
+				(assoc
+					original_series_data_features series_data_features
+					time_feature_index 0
+					time_feature (retrieve_from_entity "!tsTimeFeature")
+				)
 
-			(if (= 0 (size series_data_features))
-				(conclude (conclude
-					(call !Return (assoc
-						errors (list "continue_series_values is provided without continue_series_features, please specify continue_series_features")
+				(if (= 0 (size series_data_features))
+					(conclude (conclude
+						(call !Return (assoc
+							errors (list "continue_series_values is provided without continue_series_features, please specify continue_series_features")
+						))
 					))
+				)
+
+				;use all the features including all the derived ones
+				(assign (assoc series_data_features !trainedFeatures ))
+
+				(assign (assoc
+					series_data
+						(map
+							(lambda (let
+								(assoc series_values (current_value 1) )
+								(declare (assoc trainee_clone (first (create_entities (null))) ))
+
+								;create a shallow copy (no contained entities, just the trainee data)
+								(assign_entity_roots trainee_clone (retrieve_entity_root ) )
+
+								;train and derive all the lags and other features as necessary
+								(call_entity trainee_clone "train" (assoc
+									cases series_values
+									features original_series_data_features
+									session "temp"
+									input_is_substituted input_is_substituted
+								))
+
+								(assign (assoc
+									series_values
+										(get
+											(call_entity trainee_clone "get_cases" (assoc
+												features series_data_features
+												session "temp"
+											))
+											(list 1 "payload" "cases")
+										)
+									time_feature_index
+										(get
+											(zip series_data_features (indices series_data_features))
+											time_feature
+										)
+								))
+
+								;sort the passed in data by the time feature to ensure its order
+								(assign (assoc
+									series_values
+										(call !MultiSortList (assoc
+											data series_values
+											column_order_indices (list time_feature_index)
+										))
+								))
+
+								(destroy_entities trainee_clone)
+
+								series_values
+							))
+							series_data
+						)
 				))
 			)
-
-			;use all the features including all the derived ones
-			(assign (assoc series_data_features !trainedFeatures ))
-
-			(assign (assoc
-				series_data
-					(map
-						(lambda (let
-							(assoc series_values (current_value 1) )
-							(declare (assoc trainee_clone (first (create_entities (null))) ))
-
-							;create a shallow copy (no contained entities, just the trainee data)
-							(assign_entity_roots trainee_clone (retrieve_entity_root ) )
-
-							;train and derive all the lags and other features as necessary
-							(call_entity trainee_clone "train" (assoc
-								cases series_values
-								features original_series_data_features
-								session "temp"
-								input_is_substituted input_is_substituted
-							))
-
-							(assign (assoc
-								series_values
-									(get
-										(call_entity trainee_clone "get_cases" (assoc
-											features series_data_features
-											session "temp"
-										))
-										(list 1 "payload" "cases")
-									)
-								time_feature_index
-									(get
-										(zip series_data_features (indices series_data_features))
-										time_feature
-									)
-							))
-
-							;sort the passed in data by the time feature to ensure its order
-							(assign (assoc
-								series_values
-									(call !MultiSortList (assoc
-										data series_values
-										column_order_indices (list time_feature_index)
-									))
-							))
-
-							(destroy_entities trainee_clone)
-
-							series_values
-						))
-						series_data
-					)
-			))
 		)
 
 		(call !Return (assoc
@@ -798,6 +814,8 @@
 				(call !BatchReactSeriesStationary (assoc
 					series_data series_data
 					series_data_features series_data_features
+					series_ids series_ids
+					series_id_features series_id_features
 					context_features context_features
 					action_features action_features
 				))
@@ -812,15 +830,18 @@
 			series_data_features (null)
 			context_features (null)
 			action_features (null)
+			series_ids (null)
+			series_id_features (null)
 		)
 
 		(declare (assoc
 			per_series_output
-				||(map
+				||(range
 					(lambda
 						(let
 							(assoc
-								individual_series (current_value 1)
+								individual_series (get series_data (current_index 1))
+								individual_series_ids (get series_ids (current_index 1))
 							)
 
 							(call !ReactSeriesStationary (assoc
@@ -828,10 +849,14 @@
 								series_data_features series_data_features
 								context_features context_features
 								action_features action_features
+								series_id_features series_id_features
+								series_ids individual_series_ids
 							))
 						)
 					)
-					series_data
+					0
+					(max (size series_data) (size series_ids))
+					1
 				)
 		))
 
@@ -859,6 +884,8 @@
 			series_data_features (null)
 			context_features (null)
 			action_features (null)
+			series_ids (null)
+			series_id_features (null)
 		)
 
 		;series_data should already be very derived
@@ -868,6 +895,52 @@
 					(filter
 						(lambda (not (contains_value action_features (current_value))))
 						series_data_features
+					)
+			))
+		)
+
+		;if series_ids are specified, then pull the data for that series and overwrite series_data
+		(if series_ids
+			(assign (assoc
+				series_data_features (append context_features !tsTimeFeature)
+				series_data
+					(let
+						;get the cases of the series
+						(assoc
+							series_case_ids
+								(contained_entities
+									(apply "append"
+										(map
+											(lambda
+												[(query_equals
+													(current_value 1)
+													(if (contains_index !numericNominalFeaturesMap (current_value 1))
+														(+ (get series_ids (current_index 1)))
+														(get series_ids (current_index 1))
+													)
+												)]
+											)
+											series_id_features
+										)
+									)
+								)
+						)
+
+						;sort the cases
+						(call !MultiSortList (assoc
+							data
+								(map
+									(lambda
+										(retrieve_from_entity (current_value) (append context_features !tsTimeFeature))
+									)
+									series_case_ids
+								)
+							column_order_indices
+								(unzip
+									(zip context_features (indices context_features))
+									[!tsTimeFeature]
+								)
+						))
 					)
 			))
 		)
@@ -888,6 +961,7 @@
 				)
 		))
 
+		;predict the stationary action features for each row of the series
 		(declare (assoc
 			per_row_reactions
 				(map
@@ -915,6 +989,7 @@
 								context_features filtered_context_features
 								context_values (unzip case_context_map filtered_context_features)
 								action_features action_features
+								leave_series_out (true)
 								details
 									(append
 										details
@@ -969,17 +1044,67 @@
 							))
 
 							(if (contains_index !nominalsMap action_feature)
-								;nominals flow
-								(declare
+								;nominals flow: accumulate the categorical action probabilities computed in each row, but
+								;scale their values by the local probability of the correct prediction, which we can
+								;measure with 1 - the local residual for that feature. Then predict the class with the largest
+								;accumulated CAP
+								(let
 									(assoc
-										per_row_caps
+										scaled_per_row_caps
 											(map
-												(lambda (get (current_value) action_feature))
+												(lambda
+													(map
+														(lambda
+															;multiply each CAP by the probability of correct prediction (1-residual)
+															(*
+																(current_value)
+																(- 1 (get action_feature_row_residuals (current_index 1)))
+															)
+														)
+														(get (current_value) action_feature)
+													)
+												)
 												(get output_map "categorical_action_probabilities")
 											)
 									)
 
+									;add together the scaled CAPs for each row
+									(declare (assoc
+										aggregated_caps
+											(reduce
+												(lambda
+													(map
+														(lambda
+															(+
+																(or (first (current_value)) 0)
+																(or (last (current_value)) 0)
+															)
+														)
+														(previous_result)
+														(current_value)
+													)
+												)
+												scaled_per_row_caps
+											)
+									))
+
+									;TODO - use (index_max) here when possible
+									(let
+										(assoc
+											max_cap (apply "max" (values aggregated_caps))
+										)
+										(first (filter
+											(lambda (= (get aggregated_caps (current_value)) max_cap) )
+											(indices aggregated_caps)
+										))
+									)
 								)
+
+								;edit_distance feats
+								(contains_index !editDistanceFeatureTypesMap action_feature)
+								(null)
+
+
 							)
 						)
 					)
@@ -987,7 +1112,10 @@
 				)
 		))
 
-		output_map
+		{
+			"per_row_output" output_map
+			"action_values" stationary_action_values
+		}
 	)
 
 )
