@@ -43,6 +43,9 @@
 			;{type "boolean"}
 			;flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended
 			skip_auto_analyze (false)
+			;{type "boolean"}
+			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
+			skip_reduce_data (false)
 		)
 
 		(call !ValidateParameters)
@@ -699,11 +702,6 @@
 				)
 		)
 
-		;if user explicitly specified to skip autoanalyze, send back "analyze" status so user knows an analyze is needed
-		(if skip_auto_analyze
-			(assign (assoc status_output "analyze"))
-		)
-
 		(declare (assoc
 			batch_data_mass_threshold 0
 			batch_data_mass 0
@@ -802,6 +800,37 @@
 
 			(if (and run_autoanalyze_check (not skip_auto_analyze))
 				(call !AutoAnalyzeIfNeeded)
+			)
+
+			;if the number of cases will exceed the reduce_data threshold since the last reduce_data call, run it again
+			;the default !reduceDataInfluenceWeightEntropyThreshold of 0.6 will ensure that approximately 1/e of the data is removed
+			(if
+				(and
+					(>= (+ !dataMassChangeSinceLastDataReduction batch_size) !autoAblationMaxNumCases)
+					(not skip_reduce_data)
+				)
+				(call reduce_data (assoc
+					abs_threshold_map !autoAblationAbsThresholdMap
+					delta_threshold_map !autoAblationDeltaThresholdMap
+					rel_threshold_map !autoAblationRelThresholdMap
+					skip_auto_analyze skip_auto_analyze
+				))
+
+				;else, add the new cases to the total number since the last data reduction
+				; and notify the user that a reduce_data call is needed/recommended if skip_reduce_data is set
+				; rather than performing it now.
+				(seq
+					;ensure we only set the reduce_data status output if a reduction is actually necessary.
+					(if (and
+							(>= (+ !dataMassChangeSinceLastDataReduction batch_size) !autoAblationMaxNumCases)
+							skip_reduce_data
+						)
+						(assign (assoc status_output "reduce_data"))
+					)
+					(accum_to_entities (assoc
+						!dataMassChangeSinceLastDataReduction batch_size
+					))
+				)
 			)
 
 			(accum (assoc input_case_index batch_size ))
@@ -979,7 +1008,8 @@
 	#!AutoAnalyzeIfNeeded
 	(if (>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
 		(if skip_auto_analyze
-			;if skip_auto_analyze, send back "analyze" status so users knows an analyze is needed
+			;if skip_auto_analyze, send back "analyze" status so users knows an analyze is needed/recommended
+			; rather than performing it now.
 			(assign (assoc status_output "analyze"))
 
 			;otherwise do the analyze

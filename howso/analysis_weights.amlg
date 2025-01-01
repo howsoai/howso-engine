@@ -26,10 +26,16 @@
 			residuals_map (list)
 		))
 
+		;possibly increase the number of samples if nominals are present
+		(if (and !tsTimeFeature (size !sharedDeviationsMap))
+			(assign (assoc num_samples (call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature num_samples)) ))
+		)
+
 		(while (< iteration num_iterations)
 			(assign (assoc
 				residuals_map
-					(call !ExpandResidualValuesToUncertainty  (assoc
+					(call !ExpandResidualValuesToUncertainty (assoc
+						using_shared_deviations (true)
 						feature_residuals_map
 							(call !CalculateFeatureResiduals (assoc
 								features features
@@ -41,7 +47,7 @@
 										(min num_samples (* 10 (size features)))
 
 										;on the last iteration use the larger of 1000 or the specified samples to attain more accurate residuals
-										(= 2 iteration)
+										(= (- num_iterations 1) iteration)
 										(max num_samples 1000)
 
 										num_samples
@@ -51,6 +57,9 @@
 								compute_all_statistics use_deviations
 								;don't sparsify the confusion matrix so that SDM can be computed using full counts
 								confusion_matrix_min_count 0
+								use_shared_deviations (true)
+								;don't create copies of confusion matrices for non-primary shared deviation features
+								expand_confusion_matrices (false)
 							))
 					))
 			))
@@ -204,6 +213,72 @@
 		weights_map
 	)
 
+	;helper function for the residuals computing methods used within Analysis (ConvergeResiduals and ConvergeIRW)
+	;estimates the number of samples necessary to allow for the correct amount of samples for a feature to be predicted
+	;across all of its features that share deviations
+	;parameters:
+	; desired_samples_per_feature: the number of samples desired for each feature
+	#!ComputeRequiredNumSamplesForSharedDeviationsWithTS
+	(let
+		(assoc
+			;map of the desired samples per feature multiplied by the number of features in each shared deviation group
+			desired_non_null_samples_per_group
+				(map
+					(lambda (* desired_samples_per_feature (size (current_value))) )
+					(keep !sharedDeviationGroupByPrimaryMap features)
+				)
+		)
+
+		(declare (assoc
+			sample_cases
+				(contained_entities [
+					(query_exists !internalLabelSession)
+						(query_sample 1000 (if use_case_weights weight_feature))
+				])
+		))
+
+		;take a sample of 1000 cases and get the average number of non_null values for features in each shared deviation group
+		(declare (assoc
+			avg_non_null_values_per_case_per_group
+				(map
+					(lambda
+						(floor (/
+							(apply "+"
+								(map
+									(lambda
+										;the number of non-null values in the case of features in the shared deviation group
+										;(current_value) is case id, (current_value 1) is the list of features in the SD group
+										(size (filter (retrieve_from_entity (current_value) (current_value 1))))
+									)
+									sample_cases
+								)
+							)
+							1000
+						))
+					)
+					(keep !sharedDeviationGroupByPrimaryMap features)
+				)
+		))
+
+		(declare (assoc
+			est_needed_samples_per_group
+				(map
+					(lambda
+						(ceil (/
+							(current_value)
+							(get avg_non_null_values_per_case_per_group (current_index))
+						))
+					)
+					desired_non_null_samples_per_group
+				)
+		))
+
+		;return the max of the amount given or the maximum estimated samples needed across any
+		;of the shared deviations group
+		(max desired_samples_per_feature (apply "max" (values est_needed_samples_per_group)))
+	)
+
+
 	;output initial deviations to be the smallest gaps for each feature scaled by the number of features
 	#!ComputeInitialDeviations
 	(let
@@ -215,7 +290,7 @@
 	)
 
 	;updates analyzed_hp_map
-	;run multiple iterations of grid search and resdiuals to either use with the inverse_residuals_as_weights flow
+	;run multiple iterations of grid search and residuals to either use with the inverse_residuals_as_weights flow
 	#!ConvergeIRW
 	(declare
 		(assoc
@@ -241,6 +316,14 @@
 				)
 			residuals_map (list)
 		))
+
+		;possibly increase the number of samples if nominals are present
+		(if (and !tsTimeFeature (size !sharedDeviationsMap))
+			(assign (assoc
+				num_samples_converge (call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature num_samples_converge))
+				residual_num_samples (call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature residual_num_samples))
+			))
+		)
 
 		;when calculating IRW and LK deviations, compute the initial residual values if necessary
 		(if (= (null) initial_residual_values_map)
@@ -334,6 +417,7 @@
 						)
 
 						(call !ExpandResidualValuesToUncertainty  (assoc
+							using_shared_deviations (true)
 							feature_residuals_map
 								(call !CalculateFeatureResiduals (assoc
 									features features
@@ -350,6 +434,9 @@
 									compute_all_statistics use_deviations
 									;don't sparsify the confusion matrix so that SDM can be computed using full counts
 									confusion_matrix_min_count 0
+									use_shared_deviations (true)
+									;don't create copies of confusion matrices for non-primary shared deviation features
+									expand_confusion_matrices (false)
 								))
 						))
 					)
@@ -407,7 +494,7 @@
 					!useDynamicDeviationsDuringAnalyze
 				)
 				; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
-				(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
+				(call !StoreResidualSubTrainee (assoc custom_hyperparam_map analyzed_hp_map) )
 			)
 		)
 	)
@@ -436,7 +523,7 @@
 						(assoc feature (current_index 1))
 						;store class counts as weights (reciprocal of count) for all cases for each id feature
 						(map
-							(lambda (/ 1 (current_value)))
+							(lambda (/ 1 (current_value)) )
 
 							;grab the un-weighted count of each class
 							(compute_on_contained_entities (list

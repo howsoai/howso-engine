@@ -51,25 +51,56 @@
 	;helper method for CalculateFeatureResiduals to compute and cache min gaps and min residuals
 	#!CacheFeatureMinGapAndResidual
 	(seq
-		(assign_to_entities (assoc
-			!cachedFeatureHalfMinGapMap
+		(declare (assoc
+			features_to_compute
+				(if (size !sharedDeviationsMap)
+					;remove non-primary shared features from the features list
+					(indices (remove (zip features) !sharedDeviationsNonPrimaryFeatures) )
+
+					;else use all features
+					features
+				)
+		))
+
+		(declare (assoc
+			feature_half_min_gap_map
 				(map
 					(lambda (let
 						(assoc
+							;if using shared deviations, the group of shared deviations features including this feature
+							feature_grouping
+								;returns any empty list if not in a group
+								(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve (current_index 2)))
+							current_feature (current_index 1)
+						)
+
+						;if not in a group, create a group of just the feature
+						(if (= (size feature_grouping) 0)
+							(assign (assoc feature_grouping [current_feature]))
+						)
+
+						(declare (assoc
 							smallest_gap
-								;gap is always 1 for nominals or strings
-								(if (or
-										(contains_index !nominalsMap (current_index 1))
-										(contains_value (list "string" "string_mixable") (get !editDistanceFeatureTypesMap (current_index 1)))
+								(if
+									;gap is always 1 for nominals or strings
+									(or
+										(contains_index !nominalsMap current_feature)
+										(contains_value (list "string" "string_mixable") (get !editDistanceFeatureTypesMap current_feature ))
 									)
 									1
-
 									;else compute the gap
-									(compute_on_contained_entities (list
-										(query_min_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
-									))
+									(apply "min"
+										(map
+											(lambda
+												(compute_on_contained_entities (list
+													(query_min_difference (current_value 1) (get !cyclicFeaturesMap (current_value 1)) )
+												))
+											)
+											feature_grouping
+										)
+									)
 								)
-						)
+						))
 
 						;infinity means there was no gap, set value to zero
 						(if (= .infinity smallest_gap)
@@ -78,7 +109,7 @@
 							;(null) means that all values are nulls and a gap couldn't be computed
 							;set it to be 0.1 for edit distance feature, and zero for all other continuous
 							(= (null) smallest_gap)
-							(if (contains_index !editDistanceFeatureTypesMap (current_index))
+							(if (contains_index !editDistanceFeatureTypesMap current_feature)
 								0.1
 								0
 							)
@@ -87,11 +118,12 @@
 							(/ smallest_gap 2)
 						)
 					))
-					(zip features)
+					(zip features_to_compute)
 				)
 		))
-		(assign_to_entities (assoc
-			!cachedFeatureMinResidualMap
+
+		(declare (assoc
+			feature_min_residual_map
 				(map
 					(lambda
 						;empty datasets set minimal residual to be half a gap
@@ -110,14 +142,34 @@
 							(/ (* 2 (current_value)) (+ 1 num_training_cases))
 
 							;else set continuous lower residual bound to:  gap / ln(num_cases + 1)
-							(/ (* 2 (current_value)) (log (+ 1 num_training_cases)) )
+							(if (current_value)
+								(/ (* 2 (current_value)) (log (+ 1 num_training_cases)) )
+
+								;if gap is 0, to prevent a 0 smallest residual,
+								;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
+								;estimating the probability of having no incorrect predictions.  We chose .5 assuming the Jeffreys prior approach.
+								(/ 1 (+ 0.5 num_training_cases))
+							)
 						)
 					)
-					!cachedFeatureHalfMinGapMap
+					feature_half_min_gap_map
 				)
 		))
-	)
 
+		(if (size !sharedDeviationsMap)
+			(assign (assoc
+				feature_min_residual_map
+					(call !ExpandForSharedDeviations (assoc compressed_values feature_min_residual_map))
+				feature_half_min_gap_map
+					(call !ExpandForSharedDeviations (assoc compressed_values feature_half_min_gap_map))
+			))
+		)
+
+		(assign_to_entities (assoc
+			!cachedFeatureMinResidualMap (replace feature_min_residual_map)
+			!cachedFeatureHalfMinGapMap (replace feature_half_min_gap_map )
+		))
+	)
 
 	;Limit computed residuals from feature_residuals_map to be the max of cached minimum residual, computed residual, and user-specified error
 	;outputs the passed in feature_residuals_map with limited values.
@@ -125,66 +177,125 @@
 	;parameters:
 	; feature_residuals_map: output assoc from CalculateFeatureResiduals containing a map of feature -> residual value in the 'residual_map' key
 	;					i.e.: { "residual_map" : { "featureA" : 3.4... } }
+	; using_shared_deviations: boolean, default (null). If true, will only use parent features and expand according to the shared deviations groups
 	#!ExpandResidualValuesToUncertainty
 	(set
 		feature_residuals_map
 		"residual_map"
-		(map
-			(lambda
-				;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
-				(if (contains_index !nominalsMap (current_index))
-					(let
-						(assoc
-							;map of class -> count
-							class_counts_map
-								(compute_on_contained_entities (list
-									(query_value_masses (current_index 2) (null) (contains_index !numericNominalFeaturesMap (current_index 2)) )
-								))
-						)
-
-						;do not max cap nominal deviations if less than 2 classes have been trained
-						(if (<= (size class_counts_map) 1)
-							(max
-								(get !cachedFeatureMinResidualMap (current_index))
-								(current_value)
-								(get !userSpecifiedFeatureErrorsMap (current_index))
-							)
-
-							;else cap the max nominal deviation
+		(let (assoc
+			temp_residual_map
+				(map
+					(lambda
+						;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
+						(if (contains_index !nominalsMap (current_index))
 							(let
-								(assoc total_count (apply "+" (values class_counts_map)) )
-
-								(min
-									;nominal max deviation is the sum of: each class's probability multiplied by probability of getting it wrong
-									(apply "+"
-										(map
-											(lambda (let
-												(assoc class_prob (* (/ (current_value 1) total_count)) )
-												(* class_prob (- 1 class_prob))
-											))
-											(values class_counts_map)
+								(assoc
+									;map of class -> count
+									feature_grouping
+										(if (size !sharedDeviationsMap)
+											(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve (current_index 2)))
 										)
-									)
+									current_feature (current_index 1)
+								)
+								(declare (assoc
+									class_counts_map
+										(if (size feature_grouping)
+											;get the total class counts for all the features in the shared deviations group
+											(reduce
+												(lambda
+													;add each class's count together
+													(map
+														(lambda (+
+															(or (first (current_value)))
+															(or (last (current_value)))
+														))
+														(previous_result)
+														(current_value)
+													)
+												)
+												;list of each feature's class count assocs
+												(map
+													(lambda
+														(compute_on_contained_entities (list
+															(query_value_masses (current_value 1) (null) (contains_index !numericNominalFeaturesMap  (current_value 1)) )
+														))
+													)
+													feature_grouping
+												)
+											)
 
+											(compute_on_contained_entities (list
+												(query_value_masses current_feature (null) (contains_index !numericNominalFeaturesMap current_feature) )
+											))
+										)
+								))
+
+								;do not max cap nominal deviations if less than 2 classes have been trained
+								(if (<= (size class_counts_map) 1)
 									(max
 										(get !cachedFeatureMinResidualMap (current_index))
 										(current_value)
 										(get !userSpecifiedFeatureErrorsMap (current_index))
 									)
+
+									;else cap the max nominal deviation
+									(let
+										(assoc total_count (apply "+" (values class_counts_map)) )
+
+										(min
+											;nominal max deviation is the sum of: each class's probability multiplied by probability of getting it wrong
+											(apply "+"
+												(map
+													(lambda (let
+														(assoc class_prob (* (/ (current_value 1) total_count)) )
+														(* class_prob (- 1 class_prob))
+													))
+													(values class_counts_map)
+												)
+											)
+
+											(max
+												(get !cachedFeatureMinResidualMap (current_index))
+												(current_value)
+												(get !userSpecifiedFeatureErrorsMap (current_index))
+											)
+										)
+									)
 								)
+							)
+
+							;else continuous value don't have upper bounds, set the lower bound
+							(max
+								(get !cachedFeatureMinResidualMap (current_index))
+								(current_value)
+								(get !userSpecifiedFeatureErrorsMap (current_index))
 							)
 						)
 					)
 
-					;else continuous value don't have upper bounds, set the lower bound
-					(max
-						(get !cachedFeatureMinResidualMap (current_index))
-						(current_value)
-						(get !userSpecifiedFeatureErrorsMap (current_index))
+					;if using shared deviations, map over a reduced residuals map with only features that are not
+					; in a shared deviations group or are the primary keys of a shared deviations group
+					(if (and
+							using_shared_deviations
+							(size !sharedDeviationsMap)
+						)
+						(remove
+							(get feature_residuals_map "residual_map")
+							!sharedDeviationsNonPrimaryFeatures
+						)
+
+						(get feature_residuals_map "residual_map")
 					)
 				)
 			)
-			(get feature_residuals_map "residual_map")
+
+			(if (and
+					using_shared_deviations
+					(size !sharedDeviationsMap)
+				)
+				(call !ExpandForSharedDeviations (assoc compressed_values temp_residual_map))
+				temp_residual_map
+			)
 		)
 	)
 
@@ -255,6 +366,7 @@
 
 			;all the context features are specified
 			robust_residuals (false)
+			use_shared_deviations (true)
 		))
 	)
 
@@ -732,8 +844,10 @@
 					))
 					features
 				)
-			;need to have at least 2.5% (that's a value of 50 using default sample of 2000) non-null values for a feature
-			min_value_count (ceil (* 0.025 (size case_ids)))
+		))
+
+		(declare (assoc
+			feature_index_map (zip features (indices features))
 		))
 
 		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
@@ -755,7 +869,7 @@
 				(if (size num_valid_values_per_feature_map)
 					(seq
 						;create the resampled case_ids list that contains cases with enough necessary non-null feature values
-						(assign  (assoc
+						(assign (assoc
 							case_ids
 								;append all the lists of cases ids for each feature into one list
 								(apply "append"
@@ -765,8 +879,8 @@
 											(query_not_equals (current_index) (null))
 
 											(if valid_weight_feature
-												(query_weighted_sample weight_feature (- min_value_count (current_value)) (rand))
-												(query_sample (- min_value_count (current_value)) (rand))
+												(query_sample (- min_value_count (current_value)) weight_feature (rand))
+												(query_sample (- min_value_count (current_value)) (null) (rand))
 											)
 										))
 										num_valid_values_per_feature_map
@@ -1262,6 +1376,17 @@
 				)
 		))
 
+		(if use_shared_deviations
+			(seq
+				(assign (assoc
+					feature_residuals_lists (call !PrepSharedDeviations (assoc features features_with_nulls))
+				))
+				(assign (assoc
+					features_with_nulls (filter (lambda (not (contains_value !sharedDeviationsNonPrimaryFeatures (current_value)))) features_with_nulls)
+				))
+			)
+		)
+
 		;create a map of feature -> null prediction probability by averaging out all the correctly predicted nulls for each feature
 		(assign (assoc
 			null_accuracies_map
@@ -1288,6 +1413,10 @@
 					(lambda (let
 						(assoc
 							feature (current_index 1)
+							feature_grouping
+								(if (size !sharedDeviationsMap)
+									(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve (current_index 2)))
+								)
 
 							;null deviation is: 1 - null prediction probability
 							null_prediction_deviation (- 1 (current_value 1))
@@ -1309,12 +1438,44 @@
 										;compute from the existing feature max-min value or bounds if provided
 										(max
 											(-
-												(get !featureMarginalStatsMap (list weight_feature feature "max"))
-												(get !featureMarginalStatsMap (list weight_feature feature "min"))
+												(if (size feature_grouping)
+													(apply "max"
+														(filter (map
+															(lambda (get !featureMarginalStatsMap (list weight_feature (current_value 1) "max")))
+															feature_grouping
+														))
+													)
+													(get !featureMarginalStatsMap (list weight_feature feature "max"))
+												)
+												(if (size feature_grouping)
+													(apply "min"
+														(filter (map
+															(lambda (get !featureMarginalStatsMap (list weight_feature (current_value 1) "min")))
+															feature_grouping
+														))
+													)
+													(get !featureMarginalStatsMap (list weight_feature feature "min"))
+												)
 											)
 											(-
-												(get !featureBoundsMap (list feature "max"))
-												(get !featureBoundsMap (list feature "min"))
+												(if (size feature_grouping)
+													(apply "max"
+														(filter (map
+															(lambda (get !featureBoundsMap (list (current_value 1) "max")))
+															feature_grouping
+														))
+													)
+													(get !featureBoundsMap (list feature "max"))
+												)
+												(if (size feature_grouping)
+													(apply "min"
+														(filter (map
+															(lambda (get !featureBoundsMap (list weight_feature (current_value 1) "min")))
+															feature_grouping
+														))
+													)
+													(get !featureBoundsMap (list feature "min"))
+												)
 											)
 										)
 								)

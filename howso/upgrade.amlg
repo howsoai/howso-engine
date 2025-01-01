@@ -198,14 +198,32 @@
 			;base path to Howso Engine Core installation
 			root_filepath (null)
 			;{type "string"}
+			;path from which to load previously exported amlg trainee
+			;	If specified, trainee_json_filepath is ignored
+			trainee_amlg_filepath (null)
+			;{type "string"}
 			;path from which to load previously exported meta.json and exp.json files.
 			;	If unspecified, expects them to be located in the base installation /migrations/ directory.
 			trainee_json_filepath (null)
 			;{type "boolean"}
-			;flag, if true will load each case from its individual file
-			separate_files (false)
+			;boolean flag used automatically by #upgrade_trainee when upgrading subtrainees. Not recommended to be used
+			;manually by the user.
+			;if true, then will import and use the trainee information in the subtrainee named ".old_trainee" rather
+			;than load a trainee from the filesystem.
+			preloaded (false)
 		)
 		(call !ValidateParameters)
+
+		(if (!= !revision 0)
+			(conclude
+				(call !Return (assoc errors
+					(list (concat
+						"This Trainee has had modifications and cannot be used for upgrading. "
+						"Please use a new Trainee to upgrade old Trainees."
+					))
+				))
+			)
+		)
 
 		;create a temporary subtrainee from the latest howso code
 		(declare (assoc
@@ -235,27 +253,36 @@
 			import_cases_and_sessions_map (null)
 		))
 
-		;if not importing metadata from saved file, upgrade trainee in place
-		(if (= (null) trainee_json_filepath)
+		;if amalgam trainee is specified, load and upgrade it
+		(if (or trainee_amlg_filepath preloaded)
 			(let
 				(assoc
-					;create a list of all the matadata labels
-					labels_to_keep (call_entity new_trainee_path "get_export_attributes")
-					old_labels (call get_export_attributes)
+					old_trainee
+						(if preloaded
+							[!traineeContainer ".old_trainee"]
+
+							;else must load the old trainee properly
+							(load_entity
+								(concat trainee_amlg_filepath trainee ".amlg")
+								[!traineeContainer ".old_trainee"]
+								"amlg"
+								(false)
+								;assume flattened
+								{execute_on_load (true)}
+							)
+						)
 				)
 
-				;keep only those that are in the old trainee
-				(assign (assoc
-					labels_to_keep (filter (lambda (contains_label (current_value))) labels_to_keep)
+				(call !UpgradeFromSubTrainee (assoc
+					migration_trainee old_trainee
 				))
 
-				;set import_metadata_map to values from the old trainee
-				(assign (assoc
-					import_metadata_map (zip labels_to_keep (retrieve_from_entity labels_to_keep))
-				))
+				;cleanup
+				(destroy_entities old_trainee)
 			)
 
-			;else overwrite old version from exported file instead of from trainee
+			;else loading from json
+			;overwrite old version from exported file instead of from trainee
 			(seq
 				(assign (assoc
 					;metadata json should be in the format of: { label : value }
@@ -277,6 +304,33 @@
 						))
 					))
 				)
+
+				;when importing session .indices_map, numerify all the index keys for cases
+				(assign (assoc
+					import_cases_and_sessions_map
+						(map
+							(lambda
+								;if this is a session, it has an .indices_map of session index -> case_id
+								(if (contains_index (current_value) ".indices_map")
+									(set
+										(current_value)
+										".indices_map"
+										(zip
+											;convert all the string number indices to numeric
+											(map
+												(lambda (+ (current_value)))
+												(indices (get (current_value) ".indices_map"))
+											)
+											(values (get (current_value) ".indices_map"))
+										)
+
+									)
+									(current_value)
+								)
+							)
+							import_cases_and_sessions_map
+						)
+				))
 
 				(assign (assoc
 					old_major_version (get import_metadata_map "major_version")
@@ -303,44 +357,40 @@
 							(parse (get import_metadata_map "!featureCustomDerivedMethods"))
 						)
 				))
-			)
-		)
 
-		;overwrite this trainee code with the new code, this does not overwrite contained entities (cases, sessions),
-		;but does overwrite all labels including versions with new ones
-		(assign_entity_roots (retrieve_entity_root new_trainee_path))
-		(destroy_entities new_trainee_path)
+				;for each label pull its value from the old trainee and overwrite it in the new one
+				(assign_to_entities import_metadata_map)
 
-		;for each label pull its value from the old trainee and overwrite it in the new one
-		(assign_to_entities import_metadata_map)
-
-		;import cases and sessions from saved json and re-create them in the trainee
-		(if import_cases_and_sessions_map
-			;iterate over all the entities and re-create them as contained entities with corresponding features and values
-			(map
-				(lambda
-					(create_entities
-						(current_index)
-						(set_type
-							(zip_labels
-								(indices (current_value))
-								(values (current_value))
+				;import cases and sessions from saved json and re-create them in the trainee
+				(if import_cases_and_sessions_map
+					;iterate over all the entities and re-create them as contained entities with corresponding features and values
+					(map
+						(lambda
+							(create_entities
+								(current_index)
+								(set_type
+									(zip_labels
+										(indices (current_value))
+										(values (current_value))
+									)
+									(null)
+								)
 							)
-							(null)
 						)
+						import_cases_and_sessions_map
 					)
 				)
-				import_cases_and_sessions_map
+
+				;iterate over all the applicable migration script versions and apply each one in order
+				(call !execute_migration_scripts)
+
+				;recreate custom derive feature code on trainee if it has derived features
+				(call !recreate_feature_custom_derived_methods)
 			)
 		)
 
-		;iterate over all the applicable migration script versions and apply each one in order
-		(call !execute_migration_scripts)
-
-		;recreate custom derive feature code on trainee if it has derived features
-		(call !recreate_feature_custom_derived_methods)
-
 		(accum_to_entities (assoc !revision 1))
+		(destroy_entities new_trainee_path)
 
 		;print statement for use in utility scripts: upgrade_trainee and export_trainee
 		(print
@@ -352,6 +402,82 @@
 		)
 
 		(call !Return)
+	)
+
+	;Helper method for the upgrade process that is responsible for upgrading an older Trainee saved as a subtrainee
+	;whose entity ID/path is specified by "migration_trainee".
+	;This method retrieves an assoc of all of the export attributes of the older Trainee and assigns the value of each attribute
+	;onto itself, then calls the migrations necessary to update these values appropriately
+	;Additionally this method will also move the case/session entities from the older trainee into itself and recursively repeat
+	;this process for any subtrainees within the older trainee.
+	#!UpgradeFromSubTrainee
+	(declare
+		(assoc
+			;entity id to "import" from
+			migration_trainee (null)
+		)
+
+		(declare (assoc
+			old_labels (call_entity migration_trainee "get_export_attributes")
+			case_and_session_entities (filter (lambda (!= !traineeContainer (current_value))) (contained_entities migration_trainee))
+		))
+
+		;get all the old labels
+		(declare (assoc
+			import_metadata_map
+				(map
+					(lambda
+						(call_entity migration_trainee "debug_label" (assoc label (current_index 1) ))
+					)
+					(zip old_labels)
+				)
+		))
+		;assign all the old labels into the current entity/trainee
+		(assign_to_entities import_metadata_map)
+
+		;iterates through each case or session entity within the migration trainee and moves it
+		;up into the current trainee under the same name
+		(map
+			(lambda
+				(move_entities (append migration_trainee (current_value)) [(current_value)])
+			)
+			case_and_session_entities
+		)
+
+		;iterate over all the applicable migration script versions and apply each one in order
+		(call !execute_migration_scripts)
+
+		;recreate custom derive feature code on trainee if it has derived features
+		(call !recreate_feature_custom_derived_methods)
+
+		;if there are subtrainees, need to recursively upgrade those as well
+		(if (size (contained_entities (append migration_trainee !traineeContainer)))
+			(map
+				(lambda (let
+					(assoc new_contained_entity_path (append !traineeContainer (current_value 1)) )
+
+					;create a new trainee with the same id and relative path to the current entity
+					(clone_entities new_trainee_path new_contained_entity_path)
+
+					;move the subtrainee that needs upgrading into the trainee that will do its upgrading
+					(move_entities
+						(append migration_trainee !traineeContainer (current_value))
+						(append new_contained_entity_path !traineeContainer ".old_trainee")
+					)
+
+					;recursively upgrade that subtrainee and any subtrainees it may have
+					(set_entity_root_permission new_contained_entity_path (true))
+					(call_entity new_contained_entity_path "upgrade_trainee" (assoc
+						trainee (current_value 1)
+						;specify its already preloaded with the ".old_trainee" subtrainee
+						preloaded (true)
+						root_filepath root_filepath
+					))
+					(set_entity_root_permission new_contained_entity_path (false))
+				))
+				(contained_entities (append migration_trainee !traineeContainer))
+			)
+		)
 	)
 
 
