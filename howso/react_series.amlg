@@ -731,6 +731,17 @@
 			;{ref "ReactDetails"}
 			;The requested details.
 			details (null)
+			;{ref "DesiredConviction"}
+			;If null, will do a discriminative react. If specified, will do a generative react
+			;	For Generative React, value of desired avg conviction of generated cases, in the range of (0,infinity] with 1 as standard
+			;	larger values will increase the variance (or creativity) of the generated case from the existing model
+			;	smaller values will decrease the variance (or creativity) of the generated case from the existing model
+			desired_conviction (null)
+			;{type "string"}
+			weight_feature (null)
+			;{type "boolean"}
+			;flag, if false uses model feature residuals, if true recalculates regional model residuals. Only used when desired_conviction is specified
+			use_regional_model_residuals (true)
 		)
 		(call !ValidateParameters)
 
@@ -821,6 +832,7 @@
 					series_id_features series_id_features
 					context_features context_features
 					action_features action_features
+					weight_feature weight_feature
 				))
 		))
 	)
@@ -835,6 +847,7 @@
 			action_features (null)
 			series_ids (null)
 			series_id_features (null)
+			weight_feature (null)
 		)
 
 		(declare (assoc
@@ -854,6 +867,7 @@
 								action_features action_features
 								series_id_features series_id_features
 								series_ids individual_series_ids
+								weight_feature weight_feature
 							))
 						)
 					)
@@ -889,6 +903,7 @@
 			action_features (null)
 			series_ids (null)
 			series_id_features (null)
+			weight_feature (null)
 		)
 
 		;series_data should already be very derived
@@ -901,6 +916,15 @@
 					)
 			))
 		)
+
+		(declare (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					feature (null)
+					context_features context_features
+					weight_feature weight_feature
+				))
+		))
 
 		;if series_ids are specified, then pull the data for that series and overwrite series_data
 		(if (size series_ids)
@@ -994,12 +1018,16 @@
 								action_features action_features
 								leave_series_out (true)
 								skip_encoding (!= (null) series_ids)
+								desired_conviction (null)
+								return_entity_ids_only (true)
 								details
 									(append
 										details
 										{
 											"feature_residuals_full" (true)
 											"feature_deviations" (true)
+											"most_similar_cases" (!= (null) desired_conviction) ;need to compute max gaps if generative
+											"num_most_similar_cases" 30 ;need max of k and 30, but k always < 30 in targetless
 											"features" action_features
 											"categorical_action_probabilities" (true)
 										}
@@ -1093,15 +1121,21 @@
 											)
 									))
 
-									;TODO - use (index_max) here when possible
-									(let
-										(assoc
-											max_cap (apply "max" (values aggregated_caps))
+									(if (!= (null) desired_conviction)
+										;sample from the classes according to the CAPs
+										(rand aggregated_caps)
+
+										;TODO - use (index_max) here when possible
+										(let
+											(assoc
+												max_cap (apply "max" (values aggregated_caps))
+											)
+											;pick a random class that has the maximum probability (there may be ties)
+											(rand (filter
+												(lambda (= (get aggregated_caps (current_value)) max_cap) )
+												(indices aggregated_caps)
+											))
 										)
-										(first (filter
-											(lambda (= (get aggregated_caps (current_value)) max_cap) )
-											(indices aggregated_caps)
-										))
 									)
 								)
 
@@ -1129,22 +1163,87 @@
 												(get output_map "feature_residuals_full")
 											)
 										weight_sum (null)
+										discriminative_prediction (null)
 									)
 									(assign (assoc weight_sum (apply "+" raw_timestep_weights) ))
-									;weighted average of the predictions at each timestep where the weight is
-									;the react deviation divided by the react full residual
-									(generalized_distance
-										(map (lambda (/ (current_value) weight_sum)) raw_timestep_weights) ;weights
-										(null) ;distance_types
-										(null) ;attributes
-										(null) ;deviations
-										1 ;p
-										;vec
-										(map
-											(lambda (get (current_value) action_index))
-											(get output_map "action_values")
+									(assign (assoc
+										discriminative_prediction
+											;weighted average of the predictions at each timestep where the weight is
+											;the react deviation divided by the react full residual
+											(generalized_distance
+												(map (lambda (/ (current_value) weight_sum)) raw_timestep_weights) ;weights
+												(null) ;distance_types
+												(null) ;attributes
+												(null) ;deviations
+												1 ;p
+												;vec
+												(map
+													(lambda (get (current_value) action_index))
+													(get output_map "action_values")
+												)
+											)
+									))
+
+									(if (!= (null) desired_conviction)
+										;if generative, need to either add noise according to aggregated RMR or aggregated max gap
+										(let
+											(assoc
+												generative_residual
+													(if use_regional_model_residuals
+														;aggregate each timesteps local residual with a weighted average
+														(generalized_distance
+															(map (lambda (/ (current_value) weight_sum)) raw_timestep_weights) ;weights
+															(null) ;distance_types
+															(null) ;attributes
+															(null) ;deviations
+															1 ;p
+															;vec
+															(map
+																(lambda (get (current_value) action_feature))
+																(get output_map "feature_residuals_full")
+															)
+														)
+
+														;else
+														;aggregate max gap by taking max of each case's max gaps (min of regional and local gaps, but no larger than half min gap)
+														(apply "max"
+															(map
+																(lambda
+																	(max
+																		(get !cachedFeatureHalfMinGapMap action_feature)
+
+																		(min
+																			(compute_on_contained_entities (list
+																				(query_in_entity_list (trunc (current_value 1) (get hyperparam_map "k")))
+																				(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
+																			))
+
+																			(compute_on_contained_entities (list
+																				(query_in_entity_list (current_value 1))
+																				(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
+																			))
+																		)
+																	)
+																)
+																(get output_map "most_similar_cases")
+															)
+														)
+													)
+											)
+
+											(call !GenerateFeatureValue (assoc
+												feature_is_nominal (false)
+												action_value discriminative_prediction
+												feature_residual generative_residual
+												desired_conviction desired_conviction
+												feature action_feature
+											))
 										)
+
+										;discriminative.
+										discriminative_prediction
 									)
+
 								)
 							)
 						)
@@ -1154,7 +1253,6 @@
 		))
 
 		{
-			"per_row_output" output_map
 			"action_values" stationary_action_values
 		}
 	)
