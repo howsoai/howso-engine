@@ -1,0 +1,566 @@
+;contains methods used to investigate the stationary features of time-series data
+(null
+	#react_series_stationary
+	(declare
+		;{type "any"}
+		(assoc
+			;{type "list" values "string"}
+			;The names of the features whose values are given in "series_data" in the same order within each row. Must be
+			;specified if "series_data" is specified.
+			series_data_features (list)
+			;{type "any"}
+			;A list of lists of lists of anything. A list of series, which are lists of rows, which are lists of feature values.
+			series_data (null)
+			;{type "list" values "string"}
+			;The names of the features whose values are given in "series_ids" in the same order within each sublist. Must be
+			;specified if "series_ids" is specified.
+			series_id_features (list)
+			;{type "any"}
+			;A list of lists. A list of series IDs, which are a list of ID feature values. Each sublist should specify a
+			;a unique set of ID feature values that uniquely select a trained series from the trained data. If "series_ids"
+			;is specified, then "series_id_features" must also be specified and series_data will be ignored.
+			series_ids (null)
+			;{type "list" values "string"}
+			;Thea names of features to predict.
+			action_features (list)
+			;{type "list" values "string"}
+			;The names of features to use as contexts to predict the features named in "action_features".
+			context_features (list)
+			;{ref "ReactDetails"}
+			;The requested details.
+			details (null)
+			;{ref "DesiredConviction"}
+			;If null, will do a discriminative react. If specified, will do a generative react
+			;	For Generative React, value of desired avg conviction of generated cases, in the range of (0,infinity] with 1 as standard
+			;	larger values will increase the variance (or creativity) of the generated case from the existing model
+			;	smaller values will decrease the variance (or creativity) of the generated case from the existing model
+			desired_conviction (null)
+			;{ref "UseCaseWeights"}
+			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
+			;	case weights will be used if the trainee has them.
+			use_case_weights (null)
+			;{type "string"}
+			;name of feature whose values to use as case weights
+			weight_feature ".case_weight"
+			;{type "boolean"}
+			;flag, if false uses model feature residuals, if true recalculates regional model residuals. Only used when desired_conviction is specified
+			use_regional_model_residuals (true)
+		)
+		(call !ValidateParameters)
+
+		;this is appended to later - so must not be (null)
+		(if (not details)
+			(assign (assoc details {}))
+		)
+
+		(declare (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					feature (null)
+					context_features context_features
+					weight_feature weight_feature
+				))
+		))
+
+		;if series_data is given, assume the derived feature are not included, so rederive those other features
+		(if series_data
+			(let
+				(assoc
+					original_series_data_features series_data_features
+					time_feature_index 0
+					time_feature (retrieve_from_entity "!tsTimeFeature")
+				)
+
+				(if (= 0 (size series_data_features))
+					(conclude (conclude
+						(call !Return (assoc
+							errors (list "continue_series_values is provided without continue_series_features, please specify continue_series_features")
+						))
+					))
+				)
+
+				;use all the features including all the derived ones
+				(assign (assoc series_data_features !trainedFeatures ))
+
+				(assign (assoc
+					series_data
+						(map
+							(lambda (let
+								(assoc series_values (current_value 1) )
+								(declare (assoc trainee_clone (first (create_entities (null))) ))
+
+								;create a shallow copy (no contained entities, just the trainee data)
+								(assign_entity_roots trainee_clone (retrieve_entity_root ) )
+
+								;train and derive all the lags and other features as necessary
+								(call_entity trainee_clone "train" (assoc
+									cases series_values
+									features original_series_data_features
+									session "temp"
+									input_is_substituted input_is_substituted
+									skip_auto_analyze (true)
+									skip_reduce_data (true)
+								))
+
+								(assign (assoc
+									series_values
+										(get
+											(call_entity trainee_clone "get_cases" (assoc
+												features series_data_features
+												session "temp"
+											))
+											(list 1 "payload" "cases")
+										)
+									time_feature_index
+										(get
+											(zip series_data_features (indices series_data_features))
+											time_feature
+										)
+								))
+
+								;sort the passed in data by the time feature to ensure its order
+								(assign (assoc
+									series_values
+										(call !MultiSortList (assoc
+											data series_values
+											column_order_indices (list time_feature_index)
+										))
+								))
+
+								(destroy_entities trainee_clone)
+
+								series_values
+							))
+							series_data
+						)
+				))
+			)
+		)
+
+		(call !Return (assoc
+			payload
+				(call !BatchReactSeriesStationary (assoc
+					series_data series_data
+					series_data_features series_data_features
+					series_ids series_ids
+					series_id_features series_id_features
+					context_features context_features
+					action_features action_features
+					weight_feature weight_feature
+				))
+		))
+	)
+
+	#!BatchReactSeriesStationary
+	(declare
+		(assoc
+			;lists of lists of lists, multiple series
+			series_data (null)
+			series_data_features (null)
+			context_features (null)
+			action_features (null)
+			series_ids (null)
+			series_id_features (null)
+			weight_feature (null)
+		)
+
+		(declare (assoc
+			per_series_output
+				||(range
+					(lambda
+						(let
+							(assoc
+								individual_series (get series_data (current_index 1))
+								individual_series_ids (get series_ids (current_index 1))
+							)
+
+							(call !ReactSeriesStationary (assoc
+								series_data individual_series
+								series_data_features series_data_features
+								context_features context_features
+								action_features action_features
+								series_id_features series_id_features
+								series_ids individual_series_ids
+								weight_feature weight_feature
+							))
+						)
+					)
+					0
+					(- (max (size series_data) (size series_ids)) 1)
+					1
+				)
+		))
+
+		;convert per_series_output to a dict of details key -> lists of values (one per series)
+		(map
+			(lambda (let
+				(assoc details_key (current_index 1))
+				(map
+					(lambda (get (current_value) details_key) )
+					per_series_output
+				)
+			))
+			(if (size per_series_output)
+				(first per_series_output)
+				(assoc)
+			)
+		)
+	)
+
+	#!ReactSeriesStationary
+	(declare
+		(assoc
+			;lists of lists, one series
+			series_data (null)
+			series_data_features (null)
+			context_features (null)
+			action_features (null)
+			series_ids (null)
+			series_id_features (null)
+			weight_feature (null)
+		)
+
+		;series_data should already be very derived
+		(if (= 0 (size context_features))
+			(assign (assoc
+				context_features
+					(filter
+						(lambda (not (contains_value action_features (current_value))))
+						series_data_features
+					)
+			))
+		)
+
+		;if series_ids are specified, then pull the data for that series and overwrite series_data
+		(if (size series_ids)
+			(assign (assoc
+				series_data_features (append context_features !tsTimeFeature)
+				series_data
+					(let
+						;get the cases of the series
+						(assoc
+							series_case_ids
+								(contained_entities
+									(apply "append"
+										(map
+											(lambda
+												[(query_equals
+													(current_value 1)
+													(if (contains_index !numericNominalFeaturesMap (current_value 1))
+														(+ (get series_ids (current_index 1)))
+														(get series_ids (current_index 1))
+													)
+												)]
+											)
+											series_id_features
+										)
+									)
+								)
+						)
+
+						;sort the cases
+						(call !MultiSortList (assoc
+							data
+								(map
+									(lambda
+										(retrieve_from_entity (current_value) (append context_features !tsTimeFeature))
+									)
+									series_case_ids
+								)
+							column_order_indices
+								(unzip
+									(zip context_features (indices context_features))
+									[!tsTimeFeature]
+								)
+						))
+					)
+			))
+		)
+
+		(declare (assoc
+			context_feature_indices
+				(unzip
+					(zip series_data_features (indices series_data_features))
+					context_features
+				)
+		))
+
+		(declare (assoc
+			ts_derived_context_features
+				(filter
+					(lambda (contains_value (get !tsModelFeaturesMap "ts_derived_features") (current_value)))
+					context_features
+				)
+		))
+
+		;predict the stationary action features for each row of the series
+		(declare (assoc
+			per_row_reactions
+				(map
+					(lambda
+						(let
+							(assoc
+								case_context_map (zip context_features (unzip (current_value 1) context_feature_indices))
+							)
+
+							;filter any null derived TS features from the contexts
+							(declare (assoc
+								filtered_context_features
+									(filter
+										(lambda
+											(or
+												(not (contains_value ts_derived_context_features (current_value)))
+												(!= (null) (get case_context_map (current_value)))
+											)
+										)
+										context_features
+									)
+							))
+
+							(call !SingleReact (assoc
+								context_features filtered_context_features
+								context_values (unzip case_context_map filtered_context_features)
+								action_features action_features
+								leave_series_out (true)
+								skip_encoding (!= (null) series_ids)
+								desired_conviction (null)
+								return_entity_ids_only (true)
+								details
+									(append
+										details
+										{
+											"feature_residuals_full" (true)
+											"feature_deviations" (true)
+											"most_similar_cases" (!= (null) desired_conviction) ;need to compute max gaps if generative
+											"num_most_similar_cases" 30 ;need max of k and 30, but k always < 30 in targetless
+											"features" action_features
+											"categorical_action_probabilities" (true)
+										}
+									)
+							))
+						)
+					)
+					series_data
+				)
+		))
+
+		;convert per_row_reactions to a dict of details key -> lists of values (one per row)
+		(declare (assoc
+			output_map
+				(map
+					(lambda (let
+						(assoc details_key (current_index 1))
+						(map
+							(lambda (get (current_value) details_key) )
+							per_row_reactions
+						)
+					))
+					(if (size per_row_reactions)
+						(first per_row_reactions)
+						(assoc)
+					)
+				)
+		))
+
+		;for each action_feature, "interpolate" the per row reactions to get a prediction for the series
+		(declare (assoc
+			stationary_action_values
+				(map
+					(lambda
+						(let
+							(assoc
+								action_feature (current_value 1)
+								action_index (current_index 1)
+							)
+
+							(declare (assoc
+								action_feature_row_residuals
+									(map
+										(lambda (get (current_value) action_feature))
+										(get output_map "feature_residuals_full")
+									)
+							))
+
+							(if (contains_index !nominalsMap action_feature)
+								;nominals flow: accumulate the categorical action probabilities computed in each row, but
+								;scale their values by the local probability of the correct prediction, which we can
+								;measure with 1 - the local residual for that feature. Then predict the class with the largest
+								;accumulated CAP
+								(let
+									(assoc
+										scaled_per_row_caps
+											(map
+												(lambda
+													(map
+														(lambda
+															;multiply each CAP by the probability of correct prediction (1-residual)
+															(*
+																(current_value)
+																(- 1 (get action_feature_row_residuals (current_index 1)))
+															)
+														)
+														(get (current_value) action_feature)
+													)
+												)
+												(get output_map "categorical_action_probabilities")
+											)
+									)
+
+									;add together the scaled CAPs for each row
+									(declare (assoc
+										aggregated_caps
+											(reduce
+												(lambda
+													(map
+														(lambda
+															(+
+																(or (first (current_value)) 0)
+																(or (last (current_value)) 0)
+															)
+														)
+														(previous_result)
+														(current_value)
+													)
+												)
+												scaled_per_row_caps
+											)
+									))
+
+									(if (!= (null) desired_conviction)
+										;sample from the classes according to the CAPs
+										(rand aggregated_caps)
+
+										;TODO - use (index_max) here when possible
+										(let
+											(assoc
+												max_cap (apply "max" (values aggregated_caps))
+											)
+											;pick a random class that has the maximum probability (there may be ties)
+											(rand (filter
+												(lambda (= (get aggregated_caps (current_value)) max_cap) )
+												(indices aggregated_caps)
+											))
+										)
+									)
+								)
+
+								;edit_distance feats
+								(contains_index !editDistanceFeatureTypesMap action_feature)
+								(null)
+
+								;continuous feats
+								(and
+									(not (contains_index !categoricalFeaturesSet action_feature))
+									;interpolate continuous strings as categorical since we don't want to mix them
+									(!= "string" (get !editDistanceFeatureTypesMap action_feature))
+								)
+								(let
+									(assoc
+										raw_timestep_weights
+											(map
+												(lambda
+													(/
+														(get (first (current_value)) action_feature)
+														(get (last (current_value)) action_feature)
+													)
+												)
+												(get output_map "feature_deviations")
+												(get output_map "feature_residuals_full")
+											)
+										weight_sum (null)
+										discriminative_prediction (null)
+									)
+									(assign (assoc weight_sum (apply "+" raw_timestep_weights) ))
+									(assign (assoc
+										discriminative_prediction
+											;weighted average of the predictions at each timestep where the weight is
+											;the react deviation divided by the react full residual
+											(generalized_distance
+												(map (lambda (/ (current_value) weight_sum)) raw_timestep_weights) ;weights
+												(null) ;distance_types
+												(null) ;attributes
+												(null) ;deviations
+												1 ;p
+												;vec
+												(map
+													(lambda (get (current_value) action_index))
+													(get output_map "action_values")
+												)
+											)
+									))
+
+									(if (!= (null) desired_conviction)
+										;if generative, need to either add noise according to aggregated RMR or aggregated max gap
+										(let
+											(assoc
+												generative_residual
+													(if use_regional_model_residuals
+														;aggregate each timesteps local residual with a weighted average
+														(generalized_distance
+															(map (lambda (/ (current_value) weight_sum)) raw_timestep_weights) ;weights
+															(null) ;distance_types
+															(null) ;attributes
+															(null) ;deviations
+															1 ;p
+															;vec
+															(map
+																(lambda (get (current_value) action_feature))
+																(get output_map "feature_residuals_full")
+															)
+														)
+
+														;else
+														;aggregate max gap by taking max of each case's max gaps (min of regional and local gaps, but no larger than half min gap)
+														(apply "max"
+															(map
+																(lambda
+																	(max
+																		(get !cachedFeatureHalfMinGapMap action_feature)
+
+																		(min
+																			(compute_on_contained_entities (list
+																				(query_in_entity_list (trunc (current_value 1) (get hyperparam_map "k")))
+																				(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
+																			))
+
+																			(compute_on_contained_entities (list
+																				(query_in_entity_list (current_value 1))
+																				(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
+																			))
+																		)
+																	)
+																)
+																(get output_map "most_similar_cases")
+															)
+														)
+													)
+											)
+
+											(call !GenerateFeatureValue (assoc
+												feature_is_nominal (false)
+												action_value discriminative_prediction
+												feature_residual generative_residual
+												desired_conviction desired_conviction
+												feature action_feature
+											))
+										)
+
+										;discriminative.
+										discriminative_prediction
+									)
+
+								)
+							)
+						)
+					)
+					action_features
+				)
+		))
+
+		{
+			"per_row_output" output_map
+			"action_values" stationary_action_values
+		}
+	)
+
+)
