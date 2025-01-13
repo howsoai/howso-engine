@@ -653,25 +653,90 @@
 	;private helper method for train that creates the cases in cases and returns the case ids
 	#!TrainCreateCases
 	(if skip_ablation
-		(map
-			(lambda
-				;create the case and output case id
-				(call !CreateCase (assoc
-					features features
-					feature_values
-						(if encode_features_on_train
-							(call !ConvertFromInput (assoc
-								feature_values (current_value 2)
-								features features
+		(let
+			(assoc train_features features)
+
+			;if continuous_rebalance_features and case_weight enabled, compute DC surprisal to store when creating each case
+			(if (size !continuousRebalanceFeatures)
+				(let
+					(assoc
+						hyperparam_map
+							(call !GetHyperparameters (assoc
+								context_features features
+								weight_feature ".case_weight"
 							))
-							;else use feature_values as-is
-							(current_value 1)
-						)
-					session (get_value session)
-					session_training_index (+ trained_instance_count (current_index 1))
-				))
+					)
+					(declare (assoc
+						model_size (call !GetNumTrainingCases)
+						weight_feature (last (get hyperparam_map "paramPath"))
+						feature_weights (get hyperparam_map "featureWeights")
+						feature_weights (get hyperparam_map "featureWeights")
+						feature_deviations  (get hyperparam_map "featureDeviations")
+						dt_parameter (get hyperparam_map "dt")
+						p_parameter (get hyperparam_map "p")
+						query_closest_k (get hyperparam_map "k")
+						query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+						rebalance_feature_indices  (unzip (zip features (indices features)) !continuousRebalanceFeatures)
+						continuous_rebalance_features !continuousRebalanceFeatures
+					))
+
+					(assign (assoc
+						cases
+							||(map
+								(lambda (let
+									(assoc
+										distance_contribution
+											(call !ComputeCandidateCaseDistanceContribution (assoc
+												features continuous_rebalance_features
+												feature_values (unzip (current_value 2) rebalance_feature_indices)
+												feature_weights feature_weights
+												feature_deviations feature_deviations
+												dt_parameter dt_parameter
+												p_parameter p_parameter
+												query_closest_k query_closest_k
+												query_feature_attributes_map query_feature_attributes_map
+												use_case_weights (true)
+												weight_feature weight_feature
+											))
+									)
+									(append
+										(current_value)
+										;convert suprisal to probability
+										(if (= "surprisal_to_prob" dt_parameter)
+											(- 1 (exp (- distance_contribution)) )
+											;else store DC as-is
+											distance_contribution
+										)
+									)
+								))
+								cases
+							)
+					))
+
+					(accum (assoc train_features weight_feature))
+				)
 			)
-			cases
+
+			(map
+				(lambda
+					;create the case and output case id
+					(call !CreateCase (assoc
+						features train_features
+						feature_values
+							(if encode_features_on_train
+								(call !ConvertFromInput (assoc
+									feature_values (current_value 2)
+									features train_features
+								))
+								;else use feature_values as-is
+								(current_value 1)
+							)
+						session (get_value session)
+						session_training_index (+ trained_instance_count (current_index 1))
+					))
+				)
+				cases
+			)
 		)
 
 		;time feature exists, do ablation on time series by deriving one series at a time and then ablating those cases prior to training

@@ -515,7 +515,85 @@
 		(assign_to_entities (assoc !hasPopulatedCaseWeight (true)))
 
 		(declare (assoc
-			all_cases_map (zip (call !AllCases))
+			continuous_rebalance_features
+				(filter
+					(lambda (not (contains_index !nominalsMap (current_value))))
+					id_features
+				)
+			hyperparameter_map
+				(call !GetHyperparameters (assoc
+					context_features context_features
+					weight_feature ".case_weight"
+				))
+		))
+
+		(if (size continuous_rebalance_features)
+			(seq
+				(assign (assoc
+					id_features
+						(indices
+							(remove (zip id_features) continuous_rebalance_features)
+						)
+					closest_k (get hyperparameter_map "k")
+					feature_weights (get hyperparameter_map "featureWeights")
+					feature_deviations (get hyperparameter_map "featureDeviations")
+					p_value (get hyperparameter_map "p")
+					dt_value (if (= (get hyperparameter_map "dt") "surprisal_to_prob") "surprisal" (get hyperparameter_map "dt") )
+					query_feature_attributes_map (get hyperparameter_map "featureDomainAttributes")
+				))
+
+				;set feature deviations to be inverse of residuals if using surprisal
+				(if (and (= 0 (size feature_deviations)) (= "surprisal" dt_value))
+					(assign (assoc
+						feature_deviations (map (lambda (/ 1 (current_value))) (get hyperparameter_map "featureResiduals"))
+					))
+				)
+
+				;set global continuous_rebalance_features variable to store these values during future train() calls
+				(assign_to_entities (assoc !continuousRebalanceFeatures continuous_rebalance_features))
+
+				;store distance contributions
+				(call !StoreCaseValues (assoc
+					label_name weight_feature
+					case_values_map
+						(map
+							(lambda
+								;convert surprisal to probabilities, smaller DC -> smaller probabibility
+								(if (= "surprisal" dt_value)
+									(- 1 (exp (- (current_value))) )
+									;else store DC as-is
+									(current_value)
+								)
+							)
+							(compute_on_contained_entities (list
+								||(compute_entity_distance_contributions
+									closest_k
+									continuous_rebalance_features
+									;all cases
+									(null)
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									p_value
+									dt_value
+									(if use_case_weights weight_feature (null))
+									;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+									"fixed rand seed"
+									(null) ;radius
+									!numericalPrecision
+								)
+							))
+						)
+				))
+			)
+		)
+
+		(if (= 0 (size id_features))
+			(conclude)
+		)
+
+		(declare (assoc
 			;assoc of { feature -> { value -> weight } }
 			feature_case_weight_map
 				(map
@@ -556,7 +634,7 @@
 									(list feature (retrieve_from_entity (current_index 1) feature))
 								)
 							)
-							all_cases_map
+							(zip (call !AllCases))
 						)
 					label_name weight_feature
 				))
@@ -584,7 +662,7 @@
 								)
 							)
 						))
-						all_cases_map
+						(zip (call !AllCases))
 					)
 				label_name weight_feature
 			))
