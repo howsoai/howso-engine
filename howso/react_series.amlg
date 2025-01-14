@@ -9,13 +9,13 @@
 	(declare
 		(assoc
 			;{type "list" values "string"}
-			;list of features to condition just the first case in a series, overwrites context_features and
-			;	derived_context_features for that first case. All specified initial features must be in one of: context_features, action_features,
-			;	derived_context_features or derived_action_features. If provided a value that isn't in one of those lists, it will be ignored.
-			initial_features (list)
-			;{type "list"}
-			;list of values corresponding to the initial_features, used to condition just the first case in a series.
-			initial_values (null)
+			;list of series ID features used to uniquely select a trained series.
+			;	This list should contain all ID features, but the order can vary depending on the order of the
+			;	features values given in series_id_values.
+			series_id_features (list)
+			;{type "list" values "any"}
+			;list of values whose order corresponds to the list of features defined in series_id_features, used to identify trained series.
+			series_id_values (null)
 			;{type "assoc"}
 			;assoc of feature -> stop conditions:
 			;	for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
@@ -125,7 +125,10 @@
 
 		(call !ValidateFeatures)
 
-		(declare (assoc invalid_react_parameters (null)))
+		(declare (assoc
+			invalid_react_parameters (null)
+			warnings (assoc)
+		))
 
 		(if series_stop_map
 			(assign (assoc
@@ -145,41 +148,32 @@
 			)
 		)
 
-		(if !hasDateTimeFeatures
-			(call !ValidateDateTimeInputs (assoc single_series (true)))
-		)
+		(let
+			(assoc invalid_ts_details (indices (remove (zip requested_details) !tsSupportedDetails) ) )
 
-		;Don't allow duplicates/overlap of context features by checking if all the context features appended
-		;together are more than just the uniques between them
-		(if (>
-				(size (append initial_features series_context_features))
-				(size (values (append initial_features series_context_features) (true) ))
-			)
-			(conclude
-				(call !Return (assoc
-					errors (list "There must not be overlap between features specified in initial_features, context_features, and/or series_context_features.")
+			(if (size invalid_ts_details)
+				(accum (assoc
+					warnings
+						(associate
+							(concat
+								"The following details are not officially supported for react series: "
+								(apply "concat" (map (lambda (concat (current_value) ",") ) invalid_ts_details) )
+								". Behavior is experimental."
+							)
+						)
 				))
 			)
 		)
 
-		(declare (assoc output_features action_features))
+		(if !hasDateTimeFeatures
+			(call !ValidateDateTimeInputs (assoc single_series (true)))
+		)
 
 		(call !ValidateDerivedActionFeaturesIsSubset)
 
-		;this can get appended to in later logic, but should not appear required in the API so it's default is (null)
-		(if (= (null) initial_values)
-			(assign (assoc initial_values (list) ))
-		)
-		;prep time series parameters if it's a time series model
-		(if (retrieve_from_entity "!tsTimeFeature")
-			(call !PrepTimeSeriesFeatures (assoc
-				;singular series
-				n_samples 1
-				single_series (true)
-			))
-		)
 
 		(declare (assoc
+			output_features action_features
 			hyperparam_map
 				(call !GetHyperparameters (assoc
 					feature (null)
@@ -192,6 +186,15 @@
 
 		;check and update caches if necessary
 		(call !PreReactCacheChecks)
+
+		;prep time series parameters if it's a time series model
+		(if !tsTimeFeature
+			(call !PrepTimeSeriesFeatures (assoc
+				;singular series
+				n_samples 1
+				single_series (true)
+			))
+		)
 
 		;if user passed in a series for continuing, create a temporary trainee to derive all the necessary values (lags, deltas, etc.)
 		;and then overwrite the passed continue_series_values with the additional derived feature values
@@ -257,8 +260,8 @@
 
 		(call !Return
 			(call !ReactSeries (assoc
-				initial_features initial_features
-				initial_values initial_values
+				series_id_features series_id_features
+				series_id_values series_id_values
 				series_stop_map series_stop_maps
 				max_series_length max_series_length
 				output_new_series_ids output_new_series_ids
@@ -267,6 +270,8 @@
 				continue_series_features continue_series_features
 				continue_series_values continue_series_values
 
+				initial_features initial_features
+				initial_values initial_values
 				action_features action_features
 				derived_action_features derived_action_features
 				derived_context_features derived_context_features
@@ -301,13 +306,13 @@
 		;returns {ref "ReactSeriesResponse"}
 		(assoc
 			;{type "list" values "string"}
-			;list of features to condition just the first case in a series, overwrites context_features and
-			;	derived_context_features for that first case. All specified initial features must be in one of: context_features, action_features,
-			;	derived_context_features or derived_action_features. If provided a value that isn't in one of those lists, it will be ignored.
-			initial_features (list)
-			;{type "list" values {type "list"}}
-			;2d-list of values corresponding to the initial_features, used to condition just the first case in a series. One list is used per series.
-			initial_values (null)
+			;list of series ID features used to uniquely select a trained series.
+			;	This list should contain all ID features, but the order can vary depending on the order of the
+			;	features values given in series_id_values.
+			series_id_features (list)
+			;{type "list" values {type "list" values "any"}}
+			;2d-list of values whose order corresponds to the list of features defined in series_id_features, used to identify trained series.
+			series_id_values (null)
 			;{type "list" values {type "assoc"} }
 			;list of assocs of feature -> stop conditions:
 			;	for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
@@ -450,8 +455,8 @@
 						(!= (null) series_context_values)
 						(size series_context_values)
 
-						(!= (null) initial_values)
-						(size initial_values)
+						(!= (null) series_id_values)
+						(size series_id_values)
 
 						(!= (null) continue_series_values)
 						(size continue_series_values)
@@ -460,9 +465,13 @@
 		))
 
 		;validate parameters
-		(declare (assoc invalid_react_parameters (false) ))
+		(declare (assoc
+			invalid_react_parameters (false)
+			warnings (assoc)
+			output_features action_features
+		))
 
-		(call !ValidateBatchReactParameter (assoc param initial_values))
+		(call !ValidateBatchReactParameter (assoc param series_id_valuess))
 		(call !ValidateBatchReactParameter (assoc param series_stop_maps))
 		(call !ValidateBatchReactParameter (assoc param max_series_lengths))
 
@@ -497,28 +506,33 @@
 			)
 		)
 
-		(if !hasDateTimeFeatures
-			(call !ValidateDateTimeInputs (assoc single_series (false)))
-		)
+		(let
+			(assoc invalid_ts_details (indices (remove (zip requested_details) !tsSupportedDetails) ) )
 
-		;Don't allow duplicates/overlap of context features by checking if all the context features appended
-		;together are more than just the uniques between them
-		(if (>
-				(size (append initial_features series_context_features))
-				(size (values (append initial_features series_context_features) (true) ))
-			)
-			(conclude
-				(call !Return (assoc
-					errors (list "There must not be overlap between features specified in initial_features, context_features, and/or series_context_features.")
+			(if (size invalid_ts_details)
+				(accum (assoc
+					warnings
+						(associate
+							(concat
+								"The following details are not officially supported for react series: "
+								(apply "concat" (map (lambda (concat (current_value) ",") ) invalid_ts_details) )
+								". Behavior is experimental."
+							)
+						)
 				))
 			)
 		)
 
-		(declare (assoc output_features action_features))
+		(if !hasDateTimeFeatures
+			(call !ValidateDateTimeInputs (assoc single_series (false)))
+		)
+
+
 
 		(call !ValidateDerivedActionFeaturesIsSubset)
-
 		(declare (assoc
+			initial_features (list)
+			initial_values (null)
 			hyperparam_map
 				(call !GetHyperparameters (assoc
 					feature (null)
@@ -532,14 +546,9 @@
 		;check and update caches if necessary
 		(call !PreReactCacheChecks)
 
-		;this can get appended to in later logic, but should not appear required in the API so it's default is (null)
-		(if (= (null) initial_values)
-			(assign (assoc initial_values (list) ))
-		)
-
 		;prep time series parameters if it's a time series model
 		(if !tsTimeFeature
-			(call !PrepTimeSeriesFeatures)
+			(call !PrepTimeSeriesFeatures (assoc n_samples num_reacts))
 		)
 
 		;if user passed in a series for continuing, create a temporary trainee to derive all the necessary values (lags, deltas, etc.)
@@ -620,8 +629,8 @@
 
 		(call !Return
 			(call !BatchReactSeries (assoc
-				initial_features initial_features
-				initial_values initial_values
+				series_id_features series_id_features
+				series_id_values series_id_values
 				series_stop_maps series_stop_maps
 				max_series_lengths max_series_lengths
 				output_new_series_ids output_new_series_ids
@@ -631,6 +640,8 @@
 				continue_series_features continue_series_features
 				continue_series_values continue_series_values
 
+				initial_features initial_features
+				initial_values initial_values
 				action_features action_features
 				derived_action_features derived_action_features
 				derived_context_features derived_context_features
