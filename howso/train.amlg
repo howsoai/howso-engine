@@ -653,90 +653,108 @@
 	;private helper method for train that creates the cases in cases and returns the case ids
 	#!TrainCreateCases
 	(if skip_ablation
-		(let
-			(assoc train_features features)
+		(call !TrainCasesWithoutAblation)
 
-			;if continuous_rebalance_features and case_weight enabled, compute D.C. to store as case weight when creating each case
-			(if (size !continuousRebalanceFeatures)
-				(let
-					(assoc
-						hyperparam_map
-							(call !GetHyperparameters (assoc
-								context_features features
-								weight_feature ".case_weight"
-							))
-					)
-					(declare (assoc
-						model_size (call !GetNumTrainingCases)
-						weight_feature (last (get hyperparam_map "paramPath"))
-						feature_weights (get hyperparam_map "featureWeights")
-						feature_weights (get hyperparam_map "featureWeights")
-						feature_deviations  (get hyperparam_map "featureDeviations")
-						dt_parameter (get hyperparam_map "dt")
-						p_parameter (get hyperparam_map "p")
-						query_closest_k (get hyperparam_map "k")
-						query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
-						rebalance_feature_indices  (unzip (zip features (indices features)) !continuousRebalanceFeatures)
-						continuous_rebalance_features !continuousRebalanceFeatures
-						feature_value_weight_map (null)
-						nominal_rebalance_features (null)
-						nominal_rebalance_feature_indices (null)
-					))
+		;time feature exists, do ablation on time series by deriving one series at a time and then ablating those cases prior to training
+		!tsTimeFeature
+		(call !TrainTimeSeriesAblation)
 
-					;if there are nominal rebalance features, pull the corresponding nominal value weights
-					(if (> (size (get !savedAnalyzeParameterMap "rebalance_features")) (size continuous_rebalance_features))
-						(let
-							(assoc
-								nominal_rebalance_features_set
-									(remove
-										(zip (get !savedAnalyzeParameterMap "rebalance_features"))
-										continuous_rebalance_features
-									)
-							)
+		;else ablating cases during training
+		(call !TrainCasesWithAblation)
+	)
 
-							(assign (assoc
-								;assoc of { feature -> { value -> weight } }
-								feature_value_weight_map
-									(map
-										(lambda (let
-											(assoc feature (current_index 1))
-											;store class counts as weights (reciprocal of count) for all cases for each id feature
-											(map
-												(lambda (/ 1 (current_value)) )
+	;sub method to train cases without ablation, computing and storing an estimated case weight if rebalance features are specified
+	#!TrainCasesWithoutAblation
+	(let
+		(assoc train_features features)
 
-												;grab the un-weighted count of each class
-												(compute_on_contained_entities (list
-													(query_value_masses
-														feature
-														(null)
-														;as numeric value
-														(or
-															(not (contains_index !nominalsMap feature))
-															(contains_index !numericNominalFeaturesMap feature)
-														)
+		;if there exist continuous_rebalance_features and case_weight enabled, compute D.C. to store as case weight when creating each case
+		(if (size (get !savedAnalyzeParameterMap "rebalance_features"))
+			(let
+				(assoc
+					hyperparam_map
+						(call !GetHyperparameters (assoc
+							context_features features
+							weight_feature ".case_weight"
+						))
+				)
+				(declare (assoc
+					model_size (call !GetNumTrainingCases)
+					weight_feature (last (get hyperparam_map "paramPath"))
+					feature_weights (get hyperparam_map "featureWeights")
+					feature_weights (get hyperparam_map "featureWeights")
+					feature_deviations  (get hyperparam_map "featureDeviations")
+					dt_parameter (get hyperparam_map "dt")
+					p_parameter (get hyperparam_map "p")
+					query_closest_k (get hyperparam_map "k")
+					query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+					rebalance_feature_indices  (unzip (zip features (indices features)) !continuousRebalanceFeatures)
+					continuous_rebalance_features !continuousRebalanceFeatures
+					feature_value_weight_map (null)
+					nominal_rebalance_features (null)
+					nominal_rebalance_feature_indices (null)
+
+					;since case weights are a product of nominal and continuous rebalance feature values,
+					;if there are no continuous values, set the default weight for continuous rebalance features to 1
+					;when using surprisal math, this value should be large so that 1 - e^-value = 1
+					default_continuous_weight (if (= "surprisal_to_prob" (get hyperparam_map "dt")) 9e15 1)
+				))
+
+				;if there are nominal rebalance features, pull the corresponding nominal value weights
+				(if (> (size (get !savedAnalyzeParameterMap "rebalance_features")) (size continuous_rebalance_features))
+					(let
+						(assoc
+							nominal_rebalance_features_set
+								(remove
+									(zip (get !savedAnalyzeParameterMap "rebalance_features"))
+									continuous_rebalance_features
+								)
+						)
+
+						(assign (assoc
+							;assoc of { feature -> { value -> weight } }
+							feature_value_weight_map
+								(map
+									(lambda (let
+										(assoc feature (current_index 1))
+										;store class counts as weights (reciprocal of count) for all cases for each id feature
+										(map
+											(lambda (/ 1 (current_value)) )
+
+											;grab the un-weighted count of each class
+											(compute_on_contained_entities (list
+												(query_value_masses
+													feature
+													(null)
+													;as numeric value
+													(or
+														(not (contains_index !nominalsMap feature))
+														(contains_index !numericNominalFeaturesMap feature)
 													)
-												))
-											)
-										))
-										nominal_rebalance_features_set
-									)
-								nominal_rebalance_features (indices nominal_rebalance_features_set)
-							))
+												)
+											))
+										)
+									))
+									nominal_rebalance_features_set
+								)
+							nominal_rebalance_features (indices nominal_rebalance_features_set)
+						))
 
-							(if (size nominal_rebalance_features)
-								(assign (assoc
-									nominal_rebalance_feature_indices (unzip (zip features (indices features)) nominal_rebalance_features)
-								))
-							)
+						(if (size nominal_rebalance_features)
+							(assign (assoc
+								nominal_rebalance_feature_indices (unzip (zip features (indices features)) nominal_rebalance_features)
+							))
 						)
 					)
+				)
 
-					(assign (assoc
-						cases
-							||(map
-								(lambda (let
-									(assoc
-										distance_contribution
+				(assign (assoc
+					cases
+						||(map
+							(lambda (let
+								(assoc
+									distance_contribution
+										(if (size continuous_rebalance_features)
 											(call !ComputeCandidateCaseDistanceContribution (assoc
 												features continuous_rebalance_features
 												feature_values (unzip (current_value 2) rebalance_feature_indices)
@@ -749,89 +767,88 @@
 												use_case_weights (true)
 												weight_feature weight_feature
 											))
-										nominal_rebalance_features_weight 1
-									)
 
-									(if feature_value_weight_map
-										(let
-											(assoc nominal_values (unzip (current_value 1) nominal_rebalance_feature_indices) )
-											(assign (assoc
-												nominal_rebalance_features_weight
-													;grab the weight for this value of the one nominal rebalance feature
-													(if (= 1 (size nominal_values))
-														(get
-															feature_value_weight_map
-															[ (first nominal_rebalance_features) (first nominal_values) ]
-														)
+											;else default to the default value
+											default_continuous_weight
+										)
+									;default nominal weight to 1
+									nominal_rebalance_features_weight 1
+								)
 
-														;multiple nominal rebalance feature weights are multiplied
-														(apply "*"
-															(map
-																(lambda
-																	(get
-																		feature_value_weight_map
-																		[ (current_value 1) (get nominal_values (current_index 1)) ]
-																	)
+								(if feature_value_weight_map
+									(let
+										(assoc nominal_values (unzip (current_value 1) nominal_rebalance_feature_indices) )
+										(assign (assoc
+											nominal_rebalance_features_weight
+												;grab the weight for this value of the one nominal rebalance feature
+												(if (= 1 (size nominal_values))
+													(get
+														feature_value_weight_map
+														[ (first nominal_rebalance_features) (first nominal_values) ]
+													)
+
+													;multiple nominal rebalance feature weights are multiplied
+													(apply "*"
+														(map
+															(lambda
+																(get
+																	feature_value_weight_map
+																	[ (current_value 1) (get nominal_values (current_index 1)) ]
 																)
-																nominal_rebalance_features
 															)
+															nominal_rebalance_features
 														)
 													)
-											))
+												)
+										))
+									)
+								)
+
+								(append
+									(current_value)
+									(*
+										nominal_rebalance_features_weight
+										;convert suprisal to probability
+										(if (= "surprisal_to_prob" dt_parameter)
+											(- 1 (exp (- distance_contribution)) )
+											;else store DC as-is
+											distance_contribution
 										)
 									)
+								)
+							))
+							cases
+						)
+				))
 
-									(append
-										(current_value)
-										(*
-											nominal_rebalance_features_weight
-											;convert suprisal to probability
-											(if (= "surprisal_to_prob" dt_parameter)
-												(- 1 (exp (- distance_contribution)) )
-												;else store DC as-is
-												distance_contribution
-											)
-										)
-									)
-								))
-								cases
-							)
-					))
-
-					(accum (assoc train_features weight_feature))
-				)
-			)
-
-			(map
-				(lambda
-					;create the case and output case id
-					(call !CreateCase (assoc
-						features train_features
-						feature_values
-							(if encode_features_on_train
-								(call !ConvertFromInput (assoc
-									feature_values (current_value 2)
-									features train_features
-								))
-								;else use feature_values as-is
-								(current_value 1)
-							)
-						session (get_value session)
-						session_training_index (+ trained_instance_count (current_index 1))
-					))
-				)
-				cases
+				(accum (assoc train_features weight_feature))
 			)
 		)
 
-		;time feature exists, do ablation on time series by deriving one series at a time and then ablating those cases prior to training
-		!tsTimeFeature
-		(call !TrainTimeSeriesAblation)
-
-		;else ablating cases during training
-		(call !TrainCasesWithAblation)
+		;iterate over cases and create them here
+		(map
+			(lambda
+				;create the case and output case id
+				(call !CreateCase (assoc
+					features train_features
+					feature_values
+						(if encode_features_on_train
+							(call !ConvertFromInput (assoc
+								feature_values (current_value 2)
+								features train_features
+							))
+							;else use feature_values as-is
+							(current_value 1)
+						)
+					session (get_value session)
+					session_training_index (+ trained_instance_count (current_index 1))
+				))
+			)
+			cases
+		)
 	)
 
+	;sub method to train cases using ablation by breaking up trained cases into batches and ablating per batch as necessary
 	#!TrainCasesWithAblation
 	(let
 		(assoc
