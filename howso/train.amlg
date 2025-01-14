@@ -852,6 +852,7 @@
 		output_case_ids
 	)
 
+	; TODO - desc and return type
 	#compute_ablation_indices
 	(declare
 		(assoc
@@ -861,16 +862,13 @@
 			;{type "list" values "string" required (true)}
 			;The list of feature names.
 			features (null)
-			;{type "string"}
-			;the session label to record these cases to.  If not specified, refers to this entity's label of same name.
-			session (null)
 			;{type "boolean"}
 			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
 			input_is_substituted (false)
-		)
-
-		(if (= (null) session)
-			(assign (assoc session "none"))
+			;{ref "ReactionPredictionStats"}
+			;previous prediction stats returned from compute_ablation_indices when batching requests, used to determine if
+			;ablation thresholds have been met. Applies only when ablation thresholds were defined by set_auto_ablation_params.
+			prev_prediction_stats {}
 		)
 
 		(call !UnsubstituteTrainCases)
@@ -878,18 +876,59 @@
 		(declare
 			(assoc
 				ablated_indices_list (list)
-				thresholds_satisfied (false)
 				warnings (assoc)
 				num_cases (call !GetNumTrainingCases)
 				ablation_trained_instance_count (call !GetNumTrainingCases)
-				trained_instance_count (retrieve_from_entity session ".trained_instance_count")
+				; TODO - Do we need the true session counts for the two vars below?
+				trained_instance_count 0
+				session_training_index 0
 				encode_features_on_train (retrieve_from_entity "!hasFeaturesNeedEncodingFromInput")
-				session_training_index (retrieve_from_entity session ".trained_instance_count")
+				;threshold-related vars
+				thresholds_enabled
+					(or
+						(size !autoAblationAbsThresholdMap)
+						(size !autoAblationDeltaThresholdMap)
+						(size !autoAblationRelThresholdMap)
+					)
+				prediction_stats_map {}
+				thresholds_satisfied (false)
 			)
 		)
 
 		;parameter and data checks, returns on error
 		(call !PreTrainChecks)
+
+		(if thresholds_enabled
+			(seq
+				(assign (assoc
+					prediction_stats_map
+						(get
+							(call !CalculateFeatureResiduals (assoc
+								features features
+								weight_feature !autoAblationWeightFeature
+								use_case_weights (true)
+								compute_all_statistics (true)
+								store_values (false)
+							))
+							"prediction_stats"
+						)
+				))
+				(assign (assoc
+					thresholds_satisfied
+						(apply "or"
+							(values
+								(call !CheckThresholds (assoc
+									abs_threshold_map !autoAblationAbsThresholdMap
+									delta_threshold_map !autoAblationDeltaThresholdMap
+									rel_threshold_map !autoAblationRelThresholdMap
+									prev_prediction_stats_map prev_prediction_stats
+									new_prediction_stats_map prediction_stats_map
+								))
+							)
+						)
+				))
+			)
+		)
 
 		;perform the ablation filtering
 		(declare (assoc indices_to_train (call !FilterCasesForAblation)))
@@ -905,6 +944,7 @@
 						ablated_indices_list
 					)
 					"indices" indices_to_train
+					"prediction_stats" (remove prediction_stats_map [".robust" ".hyperparam_path"])
 				)
 		))
 
