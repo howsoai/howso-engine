@@ -23,7 +23,8 @@
     (declare
         (assoc
             ;if any of these are length of 1, the index will be 0 to pull the values and apply to all reacts
-            single_initial (= 1 (size initial_values))
+            single_series_ids (= 1 (size series_id_values))
+			single_initial (= 1 (size initial_values))
             single_stop_map (= 1 (size series_stop_maps))
             single_max_length (= 1 (size max_series_lengths))
 			single_continue_series (= 1 (size continue_series_values))
@@ -33,7 +34,8 @@
         )
 
         ;these lists must be either a list of lists or null; if it's an empty list, treat it as null
-        (if (= (list) initial_values) (assign (assoc initial_values (null))) )
+        (if (= (list) series_id_values) (assign (assoc series_id_values (null))) )
+		(if (= (list) initial_values) (assign (assoc initial_values (null))) )
         (if (= (list) series_stop_maps) (assign (assoc series_stop_maps (null))) )
 
         (if (size series_context_values)
@@ -67,7 +69,6 @@
 		)
 
 		(declare (assoc
-			warnings (assoc)
 			requested_details (indices (filter details))
 			output_details (contains_value (values details) (true))
 		))
@@ -77,6 +78,7 @@
 				||(range
 					(lambda (let
 						(assoc
+							ids_index (if single_series_ids 0 (current_index 1))
 							initial_index (if single_initial 0 (current_index 1))
 							stop_map_index (if single_stop_map 0 (current_index 1))
 							max_length_index (if single_max_length 0 (current_index 1))
@@ -89,6 +91,7 @@
 
  						;get the corresponding parameters by the index, values will be null if not specified, but must be defaulted to an empty list/assoc
 						(declare (assoc
+							react_series_ids (if series_id_values (get series_id_values ids_index) (list))
 							react_initial_values (if initial_values (get initial_values initial_index) (list))
 							react_series_stop_map (if series_stop_maps (get series_stop_maps stop_map_index) (assoc))
 							react_continue_values (if continue_series_values (get continue_series_values continue_index) (null))
@@ -101,7 +104,8 @@
 						; keys (i.e,. "action_values") once details are added to ReactSeries output
 						(get
 							(call !ReactSeries (assoc
-								initial_values react_initial_values
+								series_id_features series_id_features
+								series_id_values react_series_ids
 								series_stop_map react_series_stop_map
 								max_series_length react_max_series_length
 								rand_seed react_rand_seed
@@ -113,6 +117,7 @@
 								continue_series_values react_continue_values
 
 								initial_features initial_features
+								initial_values react_initial_values
 								series_context_features series_context_features
 								action_features action_features
 								derived_action_features derived_action_features
@@ -122,6 +127,7 @@
 								substitute_output substitute_output
 								input_is_substituted input_is_substituted
 								use_case_weights use_case_weights
+								leave_series_out leave_series_out
 								weight_feature weight_feature
 
 								desired_conviction desired_conviction
@@ -261,6 +267,23 @@
 			series_generate_attempts 0
 		))
 
+		(declare (assoc
+			;list of queries that holds out any data required, used to hold out cases from series being forecasted
+			;or used as contexts
+			;NOTE: this currently holds out the disjunction over the matches on series IDs.
+			;Meaning that when there is more than one ID feature, any series with a single matching ID feature value
+			;will be held out, this may be revisited and adjusted to be more selective for the holdout process.
+			holdout_queries
+				(if (and leave_series_out (size series_id_values))
+					(values (map
+						(lambda (query_not_equals (current_index) (current_value)))
+						(zip series_id_features series_id_values)
+					))
+
+					(list)
+				)
+		))
+
 		(assign (assoc
 			max_series_length
 				(if has_series_context_values
@@ -348,30 +371,12 @@
 			output_details (contains_value (values details) (true))
 		))
 
-		(let
-			(assoc invalid_ts_details (indices (remove (zip requested_details) !tsSupportedDetails) ) )
-
-			(if (size invalid_ts_details)
-				(accum (assoc
-					warnings
-						(associate
-							(concat
-								"The following details are not officially supported for react series: "
-								(apply "concat" (map (lambda (concat (current_value) ",") ) invalid_ts_details) )
-								". Behavior is experimental."
-							)
-						)
-				))
-			)
-		)
-
 		(if output_details
 			(declare (assoc
 				case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
 				series_detail_values_map (map (lambda (list)) (zip requested_details))
 			))
 		)
-
 
 		(let
 			(assoc context_map (zip user_specified_context_features))
@@ -713,6 +718,7 @@
 									weight_feature weight_feature
 									rand_seed rand_seed
 									leave_case_out leave_case_out
+									holdout_queries holdout_queries
 
 									desired_conviction desired_conviction
 									use_regional_model_residuals use_regional_model_residuals
@@ -1067,7 +1073,11 @@
 	#!PrepContinueReactSeries
 	(let
 		(assoc
-			series_id_features (get !tsModelFeaturesMap "series_id_features")
+			series_id_features
+				(if (size series_id_features)
+					series_id_features
+					(get !tsModelFeaturesMap "series_id_features")
+				)
 			id_values_map (assoc)
 			existing_series_cases (list)
 		)
@@ -1097,8 +1107,6 @@
 				))
 			)
 		)
-
-
 
 		;if user has provided series data to continue, populate series_data with the provided values
 		(if (size continue_series_values)
@@ -1152,73 +1160,29 @@
 				))
 			)
 
-			;else user has not specified existing cases, pull the necessary last few cases from the series to account for largest lag amount
+			;else user has not specified untrained data, must select the data of a trained series using series_id_values
 			(seq
 				;populate an assoc of id feature -> value, if conditioned on a series, otherwise select a random series
-				(assign (assoc
-					id_values_map
-						;if initial_features_map has series id features, use them
-						(if (size (filter (unzip initial_features_map series_id_features)))
-							;get ID feature values from initial map
-							(keep initial_features_map series_id_features)
-
-							;else randomly pick IDs by selecting a case at random and using its series ids
-							(zip
-								series_id_features
-								(retrieve_from_entity
-									;pick a case at random
-									(first
-										(contained_entities (list
-											(query_exists !internalLabelSession)
-											(query_sample 1)
-										))
-									)
-									;pull the random case's ID features
-									series_id_features
-								)
-							)
-						)
-				))
+				(assign (assoc id_values_map (zip series_id_features series_id_values) ))
 
 				;pull the necessary number of cases from the series
 				(assign (assoc
 					existing_series_cases
-						(contained_entities (append
-							(map
-								(lambda (query_equals (current_value) (get id_values_map (current_value))))
-								series_id_features
-							)
-							;if an initial time value is provided, limit existing series cases to those before the specified initial time
-							(if (contains_index initial_features_map !tsTimeFeature)
-								(list
-									;using both query_less_or_equal_to and query_not_equals is same effect as 'query less than'
-									(query_less_or_equal_to
-										!tsTimeFeature
-										(if (contains_index !featureDateTimeMap !tsTimeFeature)
-											(call !ConvertDateToEpoch (assoc
-												date (get initial_features_map !tsTimeFeature)
-												feature !tsTimeFeature
-											))
+						(call !RetrieveTrainedSeriesData (assoc
+							id_values_map id_values_map
+							num_cases_needed largest_max_row_lag
+							exclusive_upper_time_bound
+								;if an initial time value is provided, limit existing series cases to those before the specified initial time
+								(if (contains_index initial_features_map !tsTimeFeature)
+									(if (contains_index !featureDateTimeMap !tsTimeFeature)
+										(call !ConvertDateToEpoch (assoc
+											date (get initial_features_map !tsTimeFeature)
+											feature !tsTimeFeature
+										))
 
-											(get initial_features_map !tsTimeFeature)
-										)
-									)
-									(query_not_equals
-										!tsTimeFeature
-										(if (contains_index !featureDateTimeMap !tsTimeFeature)
-											(call !ConvertDateToEpoch (assoc
-												date (get initial_features_map !tsTimeFeature)
-												feature !tsTimeFeature
-											))
-
-											(get initial_features_map !tsTimeFeature)
-										)
+										(get initial_features_map !tsTimeFeature)
 									)
 								)
-								(list)
-							)
-							;select the necessary count of previous cases to reference lags
-							(query_max !tsTimeFeature largest_max_row_lag)
 						))
 				))
 
@@ -1340,7 +1304,7 @@
 									use_case_weights use_case_weights
 									weight_feature weight_feature
 									rand_seed rand_seed
-									leave_case_out leave_case_out
+									holdout_queries holdout_queries
 
 									desired_conviction desired_conviction
 									use_regional_model_residuals use_regional_model_residuals
@@ -1364,6 +1328,30 @@
 			)
 		)
 	)
+
+	#!RetrieveTrainedSeriesData
+	;params:
+	;  id_values_map: assoc of series id feature name to id value
+	;  exclusive_upper_time_bound: an upper bound time value that all retrieved cases must be before chronologically
+	;  num_cases_needed: the number of cases to retrieve
+	(contained_entities (append
+		(map
+			(lambda (query_equals (current_value) (get id_values_map (current_value))))
+			(indices id_values_map)
+		)
+		;if a lower bound for time is provided, limit existing series cases to those before the specified initial time
+		(if exclusive_upper_time_bound
+			(list
+				;using both query_less_or_equal_to and query_not_equals is same effect as 'query less than'
+				(query_less_or_equal_to !tsTimeFeature exclusive_upper_time_bound)
+				(query_not_equals  !tsTimeFeature exclusive_upper_time_bound)
+			)
+			(list)
+		)
+		;select the necessary count of previous cases to reference lags
+		(query_max !tsTimeFeature num_cases_needed)
+	))
+
 
 	;Helper method for ReactSeries that synthesises action_features and derives derived_action_features to create a series case
 	;and then tests it for uniqueness and retries as necessary until a unique case is created
@@ -1498,6 +1486,7 @@
 					preserve_feature_values preserve_feature_values
 					new_case_threshold new_case_threshold
 					pre_generated_uniques_map pre_generated_uniques_map
+					holdout_queries holdout_queries
 				))
 		))
 
