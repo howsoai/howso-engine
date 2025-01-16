@@ -499,15 +499,15 @@
 		)
 	)
 
-	;Compute and store case weights for all cases if there are any features with the id_feature attribute set to true
+	;Compute and store case weights for all cases if there are any rebalance features (e.g., with the id_feature attribute set to true)
 	;Each case weights as the reciprocal of the count of the id feature value in the dataset.  If there are multiple
-	;id features, the product of the weights of all the id features is the case weight, which is stored
+	;rebalance features, the product of the weights of all the rebalance features is the case weight, which is stored
 	;in each case into the .case_weight feature
-	#!ComputeAndStoreIdFeatureCaseWeights
+	#!ComputeAndStoreRebalanceFeatureCaseWeights
 	(declare
-		(assoc id_features [] )
+		(assoc rebalance_features [] )
 
-		(if (= 0 (size id_features))
+		(if (= 0 (size rebalance_features))
 			(conclude)
 		)
 
@@ -515,9 +515,100 @@
 		(assign_to_entities (assoc !hasPopulatedCaseWeight (true)))
 
 		(declare (assoc
-			all_cases_map (zip (call !AllCases))
+			continuous_rebalance_features
+				(filter
+					(lambda (not (contains_index !nominalsMap (current_value))))
+					rebalance_features
+				)
+			nominal_rebalance_features
+				(filter
+					(lambda (contains_index !nominalsMap (current_value)))
+					rebalance_features
+				)
+			hyperparameter_map
+				(call !GetHyperparameters (assoc
+					context_features context_features
+					weight_feature weight_feature
+				))
+			;assoc of case_id -> weight from continuous rebalance features
+			case_continuous_weights_map (null)
+		))
+
+		(if (size continuous_rebalance_features)
+			(seq
+				(assign (assoc
+					closest_k (get hyperparameter_map "k")
+					feature_weights (get hyperparameter_map "featureWeights")
+					feature_deviations (get hyperparameter_map "featureDeviations")
+					p_value (get hyperparameter_map "p")
+					dt_value (if (= (get hyperparameter_map "dt") "surprisal_to_prob") "surprisal" (get hyperparameter_map "dt") )
+					query_feature_attributes_map (get hyperparameter_map "featureDomainAttributes")
+				))
+
+				;set feature deviations to be inverse of residuals if using surprisal
+				(if (and (= 0 (size feature_deviations)) (= "surprisal" dt_value))
+					(assign (assoc
+						feature_deviations (map (lambda (/ 1 (current_value))) (get hyperparameter_map "featureResiduals"))
+					))
+				)
+
+				;store the assoc of case_id -> weight
+				(assign (assoc
+					case_continuous_weights_map
+						(map
+							(lambda
+								;convert surprisal to probabilities, smaller DC -> smaller probability
+								(if (= "surprisal" dt_value)
+									(- 1 (exp (- (current_value))) )
+									;else store DC as-is
+									(current_value)
+								)
+							)
+							(compute_on_contained_entities (list
+								||(compute_entity_distance_contributions
+									closest_k
+									continuous_rebalance_features
+									;all cases
+									(null)
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									p_value
+									dt_value
+									(if !autoAblationEnabled weight_feature (null))
+									;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+									"fixed rand seed"
+									(null) ;radius
+									!numericalPrecision
+								)
+							))
+						)
+				))
+
+				;store distance contributions into cases here if there are no nominal rebalance features
+				(if (= 0 (size nominal_rebalance_features))
+					(call !StoreCaseValues (assoc
+						label_name weight_feature
+						case_values_map case_continuous_weights_map
+					))
+				)
+			)
+		)
+
+		;set global continuous_rebalance_features variable to store these values during future train() calls
+		(assign_to_entities (assoc
+			!continuousRebalanceFeatures (if (size continuous_rebalance_features) continuous_rebalance_features)
+			!nominalRebalanceFeatures (if (size nominal_rebalance_features) nominal_rebalance_features)
+		))
+
+		(if (= 0 (size nominal_rebalance_features))
+			(conclude)
+		)
+
+		(declare (assoc
 			;assoc of { feature -> { value -> weight } }
-			feature_case_weight_map
+			feature_value_weight_map
 				(map
 					(lambda (let
 						(assoc feature (current_index 1))
@@ -525,11 +616,11 @@
 						(map
 							(lambda (/ 1 (current_value)) )
 
-							;grab the un-weighted count of each class
+							;grab the count of each class
 							(compute_on_contained_entities (list
 								(query_value_masses
 									feature
-									(null)
+									(if !autoAblationEnabled weight_feature (null))
 									;as numeric value
 									(or
 										(not (contains_index !nominalsMap feature))
@@ -539,24 +630,30 @@
 							))
 						)
 					))
-					(zip id_features)
+					(zip nominal_rebalance_features)
 				)
 		))
 
-		(if (= 1 (size id_features))
+		(if (= 1 (size nominal_rebalance_features))
 			(let
-				(assoc feature (first id_features))
+				(assoc feature (first nominal_rebalance_features))
 				;store .case_weight to be same as the weight for the one id feature
 				(call !StoreCaseValues (assoc
 					case_values_map
 						(map
 							(lambda
-								(get
-									feature_case_weight_map
-									(list feature (retrieve_from_entity (current_index 1) feature))
+								(*
+									(if case_continuous_weights_map
+										(get case_continuous_weights_map (current_index))
+										1
+									)
+									(get
+										feature_value_weight_map
+										[ feature (retrieve_from_entity (current_index 1) feature) ]
+									)
 								)
 							)
-							all_cases_map
+							(zip (call !AllCases))
 						)
 					label_name weight_feature
 				))
@@ -570,21 +667,27 @@
 						(lambda (let
 							(assoc case_id (current_index 1))
 
-							;multiply all the case weights for all the id features
-							(apply "*"
-								;list of all the case weights for all the id features
-								(map
-									(lambda
-										(get
-											feature_case_weight_map
-											(list (current_value 1) (retrieve_from_entity case_id (current_value 1)))
+							(*
+								(if case_continuous_weights_map
+									(get case_continuous_weights_map (current_index))
+									1
+								)
+								;multiply all the case weights for all the id features
+								(apply "*"
+									;list of all the case weights for all the id features
+									(map
+										(lambda
+											(get
+												feature_value_weight_map
+												(list (current_value 1) (retrieve_from_entity case_id (current_value 1)))
+											)
 										)
+										nominal_rebalance_features
 									)
-									id_features
 								)
 							)
 						))
-						all_cases_map
+						(zip (call !AllCases))
 					)
 				label_name weight_feature
 			))
