@@ -34,16 +34,8 @@
 			series_id_tracking "fixed"
 			;{type "boolean"}
 			;flag, default is false.  When true, react_series will do a forecast of a series.
-			;	When true, either series_id_values or continue_series_values must be specified.
+			;	When true, either series_id_values or series_context_values must be specified.
 			continue_series (false)
-			;{type "list" values "string"}
-			;list of features corresponding to the values in each row of continue_series_values.
-			;	This value is ignored if continue_series_values is not specified.
-			continue_series_features (null)
-			;{type "list" values {type "list"} }
-			;list of lists of values, when specified will continue this specific untrained series as defined by these values.
-			;	continue_series flag will be ignored and treated as true if this value is specified.
-			continue_series_values (null)
 			;{type "list" values "string"}
 			;list of feature names corresponding to values in each row of action_values
 			action_features (list)
@@ -61,7 +53,8 @@
 			;list of features corresponding to series_context_values
 			series_context_features (list)
 			;{type "list" values {type "list"} }
-			;2d-list of values, context value for each feature for each row of the series.
+			;2d-list of values, context value for each feature for each row of the series. series_context_features must be specified if this parameter
+			;is specified.
 			;	If specified, max_series_length is ignored.
 			series_context_values (list)
 			;{type "list" values "string"}
@@ -171,16 +164,27 @@
 				continue_series
 				(not (xor
 					(size series_id_values)
-					(size continue_series_values)
+					(size series_context_values)
 				))
 			)
 			(conclude
 				(call !Return (assoc
 					errors
 						(list (concat
-							"When using the continue_series flag, either series_id_values or continue_series_values "
+							"When using the continue_series flag, either series_id_values or series_context_values "
 							"must be specified, but not both."
 						))
+				))
+			)
+		)
+
+		(if (and
+				(size series_context_values)
+				(not (size series_context_features))
+			)
+			(conclude
+				(call !Return (assoc
+					errors (list "series_context_values is provided without series_context_features, please specify series_context_features.")
 				))
 			)
 		)
@@ -217,17 +221,9 @@
 		)
 
 		;if user passed in a series for continuing, create a temporary trainee to derive all the necessary values (lags, deltas, etc.)
-		;and then overwrite the passed continue_series_values with the additional derived feature values
-		(if (size continue_series_values)
+		;and then overwrite the passed series_context_values with the additional derived feature values
+		(if (and continue_series (size series_context_values))
 			(seq
-				(if (= 0 (size continue_series_features))
-					(conclude (conclude
-						(call !Return (assoc
-							errors (list "continue_series_values is provided without continue_series_features, please specify continue_series_features")
-						))
-					))
-				)
-
 				(declare (assoc trainee_clone (first (create_entities (null))) ))
 
 				;create a shollow copy (no contained entities, just the trainee data)
@@ -235,22 +231,20 @@
 
 				;train and derive all the lags and other features as necessary
 				(call_entity trainee_clone "train" (assoc
-					cases continue_series_values
-					features continue_series_features
+					cases series_context_values
+					features series_context_features
 					session "temp"
 					input_is_substituted input_is_substituted
 				))
 
 				;use all the features including all the derived ones
-				(assign (assoc continue_series_features !trainedFeatures ))
+				(assign (assoc series_context_features !trainedFeatures ))
 
 				(assign (assoc
-					;explicitly set the continue_series flag to true since values are provided
-					continue_series (true)
-					continue_series_values
+					series_context_values
 						(get
 							(call_entity trainee_clone "get_cases" (assoc
-								features continue_series_features
+								features series_context_features
 								session "temp"
 							))
 							(list 1 "payload" "cases")
@@ -260,16 +254,16 @@
 				(declare (assoc
 					time_feature_index
 						(get
-							(zip continue_series_features (indices continue_series_features))
+							(zip series_context_features (indices series_context_features))
 							!tsTimeFeature
 						)
 				))
 
 				;sort the passed in data by the time feature to ensure its order
 				(assign (assoc
-					continue_series_values
+					series_context_values
 						(call !MultiSortList (assoc
-							data continue_series_values
+							data series_context_values
 							column_order_indices (list time_feature_index)
 						))
 				))
@@ -287,8 +281,6 @@
 				output_new_series_ids output_new_series_ids
 				output_features output_features
 				continue_series continue_series
-				continue_series_features continue_series_features
-				continue_series_values continue_series_values
 
 				initial_features initial_features
 				initial_values initial_values
@@ -356,16 +348,8 @@
 			series_id_tracking "fixed"
 			;{type "boolean"}
 			;flag, default is false.  When true, react_series will do a forecast of a series.
-			;	When true, either series_id_values or continue_series_values must be specified.
+			;	When true, either series_id_values or series_context_values must be specified.
 			continue_series (false)
-			;{type "list" values "string"}
-			;list of features corresponding to the values in each row of continue_series_values.
-			;	This value is ignored if continue_series_values is not specified.
-			continue_series_features (null)
-			;{type "list" values {type "list"}}
-			;3d-list of values, when specified will continue this specific untrained series as defined by these values.
-			;	continue_series flag will be ignored and treated as true if this value is specified.
-			continue_series_values (null)
 			;{type "list" values ["number" "string"]}
 			;time step values at which to begin synthesis for each series, applicable only for time series.
 			init_time_steps (null)
@@ -389,7 +373,8 @@
 			;list of features corresponding to series_context_values
 			series_context_features (list)
 			;{type "list" values {type "list" values {type "list"}}}
-			;3d-list of values, context value for each feature for each row of a series.
+			;3d-list of values, context value for each feature for each row of each series. series_context_features must be specified if this parameter
+			;is specified.
 			;	If specified max_series_lengths are ignored.
 			series_context_values (null)
 			;{type "list" values "string"}
@@ -481,9 +466,6 @@
 
 						(!= (null) series_id_values)
 						(size series_id_values)
-
-						(!= (null) continue_series_values)
-						(size continue_series_values)
 					)
 				)
 		))
@@ -551,14 +533,14 @@
 				continue_series
 				(not (xor
 					(size series_id_values)
-					(size continue_series_values)
+					(size series_context_values)
 				))
 			)
 			(conclude
 				(call !Return (assoc
 					errors
 						(list (concat
-							"When using the continue_series flag, either series_id_values or continue_series_values "
+							"When using the continue_series flag, either series_id_values or series_context_values "
 							"must be specified, but not both."
 						))
 				))
@@ -567,6 +549,17 @@
 
 		(if !hasDateTimeFeatures
 			(call !ValidateDateTimeInputs (assoc single_series (false)))
+		)
+
+		(if (and
+				(size series_context_values)
+				(not (size series_context_features))
+			)
+			(conclude
+				(call !Return (assoc
+					errors (list "series_context_values is provided without series_context_features, please specify series_context_features.")
+				))
+			)
 		)
 
 		(call !ValidateDerivedActionFeaturesIsSubset)
@@ -592,33 +585,23 @@
 		)
 
 		;if user passed in a series for continuing, create a temporary trainee to derive all the necessary values (lags, deltas, etc.)
-		;and then overwrite the passed continue_series_values with the additional derived feature values
-		(if (size continue_series_values)
+		;and then overwrite the passed series_context_values with the additional derived feature values
+		(if (and continue_series (size series_context_values))
 			(let
 				(assoc
-					original_continue_series_features continue_series_features
+					original_series_context_features series_context_features
 					time_feature_index 0
 					time_feature (retrieve_from_entity "!tsTimeFeature")
 				)
 
-				(if (= 0 (size continue_series_features))
-					(conclude (conclude
-						(call !Return (assoc
-							errors (list "continue_series_values is provided without continue_series_features, please specify continue_series_features")
-						))
-					))
-				)
-
 				;use all the features including all the derived ones
-				(assign (assoc continue_series_features !trainedFeatures ))
+				(assign (assoc series_context_features !trainedFeatures ))
 
 				(assign (assoc
-					;explicitly set the continue_series flag to true since values are provided
-					continue_series (true)
-					continue_series_values
+					series_context_values
 						(map
 							(lambda (let
-								(assoc continue_values (current_value 1) )
+								(assoc context_values (current_value 1) )
 								(declare (assoc trainee_clone (first (create_entities (null))) ))
 
 								;create a shallow copy (no contained entities, just the trainee data)
@@ -626,42 +609,42 @@
 
 								;train and derive all the lags and other features as necessary
 								(call_entity trainee_clone "train" (assoc
-									cases continue_values
-									features original_continue_series_features
+									cases context_values
+									features original_series_context_features
 									session "temp"
 									input_is_substituted input_is_substituted
 								))
 
 								(assign (assoc
-									continue_values
+									context_values
 										(get
 											(call_entity trainee_clone "get_cases" (assoc
-												features continue_series_features
+												features series_context_features
 												session "temp"
 											))
 											(list 1 "payload" "cases")
 										)
 									time_feature_index
 										(get
-											(zip continue_series_features (indices continue_series_features))
+											(zip series_context_features (indices series_context_features))
 											time_feature
 										)
 								))
 
 								;sort the passed in data by the time feature to ensure its order
 								(assign (assoc
-									continue_values
+									context_values
 										(call !MultiSortList (assoc
-											data continue_values
+											data context_values
 											column_order_indices (list time_feature_index)
 										))
 								))
 
 								(destroy_entities trainee_clone)
 
-								continue_values
+								context_values
 							))
-							continue_series_values
+							series_context_values
 						)
 				))
 			)
@@ -677,8 +660,6 @@
 				series_id_tracking series_id_tracking
 				output_features output_features
 				continue_series continue_series
-				continue_series_features continue_series_features
-				continue_series_values continue_series_values
 
 				initial_features initial_features
 				initial_values initial_values
