@@ -80,7 +80,6 @@
 			inverse_residuals_as_weights (null)
 			;{type "list" values "string"}
 			;list of features whose values to use to rebalance case weighting of the data and to store into weight_feature
-			;cannot be used when auto ablation is enabled
 			rebalance_features (null)
 
 			;{type "boolean"}
@@ -102,15 +101,6 @@
 			(conclude
 				(call !Return (assoc
 					errors ["`context_features` must be specified when `action_features` is specified."]
-				))
-			)
-		)
-
-		;don't allow rebalance_features to be specified if auto ablation is enabled
-		(if (and (size rebalance_features) !autoAblationEnabled)
-			(conclude
-				(call !Return (assoc
-					errors ["`rebalance_features` must not be specified when auto ablation is enabled."]
 				))
 			)
 		)
@@ -401,6 +391,19 @@
 			)
 		)
 
+		;compute rebalance features (e.g., id-based) case weights
+		(if (size rebalance_features)
+			(call !ComputeAndStoreRebalanceFeatureCaseWeights (assoc rebalance_features rebalance_features))
+
+			;else clear cached rebalanced features
+			(assign_to_entities (assoc
+				!continuousRebalanceFeatures (null)
+				!nominalRebalanceFeatures (null)
+				!cachedRebalanceClassValueWeightMap (null)
+				!cachedRebalanceUnknownValueWeightMap (null)
+			))
+		)
+
 		;reimpute features after analysis and overwrite the values with the newly imputed ones
 		(if (size imputed_cases_map)
 			(let
@@ -457,6 +460,12 @@
 
 				(call !UpdateHasNulls (assoc features analyze_features))
 			)
+		)
+
+		(if (and !tsTimeFeature !tsTimeFeatureUniversal)
+			(call !UpdateMinimumTimeBound (assoc
+				hyperparam_map (call !GetHyperparameters (assoc feature (null) ))
+			))
 		)
 
 		;if auto ablation is enabled or the user has specifically requested to cache influence weight entropies, do so
@@ -781,23 +790,21 @@
 
 		;if user doesn't want to use case weights, change weight_feature to '.none'
 		(if (not use_case_weights)
-			(assign (assoc weight_feature ".none"))
+			;if rebalance features are specified, it implies that case weight should be used
+			(if (size rebalance_features)
+				(assign (assoc use_case_weights (true) ))
 
-			;else compute id-based case weights
-			(seq
-				(if (size rebalance_features)
-					(call !ComputeAndStoreIdFeatureCaseWeights (assoc id_features rebalance_features))
-				)
+				(assign (assoc weight_feature ".none"))
+			)
 
-				;if there are no id features and user didn't specify a custom weight feature, treat as without case weight
-				(if (and (not !hasPopulatedCaseWeight) (= weight_feature ".case_weight"))
-					(seq
-						(assign_to_entities (assoc !hasPopulatedCaseWeight (true)))
-						(call !StoreCaseValues (assoc
-							case_values_map (zip (call !AllCases) 1)
-							label_name weight_feature
-						))
-					)
+			;if there are no id features and user didn't specify a custom weight feature, treat as without case weight
+			(if (and (not !hasPopulatedCaseWeight) (= weight_feature ".case_weight") (= 0 (size rebalance_features)) )
+				(seq
+					(assign_to_entities (assoc !hasPopulatedCaseWeight (true)))
+					(call !StoreCaseValues (assoc
+						case_values_map (zip (call !AllCases) 1)
+						label_name weight_feature
+					))
 				)
 			)
 		)
@@ -893,6 +900,12 @@
 			weight_feature weight_feature
 			use_case_weights use_case_weights
 		))
+
+		(if (and !tsTimeFeature !tsTimeFeatureUniversal)
+			(call !UpdateMinimumTimeBound (assoc
+				hyperparam_map baseline_hyperparameter_map
+			))
+		)
 	)
 
 	;updates baseline_hyperparameter_map
@@ -1421,62 +1434,55 @@
 						(lambda (let
 							(assoc
 								dt_value (current_value 1)
-								mae_hyperparam_map baseline_hyperparameter_map
 							)
-
-							;overwrite the k/p/dt and inverse weights and deviations if appropriate
-							(accum (assoc
-								mae_hyperparam_map
-									(append
-										(assoc "p" p_value "k" k_value "dt" dt_value)
-
-										;if using inverse weights, overwrite existing weights in baseline_hyperparameter_map
-										(if use_inverse_weights
-											(assoc
-												"featureWeights" inverted_residuals_map
-												"featureDeviations" (get baseline_hyperparameter_map "featureDeviations")
-											)
-
-											(assoc)
-										)
-									)
-							))
 
 							;accumulate the accuracy distance for each set of parameters
 							(declare (assoc
 								accuracy_distance
-									;else do k-fold cross validation if K is specified, otherwise do 1-by-1 knockout
-									(if (> k_folds 1)
-										;iterate over all the validation_case_ids and react to each one
-										;returning the mean absolute error (MAE) for each action feature
-										(call !CalculateModelMAE (assoc
+									(call !CalculateModelMAE (append
+										;params used in both cases
+										(assoc
 											action_features action_features
 											context_features context_features
-											p_param_categorical_mean p_param_categorical_mean
-											p_param_accuracy_mean p_param_accuracy_mean
-											case_ids validation_case_ids
-											cases_already_removed (true)
-											;TODO: make a passthrough flag from api, story 7421
 											robust_residuals (false)
-											custom_hyperparam_map mae_hyperparam_map
 											use_case_weights use_case_weights
 											weight_feature weight_feature
-										))
+											custom_hyperparam_map
+												;update the baseline hyperparams with new k, p, and dt
+												(append
+													baseline_hyperparameter_map
+													(assoc "p" p_value "k" k_value "dt" dt_value)
 
-										;else do hold-one-out validation
-										(call !CalculateModelMAE (assoc
-											action_features action_features
-											context_features context_features
-											case_ids sample_case_ids
-											case_feature_list case_feature_list
-											ignore_exact_cases (true)
-											;TODO: make a passthrough flag from api, story 7421
-											robust_residuals (false)
-											custom_hyperparam_map mae_hyperparam_map
-											use_case_weights use_case_weights
-											weight_feature weight_feature
-										))
-									)
+													;if using inverse weights, overwrite existing weights in baseline_hyperparameter_map
+													(if use_inverse_weights
+														(assoc
+															"featureWeights" inverted_residuals_map
+															"featureDeviations" (get baseline_hyperparameter_map "featureDeviations")
+														)
+
+														(assoc)
+													)
+												)
+										)
+										;extra conditional params
+										(if (> k_folds 1)
+											;iterate over all the validation_case_ids and react to each one
+											;returning the mean absolute error (MAE) for each action feature
+											(assoc
+												p_param_categorical_mean p_param_categorical_mean
+												p_param_accuracy_mean p_param_accuracy_mean
+												case_ids validation_case_ids
+												cases_already_removed (true)
+											)
+
+											;else do hold-one-out validation
+											(assoc
+												case_ids sample_case_ids
+												case_feature_list case_feature_list
+												ignore_exact_cases (true)
+											)
+										)
+									))
 							))
 
 							(assign (assoc p_k_dt_key (concat p_value k_value dt_value)))
