@@ -29,22 +29,25 @@
 			;	series.
 			series (null)
 			;{type "boolean"}
-			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
+			;When set to true, assumes provided categorical (nominal or ordinal) feature values already been substituted.
 			input_is_substituted (false)
 			;{type "boolean"}
-			;flag, allows feature names beginning with "." if true, otherwise an error will be given if any features start with ".".
+			;When set to true, allows feature names beginning with the "." character, otherwise an error will be given if any features start with ".".
 			allow_training_reserved_features (false)
 			;{type "string"}
 			;name of feature into which to accumulate neighbors' influences as weight for ablated cases. If unspecified, will not accumulate weights.
 			accumulate_weight_feature (null)
 			;{type "boolean"}
-			;flag, if set to true, and accumulate_weight_feature is provided, will not train on the cases, but instead accumulate all of their neighbor weights.
+			;When set to true and accumulate_weight_feature is provided, will not train on the cases, but instead accumulate all of their neighbor weights.
 			train_weights_only (false)
 			;{type "boolean"}
-			;flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended
+			;When set to true, will not auto analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended.
 			skip_auto_analyze (false)
 			;{type "boolean"}
-			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
+			;When set to true, will not auto ablate cases.
+			skip_auto_ablation (false)
+			;{type "boolean"}
+			;When set to true, will not reduce data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended.
 			skip_reduce_data (false)
 		)
 
@@ -103,26 +106,12 @@
 		)
 
 		;unsubstitute nominal feature values if necessary
-		(if
-			(and input_is_substituted !hasSubstituteFeatureValues)
-			(assign (assoc
-				cases
-					(map
-						(lambda
-							(call !UnsubstituteFeatureValues (assoc
-								features features
-								feature_values (current_value 1)
-							))
-						)
-						cases
-					)
-			))
-		)
+		(call !UnsubstituteTrainCases)
 
 		(declare (assoc encode_features_on_train (retrieve_from_entity "!hasFeaturesNeedEncodingFromInput") ))
 
 		;encode all cases in bulk if either training on accumulated weights only or training from series
-		;because series trained cases are alredy encoded.
+		;because series trained cases are already encoded.
 		(if (and
 				encode_features_on_train
 				(or (size series_cases) (and train_weights_only accumulate_weight_feature) )
@@ -259,10 +248,10 @@
 		(declare (assoc num_cases (call !GetNumTrainingCases) ))
 
 		(declare (assoc
-			skip_ablation (call !CanTrainAblationBeSkipped)
+			skip_ablation (or skip_auto_ablation (call !CanTrainAblationBeSkipped))
 			;if accumulating weight feature, store the index of that weight feature
 			weight_feature_index (get (zip features (indices features)) accumulate_weight_feature)
-			;trained count that's updated immediatelly as cases are trained during ablation
+			;trained count that's updated immediately as cases are trained during ablation
 			ablation_trained_instance_count num_cases
 		))
 
@@ -274,7 +263,7 @@
 							!dataMassChangeSinceLastAnalyze
 							(if accumulate_weight_feature
 								(apply "+" (map
-									(lambda (or (get (current_value 1) weight_feature_index) 1))
+									(lambda (or (get (current_value) weight_feature_index) 1))
 									cases
 								))
 
@@ -298,6 +287,7 @@
 						(if
 							(and
 								!autoAblationEnabled
+								(not skip_auto_ablation)
 								(> (+ num_cases new_possible_data_mass) !autoAblationMinNumCases)
 							)
 							(assign (assoc skip_ablation (false) ))
@@ -319,7 +309,7 @@
 					(apply "+" (map
 						(lambda
 							(if accumulate_weight_feature
-								(or (get (current_value 1) weight_feature_index) 1)
+								(or (get (current_value) weight_feature_index) 1)
 								1
 							)
 						)
@@ -329,11 +319,7 @@
 							;else only accumulate for cases that were actually trained and not ablated
 							(unzip
 								cases
-								(remove
-									(indices cases)
-									;change ablated_indices_list into a 0-based list to match indices of cases
-									(map (lambda (- (current_value) trained_instance_count)) ablated_indices_list)
-								)
+								(remove (indices cases) ablated_indices_list)
 							)
 						)
 					))
@@ -581,14 +567,14 @@
 			(if (= (size series_cases) 0)
 				(assign (assoc
 					cases (null)
-					message "Specified series does not exist"
+					message "The specified series does not exist."
 				))
 
 				;if input cases don't match the number of cases stored in series
 				(and (> (size cases) 1) (!= (size cases) (size series_cases)))
 				(assign (assoc
 					cases (null)
-					message "cases do not match length of specified series"
+					message "Cases do not match length of the specified series."
 				))
 			)
 		)
@@ -648,6 +634,24 @@
 				cases
 			)
 		)
+	)
+
+	;unsubstitute nominal feature values if necessary
+	#!UnsubstituteTrainCases
+	(if
+		(and input_is_substituted !hasSubstituteFeatureValues)
+		(assign (assoc
+			cases
+				(map
+					(lambda
+						(call !UnsubstituteFeatureValues (assoc
+							features features
+							feature_values (current_value 1)
+						))
+					)
+					cases
+				)
+		))
 	)
 
 	;private helper method for train that creates the cases in cases and returns the case ids
@@ -873,11 +877,103 @@
 		output_case_ids
 	)
 
-
-	;Helper method to train cases with an ablation check
-	#!AblateCases
-	(let
+	; TODO - desc and return type
+	#compute_ablation_indices
+	(declare
 		(assoc
+			;{type "list" values {type "list" min_size 1} min_size 1  required (true)}
+			;The cases to ablate.
+			cases (null)
+			;{type "list" values "string" required (true)}
+			;The list of feature names.
+			features (null)
+			;{type "boolean"}
+			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
+			input_is_substituted (false)
+			;{ref "ReactionPredictionStats"}
+			;previous prediction stats returned from compute_ablation_indices when batching requests, used to determine if
+			;ablation thresholds have been met. Applies only when ablation thresholds were defined by set_auto_ablation_params.
+			prev_prediction_stats {}
+		)
+
+		(call !UnsubstituteTrainCases)
+
+		(declare (assoc
+				ablated_indices_list (list)
+				warnings (assoc)
+				num_cases (call !GetNumTrainingCases)
+				ablation_trained_instance_count (call !GetNumTrainingCases)
+				; TODO - Do we need the true session counts for the two vars below?
+				trained_instance_count 0
+				session_training_index 0
+				encode_features_on_train (retrieve_from_entity "!hasFeaturesNeedEncodingFromInput")
+				;threshold-related vars
+				thresholds_enabled
+					(or
+						(size !autoAblationAbsThresholdMap)
+						(size !autoAblationDeltaThresholdMap)
+						(size !autoAblationRelThresholdMap)
+					)
+				prediction_stats_map {}
+				thresholds_satisfied (false)
+		))
+
+		;parameter and data checks, returns on error
+		(call !PreTrainChecks)
+
+		(if thresholds_enabled
+			(seq
+				(assign (assoc
+					prediction_stats_map
+						(get
+							(call !CalculateFeatureResiduals (assoc
+								features features
+								weight_feature !autoAblationWeightFeature
+								use_case_weights (true)
+								compute_all_statistics (true)
+								store_values (false)
+							))
+							"prediction_stats"
+						)
+				))
+				(assign (assoc
+					thresholds_satisfied
+						(apply "or"
+							(values
+								(call !CheckThresholds (assoc
+									abs_threshold_map !autoAblationAbsThresholdMap
+									delta_threshold_map !autoAblationDeltaThresholdMap
+									rel_threshold_map !autoAblationRelThresholdMap
+									prev_prediction_stats_map prev_prediction_stats
+									new_prediction_stats_map prediction_stats_map
+								))
+							)
+						)
+				))
+			)
+		)
+
+		;perform the ablation filtering
+		(declare (assoc indices_to_train (call !FilterCasesForAblation)))
+
+		;return the cases thats should be trained
+		(call !Return (assoc
+			warnings (if (size warnings) (indices warnings))
+			payload
+				(assoc
+					"ablated_indices" ablated_indices_list
+					"indices" indices_to_train
+					"prediction_stats" (remove prediction_stats_map [".robust" ".hyperparam_path"])
+				)
+		))
+
+	)
+
+	;Helper method to filter indices for training - used by #train and #compute_ablation_indices
+	#!FilterCasesForAblation
+	(declare
+		(assoc
+			case_index_offset 0 ;when batching, offset ablated indices based on current batch index
 			indices_to_train
 				(if thresholds_satisfied
 					;If one or more thresholds has been satisfied, just train all of the cases in this batch.
@@ -933,14 +1029,14 @@
 
 		)
 
-		;ensure ablated indices are based off actual training index and not restarted at 0 every time this method is called
+		;ensure ablated indices are based off index of full input cases list and not restarted at 0 every time this method is called
 		(accum (assoc
 			ablated_indices_list
 				(map
 					(lambda
 						(if (size ts_ablated_indices_map)
-							(+ session_training_index (get ts_ablated_indices_map (current_value)))
-							(+ session_training_index (current_value))
+							(+ case_index_offset (get ts_ablated_indices_map (current_value)))
+							(+ case_index_offset (current_value))
 						)
 					)
 					(remove (indices cases) indices_to_train)
@@ -948,10 +1044,18 @@
 			ablation_trained_instance_count (size indices_to_train)
 		))
 
-		(declare (assoc
+		indices_to_train
+	)
+
+
+	;Helper method to train cases with an ablation check
+	#!AblateCases
+	(let
+		(assoc
+			indices_to_train (call !FilterCasesForAblation (assoc case_index_offset input_case_index))
 			rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
 			case_weights (null)
-		))
+		)
 
 		(if rebalance_weights
 			(assign (assoc
