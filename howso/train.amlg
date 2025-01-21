@@ -652,11 +652,7 @@
 
 	;private helper method for train that creates the cases in cases and returns the case ids
 	#!TrainCreateCases
-	(if
-		(or
-			skip_ablation
-			(not (size !hyperparameterMetadataMap))
-		)
+	(if skip_ablation
 		(call !TrainCasesWithoutAblation)
 
 		;time feature exists, do ablation on time series by deriving one series at a time and then ablating those cases prior to training
@@ -756,7 +752,9 @@
 		;split by batches of cases until next analyze
 		(while (< input_case_index (size cases))
 
-			(if (and thresholds_enabled (not skip_ablation))
+			;Only compute prediction stats for ablation if thresholds are enabled, we're
+			; not skipping ablation, and we have hyperparameters to use for the computation.
+			(if (and thresholds_enabled (not skip_ablation) (size !hyperparameterMetadataMap))
 				(seq
 					(assign (assoc
 						prev_prediction_stats_map new_prediction_stats_map
@@ -831,7 +829,15 @@
 			))
 
 			(if (and run_autoanalyze_check (not skip_auto_analyze))
-				(call !AutoAnalyzeIfNeeded)
+				(seq
+					(call !AutoAnalyzeIfNeeded)
+					;recompute influence weights entropy only after we analyze.
+					(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+						features features
+						weight_feature accumulate_weight_feature
+						use_case_weights (true)
+					))
+				)
 			)
 
 			;if the number of cases will exceed the reduce_data threshold since the last reduce_data call, run it again
@@ -883,8 +889,12 @@
 	(let
 		(assoc
 			indices_to_train
-				(if thresholds_satisfied
-					;If one or more thresholds has been satisfied, just train all of the cases in this batch.
+				;If one or more thresholds has been satisfied, or the Trainee has not yet been analyzed,
+				; just train all of the cases in this batch.
+				(if (or
+						thresholds_satisfied
+						(not (size !hyperparameterMetadataMap))
+					)
 					(indices cases)
 					;Otherwise, do the normal ablation filtering.
 					||(filter
@@ -1034,13 +1044,6 @@
 				)
 
 				(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze mass_to_accumulate))
-
-				;recompute influence weights entropy
-				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-					features features
-					weight_feature accumulate_weight_feature
-					use_case_weights (true)
-				))
 			)
 		)
 
