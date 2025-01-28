@@ -333,18 +333,21 @@
 						)
 					)
 				)
-			trained_series_cases []
+			trained_series_cases [] ;cases in with the same series id that is already trained
+			trained_series_indices [] ;indices of trained cases in combined data once sorted
+			trained_ablated_indices [] ;indices of nulls for previously ablated cases
 		))
 
 		;if previously trained series cases exist for this series, prepend them to data
 		(if (size trained_series_case_ids)
 			(let
 				(assoc
-					features_indices (indices features)
-					prev_row_index 0
+					trained_feature_indices (indices features)
+					prev_series_index (null)
+					next_series_row 0
 				)
 
-				;overwrite trained_series_cases to contain each cases's feature values and all the progress_features values
+				;set trained_series_cases to contain each cases's feature values and all the progress_features values
 				(assign (assoc
 					trained_series_cases
 						(map
@@ -356,76 +359,120 @@
 							)
 							trained_series_case_ids
 						)
-					series_progress_index_feature_index (size features)
+					;indexes of features in combined new + original cases assigned to "data"
+					series_index_feature_index (size features)
+				))
+
+				;combine previously trained data with this new data
+				(assign (assoc
+					data
+						(append
+							(map
+								(lambda (append
+									(unzip (current_value) trained_feature_indices)
+									(get (current_value) series_index_feature_index)
+								))
+								trained_series_cases
+							)
+							data
+						)
 				))
 
 				(assign (assoc
-					trained_series_cases
+					data
 						(call !MultiSortList (assoc
-							data trained_series_cases
-							column_order_indices [ time_feature_index ]
+							data data
+							;TODO - why was this used on trained_series_cases
+							; column_order_indices [ time_feature_index ]
+							column_order_indices (unzip feature_index_map series_ordered_by_features)
 						))
 				))
 
 				(assign (assoc
-					;flag set to true if previously trained cases were trained in reverse order,
-					;i.e., they come later in the series than the cases being trained now
-					trained_cases_reversed_order
-						(>
-							(get (first trained_series_cases) time_feature_index)
-							(get (first data) time_feature_index)
+					;TODO is this optimal? Maybe use num column instead of checking for null?
+					;capture list of indices in data for the trained cases
+					trained_series_indices
+						(filter
+							(lambda (!= (null) (current_value)))
+							(map
+								(lambda
+									(if (!= (null) (get (current_value) series_index_feature_index))
+										(current_index)
+										(null)
+									)
+								)
+								data
+							)
 						)
-					trained_series_case_ids (map (lambda (last (current_value))) trained_series_cases)
 				))
 
 				;set continue_series_index to the would-be next index value
 				(assign (assoc
-					continue_series_index (+ 1 (get (last trained_series_cases) series_progress_index_feature_index) )
+					;TODO why is this recomputed? has it even changed?
+					; trained_series_case_ids (map (lambda (last (current_value))) trained_series_cases)
+					continue_series_index (+ 1 (get (last trained_series_cases) series_index_feature_index) )
 				))
 
 				;previously trained series was ablated because the number of cases is less than the continue series index
 				(if (< (size trained_series_cases) continue_series_index)
 					(assign (assoc
-						trained_series_cases
+						data
 							;fill previously ablated cases with nulls
 							(range
-								(lambda
-									(if (= (current_index) (get trained_series_cases [prev_row_index series_progress_index_feature_index]))
+								(lambda (let
+									(assoc
+										series_index (get data [next_series_row series_index_feature_index])
+										result (null)
+									)
+									(if (= (null) series_index)
+										;output the new case
 										(seq
-											(accum (assoc prev_row_index 1))
-											(get trained_series_cases (- prev_row_index 1))
+											(assign (assoc result (get data next_series_row)))
+											(accum (assoc next_series_row 1))
 										)
 
-										;else output (null)
-									)
+										;TODO rule out any off by one errors due to start/end
+										;output nulls until we reach the the existing case
+										(if
+											;if the first series index we encounter is > 0 we need to add nulls to the start
+											(and (= (null) prev_series_index) (< 0 series_index))
+											(seq
+												(assign (assoc prev_series_index 0))
+												(accum (assoc trained_ablated_indices (current_index 1)))
+											)
 
-								)
-								0 (- continue_series_index 1) 1
+											;else if there is a gap since the last series index output null
+											(> (- series_index prev_series_index) 1)
+											(accum (assoc
+												prev_series_index 1
+												trained_ablated_indices (current_index 1)
+											))
+
+											;enough nulls output, output the existing case
+											(seq
+												(assign (assoc
+													result (remove (get data next_series_row) series_index_feature_index)
+												))
+												(accum (assoc next_series_row 1))
+												(assign (assoc prev_series_index series_index))
+											)
+										)
+									)
+									result
+								))
+								0 (+ continue_series_index untrained_data_size -1) 1
+							)
+					))
+
+					;else just drop the series index column
+					(assign (assoc
+						data
+							(map
+								(lambda (remove (current_value) series_index_feature_index))
+								data
 							)
 					))
 				)
-
-				;combine previously trained data with this new data
-				(assign (assoc
-					data
-						(if trained_cases_reversed_order
-							(append
-								data
-								(map
-									(lambda (unzip (current_value) features_indices))
-									trained_series_cases
-								)
-							)
-
-							(append
-								(map
-									(lambda (unzip (current_value) features_indices))
-									trained_series_cases
-								)
-								data
-							)
-						)
-				))
 			)
 		)
 
@@ -449,45 +496,40 @@
 			derived_progress_values_lists (call !DeriveProgressFeaturesForData)
 		))
 
-		;there were existing cases, update their progress values
-		(if (size trained_series_case_ids)
-			(map
-				(lambda
-					(assign_to_entities
-						(current_value)
-						(zip
-							progress_features
-							(get derived_progress_values_lists (current_index))
-						)
-					)
-				)
-				trained_series_case_ids
-			)
-		)
-
-
 		;append all the progress values to data
 		(assign (assoc
 			features (append features progress_features )
 			data
 				(map
-					(lambda (let
-						(assoc
-							row_index
-								(+ continue_series_index (current_index 1))
-						)
-						(append
-							(current_value)
-							;for each of the three progress features, grab the tuple of progress values
-							(get derived_progress_values_lists row_index)
-						)
+					(lambda (append
+						(current_value)
+						(get derived_progress_values_lists (current_index))
 					))
-
-					;since data is combined with all the previously trained cases,
-					;only use the non-trained data indices
-					(tail data (- continue_series_index))
+					data
 				)
 		))
+
+		(if (size trained_series_case_ids)
+			(seq
+				;there were existing cases, update their progress values
+				(map
+					(lambda
+						(assign_to_entities
+							(get trained_series_case_ids (current_index))
+							(zip
+								progress_features
+								(get derived_progress_values_lists (current_value))
+							)
+						)
+					)
+					trained_series_indices
+				)
+				;filter out the already trained cases so we only train the new ones
+				(assign (assoc
+					data (unzip data (remove (indices data) (append trained_series_indices trained_ablated_indices)))
+				))
+			)
+		)
 
 		;train and ablate cases and output created case ids
 		(call !TrainCasesWithAblation (assoc
