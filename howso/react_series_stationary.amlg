@@ -1,0 +1,299 @@
+;contains methods used to investigate the stationary features of time-series data
+(null
+	;React to series data predicting stationary feature values, values that do not change
+	;over the timesteps of the series.
+	;{long_running (true) statistically_idempotent (true) read_only (true)}
+	#react_series_stationary
+	(declare
+		;returns {ref "ReactSeriesStationaryResponse"}
+		(assoc
+			;{type "list" values "string"}
+			;The names of the features whose values are given in "series_context_values" in the same order within each row. Must be
+			;specified if "series_context_values" is specified.
+			series_context_features (list)
+			;{type "any"}
+			;A list of lists of lists of anything. A list of series, which are lists of rows, which are lists of feature values.
+			series_context_values (null)
+			;{type "list" values "string"}
+			;The names of the features whose values are given in "series_ids" in the same order within each sublist. Must be
+			;specified if "series_ids" is specified.
+			series_id_features (list)
+			;{type "any"}
+			;A list of lists. A list of series IDs, which are a list of ID feature values. Each sublist should specify a
+			;a unique set of ID feature values that uniquely select a trained series from the trained data. If "series_ids"
+			;is specified, then "series_id_features" must also be specified and series_context_values will be ignored.
+			series_id_values (null)
+			;{type "list" values "string"}
+			;Thea names of features to predict.
+			action_features (list)
+			;{type "list" values "string"}
+			;The names of features to use as contexts to predict the features named in "action_features". If unspecified, then the
+			;features specified in "series_context_features" will be used if available. Otherwise, all non-action features will be used.
+			context_features (list)
+			;{ref "DesiredConviction"}
+			;If null, will do a discriminative react. If specified, will do a generative react
+			;	For Generative React, value of desired avg conviction of generated cases, in the range of (0,infinity] with 1 as standard
+			;	larger values will increase the variance (or creativity) of the generated case from the existing model
+			;	smaller values will decrease the variance (or creativity) of the generated case from the existing model
+			desired_conviction (null)
+			;{ref "UseCaseWeights"}
+			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
+			;	case weights will be used if the trainee has them.
+			use_case_weights (null)
+			;{type "string"}
+			;name of feature whose values to use as case weights
+			weight_feature ".case_weight"
+			;{type "boolean"}
+			;flag, if false uses model feature residuals, if true recalculates regional model residuals. Only used when desired_conviction is specified
+			use_regional_residuals (true)
+			;{type "boolean"}
+			;flag, if true all time-series features that are derived from features specified as context_features will additionally be added as contexts
+			use_derived_ts_features (true)
+			;flag, if true then all time-series features (lags, rates, etc) derived from features specified in context features will be automatically
+			;used as contexts in addition to the specified context features.
+			;{type "boolean"}
+			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
+			input_is_substituted (false)
+		)
+		(call !ValidateParameters)
+
+		(if (not (xor (size series_id_values) (size series_context_values)))
+			(call !Return (assoc errors ["Either \"series_id_values\" or \"series_context_values\" must be specified, but not both."]))
+		)
+
+		;if no context features, use those given or all features
+		(if (= 0 (size context_features))
+			(assign (assoc
+				context_features
+					(if (size series_id_features)
+						series_id_features
+
+						!trainedFeatures
+					)
+			))
+		)
+
+		(if use_derived_ts_features
+			;accumulate the time-series features that derive from any of the context features
+			(accum (assoc
+				context_features
+					(filter
+						(lambda (and
+							(not (contains_value context_features (current_value)))
+							(contains_value context_features (get !derivedFeaturesMap (current_value)))
+						))
+						(get !tsModelFeaturesMap "ts_derived_features")
+					)
+			))
+		)
+
+		;this is appended to later - so must not be (null)
+		(if (not details)
+			(assign (assoc details {}))
+		)
+
+		(declare (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					feature (null)
+					context_features context_features
+					weight_feature (if use_case_weights weight_feature)
+				))
+		))
+		(call !UpdateCaseWeightParameters)
+
+		;if series_context_values is given, assume the derived feature are not included, so rederive those other features
+		(if (size series_context_values)
+			(let
+				(assoc
+					original_series_context_features series_context_features
+					time_feature_index 0
+					time_feature (retrieve_from_entity "!tsTimeFeature")
+				)
+
+				(if (= 0 (size series_context_features))
+					(conclude (conclude
+						(call !Return (assoc
+							errors (list "series_context_values is provided without series_context_features, please specify series_context_features")
+						))
+					))
+				)
+
+				;use all the features including all the derived ones
+				(assign (assoc series_context_features !trainedFeatures ))
+
+				(assign (assoc
+					series_context_values
+						(map
+							(lambda
+								(let
+									(assoc series_values (current_value 1) )
+									(call !DeriveUntrainedSeriesData (assoc
+										series_data series_values
+										series_data_features original_series_context_features
+										features_to_retrieve !trainedFeatures
+										input_is_substituted input_is_substituted
+									))
+								)
+							)
+							series_context_values
+						)
+				))
+			)
+		)
+
+		(call !Return (assoc
+			payload
+				(append
+					(call !BatchReactSeriesStationary (assoc
+						series_context_values series_context_values
+						series_context_features series_context_features
+						series_id_features series_id_features
+						series_id_values series_id_values
+						context_features context_features
+						action_features action_features
+						weight_feature weight_feature
+					))
+					{"action_features" action_features}
+				)
+		))
+	)
+
+	#!BatchReactSeriesStationary
+	(declare
+		(assoc
+			series_context_features (null)
+			;lists of lists of lists, multiple series
+			series_context_values (null)
+			context_features (null)
+			action_features (null)
+			series_id_features (null)
+			series_id_values (null)
+			weight_feature (null)
+		)
+
+		(declare (assoc
+			per_series_output
+				||(range
+					(lambda
+						(let
+							(assoc
+								individual_series (get series_context_values (current_index 1))
+								individual_series_ids (get series_id_values (current_index 1))
+							)
+
+							(call !ReactSeriesStationary (assoc
+								series_context_values individual_series
+								series_context_features series_context_features
+								context_features context_features
+								action_features action_features
+								series_id_features series_id_features
+								series_id_values individual_series_ids
+								weight_feature weight_feature
+							))
+						)
+					)
+					0
+					(- (max (size series_context_values) (size series_id_values)) 1)
+					1
+				)
+		))
+
+		;convert per_series_output to a dict of details key -> lists of values (one per series)
+		(map
+			(lambda (let
+				(assoc details_key (current_index 1))
+				(map
+					(lambda (get (current_value) details_key) )
+					per_series_output
+				)
+			))
+			(if (size per_series_output)
+				(first per_series_output)
+				(assoc)
+			)
+		)
+	)
+
+	#!ReactSeriesStationary
+	(declare
+		(assoc
+			context_features (null)
+			action_features (null)
+			series_context_features (null)
+			;lists of lists, one series
+			series_context_values (null)
+			series_id_features (null)
+			series_id_values (null)
+		)
+
+		(if (= 0 (size context_features))
+			(assign (assoc
+				context_features
+					(filter
+						(lambda (not (contains_value action_features (current_value))))
+						series_context_features
+					)
+			))
+		)
+
+		;if series_ids are specified, then pull the data for that series and overwrite series_context_values
+		(if (size series_id_values)
+			(assign (assoc
+				series_context_features (append context_features !tsTimeFeature)
+				series_context_values
+					(let
+						;get the cases of the series
+						(assoc
+							series_case_ids
+								(contained_entities
+									(apply "append"
+										(map
+											(lambda
+												[(query_equals
+													(current_value 1)
+													(if (contains_index !numericNominalFeaturesMap (current_value 1))
+														(+ (get series_id_values (current_index 1)))
+														(get series_id_values (current_index 1))
+													)
+												)]
+											)
+											series_id_features
+										)
+									)
+								)
+						)
+
+						;sort the cases
+						(call !MultiSortList (assoc
+							data
+								(map
+									(lambda
+										(retrieve_from_entity (current_value) (append context_features !tsTimeFeature))
+									)
+									series_case_ids
+								)
+							column_order_indices
+								(unzip
+									(zip (append context_features !tsTimeFeature) (indices (append context_features !tsTimeFeature)))
+									[!tsTimeFeature]
+								)
+						))
+					)
+			))
+		)
+
+		(call !PredictGroup (assoc
+			features series_context_features
+			cases series_context_values
+
+			desired_conviction desired_conviction
+			context_features context_features
+			action_features action_features
+			details details
+			return_per_case_reactions (false) ;(true) here is useful for debugging
+
+			skip_encoding (> (size series_id_values) 0)
+		))
+	)
+)
