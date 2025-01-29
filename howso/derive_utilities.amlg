@@ -106,7 +106,7 @@
 							rand_seed rand_seed
 
 							desired_conviction desired_conviction
-							use_regional_model_residuals use_regional_model_residuals
+							use_regional_residuals use_regional_residuals
 							feature_bounds_map
 								(if modified_feature_bounds_map
 									modified_feature_bounds_map
@@ -115,6 +115,7 @@
 							ordered_by_specified_features ordered_by_specified_features
 							generate_new_cases "no"
 							preserve_feature_values preserve_feature_values
+							holdout_queries holdout_queries
 						))
 				))
 
@@ -331,16 +332,6 @@
 	)
 
 	;automatically prepare inputs for BatchReactSeries for a time series model and outputs an updated assoc of react parameters.
-	;Ouputs null if no prep is needed and a string message if there was a validation error. On success, outputs:
-	; (assoc
-	;	"action_features" action_features - list of features
-	;	"initial_features" initial_features - list of features
-	;	"initial_values" initial_values - list of list of values
-	;	"derived_action_features" derived_action_features - list of features
-	;	"derived_context_features" derived_context_features - list of features
-	;	"series_stop_maps" series_stop_maps - list of assocs
-	; )
-	;
 	;parameters:
 	; init_time_steps: optional, time step values at which to begin synthesis
 	; final_time_steps:  optional, time step values at which to end synthesis
@@ -357,10 +348,6 @@
 	 ;	If "fixed", tracks the particular relevant series ID.
 	 ;	If "dynamic", tracks the particular series ID, but is allowed to change the series ID that it tracks based on its current context.
 	 ;	If "no", does not track any particular series ID.
-	 ; continue_series_values: optional, list of lists of values, when specified will continue this specific untrained series as defined by these values.
-	 ; 		continue_series flag will be ignored and treated as true if this value is specified.
-	 ; continue_series_features: optional, list of features corresponding to the values in each row of continue_series_values.
-	 ; 		This value is ignored if continue_series_values is not specified.
 	#!PrepTimeSeriesFeatures
 	(declare
 		(assoc single_series (false) )
@@ -381,7 +368,7 @@
 		)
 
 		(declare (assoc
-			all_contexts (append context_features series_context_features)
+			all_contexts series_context_features
 			n_samples
 				(if (size series_context_values)
 					(size series_context_values)
@@ -393,114 +380,124 @@
 				)
 		))
 
-		;The default initial features/values set the `start` feature to true.
-		(if (= 0 (size initial_features) (size initial_values))
-			;if all id features should be new, we do not need to retain IDs
-			(if output_new_series_ids
+		;if generating new series ids or series ids are given, only initial series progress of zero is needed
+		(if (or output_new_series_ids (size series_id_values))
+			(assign (assoc
+				initial_features (list ".series_progress")
+				initial_values (list (list 0.0))
+			))
+
+			;else if we want to retain the existing IDs, we must specify them as
+			;initial features (and matching initial values).
+			(let
+				(assoc
+					all_contexts_set (zip all_contexts)
+					series_id_features (list)
+				)
+
 				(assign (assoc
-					initial_features (list ".series_progress")
-					initial_values (list (list 0.0))
+					;Only ID features which are not already specified as contexts should be in initial values
+					series_id_features
+						(filter
+							(lambda (not (contains_index all_contexts_set (current_value)) ) )
+							(get !tsModelFeaturesMap "series_id_features")
+						)
 				))
 
-				;else if we want to retain the existing IDs, we must specify them as
-				;initial features (and matching initial values).
-				(let
-					(assoc
-						all_contexts_set (zip all_contexts)
-						series_id_features (list)
-					)
+				(declare (assoc
+					all_id_values_defined
+						;true if all series_id_features are in series_context_features
+						(=
+							(size series_id_features)
+							(size (keep (zip series_context_features) series_id_features))
+						)
+				))
 
-					(assign (assoc
-						;Only ID features which are not already specified as contexts should be in initial values
-						series_id_features
-							(filter
-								(lambda (not (contains_index all_contexts_set (current_value)) ) )
-								(get !tsModelFeaturesMap "series_id_features")
-							)
-					))
-
-					;ID features may be in one of the context lists
-					;(series_context or context features). It's possible that no IDs actually need to be set as initial.
-					(if (size series_id_features)
-						(let
-							(assoc
-								initial_values_list
-									;if continuing an untrained series, use the id values from the specified data
-									(if (size continue_series_values)
-										(map
-											(lambda
-												;only keep the series id values
-												(unzip
-													;create an assoc of features -> values from first row of series
-													(zip continue_series_features (first (current_value)))
-													series_id_features
-												)
-											)
-											;list of lists of values
-											continue_series_values
-										)
-
-										;else pull all unique id feature combos from dataset and sample n_samples worth
-										(map
-											(lambda
-												;a list of feature values for each unique conjuction
-												;each item in the list if there were two series id features would look like so:
-												;(list 12345 800)
-												(map
-													(lambda
-														;covnvert value back to number if feature is non-string
-														(if (contains_index !numericNominalFeaturesMap (get series_id_features (current_index)))
-															(+ (current_value))
-															;else leave id as string
-															(current_value)
-														)
-													)
-													(parse (current_value))
-												)
-											)
-
-											;unique conjuctions of feature values for all the series features in an unparsed list (string) format
-											;each item in the list if there were two series id features would look like so: "(list 12345 800)"
-											(values
-												(map
-													(lambda
-														(unparse (retrieve_from_entity (current_value) series_id_features))
-													)
-													(call !AllCases)
-												)
-												(true)
-											)
-										)
+				;ID features may be in one of the context lists
+				;(series_context or context features). It's possible that no IDs actually need to be set as initial.
+				(if (size series_id_features)
+					(let
+						(assoc
+							initial_values_list
+								;if continuing an untrained series where all id values are specified, use the id values from the specified data
+								(if (and
+										(size series_context_values)
+										;TODO: 22655 support partial ID specification
+										all_id_values_defined
 									)
-							)
-
-							(assign (assoc
-								initial_values_list
-									;when explicitly provided a list of untrained series to continue, keep that list
-									(if (size continue_series_values)
-										initial_values_list
-
-										;keeping n_samples worth of ids, sample randomly with replacement
-										(rand initial_values_list n_samples)
-									)
-								initial_features (append (list ".series_progress") series_id_features)
-							))
-
-							(assign (assoc
-								initial_values
 									(map
-										(lambda (append (list 0.0) (current_value)) )
-										initial_values_list
+										(lambda
+											;only keep the series id values
+											(unzip
+												;create an assoc of features -> values from first row of series
+												(zip series_context_features (first (current_value)))
+												series_id_features
+											)
+										)
+										;list of lists of values
+										series_context_values
 									)
-							))
+
+									;else pull all unique id feature combos from dataset and sample n_samples worth
+									(map
+										(lambda
+											;a list of feature values for each unique conjuction
+											;each item in the list if there were two series id features would look like so:
+											;(list 12345 800)
+											(map
+												(lambda
+													;covnvert value back to number if feature is non-string
+													(if (contains_index !numericNominalFeaturesMap (get series_id_features (current_index)))
+														(+ (current_value))
+														;else leave id as string
+														(current_value)
+													)
+												)
+												(parse (current_value))
+											)
+										)
+
+										;unique conjuctions of feature values for all the series features in an unparsed list (string) format
+										;each item in the list if there were two series id features would look like so: "(list 12345 800)"
+										(values
+											(map
+												(lambda
+													(unparse (retrieve_from_entity (current_value) series_id_features))
+												)
+												(call !AllCases)
+											)
+											(true)
+										)
+									)
+								)
 						)
 
-						;else
 						(assign (assoc
-							initial_features (list ".series_progress")
-							initial_values (list (list 0.0))
+							initial_values_list
+								;when explicitly provided a list of untrained series to continue, keep that list
+								(if (and all_id_values_defined (size series_context_values))
+									initial_values_list
+
+									;keeping n_samples worth of ids, sample randomly with replacement
+									(rand initial_values_list n_samples)
+								)
+							initial_features (append (list ".series_progress") series_id_features)
+						))
+
+						(assign (assoc
+							initial_values
+								(map
+									(lambda (append (list 0.0) (current_value)) )
+									initial_values_list
+								)
 						))
 					)
+
+					;else
+					(assign (assoc
+						initial_features (list ".series_progress")
+						initial_values (list (list 0.0))
+					))
 				)
 			)
 		)
@@ -676,7 +673,8 @@
 		))
 
 		;Ensure that the user specified context features are not being derived but still being output
-		(if (size all_contexts)
+		;when forecasting, these features still need be derived
+		(if (and (size all_contexts) (not continue_series))
 			(seq
 				(assign (assoc
 					;This line ensures that some features aren't double-added to action_features later.
