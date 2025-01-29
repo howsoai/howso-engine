@@ -146,6 +146,8 @@
 											))
 										)
 
+										(assign (assoc local_cases_map (call !Trunck (assoc local_map local_cases_map)) ))
+
 										;create the feature-specific candidate_cases_lists tuple for intepolation
 										(declare (assoc
 											candidate_cases_lists
@@ -386,6 +388,83 @@
 				)
 		))
 
+		; (declare (assoc
+		; 	feature_residual_plus_maes_map
+		; 		(map
+		; 			(lambda
+		; 				(+
+		; 					(get residuals_map (current_index))
+		; 					(apply "+" (values (current_value)))
+		; 				)
+		; 			)
+		; 			individual_features_mda_map
+		; 		)
+		; 	feature_mad_map
+		; 		(zip
+		; 			features
+		; 			(map
+		; 				(lambda
+		; 					(call !ComputeFeatureMAD (assoc feature (current_value 1) ))
+		; 				)
+		; 				features
+		; 			)
+		; 		)
+		; ))
+
+		; (assign (assoc
+		; 	feature_mad_map
+		; 		(map
+		; 			(lambda (min (first (current_value)) (last (current_value)) ) )
+		; 			feature_mad_map
+		; 			feature_residual_plus_maes_map
+		; 		)
+		; ))
+
+		; (declare (assoc
+		; 	ratios_map (map  (lambda (apply "/" (current_value))) residuals_map (get hyperparam_map ["featureResiduals" ]) )
+		; ))
+
+		; ;scaled / reduced local deviations
+		; (declare (assoc
+		; 	local_deviation_map
+		; 		(map
+		; 			(lambda
+		; 				(call !ClampLocalDeviationForFeature (assoc
+		; 					feature (current_index 1)
+		; 					target_mda_map (current_value 1)
+		; 				))
+		; 			)
+		; 			individual_features_mda_map
+		; 		)
+		; ))
+
+		; (assign (assoc
+		; 	baseline_hyperparameter_map
+		; 		(set
+		; 			baseline_hyperparameter_map
+		; 				"featureDeviations"
+		; 					(map
+		; 						(lambda
+		; 							(if (~ 0 (current_value))
+		; 								(get local_deviation_map (current_index))
+
+		; 								;else it's a list, either sdm or tuple containing null uncertainties
+		; 								(if (~ 0 (first (current_value)))
+		; 									;if first value in list is a number, it's a tuple so update the deviation value in the tuple
+		; 									(set (current_value) 0 (get local_deviation_map (current_index)))
+
+		; 									;else it's an sdm, set the second value in the sdm, which is the leftover deviation
+		; 									(set (current_value) [0 1] (get local_deviation_map (current_index)))
+		; 								)
+		; 							)
+		; 						)
+		; 						(get baseline_hyperparameter_map "featureDeviations")
+		; 					)
+		; 				"featureResiduals"
+		; 					local_deviation_map
+		; 		)
+		; ))
+
 		(declare (assoc
 			feature_mda_map
 				(map
@@ -394,7 +473,7 @@
 							target_feature (current_index 1)
 							mda_map (current_value 1)
 							;alternatively, to use robust residual as baseline: (get residuals_map (current_index 1))
-							target_feature_residual (get hyperparam_map ["featureResiduals" (current_index 2)])
+							target_feature_residual (get baseline_hyperparameter_map ["featureResiduals" (current_index 2)])
 						)
 
 						(declare (assoc
@@ -450,6 +529,121 @@
 		))
 
 		feature_mda_map
+	)
+
+
+	#!ComputeFeatureMAD
+	(if (contains_index !nominalsMap feature)
+		(let
+			(assoc
+				counts_map (get !expectedValuesMap (list weight_feature feature "class_counts"))
+				total_count 0
+			)
+			(assign (assoc total_count (apply "+" (values counts_map)) ))
+
+
+			;nominal MAD is the sum of: each class's probability multiplied by probability of getting it wrong
+			(apply "+"
+				(map
+					(lambda (let
+						(assoc class_prob (* (/ (current_value 1) total_count)) )
+						(* class_prob (- 1 class_prob))
+					))
+					(values counts_map)
+				)
+			)
+
+			;largest possible incorrect probability is 1 - smallest probability
+			;	(- 1 (/ (apply "min" (values counts_map)) total_count))
+
+		)
+
+		;else continuous
+		(let
+			(assoc
+				mean_value (get !expectedValuesMap (list weight_feature feature "expected_value"))
+				feature_values
+					(map
+						(lambda (get (current_value) feature))
+						(values
+							;outputs a list of assoc of feature -> value, [ { feature value1 } { feature value2 } ... ]
+							(compute_on_contained_entities (list
+								(query_not_equals feature (null))
+								(query_exists feature)
+							))
+						)
+					)
+				errors (list)
+			)
+
+			;list of absolute deviations for the whole dataset
+			(assign (assoc
+				errors
+					(map
+						(lambda (abs (- mean_value (current_value))) )
+						feature_values
+					)
+			))
+
+			;Mean Absolute Deviation
+			(/ (apply "+" errors) (size errors))
+		)
+	)
+
+
+	#!ClampLocalDeviationForFeature
+	(declare
+		(assoc
+			target_mda_map {}
+			feature (null)
+		)
+
+		(declare (assoc
+			sorted_features
+				(sort
+					(lambda (>
+						(get target_mda_map (current_value 1))
+						(get target_mda_map (current_value))
+					))
+					(indices target_mda_map)
+				)
+		))
+		(declare (assoc sorted_values (unzip target_mda_map sorted_features) ))
+
+		(declare (assoc
+			ratios
+				(filter (map
+					(lambda
+						(if (!= 0 (current_index) (current_value))
+							(/ (current_value) (get sorted_values (- (current_index) 1)))
+						)
+					)
+					sorted_values
+				))
+		))
+
+		(declare (assoc
+			avg_decay_ratio (/ (apply "+" ratios) (size ratios))
+			half_min_gap (get !cachedFeatureMinResidualMap feature) ;0.001 ; TODO: get gap / 2...
+			local_deviation	(get hyperparam_map ["featureResiduals" feature]) ;0.45 ; TODO: get superfull...
+			mean_abs_deviation (get feature_mad_map feature) ;0.861 ; TODO: get MAD - or add up robust residual + total maes?
+		))
+
+		(declare (assoc
+			; best mae value / ( 1 - avg decay ratio )
+			best_mae_reduction (/ (first sorted_values) (- 1 avg_decay_ratio) )
+		))
+
+		(declare (assoc
+			estimated_mae_w_inf_features (- mean_abs_deviation best_mae_reduction)
+		))
+
+		(declare (assoc
+			clamped_mae_w_inf_features (max half_min_gap (min estimated_mae_w_inf_features local_deviation) )
+		))
+
+		;output deviation to use
+		(min local_deviation clamped_mae_w_inf_features)
 	)
 
 
