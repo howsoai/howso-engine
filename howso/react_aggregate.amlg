@@ -116,10 +116,7 @@
 			;							values for a specified feature.
 			;						"all": All of the available prediction stats including the confusion_matrix
 			;				If empty, will return all of the available prediction stats not including the confusion matrices.
-			;		action_condition: assoc of feature->value(s), optional. If specified, will condition the action set, which is the dataset for which the prediction stats are for.
-			;			If both 'action_condition' and 'context_condition' are provided, then all of the action cases selected by the 'action_condition'
-			;			will be excluded from the context set, which is the set being queried to make to make predictions on the action set, effectively holding them out.
-			;			If only 'action_condition' is specified, then only the single predicted case will be left out.
+			;		action_condition: assoc of feature->value(s), optional. If specified, will condition the action set, which is the collection of cases that metrics will be computed upon.
 			;			no value = must have feature
 			;			- for continuous or numeric ordinal features:
 			;				one value = must equal exactly the value or be close to it for fuzzy match
@@ -132,9 +129,7 @@
 			;				If null, will be set to k if precision is "similar" or no limit if precision is "exact". default is null
 			;			If 'action_condition' is not set:
 			;				If null, will be set to the Howso default limit of 2000. default is null
-			;		context_condition: assoc of feature->value(s), optional. If specified, will condition the context set, which is the set being queried to make to make predictions on the action set.
-			;			If both 'action_condition' and 'context_condition' are provided, then all of the cases from the action set, which is the dataset for which the prediction stats are for,
-			;			will be excluded from the context set,  effectively holding them out. If only 'action_condition' is specified, then only the single predicted case will be left out.
+			;		context_condition: assoc of feature->value(s), optional. If specified, will condition the context set, which is the collection of cases available in queries while computing the requested metrics.
 			;			no value = must have feature
 			;			- for continuous or numeric ordinal features:
 			;				one value = must equal exactly the value or be close to it for fuzzy match
@@ -311,72 +306,6 @@
 			(assign (assoc action_features context_features ))
 		)
 
-
-		;if num_samples was explicitly specified, use that many, even if it means
-		;it should super-sample the model to match the exact number of samples specified
-		;and by default sample 1000 out of the full model if num_samples wasn't specified
-		(declare (assoc
-			case_ids
-				(if num_samples
-					(call !SampleCases (assoc
-						num num_samples
-						case_weight_feature (if valid_weight_feature weight_feature)
-					))
-
-					(> sample_model_fraction 0)
-					(call !AllCases (assoc
-						num (* sample_model_fraction num_training_cases)
-					))
-
-					;else just sample 1000 cases
-					(or
-						(get details "feature_residuals_full")
-						(get details "feature_mda_full")
-						(get details "feature_mda_permutation_full")
-						(get details "feature_contributions_full")
-					)
-					(if (> (call !GetNumTrainingCases) 1000)
-						;if more than 1000 cases, sample 1000
-						(call !SampleCases (assoc
-							num 1000
-							case_weight_feature (if valid_weight_feature weight_feature)
-						))
-
-						;otherwise just use all the cases
-						(call !AllCases)
-					)
-				)
-			robust_residual_case_ids
-				(if num_robust_residual_samples
-					(call !SampleCases (assoc
-						num num_robust_residual_samples
-						case_weight_feature (if valid_weight_feature weight_feature)
-					))
-
-					;for robust residual flows, scale the number of cases relative to the log of context_features
-					;TODO: remove feature_mda_full from this logic
-					(or robust_residuals (get details "feature_mda_robust") (get details "feature_mda_permutation_full"))
-					(call !SampleCases (assoc
-						num (* 1000 (+ 1 (log (size context_features))))
-						case_weight_feature (if valid_weight_feature weight_feature)
-					))
-				)
-			robust_influence_case_ids
-				(if	num_robust_influence_samples
-					(call !SampleCases (assoc
-						num num_robust_influence_samples
-						case_weight_feature (if valid_weight_feature weight_feature)
-					))
-
-					;TODO: add feature_mda_full to this logic
-					(get details "feature_contributions_robust")
-					(call !SampleCases (assoc
-						num 300
-						case_weight_feature (if valid_weight_feature weight_feature)
-					))
-				)
-		))
-
 		(declare (assoc
 			;set the custom hp map if specified a hyperparameter_param_path
 			custom_hyperparam_map
@@ -404,6 +333,62 @@
 				)
 		))
 
+		;if num_samples was explicitly specified, use that many, even if it means
+		;it should super-sample the model to match the exact number of samples specified
+		;and by default sample 1000 out of the full model if num_samples wasn't specified
+		(declare (assoc
+			case_ids
+				;if there is 1000 or less cases and no other parametrization of the sample
+				(if (and
+						(not (size action_condition_filter_query))
+						(not num_cases)
+						(not sample_model_fraction)
+						(<= num_training_cases 1000)
+					)
+					(call !AllCases)
+
+					;otherwise sample based on other parameters
+					(call !SampleCases (assoc
+						case_weight_feature (if (and use_case_weights valid_weight_feature) weight_feature)
+						num
+							(if num_samples
+								num_samples
+
+								(> sample_model_fraction 0)
+								(floor (* sample_model_fraction num_training_cases))
+
+								;otherwise default to 1000 (or model size if less than 1000)
+								(min num_training_cases 1000)
+							)
+						query_conditions action_condition_filter_query
+					))
+				)
+			robust_residual_case_ids
+				(call !SampleCases (assoc
+					num
+						(if num_robust_residual_samples
+							num_robust_residual_samples
+
+							(* 1000 (+ 1 (log (size context_features))))
+						)
+					case_weight_feature (if valid_weight_feature weight_feature)
+					query_conditions action_condition_filter_query
+				))
+			robust_influence_case_ids
+				(call !SampleCases (assoc
+					num
+						(if num_robust_influence_samples
+							num_robust_influence_samples
+
+							;Ideally this would be larger, but performance is of significant concern here.
+							300
+						)
+					case_weight_feature (if valid_weight_feature weight_feature)
+					query_conditions action_condition_filter_query
+				))
+		))
+
+
 		;calculates and stores the full residuals unless its conditioned prediction stats
 		(if (get details "prediction_stats")
 			(let
@@ -419,14 +404,9 @@
 							custom_hyperparam_map custom_hyperparam_map
 							compute_all_statistics (true)
 							confusion_matrix_min_count confusion_matrix_min_count
-							action_condition_filter_query action_condition_filter_query
 							context_condition_filter_query context_condition_filter_query
-							case_ids
-								;if there is an action condition, case ids matching the condition will be selected internally
-								(if (size action_condition_filter_query)
-									(null)
-									case_ids
-								)
+							case_ids case_ids
+							strict_case_ids (!= 0 (size action_condition_filter_query))
 						))
 					selected_prediction_stats
 						(call !ProcessSelectedPredictionStats (assoc selected_prediction_stats (or (get details "selected_prediction_stats") [])))
@@ -472,6 +452,8 @@
 									custom_hyperparam_map custom_hyperparam_map
 									compute_all_statistics (false)
 									confusion_matrix_min_count confusion_matrix_min_count
+									context_condition_filter_query context_condition_filter_query
+									strict_case_ids (!= 0 (size action_condition_filter_query))
 								))
 								"residual_map"
 							)
@@ -590,8 +572,7 @@
 										action_features [feature_influences_action_feature]
 										sensitivity_to_randomization (false)
 										robust (true)
-										;TODO: replace with robust_influence_case_ids
-										case_ids robust_residual_case_ids
+										case_ids robust_influence_case_ids
 										use_case_weights use_case_weights
 										weight_feature weight_feature
 										hyperparam_map custom_hyperparam_map
@@ -629,8 +610,7 @@
 										action_features [feature_influences_action_feature]
 										sensitivity_to_randomization (true)
 										robust (true)
-										;TODO: replace with robust_influence_case_ids
-										case_ids robust_residual_case_ids
+										case_ids robust_influence_case_ids
 										use_case_weights use_case_weights
 										weight_feature weight_feature
 										hyperparam_map custom_hyperparam_map
