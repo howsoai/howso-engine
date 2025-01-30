@@ -299,28 +299,6 @@
 	;derive then train with ablation
 	#!TrainSingleSeriesWithAblation
 	(seq
-		(if (size series_ordered_by_features)
-			(assign (assoc
-				data
-					(call !MultiSortList (assoc
-						data data
-						column_order_indices (unzip feature_index_map series_ordered_by_features)
-					))
-			))
-		)
-		;map of index -> original index
-		(assign (assoc
-			ts_ablated_indices_map
-				(zip
-					(indices data)
-					(map (lambda (last (current_value))) data)
-				)
-		))
-
-		;drop extra columns, including the temporary '.original_index' column
-		(assign (assoc
-			data (map (lambda (unzip (current_value) features_indices)) data)
-		))
 
 		(declare (assoc
 			;series_index of each row, will be set to be non-zero if some series cases were already trained previously
@@ -359,15 +337,16 @@
 		(if (size trained_series_case_ids)
 			(let
 				(assoc
-					prev_series_index (null)
-					next_series_row 0
-					series_index_feature_index (- (size trained_series_cases_features) 1)
-					case_id_feature_index (size trained_series_cases_features)
+					prev_series_index (null) ;last seen series index (for finding ablated cases to insert nulls)
+					next_series_row 0 ;row index for existing cases
+					new_case_row 0 ;row index for new cases (to build ts_ablated_indices_map)
+					series_index_feature_index (- (size trained_series_cases_features) 2)  ;series_index index in trained_series_cases
+					case_id_feature_index (- (size trained_series_cases_features) 1) ;case_id index in trained_series_cases
 				)
 
-				;TODO this comment says it should contain progress_features but it doesn't?
-				;set trained_series_cases to contain each cases's feature values and all the progress_features values
+				;set trained_series_cases to contain each cases's feature values and series index
 				(assign (assoc
+					ts_ablated_indices_map (assoc) ;prepare to accumulate this later
 					trained_series_cases
 						(map
 							(lambda
@@ -381,13 +360,21 @@
 						)
 				))
 
+				;sort the trained cases by time feature
+				(assoc
+					trained_series_cases
+						(call !MultiSortList (assoc
+							data trained_series_cases
+							column_order_indices [ time_feature_index ]
+						))
+				)
+
 				;combine and sort the new cases with existing cases
 				(assign (assoc
 					data
 						(call !MultiSortList (assoc
 							data (append trained_series_cases data)
 							column_order_indices
-								;TODO - do we need to sort by ordered_by_features or just time_feature_index??
 								(if (size series_ordered_by_features)
 									(unzip feature_index_map series_ordered_by_features)
 									[ time_feature_index ]
@@ -396,14 +383,10 @@
 				))
 
 				(assign (assoc
-					;determine the last time value so we can verify new cases occur after this
-					last_trained_time_value
-						(apply "max" (map
-							(lambda (get (current_value) time_feature_index))
-							trained_series_cases
-						))
 					;reset case ids so it can be rebuilt with sorted data
 					trained_series_case_ids []
+					;determine the last time value so we can verify new cases occur after this
+					last_trained_time_value (get (last trained_series_cases) time_feature_index)
 					;set continue_series_index to the would-be next index value
 					continue_series_index (+ 1 (get (last trained_series_cases) series_index_feature_index) )
 				))
@@ -417,13 +400,20 @@
 								(lambda (let
 									(assoc
 										series_index (get data [next_series_row series_index_feature_index])
+										current_row (get data next_series_row)
 									)
-									;TODO rule out any off by one errors due to start/end
-									(if (= (null) series_index)
+									(if (!= (size current_row) (size trained_series_cases_features))
 										;output the new case
 										(seq
+											;map the case index to the original input index, the case index must match the index
+											;of the data once nulls/trained cases are removed later
+											(accum (assoc
+												ts_ablated_indices_map (associate new_case_row (get current_row -1))
+											))
+											(accum (assoc new_case_row 1))
 											(accum (assoc next_series_row 1))
-											(get data (- next_series_row 1)) ; return the new case
+											;return the new case without extra columns
+											(unzip current_row features_indices)
 										)
 
 										;else if the first series index we encounter is > 0 we need to add nulls to the start
@@ -449,11 +439,11 @@
 											(accum (assoc
 												next_series_row 1
 												trained_series_indices (current_index 1)
-												trained_series_case_ids (get data [next_series_row case_id_feature_index])
+												trained_series_case_ids (get current_row case_id_feature_index)
 											))
 											(assign (assoc prev_series_index series_index))
-											;return the existing case without the series index column
-											(remove (get data (- next_series_row 1)) series_index_feature_index)
+											;return the existing case without the extra columns
+											(unzip current_row features_indices)
 										)
 									)
 								))
@@ -472,13 +462,52 @@
 											trained_series_indices (current_index 1)
 											trained_series_case_ids (get (current_value 1) case_id_feature_index)
 										))
+
+										;else capture the original index
+										(seq
+											(accum (assoc
+												ts_ablated_indices_map (associate new_case_row (last (current_value 2)))
+											))
+											(accum (assoc new_case_row 1))
+										)
 									)
+									;return case without any extra columns
 									(unzip (current_value) features_indices)
 								))
 								data
 							)
 					))
 				)
+			)
+
+			;else if no existing trained cases
+			(seq
+				;sort the data by time
+				(assign (assoc
+					data
+						(call !MultiSortList (assoc
+							data data
+							column_order_indices
+								(if (size series_ordered_by_features)
+									(unzip feature_index_map series_ordered_by_features)
+									[ time_feature_index ]
+								)
+						))
+				))
+
+				;map of index -> original index
+				(assign (assoc
+					ts_ablated_indices_map
+						(zip
+							(indices data)
+							(map (lambda (last (current_value))) data)
+						)
+				))
+
+				;drop extra columns, including the temporary '.original_index' column
+				(assign (assoc
+					data (map (lambda (unzip (current_value) features_indices)) data)
+				))
 			)
 		)
 

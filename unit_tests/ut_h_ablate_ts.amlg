@@ -1,0 +1,193 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_ablate_ts.amlg"))
+
+	(declare (assoc
+		dataset (trunc (load "unit_test_data/example_timeseries.csv") 202)
+		feature_attributes
+			(append
+				(load "unit_test_data/example_timeseries.features.json")
+				;add feature attributes for the index column appended to the dataset
+				{
+					"index"
+						{
+							"type" "continuous"
+							"data_type" "number"
+							"decimal_places" 0
+							"bounds" {"allow_null" (false)}
+						}
+				}
+			)
+	))
+	(declare (assoc
+		features (append (first dataset) "index")
+	))
+
+	(null
+		#train_and_ablate
+		(let
+			(assoc
+				session "session1"
+				trained_cases (null)
+				ablated_indices []
+			)
+
+			;create a fresh trainee
+			(destroy_entities "howso")
+			(call (load "unit_test_howso.amlg") (assoc name "ut_h_ablate_ts.amlg" skip_init (true)) )
+
+			(call_entity "howso" "set_feature_attributes" (assoc feature_attributes feature_attributes))
+
+			(call_entity "howso" "set_auto_ablation_params" (assoc
+				auto_ablation_enabled (true)
+				min_num_cases 10
+				batch_size 1
+			))
+
+			(call_entity "howso" "set_auto_analyze_params" (assoc
+				auto_analyze_enabled (true)
+				analyze_threshold 10
+				analyze_growth_factor 1.5
+			))
+
+			(range
+				(lambda (let
+					(assoc
+						response
+							(call_entity "howso" "train" (assoc
+								session session
+								features features
+								cases (unzip cases (range (current_index 2) (+ (current_index 2) 19)))
+							))
+						payload (null)
+						warnings (null)
+					)
+					(assign (assoc
+						payload (get response [1 "payload"])
+						warnings (get response [1 "warnings"])
+					))
+
+					(accum (assoc
+						ablated_indices
+							(map
+								(lambda (+ (current_value) (current_index 2))) ;offset index by the batch position
+								(get payload "ablated_indices")
+							)
+					))
+
+				))
+				0 (size cases) 20
+			)
+
+			;retrieve the trained case index values
+			(assign (assoc
+				trained_cases
+					(get
+						(call_entity "howso" "get_cases" (assoc
+							session session
+							features ["date" "index" ".session_training_index" ".series_index" "ID"]
+						))
+						[1 "payload" "cases"]
+					)
+			))
+			(declare (assoc
+				sorted_cases
+					;sort trained cases by the date column
+					(sort
+						(lambda (let
+							(assoc
+								a (current_value 1)
+								b (current_value 2)
+							)
+
+							(if (~ 0 (get a 0))
+								(- (get a 0) (get b 0) )
+
+								(> (get a 0) (get b 0) )
+							)
+						))
+						trained_cases
+					)
+				original_indices (map (lambda (get (current_value) 1)) trained_cases)
+				session_training_indices (map (lambda (get (current_value) 2)) trained_cases)
+				series_indices (map (lambda (get (current_value) 3)) trained_cases)
+				id_feature_values (values (map (lambda (get (current_value) 4)) trained_cases) (true))
+			))
+
+			(print "All cases were trained: ")
+			(call assert_same (assoc
+				obs (+ (size trained_cases) (size ablated_indices))
+				exp (size cases)
+			))
+
+			(print "Session training indices match original indices: ")
+			(call assert_same (assoc
+				obs original_indices
+				exp session_training_indices
+			))
+
+			(print "Session training indices do not contain nulls: ")
+			(call assert_false (assoc
+				obs (contains_value session_training_indices (null))
+			))
+
+			(print "Session training indices are unique: ")
+			(call assert_same (assoc
+				obs (size (values session_training_indices (true)))
+				exp (size trained_cases)
+			))
+
+			(print "Ablated indices are not found in the session training indices: ")
+			(call assert_same (assoc
+				obs
+					(size
+						(filter
+							(lambda (contains_value session_training_indices (current_value)))
+							abalted_indices
+						)
+					)
+				exp 0
+			))
+
+
+
+
+			(call exit_if_failures (assoc msg "Train with time series ablation computed successfully"))
+		)
+	)
+
+	;sequential cases test
+	(call train_and_ablate (assoc
+		cases
+			(map
+				;map in the expected session training index
+				(lambda (append (current_value) (current_index)) )
+				(tail dataset)
+			)
+	))
+
+	;sequential but inter-mixed test (all series are in each batch train call)
+	; (call train_and_ablate (assoc
+	; 	;sort the cases randomly so they are out of order
+	; 	cases
+	; 		(map
+	; 			;map in the expected session training index
+	; 			(lambda (append (current_value) (current_index)) )
+	; 			;TODO sort this sequential but mixed
+	; 			(tail dataset)
+	; 		)
+	; ))
+
+	;out of order cases test
+	; (call train_and_ablate (assoc
+	; 	;sort the cases randomly so they are out of order
+	; 	cases
+	; 		(map
+	; 			;map in the expected session training index
+	; 			(lambda (append (current_value) (current_index)) )
+	; 			(sort (lambda (- (rand) (rand))) (tail dataset))
+	; 		)
+	; ))
+
+	(call exit_if_failures (assoc msg unit_test_name) )
+)
