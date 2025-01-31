@@ -328,7 +328,7 @@
 				)
 			trained_series_cases_features (append features [".series_index" ".case_id"])
 			trained_series_cases [] ;cases in with the same series id that is already trained
-			trained_series_indices [] ;indices of trained cases in combined data once sorted
+			trained_case_indices [] ;indices of trained cases in combined data once sorted
 			trained_ablated_indices [] ;indices of nulls for previously ablated cases
 			last_trained_time_value (null)
 		))
@@ -339,14 +339,12 @@
 				(assoc
 					prev_series_index (null) ;last seen series index (for finding ablated cases to insert nulls)
 					next_series_row 0 ;row index for existing cases
-					new_case_row 0 ;row index for new cases (to build ts_ablated_indices_map)
 					series_index_feature_index (- (size trained_series_cases_features) 2)  ;series_index index in trained_series_cases
 					case_id_feature_index (- (size trained_series_cases_features) 1) ;case_id index in trained_series_cases
 				)
 
 				;set trained_series_cases to contain each cases's feature values and series index
 				(assign (assoc
-					ts_ablated_indices_map (assoc) ;prepare to accumulate this later
 					trained_series_cases
 						(map
 							(lambda
@@ -358,15 +356,6 @@
 							)
 							trained_series_case_ids
 						)
-				))
-
-				;sort the trained cases by time feature
-				(assign (assoc
-					trained_series_cases
-						(call !MultiSortList (assoc
-							data trained_series_cases
-							column_order_indices [ time_feature_index ]
-						))
 				))
 
 				;combine and sort the new cases with existing cases
@@ -383,12 +372,35 @@
 				))
 
 				(assign (assoc
-					;reset case ids so it can be rebuilt with sorted data
-					trained_series_case_ids []
 					;determine the last time value so we can verify new cases occur after this
-					last_trained_time_value (get (last trained_series_cases) time_feature_index)
+					last_trained_time_value
+						(apply "max" (map
+							(lambda (get (current_value) time_feature_index))
+							trained_series_cases
+						))
 					;set continue_series_index to the would-be next index value
-					continue_series_index (+ 1 (get (last trained_series_cases) series_index_feature_index) )
+					continue_series_index
+						(+
+							1
+							(apply "max" (map
+								(lambda (get (current_value) series_index_feature_index))
+								trained_series_cases
+							))
+						)
+					;using sorted data we need to map index -> original_index where the index is the
+					;index in a list of *only* the new cases
+					ts_ablated_indices_map
+						(zip
+							(range 0 (- (size data) (size trained_series_cases) 1) 1)
+							(filter (map
+								(lambda
+									(if (!= (size (current_value)) (size trained_series_cases_features))
+										(last (current_value))
+									)
+								)
+								data
+							))
+						)
 				))
 
 				;previously trained series was ablated because the number of cases is less than the continue series index
@@ -405,79 +417,64 @@
 									(if (!= (size current_row) (size trained_series_cases_features))
 										;output the new case
 										(seq
-											;map the case index to the original input index, the case index must match the index
-											;of the data once nulls/trained cases are removed later
-											(accum (assoc
-												ts_ablated_indices_map (associate new_case_row (get current_row -1))
-											))
-											(accum (assoc new_case_row 1))
 											(accum (assoc next_series_row 1))
-											;return the new case without extra columns
-											(unzip current_row features_indices)
+											current_row ;return the new case
 										)
 
 										;else if the first series index we encounter is > 0 we need to add nulls to the start
-										(and (= (null) prev_series_index) (< 0 series_index))
+										(and (= (null) prev_series_index) (> series_index 0))
 										(seq
 											(assign (assoc prev_series_index 0))
-											(accum (assoc trained_ablated_indices (current_index 1)))
-											(map (lambda (null)) features_indices) ;return nulls
+											(null) ;return null
 										)
 
 										;else if there is a gap since the last series index, output null
 										(> (- series_index prev_series_index) 1)
 										(seq
-											(accum (assoc
-												prev_series_index 1
-												trained_ablated_indices (current_index 1)
-											))
-											(map (lambda (null)) features_indices) ;return nulls
+											(accum (assoc prev_series_index 1))
+											(null) ;return null
 										)
 
 										;else output the existing case
 										(seq
-											(accum (assoc
-												next_series_row 1
-												trained_series_indices (current_index 1)
-												trained_series_case_ids (get current_row case_id_feature_index)
-											))
+											(accum (assoc next_series_row 1))
 											(assign (assoc prev_series_index series_index))
-											;return the existing case without the extra columns
-											(unzip current_row features_indices)
+											current_row ;return the existing case
 										)
 									)
 								))
 								0 (+ continue_series_index untrained_data_size -1) 1
 							)
 					))
-
-					;else just drop extra columns from existing cases
-					(assign (assoc
-						data
-							(map
-								(lambda (seq
-									(if (= (size (current_value)) (size trained_series_cases_features))
-										;if this is an existing case, capture the index and case_id
-										(accum (assoc
-											trained_series_indices (current_index 1)
-											trained_series_case_ids (get (current_value 1) case_id_feature_index)
-										))
-
-										;else capture the original index
-										(seq
-											(accum (assoc
-												ts_ablated_indices_map (associate new_case_row (last (current_value 2)))
-											))
-											(accum (assoc new_case_row 1))
-										)
-									)
-									;return case without any extra columns
-									(unzip (current_value) features_indices)
-								))
-								data
-							)
-					))
 				)
+
+				(assign (assoc
+					;get updated order of case ids
+					trained_series_case_ids
+						(filter (map
+							(lambda
+								(if (= (size (current_value)) (size trained_series_cases_features))
+									(get (current_value) case_id_feature_index)
+								)
+							)
+							data
+						))
+					;get the indices of the trained cases so they can be removed later
+					trained_case_indices
+						(filter
+							(lambda (=
+								(size (get data (current_value)))
+								(size trained_series_cases_features)
+							))
+							(indices data)
+						)
+					;get the indices of the ablated cases so they can be removed later
+					trained_ablated_indices
+						(filter
+							(lambda (= (null) (get data (current_value))))
+							(indices data)
+						)
+				))
 			)
 
 			;else if no existing trained cases
@@ -503,13 +500,22 @@
 							(map (lambda (last (current_value))) data)
 						)
 				))
-
-				;drop extra columns, including the temporary '.original_index' column
-				(assign (assoc
-					data (map (lambda (unzip (current_value) features_indices)) data)
-				))
 			)
 		)
+
+		;drop extra temporary columns from data
+		(assign (assoc
+			data
+				(map
+					(lambda
+						(if (= (null) (current_value))
+							(null) ;ablated case
+							(unzip (current_value) features_indices)
+						)
+					)
+					data
+				)
+		))
 
 		;now that the length of each new series is known, ensure that ts_series_length_limit is e*(longest series)
 		(if (> (* 2.718281828459 (size data)) ts_series_length_limit)
@@ -557,11 +563,11 @@
 							)
 						)
 					)
-					trained_series_indices
+					trained_case_indices
 				)
 				;filter out the already trained cases so we only train the new ones
 				(assign (assoc
-					data (unzip data (remove (indices data) (append trained_series_indices trained_ablated_indices)))
+					data (unzip data (remove (indices data) (append trained_case_indices trained_ablated_indices)))
 				))
 
 				;Check if we need to warn about out of sequence cases
