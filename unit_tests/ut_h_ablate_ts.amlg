@@ -3,6 +3,7 @@
 	(call (load "unit_test_howso.amlg") (assoc name "ut_h_ablate_ts.amlg"))
 
 	(declare (assoc
+		;201 cases for training 20 batches of 20 and 1 batch of 1
 		dataset (trunc (load "unit_test_data/example_timeseries.csv") 202)
 		feature_attributes
 			(append
@@ -21,6 +22,7 @@
 	))
 	(declare (assoc
 		features (append (first dataset) "index")
+		expected_warnings []
 	))
 
 	(null
@@ -30,6 +32,7 @@
 				session "session1"
 				trained_cases (null)
 				ablated_indices []
+				warnings []
 			)
 
 			;create a fresh trainee
@@ -50,6 +53,7 @@
 				analyze_growth_factor 1.5
 			))
 
+			;train the cases in batches of up to 20
 			(range
 				(lambda (let
 					(assoc
@@ -59,19 +63,13 @@
 								features features
 								cases (unzip cases (range (current_index 2) (+ (current_index 2) 19)))
 							))
-						payload (null)
-						warnings (null)
 					)
-					(assign (assoc
-						payload (get response [1 "payload"])
-						warnings (get response [1 "warnings"])
-					))
-
 					(accum (assoc
+						warnings (or (get response [1 "warnings"]) [])
 						ablated_indices
 							(map
 								(lambda (+ (current_value) (current_index 2))) ;offset index by the batch position
-								(get payload "ablated_indices")
+								(get response [1 "payload" "ablated_indices"])
 							)
 					))
 
@@ -79,39 +77,66 @@
 				0 (size cases) 20
 			)
 
+			(if (size expected_warnings)
+				;match that at least one of the expected warnings is raised, and no others
+				(seq
+					(declare (assoc
+						matched_warnings
+							(filter
+								(lambda (size
+									;at least one of the expected warnings should be matched
+									(filter
+										(lambda (contains_value (current_value 1) (current_value)) )
+										expected_warnings
+									)
+								))
+								warnings
+							)
+					))
+					(print "Expected warnings were raised: ")
+					(call assert_true (assoc
+						obs (> (size matched_warnings) 0)
+					))
+					(print "No unexpected warnigs were raised: ")
+					(call assert_same (assoc
+						obs (size matched_warnings)
+						exp (size warnings)
+					))
+				)
+
+				;else expect no warnings
+				(seq
+					(print "No warnings were raised: ")
+					(call assert_same (assoc
+						obs (size warnings)
+						exp 0
+					))
+				)
+			)
+			(call exit_if_failures (assoc msg "Only expected warnings raised"))
+
 			;retrieve the trained case index values
 			(assign (assoc
 				trained_cases
 					(get
 						(call_entity "howso" "get_cases" (assoc
 							session session
-							features ["date" "index" ".session_training_index" ".series_index" "ID"]
+							features ["ID" "date" "index" ".session_training_index" ".series_index" ".series_progress"]
 						))
 						[1 "payload" "cases"]
 					)
+				id_feature_index 0
+				time_feature_index 1
+				original_index 2
+				session_train_index 3
+				series_index 4
+				series_progress_index 5
 			))
 			(declare (assoc
-				sorted_cases
-					;sort trained cases by the date column
-					(sort
-						(lambda (let
-							(assoc
-								a (current_value 1)
-								b (current_value 2)
-							)
-
-							(if (~ 0 (get a 0))
-								(- (get a 0) (get b 0) )
-
-								(> (get a 0) (get b 0) )
-							)
-						))
-						trained_cases
-					)
-				original_indices (map (lambda (get (current_value) 1)) trained_cases)
-				session_training_indices (map (lambda (get (current_value) 2)) trained_cases)
-				series_indices (map (lambda (get (current_value) 3)) trained_cases)
-				id_feature_values (values (map (lambda (get (current_value) 4)) trained_cases) (true))
+				original_indices (map (lambda (get (current_value) original_index)) trained_cases)
+				session_training_indices (map (lambda (get (current_value) session_train_index)) trained_cases)
+				series_indices (map (lambda (get (current_value) series_index)) trained_cases)
+				id_feature_values (values (map (lambda (get (current_value) id_feature_index)) trained_cases) (true))
 			))
 
 			(print "All cases were trained: ")
@@ -149,14 +174,95 @@
 				exp 0
 			))
 
+			(assign (assoc
+				;sort trained cases by the date column
+				trained_cases
+					(sort
+						(lambda (let
+							(assoc
+								a (current_value 1)
+								b (current_value 2)
+							)
 
+							(if (~ 0 (get a time_feature_index))
+								(- (get a time_feature_index) (get b time_feature_index) )
+								(> (get a time_feature_index) (get b time_feature_index) )
+							)
+						))
+						trained_cases
+					)
+			))
 
+			(print "Series indices do not contain nulls: ")
+			(call assert_false (assoc
+				obs (contains_value series_indices (null))
+			))
 
-			(call exit_if_failures (assoc msg "Train with time series ablation computed successfully"))
+			;per series checks
+			(map
+				(lambda (let
+					(assoc
+						series_cases
+							(filter
+								(lambda (= (current_value 2) (get (current_value) id_feature_index)))
+								trained_cases
+							)
+					)
+
+					(print (concat "Series " (current_value) " indices are unique: "))
+					(call assert_same (assoc
+						obs
+							(size (values
+								(map (lambda (get (current_value) series_index)) series_cases)
+								(true)
+							))
+						exp (size series_cases)
+					))
+
+					(print (concat "Series " (current_value) " indices are in order: "))
+					(call assert_same (assoc
+						obs
+							(size (filter
+								(lambda
+									(if (!= 0 (current_index))
+										;match when previous value is >= the current value
+										(>=
+											(get series_cases [(- (current_index 1) 1) series_index])
+											(get (current_value) series_index)
+										)
+									)
+								)
+								series_cases
+							))
+						exp 0 ;if cases are in order, there should be none returned by the filter
+					))
+
+					(print (concat "Series " (current_value) " progress are in order: "))
+					(call assert_same (assoc
+						obs
+							(size (filter
+								(lambda
+									(if (!= 0 (current_index))
+										;match when previous value is >= the current value
+										(>=
+											(get series_cases [(- (current_index 1) 1) series_progress_index])
+											(get (current_value) series_progress_index)
+										)
+									)
+								)
+								series_cases
+							))
+						exp 0 ;if cases are in order, there should be none returned by the filter
+					))
+				))
+				id_feature_values
+			)
+
+			(call exit_if_failures (assoc msg "Train with time series ablation"))
 		)
 	)
 
-	;sequential cases test
+	(print "Test sequential time seires ablation\n")
 	(call train_and_ablate (assoc
 		cases
 			(map
@@ -166,28 +272,39 @@
 			)
 	))
 
-	;sequential but inter-mixed test (all series are in each batch train call)
-	; (call train_and_ablate (assoc
-	; 	;sort the cases randomly so they are out of order
-	; 	cases
-	; 		(map
-	; 			;map in the expected session training index
-	; 			(lambda (append (current_value) (current_index)) )
-	; 			;TODO sort this sequential but mixed
-	; 			(tail dataset)
-	; 		)
-	; ))
+	(print "Test sequential but mixed time seires ablation\n")
+	(call train_and_ablate (assoc
+		cases
+			(map
+				;map in the expected session training index
+				(lambda (append (current_value) (current_index)) )
+				;mixed indices such that each series is still sequetnail but most train batches include both series
+				(unzip
+					(tail dataset)
+					[
+						0 1 2 3 4 5 6 7 8 9 10 116 117 118 119 120 121 122 123 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25
+						26 27 28 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 29 30 31 32 33 34 35 36 37 38 39
+						40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 139 140 141 142 143 144 145 146 147
+						148 149 150 151 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 152 153 154 155 156 157
+						158 159 160 161 162 163 164 165 166 167 82 83 84 85 86 87 88 89 90 91 168 169 170 171 172 92 93 94
+						95 96 97 173 174 175 176 177 178 179 180 181 182 183 98 99 100 101 102 103 104 105 106 107 108 109
+						110 111 112 113 114 115 184 185 186 187 188 189 190 191 192 193 194 195 196 197 198 199 200
+					]
+				)
+			)
+	))
 
-	;out of order cases test
-	; (call train_and_ablate (assoc
-	; 	;sort the cases randomly so they are out of order
-	; 	cases
-	; 		(map
-	; 			;map in the expected session training index
-	; 			(lambda (append (current_value) (current_index)) )
-	; 			(sort (lambda (- (rand) (rand))) (tail dataset))
-	; 		)
-	; ))
+	(print "Test out of order time series ablation\n")
+	(call train_and_ablate (assoc
+		;sort the cases randomly so they are out of order
+		cases
+			(map
+				;map in the expected session training index
+				(lambda (append (current_value) (current_index)) )
+				(sort (lambda (- (rand) (rand))) (tail dataset))
+			)
+		expected_warnings ["Training time series cases out of sequence with ablation enabled.*"]
+	))
 
 	(call exit_if_failures (assoc msg unit_test_name) )
 )
