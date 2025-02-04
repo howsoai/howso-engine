@@ -72,7 +72,10 @@
 						(null
 							##.replay_steps (list)
 							##.indices_map (assoc)
+							;total count of cases trained
 							##.trained_instance_count 0
+							;total count of cases observed (incl ablated, trained as weights, etc)
+							##.total_instance_count 0
 							##.metadata (assoc)
 						)
 					)))
@@ -81,6 +84,7 @@
 
 		(declare (assoc
 			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
+			total_instance_count (retrieve_from_entity session ".total_instance_count")
 			series_cases (if (!= (null) series) (get !seriesStore series))
 			status_output (null)
 			message (null)
@@ -150,6 +154,11 @@
 					features features
 					accumulate_weight_feature accumulate_weight_feature
 					cases cases
+				))
+
+				;capture these cases into the total observed count
+				(accum_to_entities session (assoc
+					".total_instance_count" (size cases)
 				))
 
 				(accum_to_entities (assoc !revision 1))
@@ -327,14 +336,7 @@
 						(if accumulate_weight_feature
 							cases
 							;else only accumulate for cases that were actually trained and not ablated
-							(unzip
-								cases
-								(remove
-									(indices cases)
-									;change ablated_indices_list into a 0-based list to match indices of cases
-									(map (lambda (- (current_value) trained_instance_count)) ablated_indices_list)
-								)
-							)
+							(unzip cases (remove (indices cases) ablated_indices_list))
 						)
 					))
 			))
@@ -503,6 +505,11 @@
 			(assign_to_entities (assoc !inactiveFeaturesNeedCaching (true) ))
 		)
 
+		;capture these cases into the total observed count
+		(accum_to_entities session (assoc
+			".total_instance_count" (size cases)
+		))
+
 		(accum_to_entities (assoc !revision 1))
 
 		;return response
@@ -511,7 +518,7 @@
 			payload
 				(assoc
 					"num_trained" (size new_case_ids)
-					"ablated_indices" ablated_indices_list
+					"ablated_indices" (sort ablated_indices_list)
 					"status" status_output
 				)
 		))
@@ -562,7 +569,12 @@
 			))
 		)
 
-		(if (!= (size features) (size (first cases)) )
+		;verify all row sizes match the number of features
+		(if
+			(size (filter
+				(lambda (!= (size features) (size (current_value))))
+				cases
+			))
 			(conclude (conclude
 				(call !Return (assoc
 					errors (list "The number of feature names specified does not match the number of feature values given.")
@@ -711,7 +723,7 @@
 							(current_value 1)
 						)
 					session (get_value session)
-					session_training_index (+ trained_instance_count (current_index 1))
+					session_training_index (+ total_instance_count (current_index 1))
 				))
 			)
 			cases
@@ -823,7 +835,7 @@
 					(call !AblateCases (assoc
 						cases (unzip cases (range input_case_index (+ input_case_index batch_size -1)) )
 						;ensure that starting training index value is updated for each batch
-						session_training_index (+ trained_instance_count input_case_index)
+						session_training_index (+ total_instance_count input_case_index)
 					))
 			))
 
@@ -945,8 +957,8 @@
 				(map
 					(lambda
 						(if (size ts_ablated_indices_map)
-							(+ session_training_index (get ts_ablated_indices_map (current_value)))
-							(+ session_training_index (current_value))
+							(get ts_ablated_indices_map (+ input_case_index (current_value)))
+							(+ input_case_index (current_value))
 						)
 					)
 					(remove (indices cases) indices_to_train)
@@ -996,7 +1008,11 @@
 									feature_values
 								)
 							session (get_value session)
-							session_training_index (+ session_training_index (current_value 1))
+							session_training_index
+								(if (size ts_ablated_indices_map)
+									(+ total_instance_count (get ts_ablated_indices_map (+ input_case_index (current_value 1))))
+									(+ session_training_index (current_value 1))
+								)
 						))
 					))
 					indices_to_train
