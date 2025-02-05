@@ -304,6 +304,9 @@
 			;flag, if true order of generated feature values will match the order of features
 			ordered_by_specified_features (false)
 			;{type "boolean"}
+			;flag, if true then action features that have time-series derivation logic will be derived, automatically including necessary action features for derivation
+			derive_time_series_features (true)
+			;{type "boolean"}
 			;If true will exclude sensitive features whose values will be
 			;	replaced after synthesis from uniqueness check.
 			; Only applicable when desired_conviction is specified.
@@ -338,6 +341,9 @@
 						(size case_indices)
 					)
 				)
+			output_action_features action_features
+			;flag to indicate if action features gets changed and output should be filtered
+			action_features_augmented (false)
 		))
 
 		;validate parameters
@@ -358,6 +364,48 @@
 		(if invalid_react_parameters
 			(conclude
 				(call !Return (assoc errors (list "Failed to react: invalid react parameters.") ))
+			)
+		)
+
+		;if a time-series trainee and the flag is set,
+		;move applicable action features to derived_action_features and add other necessary action features
+		(if (and !tsTimeFeature derive_time_series_features (size action_features))
+			(let
+				(assoc
+					possible_derived_action_features
+						(filter
+							(lambda
+								(and
+									(get !featureAttributes [(current_value 1) "time_series"])
+									(get !featureAttributes [(current_value 1) "derived_feature_code"])
+								)
+							)
+							action_features
+						)
+				)
+
+
+				(map
+					(lambda
+						(accum (assoc
+							derived_action_features (current_value 1)
+							action_features
+								(filter
+									(lambda
+										;not already an action or context
+										(and
+											(not (contains_value context_features (current_value)))
+											(not (contains_value action_features (current_value)))
+										)
+									)
+									;list of features necessary for derivation
+									(indices (get_all_labels (parse (get !featureAttributes [(current_value 2) "derived_feature_code"]))))
+								)
+						))
+					)
+					possible_derived_action_features
+				)
+				(if (size possible_derived_action_features) (assign (assoc action_features_augmented (true) )))
 			)
 		)
 
@@ -418,7 +466,7 @@
 		(call !PreReactCacheChecks)
 
 		(declare (assoc
-			output_action_features
+			react_action_features
 				(if (size derived_action_features)
 					(append action_features derived_action_features)
 					action_features
@@ -546,6 +594,29 @@
 					)
 				)
 		))
+
+		(if action_features_augmented
+			(let
+				(assoc
+					output_action_features_indices
+						(unzip
+							(zip react_action_features (indices react_action_features))
+							output_action_features
+						)
+				)
+
+				(accum (assoc
+					react_output_map
+						{
+							"action_values"
+								(map
+									(lambda (unzip (current_value) output_action_features_indices))
+									(get react_output_map "action_values")
+								)
+						}
+				))
+			)
+		)
 
 		(call !Return (assoc
 			payload (append react_output_map (assoc "action_features" output_action_features))
