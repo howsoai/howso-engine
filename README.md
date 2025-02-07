@@ -53,38 +53,33 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
     (assign_to_entities "howso" (assoc filepath "./"))
     (set_entity_root_permission "howso" 1)
 
-    (call_entity "howso" "create_trainee" (assoc trainee "iris_trainee"))
-
     (call_entity "howso" "set_feature_attributes" (assoc
-        trainee "iris_trainee"
-        feature_attributes (assoc "species" (assoc "type" "nominal"))
+        feature_attributes {"species" {assoc "type" "nominal"}}
     ))
 
     (call_entity "howso" "train" (assoc
-        trainee "iris_trainee"
-        features (list "sepal_length" "sepal_width" "petal_length" "petal_width" "species")
+        features ["sepal_length" "sepal_width" "petal_length" "petal_width" "species"]
         cases
             (list
-                (list 6.4 2.8 5.6 2.2 "virginica")
-                (list 5.0 2.3 3.3 1.0 "versicolor")
-                (list 4.9 3.1 1.5 0.1 "setosa")
-                (list 5.9 3.0 4.2 1.5 "versicolor")
-                (list 6.9 3.1 5.4 2.1 "virginica")
-                (list 5.1 3.3 1.7 0.5 "setosa")
+                [6.4 2.8 5.6 2.2 "virginica"]
+                [5.0 2.3 3.3 1.0 "versicolor"]
+                [4.9 3.1 1.5 0.1 "setosa"]
+                [5.9 3.0 4.2 1.5 "versicolor"]
+                [6.9 3.1 5.4 2.1 "virginica"]
+                [5.1 3.3 1.7 0.5 "setosa"]
                 ;... as many cases as appropriate
             )
         session "iris_session"
     ))
 
-    (call_entity "howso" "analyze" (assoc trainee "iris_trainee"))
+    (call_entity "howso" "analyze")
 
     (declare (assoc
         reaction
             (call_entity "howso" "single_react" (assoc
-                trainee "iris_trainee"
-                context_features (list "sepal_length" "sepal_width" "petal_length" "petal_width")
-                context_values (list 5.3 2.5 4.1 1.3)
-                action_features (list "species")
+                context_features ["sepal_length" "sepal_width" "petal_length" "petal_width"]
+                context_values [5.3 2.5 4.1 1.3]
+                action_features ["species"]
             ))
     ))
 
