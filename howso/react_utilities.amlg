@@ -882,108 +882,104 @@
 		)
 	)
 
-	;Helper method for reacts to revert contexts back to original values after the secondary goal feature query
-	#!UpdateContextsAfterGoalQuery
-	(assign (assoc
-		feature_weights orig_feature_weights
-		context_features orig_context_features
-		context_values orig_context_values
-		custom_extra_filtering_queries orig_custom_extra_filtering_queries
-	))
+	;Helper method for reacts to update contexts with goal feature values from results of local_model_cases_tuple and rerun the query
+	#!UpdateLocalInfluencesForGoals
+	(seq
+		(assign (assoc
+			;set feature weight of goal features, zero out all other weights
+			feature_weights
+				(map
+					(lambda
+						(if (contains_index goal_features_map (current_index))
+							;for non-surprisal space, use the provided weight as-is, otherwise set all goal feature weights to 1
+							(if (and (!= "suprisal_to_prob" dt) feature_weights)
+								(current_value)
+								1
+							)
 
-	;Helper method for reacts to update contexts with goal feature values from results of local_model_cases_tuple
-	#!UpdateContextsForGoalFeatures
-	(assign (assoc
-		;set feature weight of goal features, zero out all other weights
-		feature_weights
-			(map
-				(lambda
-					(if (contains_index goal_features_map (current_index))
-						;for non-surprisal space, use the provided weight as-is, otherwise set all goal feature weights to 1
-						(if (and (!= "suprisal_to_prob" dt) feature_weights)
-							(current_value)
-							1
+							;all non-goal features have weight of 0
+							0
 						)
-
-						;all non-goal features have weight of 0
-						0
+					)
+					(if feature_weights
+						feature_weights
+						(zip (append context_features goal_features))
 					)
 				)
-				(if feature_weights
-					feature_weights
-					(zip (append context_features goal_features))
+
+			context_features (append context_features goal_features)
+
+			;set goal to max/min/specified value in local space
+			context_values
+				(append
+					context_values
+					(map
+						(lambda (let
+							(assoc
+								goal_feature (current_value 1)
+								not_nominal (not (contains_index !nominalsMap (current_value 1)))
+							)
+
+							(if (and not_nominal (= "max" (get goal_features_map [goal_feature "goal"])) )
+								(get
+									(first
+										(compute_on_contained_entities [
+											(query_in_entity_list (first local_model_cases_tuple))
+											(query_max goal_feature 1)
+											(query_exists goal_feature)
+										])
+									)
+									goal_feature
+								)
+
+								(and not_nominal (= "min" (get goal_features_map [goal_feature "goal"])) )
+								(get
+									(first
+										(compute_on_contained_entities [
+											(query_in_entity_list (first local_model_cases_tuple))
+											(query_min goal_feature 1)
+											(query_exists goal_feature)
+										])
+									)
+									goal_feature
+								)
+
+								;else approach specified value
+								(let
+									(assoc
+										goal_value (get goal_features_map [goal_feature "value"])
+										local_goal_values
+											(map
+												(lambda (retrieve_from_entity (current_value) goal_feature))
+												(first local_model_cases_tuple)
+											)
+									)
+									(declare (assoc local_max (apply "max" local_goal_values) ))
+									(if (>= goal_value local_max) (conclude local_max) )
+
+									(declare (assoc local_min (apply "min" local_goal_values) ))
+									(if (<= goal_value local_min)
+										local_min
+
+										;else goal value is within the local space, use it as-is
+										goal_value
+									)
+								)
+							)
+						))
+						goal_features
+					)
 				)
-			)
 
-		context_features (append context_features goal_features)
-
-		;set goal to max/min/specified value in local space
-		context_values
-			(append
-				context_values
-				(map
-					(lambda (let
-						(assoc
-							goal_feature (current_value 1)
-							not_nominal (not (contains_index !nominalsMap (current_value 1)))
-						)
-
-						(if (and not_nominal (= "max" (get goal_features_map [goal_feature "goal"])) )
-							(get
-								(first
-									(compute_on_contained_entities [
-										(query_in_entity_list (first local_model_cases_tuple))
-										(query_max goal_feature 1)
-										(query_exists goal_feature)
-									])
-								)
-								goal_feature
-							)
-
-							(and not_nominal (= "min" (get goal_features_map [goal_feature "goal"])) )
-							(get
-								(first
-									(compute_on_contained_entities [
-										(query_in_entity_list (first local_model_cases_tuple))
-										(query_min goal_feature 1)
-										(query_exists goal_feature)
-									])
-								)
-								goal_feature
-							)
-
-							;else approach specified value
-							(let
-								(assoc
-									goal_value (get goal_features_map [goal_feature "value"])
-									local_goal_values
-										(map
-											(lambda (retrieve_from_entity (current_value) goal_feature))
-											(first local_model_cases_tuple)
-										)
-								)
-								(declare (assoc local_max (apply "max" local_goal_values) ))
-								(if (>= goal_value local_max) (conclude local_max) )
-
-								(declare (assoc local_min (apply "min" local_goal_values) ))
-								(if (<= goal_value local_min)
-									local_min
-
-									;else goal value is within the local space, use it as-is
-									goal_value
-								)
-							)
-						)
-					))
-					goal_features
+			;limit the secondary goal-oriented query to only run on cases in this local space
+			custom_extra_filtering_queries
+				(if custom_extra_filtering_queries
+					(append custom_extra_filtering_queries (query_in_entity_list (first local_model_cases_tuple)) )
+					(query_in_entity_list (first local_model_cases_tuple))
 				)
-			)
+		))
 
-		;limit the secondary goal-oriented query to only run on cases in this local space
-		custom_extra_filtering_queries
-			(if custom_extra_filtering_queries
-				(append custom_extra_filtering_queries (query_in_entity_list (first local_model_cases_tuple)) )
-				(query_in_entity_list (first local_model_cases_tuple))
-			)
-	))
+		;call the react query again with the goal-oriented contexts and weights
+		(assign (assoc local_model_cases_tuple (call (retrieve_from_entity query_label)) ))
+	)
 )
