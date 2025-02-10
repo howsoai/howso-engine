@@ -21,6 +21,7 @@
 	;   			case weights will be used if the trainee has them.
 	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
 	; context_condition_filter_query: a list of queries that can be used to filter the possible set of cases that can be used for predictions
+	; use_derivation_logic: flag, if true action feature will be derived and the features needed to derive will be predicted
 	#!DecreaseInAccuracy
 	(declare
 		(assoc
@@ -36,6 +37,7 @@
 			use_case_weights (null)
 			hyperparam_map (null)
 			context_condition_filter_query (list)
+			use_derivation_logic (false)
 		)
 
 		(if (= (null) hyperparam_map)
@@ -50,7 +52,6 @@
 					)
 			))
 		)
-
 		(call !UpdateCaseWeightParameters (assoc set_valid_weight_feature (false) ))
 
 		(declare (assoc
@@ -83,6 +84,7 @@
 					use_case_weights use_case_weights
 					weight_feature weight_feature
 					context_condition_filter_query context_condition_filter_query
+					use_derivation_logic use_derivation_logic
 				))
 		))
 
@@ -119,6 +121,7 @@
 											use_case_weights use_case_weights
 											weight_feature weight_feature
 											context_condition_filter_query context_condition_filter_query
+											use_derivation_logic use_derivation_logic
 
 											;the scramble feature index will be null if doing feature knockout
 											scramble_feature_index
@@ -178,6 +181,7 @@
 	;   			case weights will be used if the trainee has them.
 	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
 	; context_condition_filter_query: a list of queries that can be used to filter the possible set of cases that can be used for predictions
+	; use_derivation_logic: flag, if true action features will be derived and the features needed to derive will be predicted
 	#!CalculateModelMAE
 	(declare
 		(assoc
@@ -197,6 +201,52 @@
 			use_case_weights (null)
 			weight_feature ".case_weight"
 			context_condition_filter_query (list)
+			use_derivation_logic (false)
+		)
+
+		(if use_derivation_logic
+			(seq
+				(declare (assoc
+					;map of action_features to features needed for derivation
+					features_for_derivation_map
+						(map
+							(lambda
+								(indices (get_all_labels (parse (get !featureAttributes [action_feature "derived_feature_code"]) )))
+							)
+							(zip action_features)
+						)
+				))
+
+				(if !tsTimeFeature
+					(let
+						(assoc
+							;the rate of change features for any of the action features (deltas or rates)
+							rate_of_change_features_set
+								(zip (filter
+									(lambda
+										(and
+											(contains_value action_features (get !derivedFeaturesMap (current_value)))
+											(or
+												(contains_value (get !tsModelFeaturesMap "rate_features") (current_value))
+												(contains_value (get !tsModelFeaturesMap "delta_features") (current_value))
+											)
+										)
+									)
+									(apply "append" (values features_for_derivation_map))
+								))
+						)
+
+						;filter out the rate_of_change features of the action features, these should always be derived/predicted and used for derivation
+						(assign (assoc
+							context_features
+								(filter
+									(lambda (not (contains_index rate_of_change_features_set (current_value))))
+									context_features
+								)
+						))
+					)
+				)
+			)
 		)
 
 		;if a corresponding feature list for each case was provided, only consider action features from that list
@@ -347,27 +397,7 @@
 						)
 
 						(declare (assoc
-							reaction_values
-								(call !ReactDiscriminative (assoc
-									return_action_values_only (true)
-									context_features react_context_features
-									action_features react_action_features
-									;retreive the raw/stored case values for each validation case from _temp_
-									context_values corresponding_context_values
-									;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
-									skip_encoding 1
-									;bypass decoding since computing distances to each reaction uses encoded numeric values
-									skip_decoding 1
-									details (assoc "categorical_action_probabilities" (true) "ignore_case" (null))
-									ignore_case (if ignore_exact_cases case_id (null))
-									substitute_output (false)
-									hyperparam_map custom_hyperparam_map
-									weight_feature weight_feature
-									use_case_weights use_case_weights
-									;disable usage of dependent features for resdiual computation to prevent recursive behaviour in reacts
-									has_dependent_features (false)
-									filtering_queries context_condition_filter_query
-								))
+							reaction_values (call !ModelMAEReact)
 							expected_values (retrieve_from_entity (if cases_already_removed (list "_temp_" case_id ) case_id) react_action_features)
 						))
 
@@ -625,6 +655,94 @@
 			)
 		))
 		action_feature_maes
+	)
+
+	#!ModelMAEReact
+	(if (not use_derivation_logic)
+		(call !ReactDiscriminative (assoc
+			return_action_values_only (true)
+			context_features react_context_features
+			action_features react_action_features
+			;retreive the raw/stored case values for each validation case from _temp_
+			context_values corresponding_context_values
+			;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
+			skip_encoding 1
+			;bypass decoding since computing distances to each reaction uses encoded numeric values
+			skip_decoding 1
+			details (assoc "categorical_action_probabilities" (true) "ignore_case" (null))
+			ignore_case (if ignore_exact_cases case_id (null))
+			substitute_output (false)
+			hyperparam_map custom_hyperparam_map
+			weight_feature weight_feature
+			use_case_weights use_case_weights
+			;disable usage of dependent features for resdiual computation to prevent recursive behaviour in reacts
+			has_dependent_features (false)
+			filtering_queries context_condition_filter_query
+		))
+
+		;otherwise need to derive the value for each action_feature, and return a react-like format
+		{
+			"action_values"
+				(map
+					(lambda
+						(let
+							;map over each action feature, predict the features needed to derive and then derive
+							(assoc
+								action_feature (current_value 1)
+								features_for_derivation (get features_for_derivation_map (current_value 1))
+							)
+
+							(declare (assoc
+								values_for_derivation_map
+									(zip
+										features_for_derivation
+										(get
+											(call !ReactDiscriminative (assoc
+												return_action_values_only (true)
+												context_features react_context_features
+												action_features features_for_derivation
+												;retreive the raw/stored case values for each validation case from _temp_
+												context_values corresponding_context_values
+												;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
+												skip_encoding 1
+												;bypass decoding since computing distances to each reaction uses encoded numeric values
+												skip_decoding 1
+												details (assoc "categorical_action_probabilities" (true) "ignore_case" (null))
+												ignore_case (if ignore_exact_cases case_id (null))
+												substitute_output (false)
+												hyperparam_map custom_hyperparam_map
+												weight_feature weight_feature
+												use_case_weights use_case_weights
+												;disable usage of dependent features for resdiual computation to prevent recursive behaviour in reacts
+												has_dependent_features (false)
+												filtering_queries context_condition_filter_query
+											))
+											"action_values"
+										)
+									)
+							))
+
+							(call_sandboxed
+								(call !ParseDerivedFeatureCode (assoc
+									code_string (get !featureAttributes [action_feature "derived_feature_code"])
+									label_to_code
+										(lambda
+											(if (= (lambda label_value) 0)
+												;pull the feature value
+												(get case (lambda label_name))
+
+												(null)
+											)
+										)
+								))
+								{"case" (append (zip react_context_features corresponding_context_values) values_for_derivation_map)}
+								!sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit
+							)
+						)
+					)
+					action_features
+				)
+		}
 	)
 
 )
