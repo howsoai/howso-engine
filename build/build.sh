@@ -73,7 +73,7 @@ test() {
   update_version_file ${engine_version}
   cd ${src_dir}/unit_tests
   echo "Running howso-engine unit tests with amalgam version \"${amlg_version}\"..."
-  "${amlg_exe}" --debug-internal-memory ./ut_comprehensive_unit_test.amlg | tee /tmp/ut_results
+  "${amlg_exe}" --no-warn-on-undefined --debug-internal-memory ./ut_comprehensive_unit_test.amlg | tee /tmp/ut_results
   reset_version_file
   local ut_res=$(cat /tmp/ut_results | grep "PASSED : Total comprehensive test execution time" | wc -l)
   if [ $ut_res \< 1 ]; then
@@ -94,7 +94,7 @@ performance_test() {
 
   update_version_file ${engine_version}
   echo "Running howso-engine performance tests with amalgam version \"${amlg_version}\"..."
-  "${amlg_exe}" ./run_performance_tests.amlg | tee /tmp/pt_results
+  "${amlg_exe}" --no-warn-on-undefined ./run_performance_tests.amlg | tee /tmp/pt_results
   reset_version_file
   local pt_res=$(cat /tmp/pt_results | grep "PASSED : Total comprehensive test execution time" | wc -l)
   if [ "$pt_res" \< 1 ]; then
