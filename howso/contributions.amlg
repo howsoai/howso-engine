@@ -20,6 +20,7 @@
 	;				  Defaults to 300 + 2 * (number of features).
 	; run_on_local_model: optional, if true will use all the provided cases and not store results to model
 	; context_condition_filter_query: a list of queries that can be used to filter the possible set of cases that can be used for predictions
+	; use_derivation_logic: flag, if true action feature will be derived and the features needed to derive will be predicted
 	#!CalculateFeatureContributions
 	(declare
 		(assoc
@@ -34,10 +35,10 @@
 			num_samples (null)
 			run_on_local_model (false)
 			context_condition_filter_query (list)
+			use_derivation_logic (true)
 		)
 
 		(declare (assoc
-			context_set (zip context_features)
 			action_is_nominal
 				(or
 					(contains_index !nominalsMap action_feature)
@@ -55,11 +56,61 @@
 					))
 				)
 			feature_contributions_map (assoc)
-			features (values (append context_features action_feature) (true))
 			num_training_cases (call !GetNumTrainingCases)
-			num_features (size context_features)
 			edit_distance_action_feature (contains_index !editDistanceFeatureTypesMap action_feature)
 			is_string_mixable (= "string_mixable" (get !editDistanceFeatureTypesMap action_feature))
+			deriving_action_feature
+				(and
+					use_derivation_logic
+					(not (contains_index !derivedFeaturesMap action_feature))
+					(get !featureAttributes [action_feature "derived_feature_code"])
+				)
+		))
+
+		(if deriving_action_feature
+			(seq
+				(declare (assoc
+					features_for_derivation (indices (get_all_labels (parse (get !featureAttributes [action_feature "derived_feature_code"]) )))
+					;will be used to indicate which features to predict for derivation
+					features_to_predict []
+				))
+
+				(if !tsTimeFeature
+					(let
+						(assoc
+							;the rate of change features for the action feature (deltas or rates)
+							rate_of_change_features_set
+								(zip (filter
+									(lambda
+										(and
+											(= (get !derivedFeaturesMap (current_value)) action_feature)
+											(or
+												(contains_value (get !tsModelFeaturesMap "rate_features") (current_value))
+												(contains_value (get !tsModelFeaturesMap "delta_features") (current_value))
+											)
+										)
+									)
+									features_for_derivation
+								))
+						)
+
+						;filter out the rate_of_change features of the action feature, these should always be derived/predicted and used for derivation
+						(assign (assoc
+							context_features
+								(filter
+									(lambda (not (contains_index rate_of_change_features_set (current_value))))
+									context_features
+								)
+						))
+					)
+				)
+			)
+		)
+
+		(declare (assoc
+			context_set (zip context_features)
+			features (values (append context_features action_feature) (true))
+			num_features (size context_features)
 		))
 
 		;for robust flows set a default number of reacts per case, 200 + 2 * num features
@@ -220,7 +271,8 @@
 										;this while statement should only loop in rare edge cases
 										(while all_flags_set
 											(assign (assoc remaining_feature_flags (map (lambda (< (rand) 0.5)) context_features) ))
-											(assign (assoc all_flags_set (apply "and" remaining_feature_flags) ))
+											;shortcut on the all_flags_set logic so that if there is only one context feature, it can be left in the context
+											(assign (assoc all_flags_set (and (!= (size context_features) 1) (apply "and" remaining_feature_flags)) ))
 										)
 										;filter out context features based on the bitmask and also create a set of all the removed features
 										(assign (assoc
@@ -229,19 +281,16 @@
 												(zip (filter (lambda (not (get remaining_feature_flags (current_index)) )) context_features) )
 										))
 
+										(if deriving_action_feature
+											(assign (assoc
+												features_to_predict (filter (lambda (not (contains_value filtered_context_features (current_value)))) features_for_derivation)
+											))
+										)
+
 										(assign (assoc
 											reaction
-												(call !ReactDiscriminative (assoc
+												(call !ContributionReact (assoc
 													context_features filtered_context_features
-													context_values (unzip case_values_map filtered_context_features)
-													action_features (list action_feature)
-													skip_decoding (true)
-													skip_encoding (true)
-													;ignore the local case
-													ignore_case case_id
-													details (assoc "categorical_action_probabilities" action_is_nominal)
-													hyperparam_map hyperparam_map
-													filtering_queries context_condition_filter_query
 												))
 											with_features_set (zip filtered_context_features)
 										))
@@ -425,6 +474,12 @@
 						deltas (list)
 					)
 
+					(if deriving_action_feature
+						(assign (assoc
+							features_to_predict (filter (lambda (not (contains_value filtered_context_features (current_value)))) features_for_derivation)
+						))
+					)
+
 					(assign (assoc
 						deltas
 							(map
@@ -445,30 +500,12 @@
 									(let
 										(assoc
 											reaction_with
-												(call !ReactDiscriminative (assoc
+												(call !ContributionReact (assoc
 													context_features (append filtered_context_features feature)
-													context_values (unzip case_values_map (append filtered_context_features feature))
-													action_features (list action_feature)
-													skip_decoding (true)
-													skip_encoding (true)
-													;ignore the local case
-													ignore_case case_id
-													details (assoc "categorical_action_probabilities" action_is_nominal)
-													hyperparam_map hyperparam_map
-													filtering_queries context_condition_filter_query
 												))
 											reaction_without
-												(call !ReactDiscriminative (assoc
+												(call !ContributionReact (assoc
 													context_features filtered_context_features
-													context_values (unzip case_values_map filtered_context_features)
-													action_features (list action_feature)
-													skip_decoding (true)
-													skip_encoding (true)
-													;ignore the local case
-													ignore_case case_id
-													details (assoc "categorical_action_probabilities" action_is_nominal)
-													hyperparam_map hyperparam_map
-													filtering_queries context_condition_filter_query
 												))
 											correct_value
 												(if action_is_nominal
@@ -492,7 +529,7 @@
 												)
 											)
 
-											;else continuous, output pair of [absolute, non-absolute] delta
+											;not nominal. treat as continuous, but could be edit distance
 											(if edit_distance_action_feature
 												(list
 													(edit_distance
@@ -507,6 +544,7 @@
 													)
 												)
 
+												;else continuous, output pair of [absolute, non-absolute] delta
 												(list
 													(abs (-
 														(get reaction_with (list "action_values" 0))
@@ -539,5 +577,71 @@
 				)
 			)
 	))
+
+	;helper method for Contributions that computes the react, but also derives the feature value if necessary
+	;specifically needs case_values_map, action feature, action_is_nominal, case_id, etc
+	;context_features should be passed alongside the call to this method.
+	#!ContributionReact
+	(if (not deriving_action_feature)
+		;simply react if no need to derive
+		(call !ReactDiscriminative (assoc
+			context_features context_features
+			context_values (unzip case_values_map context_features)
+			action_features (list action_feature)
+			skip_decoding (true)
+			skip_encoding (true)
+			;ignore the local case
+			ignore_case case_id
+			details (assoc "categorical_action_probabilities" action_is_nominal)
+			hyperparam_map hyperparam_map
+			filtering_queries context_condition_filter_query
+		))
+
+		;need to react to predict the non context features needed for derivation, then derive
+		(let
+			(assoc
+				values_for_derivation_map
+					(zip
+						features_to_predict
+						(get
+							(call !ReactDiscriminative (assoc
+								context_features context_features
+								context_values (unzip case_values_map context_features)
+								action_features features_to_predict
+								skip_decoding (true)
+								skip_encoding (true)
+								;ignore the local case
+								ignore_case case_id
+								details (assoc "categorical_action_probabilities" action_is_nominal)
+								hyperparam_map hyperparam_map
+								filtering_queries context_condition_filter_query
+							))
+							"action_values"
+						)
+					)
+			)
+
+			;this needs to look like the response of a react to the code calling it
+			{
+				"action_values"
+					[(call_sandboxed
+						(call !ParseDerivedFeatureCode (assoc
+							code_string (get !featureAttributes [action_feature "derived_feature_code"])
+							label_to_code
+								(lambda
+									(if (= (lambda label_value) 0)
+										;pull the feature value
+										(get case (lambda label_name))
+
+										(null)
+									)
+								)
+						))
+						{"case" (append case_values_map values_for_derivation_map)}
+						!sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit
+					)]
+			}
+		)
+	)
 
 )
