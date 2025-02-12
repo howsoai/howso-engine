@@ -65,7 +65,27 @@
 					(not (contains_index !derivedFeaturesMap action_feature))
 					(get !featureAttributes [action_feature "derived_feature_code"])
 				)
+			;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
+			ts_feature_lag_amount_map
+				(if !tsTimeFeature
+					(map
+						(lambda (or
+							;store value of 'max_row_lag' for lag features and 'ts_order' for delta or rate features
+							(get (current_value) "max_row_lag")
+							(get (current_value) "ts_order")
+						))
+						;only lag, delta and rate features have a ts_type defined
+						(filter
+							(lambda (get (current_value) "ts_type") )
+							!featureAttributes
+						)
+					)
+				)
+			max_lag_index_value (null)
 		))
+		(if !tsTimeFeature
+			(assign (assoc max_lag_index_value (apply "max" (values ts_feature_lag_amount_map)) ))
+		)
 
 		(if deriving_action_feature
 			(seq
@@ -230,6 +250,18 @@
 							correct_value (retrieve_from_entity (current_value 1) action_feature)
 							case_values_map (zip context_features (retrieve_from_entity (current_value 1) context_features))
 							local_case_reaction_pairs (list)
+							;save an inner version in this scope to update per case for time-series flows
+							context_features context_features
+						)
+
+						(if !tsTimeFeature
+							(assign (assoc
+								context_features
+									(call !FilterContextsBySeriesIndex (assoc
+										all_context_features context_features
+										series_index (retrieve_from_entity case_id ".series_index")
+									))
+							))
 						)
 
 						;for this local case, run num_robust_influence_samples_per_case reacts and output a list of pairs of [reacts_with_feature, reacts_without_feature]
@@ -487,7 +519,19 @@
 									(assoc
 										case_id (current_value 1)
 										case_values_map (zip features (retrieve_from_entity (current_value 1) features))
+										filtered_context_features filtered_context_features
 									)
+
+									(if !tsTimeFeature
+										(assign (assoc
+											filtered_context_features
+												(call !FilterContextsBySeriesIndex (assoc
+													all_context_features filtered_context_features
+													series_index (retrieve_from_entity case_id ".series_index")
+												))
+										))
+									)
+
 									;Labeled as a helper method so that feature contributions can be computed on a per-case basis provided the following parameters:
 									;  case_id: id of case for which to compute robust contributions
 									;  case_values_map: all the feature values from the case
@@ -511,6 +555,18 @@
 												(if action_is_nominal
 													(get case_values_map action_feature)
 												)
+										)
+
+										(if (= (null) (get reaction_with ["action_values" 0]))
+											(call !ContributionReact (assoc
+												context_features (append filtered_context_features feature)
+											))
+										)
+
+										(if (= (null) (get reaction_without ["action_values" 0]))
+											(call !ContributionReact (assoc
+												context_features filtered_context_features
+											))
 										)
 
 										;compute delta
@@ -638,7 +694,7 @@
 								)
 						))
 						{"case" (append case_values_map values_for_derivation_map)}
-						!sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit
+						!sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false)
 					)]
 			}
 		)

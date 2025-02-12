@@ -284,6 +284,19 @@
 			;	allow_null - default is true, if true nulls may be generated per their distribution in the data
 			; Only used when desired_conviction is specified
 			feature_bounds_map (assoc)
+			;{type "assoc" additional_indices {ref "GoalFeatures"}}
+			; assoc of :
+			;		{ feature : { "goal" : "min"/"max", "value" : value }}
+			;		A mapping of feature name to the goals for the feature, which will cause the react to achieve the goals as appropriate
+			;		for the context.  This is useful for conditioning responses when it is challenging or impossible to know appropriate
+			;		values ahead of time, such as maximizing the reward or minimizing cost for reinforcement learning, or conditioning a
+			;		forecast based on attempting to achieve some value.  Goal features will reevaluate the inference for the given context
+			;		optimizing for the specified goals. Valid keys in the map are:
+			;		"goal": "min" or "max", will make a prediction while minimizing or maximizing the value for the feature or
+			;		"value" : value, will make a prediction while approaching the specified value
+			;	note: nominal features only support 'value', 'goal' is ignored.
+			;		  for non-nominals, if both are provided, only 'goal' is considered.
+			goal_features_map (assoc)
 			;{type "list" values "string"}
 			;list of features that will preserve their values from the case specified by case_indices, appending and
 			;	overwriting the specified context and context features as necessary.  For generative reacts, if case_indices isn't specified,
@@ -486,6 +499,7 @@
 							desired_conviction desired_conviction
 							use_regional_residuals use_regional_residuals
 							feature_bounds_map feature_bounds_map
+							goal_features_map goal_features_map
 							ordered_by_specified_features ordered_by_specified_features
 							exclude_novel_nominals_from_uniqueness_check exclude_novel_nominals_from_uniqueness_check
 							generate_new_cases generate_new_cases
@@ -657,6 +671,19 @@
 			;	allow_null - default is true, if true nulls may be generated per their distribution in the data
 			; Only used when desired_conviction is specified
 			feature_bounds_map (assoc)
+			;{type "assoc" additional_indices {ref "GoalFeatures"}}
+			; assoc of :
+			;		{ feature : { "goal" : "min"/"max", "value" : value }}
+			;		A mapping of feature name to the goals for the feature, which will cause the react to achieve the goals as appropriate
+			;		for the context.  This is useful for conditioning responses when it is challenging or impossible to know appropriate
+			;		values ahead of time, such as maximizing the reward or minimizing cost for reinforcement learning, or conditioning a
+			;		forecast based on attempting to achieve some value.  Goal features will reevaluate the inference for the given context
+			;		optimizing for the specified goals. Valid keys in the map are:
+			;		"goal": "min" or "max", will make a prediction while minimizing or maximizing the value for the feature or
+			;		"value" : value, will make a prediction while approaching the specified value
+			;	note: nominal features only support 'value', 'goal' is ignored.
+			;		  for non-nominals, if both are provided, only 'goal' is considered.
+			goal_features_map (assoc)
 			;{type "list" values "string"}
 			;list of features that will preserve their values from the case specified by case_indices, appending and
 			;	overwriting the specified context and context features as necessary.  For generative reacts, if case_indices isn't specified,
@@ -762,6 +789,7 @@
 					desired_conviction desired_conviction
 					use_regional_residuals use_regional_residuals
 					feature_bounds_map feature_bounds_map
+					goal_features_map goal_features_map
 					ordered_by_specified_features ordered_by_specified_features
 					exclude_novel_nominals_from_uniqueness_check exclude_novel_nominals_from_uniqueness_check
 					generate_new_cases generate_new_cases
@@ -839,6 +867,7 @@
 			case_indices (null)
 			use_regional_residuals (true)
 			feature_bounds_map (assoc)
+			goal_features_map (assoc)
 			preserve_feature_values (list)
 			new_case_threshold "min"
 			pre_generated_uniques_map (null)
@@ -928,6 +957,7 @@
 									desired_conviction desired_conviction
 									use_regional_residuals use_regional_residuals
 									feature_bounds_map feature_bounds_map
+									goal_features_map goal_features_map
 									ordered_by_specified_features ordered_by_specified_features
 									exclude_novel_nominals_from_uniqueness_check exclude_novel_nominals_from_uniqueness_check
 									;forcibly attempt to generate a novel case on all passes except for the last one if generate_new_cases = 'attempt'
@@ -967,6 +997,7 @@
 									desired_conviction desired_conviction
 									use_regional_residuals use_regional_residuals
 									feature_bounds_map feature_bounds_map
+									goal_features_map goal_features_map
 									ordered_by_specified_features ordered_by_specified_features
 									exclude_novel_nominals_from_uniqueness_check exclude_novel_nominals_from_uniqueness_check
 									;forcibly generate a novel case on all passes except for the last one if generate_new_cases = 'attempt'
@@ -1132,6 +1163,7 @@
 							leave_case_out leave_case_out
 							weight_feature weight_feature
 							use_case_weights use_case_weights
+							goal_features_map goal_features_map
 							preserve_feature_values preserve_feature_values
 							new_case_threshold new_case_threshold
 							allow_nulls allow_nulls
@@ -1273,7 +1305,8 @@
 		)
 
 		(declare (assoc
-			candidate_cases_lists
+			local_model_cases_tuple
+				#!ReactionQuery
 				(compute_on_contained_entities
 					(append
 						not_null_features_queries
@@ -1314,13 +1347,23 @@
 				)
 		))
 
+		(if goal_features
+			(call !UpdateLocalInfluencesForGoals (assoc
+				feature_weights feature_weights
+				context_features context_features
+				context_values context_values
+				custom_extra_filtering_queries custom_extra_filtering_queries
+				query_label "!ReactionQuery"
+			))
+		)
+
 		;populate filtering_queries for details if necessary
 		(call !PopulateFilteringQueriesForDetails)
 
 		;if there is no context or local model, calculate the expected value
 		(if (or
 				(= (list) context_features)
-				(= 0 (size (first candidate_cases_lists)))
+				(= 0 (size (first local_model_cases_tuple)))
 			)
 			(let
 				(assoc
@@ -1347,9 +1390,9 @@
 			;else interpolate the result from the nearest neighbors
 			(call !InterpolateActionValues (assoc
 				action_feature (first action_features)
-				candidate_case_ids (first candidate_cases_lists)
-				candidate_case_weights (get candidate_cases_lists 1)
-				candidate_case_values (last candidate_cases_lists)
+				candidate_case_ids (first local_model_cases_tuple)
+				candidate_case_weights (get local_model_cases_tuple 1)
+				candidate_case_values (last local_model_cases_tuple)
 				allow_nulls allow_nulls
 			))
 		)
