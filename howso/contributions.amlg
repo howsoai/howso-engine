@@ -116,6 +116,9 @@
 		(declare (assoc
 			context_set (zip context_features)
 			features (values (append context_features action_feature) (true))
+			;all context features that should get contributions
+			all_context_features context_features
+			all_context_features_indices_map (zip context_features (indices context_features))
 			num_features (size context_features)
 		))
 
@@ -200,15 +203,6 @@
 			(conclude (list feature_contributions_map directional_contributions_map))
 		)
 
-		(declare (assoc
-			identifier_map
-				(assoc
-					".robust" robust
-					".weight_feature" weight_feature
-					".action_feature" action_feature
-				)
-		))
-
 		(associate
 			(concat "feature_contributions_" (if robust "robust" "full") )
 				feature_contributions_map
@@ -237,21 +231,22 @@
 							case_values_map (zip context_features (retrieve_from_entity (current_value 1) context_features))
 							local_case_reaction_pairs (list)
 							;save an inner version in this scope to update per case for time-series flows
-							context_features context_features
+							context_features all_context_features
 						)
 
 						;TODO: Turn this back on, but find a way to not disrupt following code
 						;with it on, the changing number of context features hurts the size of the sublists in accrued_cases_deltas_lists
 						;which are assumed to contain one list per context feature later.
-						; (if !tsTimeFeature
-						; 	(assign (assoc
-						; 		context_features
-						; 			(call !FilterContextsBySeriesIndex (assoc
-						; 				all_context_features context_features
-						; 				series_index (retrieve_from_entity case_id ".series_index")
-						; 			))
-						; 	))
-						; )
+						(if !tsTimeFeature
+							(assign (assoc
+								;the legal context_features for this case, by time_series rules
+								context_features
+									(call !FilterContextsBySeriesIndex (assoc
+										all_context_features context_features
+										series_index (retrieve_from_entity case_id ".series_index")
+									))
+							))
+						)
 
 						;for this local case, run num_robust_influence_samples_per_case reacts and output a list of pairs of [reacts_with_feature, reacts_without_feature]
 						;Example output of a *single* react execution for a 4 feature dataset where the react value was 0.75 and it only used 'a' and 'd' as contexts:
@@ -291,15 +286,37 @@
 										;ensure that at least one feature is removed
 										;this while statement should only loop in rare edge cases
 										(while all_flags_set
-											(assign (assoc remaining_feature_flags (map (lambda (< (rand) 0.5)) context_features) ))
+											(assign (assoc remaining_feature_flags (map (lambda (< (rand) 0.5)) all_context_features) ))
+											(if (< (size context_features) (size all_context_features))
+												;ensure TS filtered features stay false
+												(let
+													(assoc
+														original_indices_for_context_features
+															(unzip all_context_features_indices_map context_features)
+													)
+													;keeps only those flags that match the original indices for remaining context_features
+													(assign (assoc
+														remaining_feature_flags
+															(map
+																(lambda
+																	(if (contains_value original_indices_for_context_features (current_index))
+																		(current_value)
+																		(false)
+																	)
+																)
+																remaining_feature_flags
+															)
+													))
+												)
+											)
 											;shortcut on the all_flags_set logic so that if there is only one context feature, it can be left in the context
 											(assign (assoc all_flags_set (and (!= (size context_features) 1) (apply "and" remaining_feature_flags)) ))
 										)
 										;filter out context features based on the bitmask and also create a set of all the removed features
 										(assign (assoc
-											filtered_context_features (filter (lambda (get remaining_feature_flags (current_index))) context_features)
+											filtered_context_features (filter (lambda (get remaining_feature_flags (current_index))) all_context_features)
 											without_features_set
-												(zip (filter (lambda (not (get remaining_feature_flags (current_index)) )) context_features) )
+												(zip (filter (lambda (not (get remaining_feature_flags (current_index)) )) all_context_features) )
 										))
 
 										(if deriving_action_feature
@@ -335,7 +352,7 @@
 												(lambda
 													(if (contains_index with_features_set (current_value)) react_value)
 												)
-												context_features
+												all_context_features
 											)
 
 											;all removed features with this react_value as the 'without' list
@@ -343,7 +360,7 @@
 												(lambda
 													(if (contains_index without_features_set (current_value)) react_value)
 												)
-												context_features
+												all_context_features
 											)
 										)
 									))
@@ -436,7 +453,7 @@
 								)
 
 							))
-							context_features
+							all_context_features
 						)
 					))
 					case_ids
@@ -451,29 +468,37 @@
 		(assign (assoc
 			feature_contributions_map
 				(zip
-					(or details_context_features context_features)
+					(or details_context_features all_context_features)
 					(map
 						(lambda (let
 							(assoc feature_index (current_index 1) )
-							(list
-								;for each feature, iterate over the list of feature deltas for each case, and average them out
-								(/
-									(apply "+" (map
+							(declare (assoc
+								abs_avgs
+									;these lists must be filtered because some cases will
+									;have some context features completely filtered due to TS
+									(filter (map
 										(lambda (get (current_value) (list feature_index 0)) )
 										accrued_cases_delta_lists
 									))
-									(size accrued_cases_delta_lists)
-								)
-								(/
-									(apply "+" (map
+								avgs
+									(filter (map
 										(lambda (get (current_value) (list feature_index 1)) )
 										accrued_cases_delta_lists
 									))
-									(size accrued_cases_delta_lists)
+							))
+							(list
+								;for each feature, iterate over the list of feature deltas for each case, and average them out
+								(/
+									(apply "+" abs_avgs)
+									(size abs_avgs)
+								)
+								(/
+									(apply "+" avgs)
+									(size avgs)
 								)
 							)
 						))
-						(or details_context_features context_features)
+						(or details_context_features all_context_features)
 					)
 				)
 		))
