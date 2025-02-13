@@ -484,11 +484,12 @@
 	;;Helper method for GenerateCase that given existing contexts and an action_feature, pick the value for that action_feature from the region around the contexts
 	#!GetNextActionValueGivenContexts
 	(seq
-
-		(call !CreateAndCacheTimeSeriesFilterQuery (assoc
-			regional_model_context_features context_features
-			regional_model_context_values context_values
-		))
+		(if use_time_series_filter_query
+			(call !CreateAndCacheTimeSeriesFilterQuery (assoc
+				regional_model_context_features context_features
+				regional_model_context_values context_values
+			))
+		)
 
 		(assign (assoc
 			react_map
@@ -515,22 +516,10 @@
 				action_value (get react_map "action_value")
 			))
 
-			;else select action value by weighted probability using the weight of each cases's influence as the probability
 			(seq
-				(assign (assoc local_case_ids (get react_map "local_case_ids")))
+				(if use_regional_residuals (assign (assoc local_case_ids (get react_map "local_case_ids"))) )
 
-				(declare (assoc
-					;randomly choose a neighbor case index by its weight
-					random_weighted_case_id
-					(rand
-						;pass in associated lists of index of local case -> its weight in the order of
-						;local_case_ids to ensure reproduceability for random seeds
-						(get react_map "local_model_cases_map")
-					)
-				))
-
-				;pull action value from the randomly selected case by the weight of the case's influence
-				(assign (assoc action_value (retrieve_from_entity random_weighted_case_id feature)))
+				(assign (assoc action_value (get react_map "action_value") ))
 			)
 		)
 
@@ -539,7 +528,7 @@
 			regional_model_context_values (append context_values action_value)
 		))
 
-		(call !CreateAndCacheTimeSeriesFilterQuery)
+		(if use_time_series_filter_query (call !CreateAndCacheTimeSeriesFilterQuery) )
 
 		;for continuous fetaures, when not running RMR, pull the local case ids around the predicted value to approximate
 		;the residual using feature gaps in the localized area around the currently generated case
@@ -577,13 +566,9 @@
 	#!GetInitialActionValue
 	(let
 		(assoc
-			case_id
+			random_case_values_map
 				(first
-					(contained_entities (append
-						(if custom_extra_filtering_queries
-							custom_extra_filtering_queries
-							(list)
-						)
+					(compute_on_contained_entities (append
 						(query_exists !internalLabelSession)
 						(if valid_weight_feature
 							;select case using weighted random
@@ -591,17 +576,18 @@
 							;else just select a random case
 							(query_sample 1 (null) (rand))
 						)
+						(map (lambda (query_exists (current_value))) (append action_features feature))
 					))
 				)
 		)
 
 		(assign (assoc
-			action_value (retrieve_from_entity case_id feature)
+			action_value (get random_case_values_map feature)
 			regional_model_context_features action_features
-			regional_model_context_values (retrieve_from_entity case_id action_features)
+			regional_model_context_values (unzip random_case_values_map action_features)
 		))
 
-		(call !CreateAndCacheTimeSeriesFilterQuery)
+		(if use_time_series_filter_query (call !CreateAndCacheTimeSeriesFilterQuery) )
 
 		;find the localized area around the starting case to use for residual approximation for this feature
 		(assign (assoc
@@ -672,7 +658,7 @@
 			))
 		)
 
-		(call !CreateAndCacheTimeSeriesFilterQuery)
+		(if use_time_series_filter_query (call !CreateAndCacheTimeSeriesFilterQuery) )
 
 		(assign (assoc
 			regional_model_cases_map
