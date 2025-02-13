@@ -227,7 +227,7 @@
 			target_residual_feature (null)
 			regional_model_only (false)
 			focal_case (null)
-			robust_residuals (false)
+			robust_residuals (null)
 			strict_case_ids (false)
 
 			;ordered by priority for the action set, with the 'case_ids' parameters having the top priority.
@@ -286,6 +286,7 @@
 			;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
 			ts_feature_lag_amount_map (null)
 			max_lag_index_value (null)
+			feature_mda_map (null)
 			original_features (replace features)
 		))
 
@@ -428,6 +429,21 @@
 			))
 		)
 
+		;compute mda if necessary
+		(if (and (= "robust_mda" robust_residuals) (= (null) target_residual_feature))
+			(assign (assoc
+				feature_mda_map
+					(call !ComputeRobustTargetlessMDA (assoc
+						features original_features
+						case_residuals_lists case_residuals_lists
+					))
+			))
+
+			;TODO: fix this so it's not simply set residual to half its value (approximate average between this computed and theoretical smallest)
+			(assign (assoc
+				residuals_map (map (lambda (/ (current_value) 2)) residuals_map)
+			))
+		)
 
 		;for shared deviations, only one set of deviations are calculated for each group. At the end of the calculations,
 		; the deviations mapping is expanded to add back the other features whose deviations were not calculated and point them at the feature
@@ -494,6 +510,9 @@
 			;default index offset of where the actual case value is in each output react
 			actual_offset 1
 			predicted_offset 2
+			actual_nom_offset (if compute_all_statistics 2 1)
+			predicted_nom_offset (if compute_all_statistics 3 2)
+			cap_offset 1
 		))
 
 		;if some of the features are edit distance types, r2 and spearman coefficient don't apply since there's no mean or relative sorting
@@ -809,66 +828,91 @@
 
 		(assign (assoc
 			confusion_matrix_map
-				(zip
-					nominal_features
-					;iterate over nominal features, where (current_value) is a list of react tuples for each feature
-					(map
-						(lambda
-							(map
-								(lambda
-									(zip
-										;all collisions will increase the count value
-										;e.g. zipping ["small" "medium" "small"] will create { small 1 medium 1 } then accumulate a 1
-										;for the second "small" in the list since it's a key collision, resulting in { small 2 medium 1 }
-										(lambda (+ 1 (current_value 1)) )
-										;ensure to zip a list of classes instead of single value by converting it to a list if it isn't a list already
-										(if (~ [] (current_value))
+				;analyze uses confusion matrix to compute SDM, use Categorical Action Probabilities for higher fidelity of nominal residuals
+				(if in_analyze
+					(zip
+						nominal_features
+						(map
+							(lambda
+								(zip
+									(lambda
+										(map
+											(lambda
+												(apply "+" (filter (current_value)))
+											)
+											(current_value 1)
 											(current_value)
-											[(current_value 1)]
-										)
-										;zip all classes with a value of 1 so that all clases in the predicted list are assigned a value of 1
-										(range
-											(lambda 1)
-											1
-											;if there is only one entry for a value, then it's predicted values: (current_value)
-											;will be singular (not a list, size=0), so we bound the list of 1's to be at least size=1
-											(max 1 (size (current_value)))
-											1
 										)
 									)
+									(map (lambda (get (current_value) actual_nom_offset) ) (current_value))
+									(map (lambda (get (current_value) cap_offset) ) (current_value))
 								)
-								;keep only those class values that had non-null counts
-								(filter
-									(lambda (size (current_value)))
-									;nominal prediction tuples are in the format of [diff, actual, predicted]
-									;thus this iterates over the two corresponding lists of [actual] and [predicted] values
-									;accruing into an assoc of lists of predicted classes for every provided actual class, e.g.,
-									;given actual ["a" "a" "x" "x" "x"] and predicted ["a" "a" "x" "a" "x"] results in:
-									; {
-									;	"a" [ "a" a" ]
-									;	"x" [ "x "a" "x"]
-									; }
-									(map
-										;filter out the nulls out of the list of predicted values
-										(lambda (filter (replace (current_value))))
+							)
+							(unzip feature_residuals_lists nominal_indices)
+						)
+					)
+					;else compute confusion matrix using counts of correct guesses for each class
+					(zip
+						nominal_features
+						;iterate over nominal features, where (current_value) is a list of react tuples for each feature
+						(map
+							(lambda
+								(map
+									(lambda
 										(zip
-											;iterate over pairs of (actual value, predicted value), this lambda is run when there is a
-											;key collision (actual value). In that case append the new predicted value to get an assoc of
-											; actual values to the list of values they are predicted as
-											(lambda
-												(append (replace (current_value 1)) (list (replace (current_value 1))))
+											;all collisions will increase the count value
+											;e.g. zipping ["small" "medium" "small"] will create { small 1 medium 1 } then accumulate a 1
+											;for the second "small" in the list since it's a key collision, resulting in { small 2 medium 1 }
+											(lambda (+ 1 (current_value 1)) )
+											;ensure to zip a list of classes instead of single value by converting it to a list if it isn't a list already
+											(if (~ [] (current_value))
+												(current_value)
+												[(current_value 1)]
 											)
-											;(get (current_value) 1) refers to the actual case value in each react tuple
-											(map (lambda (replace (get (current_value) 1))) (current_value))
-											;and (get (current_value) 2) refers to the interpolated/predicted case value in
-											;each react tuple
-											(map (lambda (replace (get (current_value) 2))) (current_value))
+											;zip all classes with a value of 1 so that all clases in the predicted list are assigned a value of 1
+											(range
+												(lambda 1)
+												1
+												;if there is only one entry for a value, then it's predicted values: (current_value)
+												;will be singular (not a list, size=0), so we bound the list of 1's to be at least size=1
+												(max 1 (size (current_value)))
+												1
+											)
+										)
+									)
+									;keep only those class values that had non-null counts
+									(filter
+										(lambda (size (current_value)))
+										;nominal prediction tuples are in the format of [diff, actual, predicted]
+										;thus this iterates over the two corresponding lists of [actual] and [predicted] values
+										;accruing into an assoc of lists of predicted classes for every provided actual class, e.g.,
+										;given actual ["a" "a" "x" "x" "x"] and predicted ["a" "a" "x" "a" "x"] results in:
+										; {
+										;	"a" [ "a" a" ]
+										;	"x" [ "x "a" "x"]
+										; }
+										(map
+											;filter out the nulls out of the list of predicted values
+											(lambda (filter (replace (current_value))))
+											(zip
+												;iterate over pairs of (actual value, predicted value), this lambda is run when there is a
+												;key collision (actual value). In that case append the new predicted value to get an assoc of
+												; actual values to the list of values they are predicted as
+												(lambda
+													(append (replace (current_value 1)) (list (replace (current_value 1))))
+												)
+												;(get (current_value) 1) refers to the actual case value in each react tuple
+												(map (lambda (replace (get (current_value) actual_nom_offset))) (current_value))
+												;and (get (current_value) 2) refers to the interpolated/predicted case value in
+												;each react tuple
+												(map (lambda (replace (get (current_value) predicted_nom_offset))) (current_value))
+											)
 										)
 									)
 								)
 							)
+							(unzip feature_residuals_lists nominal_indices)
 						)
-						(unzip feature_residuals_lists nominal_indices)
 					)
 				)
 		))

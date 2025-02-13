@@ -315,6 +315,7 @@
 					(values (append context_features action_features) (true))
 				)
 			residuals_map (list)
+			last_iteration (false)
 		))
 
 		;possibly increase the number of samples if nominals are present
@@ -379,14 +380,24 @@
 													(query_min_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
 												))
 											)
+										num_buckets (size (compute_on_contained_entities [(query_value_masses (current_index 2) )]))
+										num_values (size (compute_on_contained_entities [(query_not_equals (current_index 2) (null))]))
 									)
 
 
 									;infinity means there was no gap, and nan means all values are null and can't compute gap
 									(if (or (= (null) min_gap) (= .infinity min_gap) (= .infinity max_gap))
 										1
-										;use average of max_gap/2 and min_gap/2
-										(/ (+ (/ max_gap 2) (/ min_gap 2)) 2)
+
+										;use the smaller of of max_gap * (1 - 1/num_buckets) or
+										;(average of max_gap/2 and min_gap/2) * sqrt(avg_num_values_per_bucket)
+										(min
+											(* max_gap (- 1 (/ 1 num_buckets)) )
+											(*
+												(sqrt (/ num_values num_buckets))
+												(/ (+ (/ max_gap 2) (/ min_gap 2)) 2)
+											)
+										)
 									)
 								)
 							)
@@ -397,11 +408,16 @@
 			))
 		)
 
+		(declare (assoc in_analyze (true) ))
+
 		;First pass uses inverse feature gap/2 values as weights to compute hyperparameters that should provide decent results.
 		;Second pass uses these decent residuals to finds even better hyperparmeters and improved residuals.
 		;Last pass finds usable hyperparams using the improved residuals and then calculates usable residuals for weights.
 		;At this point the hyperparameters and residuals and weights are stable enough for use.
 		(while (< iteration num_iterations)
+			(if (= iteration (- num_iterations 1))
+				(assign (assoc last_iteration (true) ))
+			)
 			(assign (assoc
 				residuals_map
 					(if (= 0 iteration)
@@ -421,9 +437,9 @@
 							feature_residuals_map
 								(call !CalculateFeatureResiduals (assoc
 									features features
-									robust_residuals (true)
+									robust_residuals "deviations" ;(true)
 									num_samples
-										(if (or (< iteration (- num_iterations 1)) (!= targeted_model "targetless"))
+										(if (or (not last_iteration) (!= targeted_model "targetless"))
 											residual_num_samples
 
 											;else on the last iteration, use
@@ -465,15 +481,28 @@
 					)
 			))
 
+			;grid search, unless last iteration, in which case simply compute accuracy by using existing k+p values
 			(assign (assoc
 				analyzed_hp_map
 					(call !ComputeResidualsAcrossParametersAndSelectOptimal (assoc
 						context_features context_features
 						action_features action_features
 						k_folds k_folds
-						k_values k_values
-						p_values (filter (lambda (!= 0 (current_value))) p_values)
-						dt_values dt_values
+						k_values
+							(if last_iteration
+								[(get baseline_hyperparameter_map "k")]
+								k_values
+							)
+						p_values
+							(if last_iteration
+								[(get baseline_hyperparameter_map "p")]
+								(filter (lambda (!= 0 (current_value))) p_values)
+							)
+						dt_values
+							(if last_iteration
+								[(get baseline_hyperparameter_map "dt")]
+								dt_values
+							)
 						k_folds_by_indices k_folds_by_indices
 						num_analysis_samples num_analysis_samples
 						targetless (= targeted_model "targetless")
@@ -482,6 +511,33 @@
 						use_inverse_weights (true)
 					))
 			))
+
+			;compute and store feature weights scaled by mda
+			(if last_iteration
+				(let
+					(assoc
+						residuals_map
+							(call !CalculateFeatureResiduals (assoc
+								features features
+								robust_residuals "robust_mda"
+								num_samples 10000
+								custom_hyperparam_map baseline_hyperparameter_map
+								;must compute confusion matrix to use sparse deviation matrix
+								compute_all_statistics (false)
+								;don't sparsify the confusion matrix so that SDM can be computed using full counts
+								confusion_matrix_min_count 0
+								use_shared_deviations (true)
+								;don't create copies of confusion matrices for non-primary shared deviation features
+								expand_confusion_matrices (false)
+							))
+					)
+
+					(accum (assoc
+						baseline_hyperparameter_map (assoc "featureMdaMap" (get residuals_map "feature_mda_map") )
+					))
+				)
+			)
+
 			(accum (assoc iteration 1))
 
 			(if (and
