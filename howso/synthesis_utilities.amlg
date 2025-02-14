@@ -6,16 +6,15 @@
 	; regional_model_context_features: list of context features
 	; regional_model_context_values: list of corresponding context values
 	#!CreateAndCacheTimeSeriesFilterQuery
-	(if use_time_series_filter_query
-		(if (= 0 (size cached_time_series_filter_query))
-			(let
-				(assoc context_map (zip regional_model_context_features regional_model_context_values) )
-				(if (contains_index context_map !tsTimeFeature)
-					(assign (assoc cached_time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
-				)
+	(if (= 0 (size cached_time_series_filter_query))
+		(let
+			(assoc context_map (zip regional_model_context_features regional_model_context_values) )
+			(if (contains_index context_map !tsTimeFeature)
+				(assign (assoc cached_time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
 			)
 		)
 	)
+
 
 	;returns the closest ordinal value for a specified ordinal feature value,
 	;e.g., if an ordinal feature has values of 0,5,10,15  specifying 11.4 would return 10
@@ -388,12 +387,9 @@
 
 		;create an interpolated probabilities map that's interpolated between local and global based on desired_conviction, where
 		;desired_conviction >=1 is local probabilities, 0=all classes except action_value are 1/N (uniform)
-		(declare (assoc
-			residual_blended_probabilities_map
-				(if (>= desired_conviction 1)
-					local_class_probabilities_map
-
-					;else desired_conviction < 1
+		(if (< desired_conviction 1)
+			(assign (assoc
+				local_class_probabilities_map
 					(let
 						(assoc local_model_has_zero_probability_classes (contains_value (values local_class_probabilities_map) 0))
 
@@ -486,22 +482,22 @@
 							)
 						)
 					)
-				)
-		))
+			))
+		)
 
-		(declare (assoc total_prob_values (apply "+" (values residual_blended_probabilities_map))))
+		(declare (assoc total_prob_values (apply "+" (values local_class_probabilities_map))))
 
 		;in the case of no probabilities, assign even probabilities to all
 		(if (= 0 total_prob_values)
 			(map
-				(lambda (/ 1 (size residual_blended_probabilities_map)))
-				residual_blended_probabilities_map
+				(lambda (/ 1 (size local_class_probabilities_map)))
+				local_class_probabilities_map
 			)
 
 			;output normalized probabilities that all add up to 1
 			(map
 				(lambda (/ (current_value) total_prob_values))
-				residual_blended_probabilities_map
+				local_class_probabilities_map
 			)
 		)
 	)
@@ -643,11 +639,7 @@
 							(null) ;radius
 							!numericalPrecision
 							;output sorted list case values along with weights
-							(if output_continuous_case_values
-								action_feature
-								;else output only sorted list of  weights
-								(true)
-							)
+							action_feature
 						)
 					)
 				)
@@ -705,31 +697,18 @@
 				(assign (assoc local_case_ids (trunc regional_case_ids local_k)))
 
 				;keep only the local k cases in the map
-				(if output_continuous_case_values
-					(assign (assoc
-						local_model_cases_map (zip local_case_ids (trunc (get local_model_cases_tuple 1) local_k))
-						local_model_case_values_map (zip local_case_ids (trunc (last local_model_cases_tuple) local_k))
-					))
-
-					(assign (assoc
-						local_model_cases_map (zip local_case_ids (trunc (last local_model_cases_tuple) local_k))
-					))
-				)
+				(assign (assoc
+					local_model_cases_map (zip local_case_ids (trunc (get local_model_cases_tuple 1) local_k))
+					local_model_case_values_map (zip local_case_ids (trunc (last local_model_cases_tuple) local_k))
+				))
 			)
 
 			;else the local case_ids are the same as the indices of local model map
-			(if output_continuous_case_values
-				(assign (assoc
-					local_case_ids (first local_model_cases_tuple)
-					local_model_cases_map (zip (first local_model_cases_tuple) (get local_model_cases_tuple 1))
-					local_model_case_values_map (zip (first local_model_cases_tuple) (last local_model_cases_tuple))
-				))
-
-				(assign (assoc
-					local_case_ids (first local_model_cases_tuple)
-					local_model_cases_map (zip (first local_model_cases_tuple) (last local_model_cases_tuple))
-				))
-			)
+			(assign (assoc
+				local_case_ids (first local_model_cases_tuple)
+				local_model_cases_map (zip (first local_model_cases_tuple) (get local_model_cases_tuple 1))
+				local_model_case_values_map (zip (first local_model_cases_tuple) (last local_model_cases_tuple))
+			))
 		)
 
 		(declare (assoc local_cases_total_weight (apply "+" (values local_model_cases_map))))
@@ -756,72 +735,48 @@
 		(if feature_is_nominal
 			(let
 				(assoc
-					categorical_value_weights_map (assoc)
-					action_value (null)
-				)
-
-				(if (= .infinity local_cases_total_weight)
-					(let
-						(assoc
-							neighbor_id_to_values_map
-								(map
-									(lambda (retrieve_from_entity (current_index) action_feature))
-									;only consider perfect match neighbors by filtering out those with a weight of 0
-									(filter (lambda (= 1 (current_value))) local_model_cases_map)
+					categorical_value_weights_map
+						(if (= .infinity local_cases_total_weight)
+							(let
+								(assoc
+									neighbor_id_to_values_map
+										;only keep perfect match neighbors that have a weight of 1
+										(filter
+											(lambda (= 1 (get local_model_cases_map (current_index))) )
+											local_model_case_values_map
+										)
 								)
-						)
 
-						;since these are perfect matches, they all have equal weight
-						(declare (assoc value_weight (/ 1 (size neighbor_id_to_values_map))))
-
-						;iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
-						;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
-						(assign (assoc
-							categorical_value_weights_map
+								;iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+								;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
 								(zip
 									(lambda (+ (current_value 1) (current_value)))
 									(values neighbor_id_to_values_map)
-									value_weight
+									;since these are perfect matches, they all have equal weight
+									(/ 1 (size neighbor_id_to_values_map))
 								)
-						))
-					)
+							)
 
-					;else iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
-					;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
-					(assign (assoc
-						categorical_value_weights_map
+							;else iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+							;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
 							(zip
 								(lambda (+ (current_value 1) (current_value)))
 								;feature value for each case
 								(map
-									(lambda (retrieve_from_entity (current_value) action_feature))
+									(lambda (get local_model_case_values_map (current_value)))
 									(indices local_model_cases_map)
 								)
 
 								;weights of corresponding case
 								(values local_model_cases_map)
 							)
-					))
-				)
-
-				;sort the assoc of discrete values by their weights from high to low
-				;returns the first (highest weighted) categorical value
-				(assign (assoc
-					action_value
-						(first
-							(sort
-								(lambda (>
-									(get categorical_value_weights_map (current_value 1))
-									(get categorical_value_weights_map (current_value))
-								))
-								(indices categorical_value_weights_map)
-							)
 						)
-				))
+				)
 
 				;categorical action feature output
 				(assoc
-					"action_value" action_value
+					;returns the highest weighted categorical value
+					"action_value" (first (index_max categorical_value_weights_map))
 					"categorical_value_weights_map" categorical_value_weights_map
 					"local_model_cases_map" local_model_cases_map
 				)
@@ -829,7 +784,9 @@
 
 			;else continuous action feature output
 			(assoc
-				"local_model_case_values_map" local_model_case_values_map
+				;select action value by weighted probability using the weight of each cases's influence as the probability
+				"action_value" (get local_model_case_values_map (rand local_model_cases_map))
+				"local_model_case_values_map" (if output_continuous_case_values local_model_case_values_map {})
 				"local_model_cases_map" local_model_cases_map
 				"regional_case_ids" regional_case_ids
 				"local_case_ids" local_case_ids
