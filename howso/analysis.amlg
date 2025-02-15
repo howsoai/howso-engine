@@ -74,10 +74,6 @@
 			;when true will scale influence weights by each case's weight_feature weight. if use_case_weights isn't specified, it will
 			;	be true if auto ablation is enabled and false otherwise
 			use_case_weights (null)
-			;{type ["boolean" "null"]}
-			;whether to use inverse residuals as feature weights. If unspecified, inverse residuals will be used as weights for
-			; targetless params, otherwise this method will not be used.
-			inverse_residuals_as_weights (null)
 			;{type "list" values "string"}
 			;list of features whose values to use to rebalance case weighting of the data and to store into weight_feature
 			rebalance_features (null)
@@ -154,7 +150,6 @@
 					"targeted_model" targeted_model
 					"num_analysis_samples" num_analysis_samples
 					"analysis_sub_model_size" analysis_sub_model_size
-					"inverse_residuals_as_weights" inverse_residuals_as_weights
 					"use_case_weights" use_case_weights
 					"weight_feature" weight_feature
 					"rebalance_features" rebalance_features
@@ -245,7 +240,6 @@
 				k_folds_by_indices k_folds_by_indices
 				targeted_model targeted_model
 				num_analysis_samples num_analysis_samples
-				inverse_residuals_as_weights inverse_residuals_as_weights
 				residual_num_samples (if (> num_samples 0) num_samples 200)
 				use_case_weights use_case_weights
 				weight_feature weight_feature
@@ -491,8 +485,6 @@
 	;   "targetless" = analyze hyperparameters for all context features as possible action features, ignores action_features parameter
 	; context_features: list of context features to analyze for
 	; action_features: list of action features to analyze for
-	; inverse_residuals_as_weights : optional, default is null, will be set to false for targeted and true for targetless
-	;			when true will forcibly compute and use inverse of residuals as feature weights
 	; num_analysis_samples: optional. number of cases to sample during analysis. only applies for k_folds = 1
 	; residual_num_samples: optional. initial number of samples to use for computing residuals
 	; derived_auto_analyzed: optional, if true, will set the 'derivedAutoAnalyzed' parameter to true in the hyperparameter set,
@@ -504,7 +496,7 @@
 			context_features (list)
 			action_feature (null)
 			num_analysis_samples (null)
-			residual_num_samples 200
+			residual_num_samples 1000
 		)
 
 		(declare (assoc
@@ -538,38 +530,16 @@
 			use_deviations (false)
 		))
 
-		(if inverse_residuals_as_weights
+		(if (= "targetless" targeted_model)
 			(conclude (seq
-				;if use_deviations is (true), then IRW without deviations does not need to be computed at all
-				(if (!= use_deviations (true))
-					(seq
-						(call !ConvergeIRW (assoc use_deviations (false))) ;iterations of ComputeResiduals and GridSearch
-						(call !BackupAnalyzedHyperparameters)
-						(if (= (false) use_deviations)
-							(seq
-								;IRW always needs subtrainee
-								(if (and use_dynamic_deviations (not !useDynamicDeviationsDuringAnalyze))
-									; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
-									(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
-								)
-								(conclude (call !SetModelHyperParameters))
-							)
-						)
-					)
-				)
-
-				(call !ConvergeIRW (assoc use_deviations (true)))	;iterations of ComputeResiduals and GridSearch
-				(if (= (null) use_deviations)
-					(call !KeepOrRevertHyperparameters)
-
-					(assign (assoc baseline_hyperparameter_map analyzed_hp_map))
-				)
+				(call !ConvergeTargetless)
 
 				;IRW always needs subtrainee
 				(if (and use_dynamic_deviations (not !useDynamicDeviationsDuringAnalyze))
 					; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
 					(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
 				)
+
 				(call !SetModelHyperParameters)
 			))
 		)
@@ -672,7 +642,14 @@
 
 		(call !InitResiduals)
 
-		(call !RunFullResiduals)
+		(assign (assoc in_analyze (true) ))
+
+		(if (= targeted_model "targetless")
+			(call !ComputeDeviations)
+
+			;targeted runs full residuals to match targeted flow
+			(call !RunFullResiduals)
+		)
 
 		(assign (assoc
 			deviation_subtrainee_name
@@ -809,18 +786,8 @@
 			)
 		)
 
-		;if inverse_residuals_as_weights isn't defined, default it to true for targetless, false for targeted
-		(if (= (null) inverse_residuals_as_weights)
-			(assign (assoc inverse_residuals_as_weights (= targeted_model "targetless") ))
-		)
-
 		(assign (assoc
-			baseline_hyperparameter_map
-				(call !GetHyperparameters (assoc
-					feature action_feature
-					context_features context_features
-					weight_feature weight_feature
-				))
+			baseline_hyperparameter_map (replace (retrieve_from_entity "!defaultHyperparameters"))
 		))
 
 		;if using default targetless hyperparameters, set p to 1 as the starting p value
@@ -828,7 +795,15 @@
 				(= "targetless" targeted_model)
 				(= [".default"] (get baseline_hyperparameter_map "paramPath"))
 			)
-			(assign (assoc baseline_hyperparameter_map (set baseline_hyperparameter_map "p" 1) ))
+			(assign (assoc
+				baseline_hyperparameter_map
+					(set
+						baseline_hyperparameter_map
+						"k" (if (size k_values) (first k_values) 20)
+						"p" 1
+						"dt" "surprisal_to_prob"
+					)
+			))
 		)
 
 		;store the paramPath for this hyperparameter set so it has a reference to where it's stored in !hyperparameterMetadataMap
@@ -950,7 +925,6 @@
 	; targetless : optional flag, if true will randomly select a context feature as an action feature for each case during grid search
 	; num_analysis_samples : optional. number of cases to sample during analysis. only applies for k_folds = 1
 	; baseline_hyperparameter_map : the base hyperparameters to use for computation
-	; use_inverse_weights: if true, will compute inverse residual weights (IRW) during the grid search for use in error computations
 	#!ComputeResidualsAcrossParametersAndSelectOptimal
 	(declare
 		(assoc
@@ -969,7 +943,6 @@
 			targetless (false)
 			num_analysis_samples (null)
 			baseline_hyperparameter_map (assoc)
-			use_inverse_weights (false)
 		)
 
 		;can't do analysis if there is a max of one context feature provided and no different action features
@@ -988,23 +961,36 @@
 		(if (= (null) k_values)
 			(assign (assoc
 				k_values
-					;grid search fibonacci sequence
 					(if (= targeted_model "targetless")
-						(list 5 8 13)
+						;20 is the maximum cutoff for a total marginal probability of 95% using dynamic K
+						[20]
 
-						(list 3 5 8 13 21 34 55 89 144)
+						;grid search fibonacci sequence
+						[3 5 8 13 21 34 55 89 144]
 					)
 			))
 		)
 		(if (= (null) p_values)
 			(assign (assoc
-				p_values (list 0.1 0.5 1 2)
+				p_values
+					(if (= targeted_model "targetless")
+						[1]
+
+						[0.1 0.5 1 2]
+					)
 			))
 		)
 
 		;if dt is null, default it to -1, if it's empty list set it to the recommended default search list
 		(if (= (null) dt_values )
-			(assign (assoc dt_values (list -1)))
+			(assign (assoc
+				dt_values
+					(if (= targeted_model "targetless")
+						["surprisal_to_prob"]
+
+						[-1]
+					)
+			))
 
 			(= (list) dt_values)
 			(assign (assoc dt_values (list -8 -2 -1 -0.5 0)))
@@ -1209,67 +1195,7 @@
 		;output updated hyperparam map
 		(append
 			baseline_hyperparameter_map
-
-			;overwrite with the autotuned k and p values
-			(if (not use_inverse_weights)
-				output_map
-
-				;else compute and output the corresponding IRW with the parameters
-				(append
-					output_map
-					(assoc
-						"featureWeights"
-							;set inverted residuals to be 1 / (residual^p), unless it's 0 (or within floating point error of 0)
-							(map
-								(lambda
-									;ensure that inactive features always maintain a feature weight of 0
-									(if (contains_index !inactiveFeaturesMap (current_index))
-										0
-
-										(call !ConvertDeviationToFeatureWeight (assoc
-											feature_is_nominal (contains_index !nominalsMap (current_index 1) )
-											feature_deviation (current_value 1)
-											p_value (get output_map "p")
-										))
-									)
-
-								)
-								(get baseline_hyperparameter_map "featureResiduals")
-							)
-					)
-				)
-			)
-		)
-	)
-
-	;helper method to convert deviation value to feature weight given a deviation and p value
-	;parameters:
-	; feature_is_nominal: flag, set to true if feature is nominal
-	; feature_deviation: value or tuple as passed in from the hyperparameter map
-	; p_value: p value from the hyperarameter map
-	#!ConvertDeviationToFeatureWeight
-	(let
-		(assoc
-			deviation_value
-				(if feature_is_nominal
-					;if the deviation is an assoc containing a sparse deviation matrix, pull the expected deviation value from it
-					(if (~ (assoc) feature_deviation)
-						(get feature_deviation "expected_deviation")
-
-						feature_deviation
-					)
-
-					;else continuous
-					feature_deviation
-				)
-		)
-
-		;tiny values < 1e13 mean it's a floating point percision error, set IRW to 1 / residual ^ p
-		(if (> deviation_value 1e-13)
-			(/ 1 (pow deviation_value p_value))
-
-			;else set it to 1 because there is no residual
-			1
+			output_map
 		)
 	)
 
@@ -1392,40 +1318,7 @@
 	#!AccumulateErrorsViaGridSearch
 	(map
 		(lambda (let
-			(assoc
-				p_value (current_value 1)
-				inverted_residuals_map (null)
-			)
-
-			;compute IRW if residuals for IRW map was provided
-			(if use_inverse_weights
-				(assign (assoc
-					;set inverted residuals to be 1 / (residual^p), unless it's 0 (or within floating point error of 0)
-					;in which case set it to 1 as to not affect the feature since it's already accurate
-					;each feature's residual value will be on the same scale as the feature itself, e.g., for large feature values
-					;like billions, a residual of a few percent will be in the tens of millions, for tiny feature values, the
-					;residual values will also be tiny.  Thus deviding each feature by its residual scales the large values down
-					;and small values up.  If the residual is within an order or two of magnitude, this weighing still
-					;effectively normalizes the data.  Relatively large residuals also scale the values smaller,
-					;decreasing the effect of features that are noisy and hard to predict.
-					inverted_residuals_map
-						(map
-							(lambda
-								;ensure that inactive features always maintain a feature weight of 0
-								(if (contains_index !inactiveFeaturesMap (current_index))
-									0
-
-									(call !ConvertDeviationToFeatureWeight (assoc
-										feature_is_nominal (contains_index !nominalsMap (current_index 1) )
-										feature_deviation (current_value 1)
-										p_value p_value
-									))
-								)
-							)
-							(get baseline_hyperparameter_map "featureResiduals")
-						)
-				))
-			)
+			(assoc p_value (current_value 1))
 
 			(map
 				(lambda (let
@@ -1452,16 +1345,6 @@
 												(append
 													baseline_hyperparameter_map
 													(assoc "p" p_value "k" k_value "dt" dt_value)
-
-													;if using inverse weights, overwrite existing weights in baseline_hyperparameter_map
-													(if use_inverse_weights
-														(assoc
-															"featureWeights" inverted_residuals_map
-															"featureDeviations" (get baseline_hyperparameter_map "featureDeviations")
-														)
-
-														(assoc)
-													)
 												)
 										)
 										;extra conditional params
