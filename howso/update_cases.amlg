@@ -543,6 +543,7 @@
 			batch_of_cases []
 			closest_cases_maps {}
 			entropy_weights []
+			rebalance_case_weights (null)
 		))
 		(declare (assoc k_param (get hyperparam_map "k") ))
 		;if k_param is a dynamic k tuple, use the max k value to compute the larger possible max_influence_entropy
@@ -561,6 +562,12 @@
 				batch_of_cases (unzip cases (range case_index (+ case_index batch_size -1)))
 			))
 
+			(if rebalance_weights
+				(assign (assoc
+					rebalance_case_weights (call !ComputeRebalanceCaseWeights (assoc rebalance_cases batch_of_cases))
+				))
+			)
+
 			;store all the local models for the cases in one pass
 			(assign (assoc
 				closest_cases_maps (call !ComputeClosestCasesMapsForAccumulation)
@@ -576,10 +583,28 @@
 								case_weight
 									(if (!= (null) weight_feature_index)
 										(get batch_of_cases [ (current_index 2) weight_feature_index ] )
-										;assume weight of 1 if weight feature values are not given
+										;assume weight of 1 if weight feature values are not explicitly provided
 										1
 									)
-								total_weight (apply "+" (values (current_value 1)))
+								total_neighbor_influence (apply "+" (values (current_value 1)))
+							)
+
+							(if rebalance_weights
+								(seq
+									(accum (assoc
+										total_mass 1
+										total_rebalance_mass (get rebalance_case_weights (current_index 1))
+									))
+									;scale case weight so the total mass of the dataset remains the same, as though it wasn't rebalanced
+									(assign (assoc
+										case_weight
+											(*
+												case_weight
+												(get rebalance_case_weights (current_index 1))
+												(/ total_mass total_rebalance_mass)
+											)
+									))
+								)
 							)
 
 							(declare (assoc
@@ -587,28 +612,66 @@
 									;iterate over all the closest cases and accumulate the normalized weight to each one
 									(map
 										(lambda (seq
+											(if rebalance_weights
+												(let
+													(assoc
+														case_old_weights_pair (retrieve_from_entity (current_index 1) [ accumulate_weight_feature !internalLabelProbabilityMass ] )
+													)
+													;accumulate to probability mass
+													(declare (assoc
+														new_probability_mass (+ (or (last case_old_weights_pair) 1) case_weight)
+													))
+													;scale old weight by new_prob_mass / old_prob_mass
+													(declare (assoc
+														new_case_weight
+															(*
+																(* (or (first case_old_weights_pair) 1) (/ (current_value 1) total_neighbor_influence) )
+																(/ new_probability_mass (or (last case_old_weights_pair) 1) )
+															)
+													))
 
-											;if accumulate_weight_feature label doesn't exist in this case, add it with a weight `1`
-											(if (not (contains_label (current_index) accumulate_weight_feature))
-												(accum_entity_roots (current_index)
-													(zip_labels
-														(list accumulate_weight_feature)
-														(list (+ 1 (* (/ (current_value 1) total_weight) case_weight)) )
+													(if (not (contains_label (current_index) accumulate_weight_feature))
+														(accum_entity_roots (current_index)
+															(zip_labels
+																[ accumulate_weight_feature !internalLabelProbabilityMass ]
+																[ new_case_weight new_probability_mass ]
+															)
+														)
+
+														;else label exists, set to new values
+														(assign_to_entities
+															(current_index)
+															(associate
+																accumulate_weight_feature new_case_weight
+																!internalLabelProbabilityMass new_probability_mass
+															)
+														)
 													)
 												)
 
-												;else label exists, accumulate to it
-												(accum_to_entities
-													(current_index)
-													(associate
-														accumulate_weight_feature
-															(* (/ (current_value 1) total_weight) case_weight)
+												;else no rebalance weights, accumulate to weight feature
+												;if accumulate_weight_feature label doesn't exist in this case, add it with a weight `1`
+												(if (not (contains_label (current_index) accumulate_weight_feature))
+													(accum_entity_roots (current_index)
+														(zip_labels
+															(list accumulate_weight_feature)
+															(list (+ 1 (* (/ (current_value 1) total_neighbor_influence) case_weight)) )
+														)
+													)
+
+													;else label exists, accumulate to it
+													(accum_to_entities
+														(current_index)
+														(associate
+															accumulate_weight_feature
+																(* (/ (current_value 1) total_neighbor_influence) case_weight)
+														)
 													)
 												)
 											)
 
 											;normalize influence
-											(/ (current_value) total_weight)
+											(/ (current_value) total_neighbor_influence)
 										))
 										;closest_cases_map
 										(current_value 1)
@@ -755,6 +818,7 @@
 					))
 				)
 
+				;;;TODO: update for rebalance features to distribute to probability mass and to update case weight based on prob_mass
 				(assign (assoc total_weight (apply "+" (values closest_cases_map))))
 
 				;iterate over all the closest cases and accumulate the normalized weight to each one
