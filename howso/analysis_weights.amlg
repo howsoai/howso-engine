@@ -532,20 +532,20 @@
 					context_features context_features
 					weight_feature weight_feature
 				))
-			;assoc of case_id -> weight from continuous rebalance features
-			case_continuous_weights_map (null)
+			;assoc of case_id -> weight from rebalance features
+			case_weights_map (null)
 		))
 
 		(if (size continuous_rebalance_features)
-			(seq
-				(assign (assoc
+			(let
+				(assoc
 					closest_k (get hyperparameter_map "k")
 					feature_weights (get hyperparameter_map "featureWeights")
 					feature_deviations (get hyperparameter_map "featureDeviations")
 					p_value (get hyperparameter_map "p")
 					dt_value (if (= (get hyperparameter_map "dt") "surprisal_to_prob") "surprisal" (get hyperparameter_map "dt") )
 					query_feature_attributes_map (get hyperparameter_map "featureDomainAttributes")
-				))
+				)
 
 				;set feature deviations to be inverse of residuals if using surprisal
 				(if (and (= 0 (size feature_deviations)) (= "surprisal" dt_value))
@@ -556,7 +556,7 @@
 
 				;store the assoc of case_id -> weight
 				(assign (assoc
-					case_continuous_weights_map
+					case_weights_map
 						(map
 							(lambda
 								;convert surprisal to probabilities, smaller DC -> smaller probability
@@ -587,208 +587,144 @@
 							))
 						)
 				))
-
-				;store distance contributions into cases here if there are no nominal rebalance features
-				(if (= 0 (size nominal_rebalance_features))
-					(call !StoreCaseValues (assoc
-						label_name weight_feature
-						case_values_map case_continuous_weights_map
-					))
-				)
 			)
 		)
 
-		;set global continuous_rebalance_features variable to store these values during future train() calls
-		(assign_to_entities (assoc
-			!continuousRebalanceFeatures (if (size continuous_rebalance_features) continuous_rebalance_features)
-			!nominalRebalanceFeatures (if (size nominal_rebalance_features) nominal_rebalance_features)
-		))
-
-		(if (= 0 (size nominal_rebalance_features))
-			(conclude)
-		)
-
-		(declare (assoc num_cases (call !GetNumTrainingCases) ))
-		(declare (assoc
-			;assoc of { feature -> { value -> weight } }
-			feature_value_weight_map
-				(map
-					(lambda (let
-						(assoc feature (current_index 1))
-						(declare (assoc
-							;the scalar value for each feature is: num_cases / num_classes
-							feature_scalar
-								(/
-									num_cases
-									(size
-										(compute_on_contained_entities (list
-											(query_value_masses feature (null)
-												(or
-													(not (contains_index !nominalsMap feature))
-													(contains_index !numericNominalFeaturesMap feature)
-												)
-											)
-										))
-									)
-								)
-						))
-
-						;store class counts as weights (reciprocal of count) for all cases for each id feature
-						;multiplied by the scalar so that the total mass of the dataset remains the same, as though it was unweighted
+		(if (size nominal_rebalance_features)
+			(let
+				(assoc
+					;assoc of { feature -> { value -> weight } }
+					feature_value_weight_map
 						(map
-							(lambda (/ feature_scalar (current_value)) )
+							(lambda (let
+								(assoc feature (current_index 1))
 
-							;grab the count of each class
-							(compute_on_contained_entities (list
-								(query_value_masses
-									feature
-									(if !autoAblationEnabled weight_feature (null))
-									;as numeric value
-									(or
-										(not (contains_index !nominalsMap feature))
-										(contains_index !numericNominalFeaturesMap feature)
-									)
+								;store class counts as weights (reciprocal of count) for all cases for each id feature
+								(map
+									(lambda (/ 1 (current_value)) )
+
+									;grab the count of each class
+									(compute_on_contained_entities (list
+										(query_value_masses
+											feature
+											(if !autoAblationEnabled weight_feature (null))
+											;as numeric value
+											(or
+												(not (contains_index !nominalsMap feature))
+												(contains_index !numericNominalFeaturesMap feature)
+											)
+										)
+									))
 								)
 							))
+							(zip nominal_rebalance_features)
 						)
-					))
-					(zip nominal_rebalance_features)
 				)
-		))
 
-		(if (= 1 (size nominal_rebalance_features))
-			(let
-				(assoc feature (first nominal_rebalance_features))
-				;store .case_weight to be same as the weight for the one id feature
-				(call !StoreCaseValues (assoc
-					case_values_map
+				;overwrite case_weights_map to the product of all the rebalance feature weights
+				(assign (assoc
+					case_weights_map
 						(map
 							(lambda (let
 								(assoc
-									current_case_weight
-										(if !autoAblationEnabled
-											(let
-												(assoc case_value_and_weight (unzip (current_value 2) [feature weight_feature]) )
-
-												;divide existing case weight by previous rebalance value to undo the old rebalance
-												(/
-													(or (last case_value_and_weight) 1)
-													(if !cachedRebalanceClassValueWeightMap
-														(or
-															(get !cachedRebalanceClassValueWeightMap [feature (first case_value_and_weight)])
-															(get !cachedRebalanceUnknownValueWeightMap feature)
-														)
-														;else class weight values haven't been cached yet, divide by 1 to leave original case weight as-is
-														1
-													)
-												)
-											)
-
-											;else weight of case is 1
-											1
-										)
-									case_id (current_index 1)
+									feature_classes_map (current_value 1)
 								)
 
-								;rebalance weight by multiplying it by rebalance feature weights
+								;case weight is product of all the rebalance features' weights
 								(*
-									current_case_weight
-
-									(if case_continuous_weights_map
-										(get case_continuous_weights_map case_id)
+									;get the continuous value for this case if exists
+									(if case_weights_map
+										(get case_weights_map (current_index))
 										1
 									)
 
-									(get
-										feature_value_weight_map
-										[ feature (get (current_value 1) feature) ]
+									;multiply all the case weights for all the nominal features
+									(apply "*"
+										;list of all the case weights for all the nominal features
+										(map
+											(lambda
+												(get
+													feature_value_weight_map
+													[ (current_value 1) (get feature_classes_map (current_value 1)) ]
+												)
+											)
+											nominal_rebalance_features
+										)
 									)
 								)
 							))
-							(compute_on_contained_entities [
-								(query_exists weight_feature)
-								(query_exists feature)
-							])
+
+							;iterate over all nominal rebalance features and pull their class values
+							(compute_on_contained_entities
+								(map (lambda (query_exists (current_value))) nominal_rebalance_features)
+							)
 						)
-					label_name weight_feature
 				))
 			)
-
-			;else there are several nominal rebalance features, compute and store .case_weight
-			;as the product of all nominal rebalance feature case weights for each case
-			(call !StoreCaseValues (assoc
-				case_values_map
-					(map
-						(lambda (let
-							(assoc
-								case_id (current_index 1)
-								feature_values_map (current_value 1)
-							)
-							(declare (assoc
-								current_case_weight
-									(if !autoAblationEnabled
-										;divide existing case weight by previous rebalance value to undo the old rebalance
-										(/
-											(or (get feature_values_map weight_feature) 1)
-											(if !cachedRebalanceClassValueWeightMap
-												(apply "*"
-													(map
-														(lambda
-															(or
-																(get
-																	!cachedRebalanceClassValueWeightMap
-																	[ (current_value 1) (get feature_values_map (current_value 1)) ]
-																)
-																(get !cachedRebalanceUnknownValueWeightMap (current_value))
-															)
-														)
-														nominal_rebalance_features
-													)
-												)
-												;else class weight values haven't been cached yet, divide by 1 to leave original case weight as-is
-												1
-											)
-										)
-
-										;else weight of case is 1
-										1
-									)
-							))
-
-							;rebalance weight by multiplying it by rebalance feature weights
-							(*
-								current_case_weight
-
-								(if case_continuous_weights_map
-									(get case_continuous_weights_map case_id)
-									1
-								)
-
-								;multiply all the case weights for all the id features
-								(apply "*"
-									;list of all the case weights for all the id features
-									(map
-										(lambda
-											(get
-												feature_value_weight_map
-												[ (current_value 1) (get feature_values_map (current_value 1)) ]
-											)
-										)
-										nominal_rebalance_features
-									)
-								)
-							)
-						))
-						(compute_on_contained_entities
-							(map (lambda (query_exists (current_value))) (append nominal_rebalance_features weight_feature))
-						)
-					)
-				label_name weight_feature
-			))
 		)
 
-		;cache the newly computed rebalance class values
+		(declare (assoc
+			total_mass (if (not !autoAblationEnabled) (call !GetNumTrainingCases))
+		))
+
+		(if !autoAblationEnabled
+			(let
+				(assoc
+					case_probability_mass_map
+						(compute_on_contained_entities [
+							(query_exists !internalLabelProbabilityMass)
+						])
+				)
+				(assign (assoc
+					total_mass
+						(reduce
+							(lambda
+								(+
+									(previous_result)
+									(get (current_value) !internalLabelProbabilityMass)
+								)
+							)
+							(values case_probability_mass_map)
+						)
+					;scale each weight by its probability mass
+					case_weights_map
+						(map
+							(lambda
+								(*
+									(first (current_value))
+									(or (get (current_value) [ 1 !internalLabelProbabilityMass ] ) 1)
+								)
+							)
+							case_weights_map
+							case_probability_mass_map
+						)
+				))
+			)
+		)
+
+		(declare (assoc
+			total_rebalance_mass (apply "+" (values case_weights_map))
+		))
+		(declare (assoc scalar (/ total_mass total_rebalance_mass)))
+
+		;store the rebalance weights into cases
+		(call !StoreCaseValues (assoc
+			label_name weight_feature
+			case_values_map
+				;multiply by the scalar so that the total mass of the dataset remains the same, as though it wasn't rebalanced
+				(map
+					(lambda (* scalar (current_value)))
+					case_weights_map
+				)
+		))
+
 		(assign_to_entities (assoc
+			;set global continuous_rebalance_features variable to store these values during future train() calls
+			!continuousRebalanceFeatures (if (size continuous_rebalance_features) continuous_rebalance_features)
+			!nominalRebalanceFeatures (if (size nominal_rebalance_features) nominal_rebalance_features)
+			!cachedRebalanceTotalMass total_rebalance_mass
+			!cachedTotalMass total_mass
+
 			!cachedRebalanceClassValueWeightMap feature_value_weight_map
 			!cachedRebalanceUnknownValueWeightMap
 				;store the average weight as the unknown
