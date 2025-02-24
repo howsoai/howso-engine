@@ -684,18 +684,43 @@
 		(if (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
 			(let
 				(assoc
-					case_weights (call !ComputeRebalanceCaseWeights (assoc rebalance_cases cases ))
+					rebalance_case_weights (call !ComputeRebalanceCaseWeights (assoc rebalance_cases cases ))
+					total_mass (replace !cachedTotalMass)
+					total_rebalance_mass (replace !cachedRebalanceTotalMass)
 				)
 
 				(assign (assoc
 					cases
 						(map
-							(lambda (append (current_value) (get case_weights (current_index))))
+							(lambda (let
+								(assoc case_weight (get rebalance_case_weights (current_index 1)) )
+
+								(accum (assoc
+									total_mass 1
+									total_rebalance_mass case_weight
+								))
+
+								(append
+									(current_value)
+									;scale case weight so the total mass of the dataset remains the same, as though it wasn't rebalanced
+									(* case_weight (/ total_mass total_rebalance_mass))
+
+									;probability mass is always 1 for new cases
+									(if !autoAblationEnabled 1 [])
+								)
+							))
 							cases
 						)
 				))
 
-				(accum (assoc train_features (if !autoAblationEnabled accumulate_weight_feature ".case_weight") ))
+				(accum (assoc
+					train_features
+						;if ablation is enabled but not needed for this batch of cases
+						(if !autoAblationEnabled
+							[accumulate_weight_feature !internalLabelProbabilityMass]
+							".case_weight"
+						)
+				))
 			)
 
 			;if ablation is enabled but is not needed for this batch of cases,
@@ -734,15 +759,6 @@
 	#!TrainCasesWithAblation
 	(let
 		(assoc
-			train_features
-				;if auto ablate is enabled, populate the weight feature for this case
-				(if !autoAblationEnabled
-					(append features (list !autoAblationWeightFeature))
-					features
-				)
-		)
-
-		(declare (assoc
 			batch_data_mass_threshold 0
 			batch_data_mass 0
 			batch_size 0
@@ -759,7 +775,22 @@
 			prev_prediction_stats_map {}
 			new_prediction_stats_map {}
 			thresholds_satisfied (false)
-		))
+
+			rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+			train_features
+				;if auto ablate is enabled, populate the weight and probability mass features for this case
+				(if !autoAblationEnabled
+					(if (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+						(append features [ !autoAblationWeightFeature !internalLabelProbabilityMass ] )
+						(append features [ !autoAblationWeightFeature ] )
+					)
+
+					(or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+					(append features ".case_weight")
+
+					features
+				)
+		)
 
 		;split by batches of cases until next analyze
 		(while (< input_case_index (size cases))
@@ -966,15 +997,11 @@
 			ablation_trained_instance_count (size indices_to_train)
 		))
 
-		(declare (assoc
-			rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
-			case_weights (null)
-		))
-
 		(if rebalance_weights
-			(assign (assoc
-				case_weights
-					(call !ComputeRebalanceCaseWeights (assoc rebalance_cases (unzip cases indices_to_train) ))
+			(declare (assoc
+				rebalance_case_weights (call !ComputeRebalanceCaseWeights (assoc rebalance_cases (unzip cases indices_to_train) ))
+				total_mass (replace !cachedTotalMass)
+				total_rebalance_mass (replace !cachedRebalanceTotalMass)
 			))
 		)
 
@@ -983,7 +1010,10 @@
 			output_cases
 				(map
 					(lambda (let
-						(assoc feature_values (get cases (current_value 1)) )
+						(assoc
+							feature_values (get cases (current_value 1))
+							rebalance_case_weight (null)
+						)
 						(if encode_features_on_train
 							(assign (assoc
 								feature_values
@@ -992,6 +1022,22 @@
 										features features
 									))
 							))
+						)
+						(if rebalance_weights
+							(seq
+								(accum (assoc
+									total_mass 1
+									total_rebalance_mass (get rebalance_case_weights (current_index 1))
+								))
+								;scale case weight so the total mass of the dataset remains the same, as though it wasn't rebalanced
+								(assign (assoc
+									rebalance_case_weight
+										(*
+											(get rebalance_case_weights (current_index 1))
+											(/ total_mass total_rebalance_mass)
+										)
+								))
+							)
 						)
 
 						;create the case and output case id
@@ -1002,9 +1048,16 @@
 								(if !autoAblationEnabled
 									(append
 										feature_values
-										;if rebalance weight is specified, use it, else store a weight of 1
-										(if rebalance_weights (get case_weights (current_index 1)) [1])
+										;if rebalance weights are used, store them and probability mass of 1, else just store a weight of 1
+										(if rebalance_weights
+											[ rebalance_case_weight 1 ]
+											1
+										)
 									)
+
+									rebalance_weights
+									(append feature_values rebalance_case_weight)
+
 									feature_values
 								)
 							session (get_value session)
@@ -1308,11 +1361,6 @@
 			nominal_rebalance_features !nominalRebalanceFeatures
 			feature_value_weight_map (null)
 			nominal_rebalance_feature_indices (null)
-
-			;since case weights are a product of nominal and continuous rebalance feature values,
-			;if there are no continuous values, set the default weight for continuous rebalance features to 1
-			;when using surprisal math, this value should be large so that 1 - e^-value = 1
-			default_continuous_weight (if (= "surprisal_to_prob" (get hyperparam_map "dt")) 9e15 1)
 		))
 
 		;if there are nominal rebalance features, pull the corresponding nominal value weights
@@ -1350,9 +1398,6 @@
 								use_case_weights !autoAblationEnabled
 								weight_feature weight_feature
 							))
-
-							;else default to the default value
-							default_continuous_weight
 						)
 					;default nominal weight to 1
 					nominal_rebalance_features_weight 1
@@ -1372,6 +1417,7 @@
 										(unzip (current_value 1) nominal_rebalance_feature_indices)
 									)
 						)
+						;TODO: Grab most updated counts  ;;;
 						(assign (assoc
 							nominal_rebalance_features_weight
 								;grab the weight for this value of the one nominal rebalance feature
@@ -1404,15 +1450,19 @@
 					)
 				)
 
-
-				(*
-					nominal_rebalance_features_weight
-					;convert suprisal to probability
-					(if (= "surprisal_to_prob" dt_parameter)
-						(- 1 (exp (- distance_contribution)) )
-						;else store DC as-is
-						distance_contribution
+				;product of all the rebalance feature weights
+				(if distance_contribution
+					(*
+						nominal_rebalance_features_weight
+						;convert suprisal to probability
+						(if (= "surprisal_to_prob" dt_parameter)
+							(- 1 (exp (- distance_contribution)) )
+							;else store DC as-is
+							distance_contribution
+						)
 					)
+					;else only the nominal rebalance weight
+					nominal_rebalance_features_weight
 				)
 			))
 			rebalance_cases
