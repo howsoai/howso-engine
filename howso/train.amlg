@@ -149,7 +149,12 @@
 
 		;don't train the data, only accumulate weights to neighbors
 		(if (and train_weights_only accumulate_weight_feature)
-			(seq
+			(let
+				(assoc
+					rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+					total_mass (replace !cachedTotalMass)
+					total_rebalance_mass (replace !cachedRebalanceTotalMass)
+				)
 				(call !AccumulateCaseInfluenceWeights (assoc
 					features features
 					accumulate_weight_feature accumulate_weight_feature
@@ -160,6 +165,13 @@
 				(accum_to_entities session (assoc
 					".total_instance_count" (size cases)
 				))
+
+				(if rebalance_weights
+					(assign_to_entities (assoc
+						!cachedTotalMass total_mass
+						!cachedRebalanceTotalMass total_rebalance_mass
+					))
+				)
 
 				(accum_to_entities (assoc !revision 1))
 
@@ -704,13 +716,17 @@
 									(current_value)
 									;scale case weight so the total mass of the dataset remains the same, as though it wasn't rebalanced
 									(* case_weight (/ total_mass total_rebalance_mass))
-
 									;probability mass is always 1 for new cases
-									(if !autoAblationEnabled 1 [])
+									1
 								)
 							))
 							cases
 						)
+				))
+
+				(assign_to_entities (assoc
+					!cachedTotalMass total_mass
+					!cachedRebalanceTotalMass total_rebalance_mass
 				))
 
 				(accum (assoc
@@ -718,7 +734,7 @@
 						;if ablation is enabled but not needed for this batch of cases
 						(if !autoAblationEnabled
 							[accumulate_weight_feature !internalLabelProbabilityMass]
-							".case_weight"
+							[".case_weight" !internalLabelProbabilityMass]
 						)
 				))
 			)
@@ -786,10 +802,18 @@
 					)
 
 					(or !continuousRebalanceFeatures !nominalRebalanceFeatures)
-					(append features ".case_weight")
+					(append features [ ".case_weight" !internalLabelProbabilityMass ] )
 
 					features
 				)
+		)
+
+		(if rebalance_weights
+			(declare (assoc
+				rebalance_case_weights (null)
+				total_mass (replace !cachedTotalMass)
+				total_rebalance_mass (replace !cachedRebalanceTotalMass)
+			))
 		)
 
 		;split by batches of cases until next analyze
@@ -915,6 +939,13 @@
 			output_case_ids
 		)
 
+		(if rebalance_weights
+			(assign_to_entities (assoc
+			 	!cachedTotalMass total_mass
+				!cachedRebalanceTotalMass total_rebalance_mass
+			))
+		)
+
 		output_case_ids
 	)
 
@@ -998,10 +1029,8 @@
 		))
 
 		(if rebalance_weights
-			(declare (assoc
+			(assign (assoc
 				rebalance_case_weights (call !ComputeRebalanceCaseWeights (assoc rebalance_cases (unzip cases indices_to_train) ))
-				total_mass (replace !cachedTotalMass)
-				total_rebalance_mass (replace !cachedRebalanceTotalMass)
 			))
 		)
 
@@ -1044,19 +1073,13 @@
 						(call !CreateCase (assoc
 							features train_features
 							feature_values
-								;if auto ablate is enabled, populate the weight feature for this case
-								(if !autoAblationEnabled
-									(append
-										feature_values
-										;if rebalance weights are used, store them and probability mass of 1, else just store a weight of 1
-										(if rebalance_weights
-											[ rebalance_case_weight 1 ]
-											1
-										)
-									)
+								(if rebalance_weights
+									;store rebalance weight and probability mass of 1
+									(append feature_values [ rebalance_case_weight 1 ])
 
-									rebalance_weights
-									(append feature_values rebalance_case_weight)
+									;if auto ablate is enabled, populate the weight feature for this case
+									!autoAblationEnabled
+									(append feature_values 1)
 
 									feature_values
 								)
@@ -1083,13 +1106,6 @@
 						cases
 						(remove (indices cases) indices_to_train)
 					)
-			))
-		)
-
-		(if rebalance_weights
-			(assign_to_entities (assoc
-			 	!cachedTotalMass total_mass
-				!cachedRebalanceTotalMass total_rebalance_mass
 			))
 		)
 
