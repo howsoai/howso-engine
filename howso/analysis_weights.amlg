@@ -580,16 +580,19 @@
 				))
 
 				(if !autoAblationEnabled
-					;distance contributions are multiplied by their own case weights for anomaly detection flows
-					;but for rebalancing, the more dense a case, the less it should contribute/the smaller its influence should be
-					;thus the need to divide this scaled DC the square of its own probability mass,
-					;to revert back to the base DC value and to scale down the base DC by that mass
+					;current implementation compute_entity_distance_contributions multiplies the computed "base d.c." (distance contribution if the case had a weight of 1)
+					;by each cases's own weight, this is useful for anomaly detection, but for rebalancing, the opposite is necessary because the more massive a case,
+					;the less its rebalanced weight/influence should be (e.g, case with weight of 10 is like having 10 exact dupes, each with 1/10th of their original influence).
+					;To get back to "base d.c." values, each computed value above is divided by each case's own weight. Rebalancing needs these "base d.c."s to be
+					;scaled down appropriately as explained above, thus each is divided a second time by their own weight, scaling their relative influence down by their mass.
 					(assign (assoc
 						case_weights_map
 							(map
 								(lambda
 									(/
 										(first (current_value))
+										;divide the computed d.c. by the case's mass twice (square of the mass),
+										;once to revert back to the "base d.c." (with a weight 1), second to scale down for rebalancing
 										(or
 											(pow (get (current_value) [1 !internalLabelProbabilityMass]) 2)
 											1
@@ -677,41 +680,31 @@
 			)
 		)
 
+		;total mass is set to the number of cases, but if ablation is enabled, it's the sum of all accumulated probability masses
 		(declare (assoc
-			total_mass (if (not !autoAblationEnabled) (call !GetNumTrainingCases))
+			total_mass
+				(if !autoAblationEnabled
+					(compute_on_contained_entities [ (query_exists !internalLabelProbabilityMass) (query_sum !internalLabelProbabilityMass )])
+					;else number of cases
+					(call !GetNumTrainingCases)
+				)
 		))
 
 		(if !autoAblationEnabled
-			(let
-				(assoc
-					case_probability_mass_map
+			(assign (assoc
+				;scale each weight by its probability mass
+				case_weights_map
+					(map
+						(lambda
+							(*
+								(first (current_value))
+								(or (get (current_value) [ 1 !internalLabelProbabilityMass ] ) 1)
+							)
+						)
+						case_weights_map
 						(compute_on_contained_entities [ (query_exists !internalLabelProbabilityMass) ])
-				)
-				(assign (assoc
-					total_mass
-						(reduce
-							(lambda
-								(+
-									(previous_result)
-									(get (current_value) !internalLabelProbabilityMass)
-								)
-							)
-							(values case_probability_mass_map)
-						)
-					;scale each weight by its probability mass
-					case_weights_map
-						(map
-							(lambda
-								(*
-									(first (current_value))
-									(or (get (current_value) [ 1 !internalLabelProbabilityMass ] ) 1)
-								)
-							)
-							case_weights_map
-							case_probability_mass_map
-						)
-				))
-			)
+					)
+			))
 		)
 
 		(declare (assoc
