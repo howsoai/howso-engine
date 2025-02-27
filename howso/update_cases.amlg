@@ -754,13 +754,20 @@
 	; features: feature set to use for finding neighbors
 	; case_ids: list of model case ids whose weights need to be distributed
 	; distribute_weight_feature : name of feature into which to pull cases' weight and distribute neighbors' influences as weight.
+	; has_rebalance_features: flag, if set to true will also distribute out probability mass to !internalLabelProbabilityMass
 	#!DistributeCaseInfluenceWeights
 	(declare
 		(assoc
 			features !trainedFeatures
 			case_ids (list)
 			distribute_weight_feature ".case_weight"
+			has_rebalance_features (false)
 		)
+
+		(declare (assoc original_distribute_weight_feature distribute_weight_feature))
+
+		;for rebalance weights, use the built-in probability mass feature for distribution
+		(if has_rebalance_features (assign (assoc distribute_weight_feature !internalLabelProbabilityMass)) )
 
 		(declare (assoc
 			hyperparam_map
@@ -779,16 +786,11 @@
 		(map
 			(lambda (let
 				(assoc
-					case (current_value 1)
+					case (current_index 1)
 					closest_cases_map (assoc)
-					total_weight 0
+					total_influence 0
 					;case weight value that needs to be distributed among the neighbors
-					case_weight (retrieve_from_entity (current_value 1) distribute_weight_feature)
-				)
-
-				;if case doesn't have a weight, default it to 1.0
-				(if (= (null) case_weight)
-					(assign (assoc case_weight 1.0))
+					case_weight (or (get (current_value 1) distribute_weight_feature) 1)
 				)
 
 				(assign (assoc
@@ -824,26 +826,92 @@
 					))
 				)
 
-				;;;TODO: update for rebalance features to distribute to probability mass and to update case weight based on prob_mass
-				(assign (assoc total_weight (apply "+" (values closest_cases_map))))
+				(assign (assoc total_influence (apply "+" (values closest_cases_map))))
 
-				;iterate over all the closest cases and accumulate the normalized weight to each one
-				(map
-					(lambda (seq
-						;if distribute_weight_feature label doesn't exist in this case, add it with a weight `1`
-						(if (not (contains_label (current_index) distribute_weight_feature))
-							(accum_entity_roots (current_index) new_weight_label_and_value)
-						)
+				;populate neighbor cases' masses and update their case weights accordingly
+				;eg, if 2 neighbor are splitting this case_weight evenly among them, their masses will both go up by 0.5
+				;and their case weights will be scaled up relative the increase in each of their masses,
+				;a neighbor with a case_weight of 0.8 and a mass of 4, will have a new mass of 4.5 and a weight of 0.9
+				(if has_rebalance_features
+					(map
+						(lambda (let
+							(assoc
+								neighbor_case_id (current_index 1)
+								old_neighbor_mass (or (get (current_value 1) !internalLabelProbabilityMass) 1)
+							)
 
-						;distribute the corresponding portion of this case's weight based on the neighbor's influence
-						(accum_to_entities
-							(current_index)
-								(associate
-									distribute_weight_feature (* case_weight (/ (current_value 1) total_weight))
+							;new neighbor mass = old neighbor mass + normalized influence
+							(declare (assoc
+								new_neighbor_mass
+									(+
+										old_neighbor_mass
+										;normalized portion of influence to accumulate to neighbor
+										(/ (get closest_cases_map neighbor_case_id) total_influence)
+									)
+							))
+
+							;new neighbor case weight = old case weight * new probability mass / old probability mass
+							(declare (assoc
+								new_neighbor_case_weight
+									(*
+										(or (get (current_value 1) original_distribute_weight_feature) 1)
+										(/ new_neighbor_mass old_neighbor_mass)
+									)
+							))
+
+							(if (and
+									(contains_label neighbor_case_id original_distribute_weight_feature)
+									(contains_label neighbor_case_id !internalLabelProbabilityMass)
 								)
-						)
-					))
-					closest_cases_map
+								(assign_to_entities neighbor_case_id (associate
+									original_distribute_weight_feature new_neighbor_case_weight
+									!internalLabelProbabilityMass new_neighbor_mass
+								))
+
+								;else only has the case weight label
+								(contains_label neighbor_case_id original_distribute_weight_feature)
+								(seq
+									(assign_to_entities neighbor_case_id (associate original_distribute_weight_feature new_neighbor_case_weight ))
+									(accum_entity_roots neighbor_case_id (associate !internalLabelProbabilityMass new_neighbor_mass ))
+								)
+
+								;else only has the mass label
+								(contains_label neighbor_case_id !internalLabelProbabilityMass)
+								(seq
+									(assign_to_entities neighbor_case_id (associate !internalLabelProbabilityMass new_neighbor_mass ))
+									(accum_entity_roots neighbor_case_id (associate original_distribute_weight_feature new_neighbor_case_weight ))
+								)
+
+								;else has neither labels
+								(accum_entity_roots neighbor_case_id (associate
+									original_distribute_weight_feature new_neighbor_case_weight
+									!internalLabelProbabilityMass new_neighbor_mass
+								))
+							)
+						))
+						;create an assoc of case id -> { .case_weight : value, .probability_mass : value} for each neighbor
+						(compute_on_contained_entities [
+							(query_in_entity_list (indices closest_cases_map))
+							(query_exists original_distribute_weight_feature)
+							(query_exists !internalLabelProbabilityMass)
+						])
+					)
+
+					;else iterate over neighboring cases and accumulate the normalized weight to each one
+					(map
+						(lambda (seq
+							;if distribute_weight_feature label doesn't exist in this case, add it with a weight `1`
+							(if (not (contains_label (current_index) distribute_weight_feature))
+								(accum_entity_roots (current_index) new_weight_label_and_value)
+							)
+
+							;distribute the corresponding portion of this case's weight based on the neighbor's influence
+							(accum_to_entities (current_index) (associate
+								distribute_weight_feature (* case_weight (/ (current_value 1) total_influence))
+							))
+						))
+						closest_cases_map
+					)
 				)
 
 				;also add the weight accumulated to each case to !dataMassChangeSinceLastAnalyze to ensure that cases trained as
@@ -851,7 +919,7 @@
 				; if enabled.
 				(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze case_weight))
 			))
-			case_ids
+			(compute_on_contained_entities [ (query_in_entity_list case_ids) (query_exists distribute_weight_feature) ])
 		)
 	)
 
