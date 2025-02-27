@@ -787,6 +787,7 @@
 			model_size (null)
 			use_case_weights (false)
 			weight_feature ".case_weight"
+			rebalance_weight_feature (null)
 		)
 
 		;if parameters aren't passed in, set them here
@@ -828,6 +829,13 @@
 			non_zero_distances 0
 			done (false)
 			harmonic_mean_of_non_zero_neighbors 0
+			dc_weight_feature
+				(if use_case_weights
+					(if rebalance_weight_feature
+						rebalance_weight_feature
+						weight_feature
+					)
+				)
 		))
 
 		(while (not done)
@@ -844,9 +852,14 @@
 							query_feature_attributes_map
 							feature_deviations
 							p_parameter
-							;pull actual distance or surprisal, not influence
-							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-							(if use_case_weights weight_feature (null))
+							;if weighted, pull surprisal because we'll need both probabilities and surprisals for computations
+							;for unweighted we only need probabilities
+							(if (= "surprisal_to_prob" dt_parameter)
+								(if dc_weight_feature "surprisal" "surprisal_to_prob")
+								;pull distance and not influence to compute distance contribution
+								1
+							)
+							dc_weight_feature
 							(rand)
 							(null) ;radius
 							!numericalPrecision
@@ -901,22 +914,67 @@
 				)
 		))
 
-		;if all the neighbors have zero distance, return a 0
 		(if (= "surprisal_to_prob" dt_parameter)
 			(let
 				(assoc
-					probabilities (map (lambda (exp (- (current_value)))) (values closest_cases_distances_map))
+					probabilities
+						;multiply probabilities by their corresponding case weight
+						(if dc_weight_feature
+							;ensure order of probabilities stays consistent by unzipping by indices of closest_cases_distances_map
+							(unzip
+								(map
+									(lambda
+										(*
+											;convert unweighted surprisal to probability
+											(exp (- (first (current_value))))
+											(or (get (current_value) [1 dc_weight_feature]) 1)
+										)
+									)
+									;assoc of cased id -> surprisal value
+									closest_cases_distances_map
+									;assoc of caseid -> { dc_weight_feature : case weight }
+									(compute_on_contained_entities [
+										(query_in_entity_list (indices closest_cases_distances_map))
+										(query_exists dc_weight_feature)
+									])
+								)
+								(indices closest_cases_distances_map)
+							)
+
+							;else unweigthed, simply use the probabilities
+							(values closest_cases_distances_map)
+						)
 				)
-				(declare (assoc total_probabilities (apply "+" probabilities) ))
+
+				(declare (assoc total_of_probabilities (apply "+" probabilities) ))
+
 				;if the case is extremely surprising, use the most similar surprisal value
-				(if (= 0 total_probabilities)
+				(if (= 0 total_of_probabilities)
 					(apply "min" (values closest_cases_distances_map))
 
 					;normalize by total probabilities
-					(/ (entropy probabilities) total_probabilities)
+					(if dc_weight_feature
+						;sum of multiplied surprisals by their corresponding normalized weighted probabilities
+						(apply "+"
+							(map
+								(lambda
+									(*
+										(/ (first (current_value)) total_of_probabilities)
+										(last (current_value))
+									)
+								)
+								probabilities
+								(values closest_cases_distances_map)
+							)
+						)
+
+						;else can simply normalize the entropy of the probabilities
+						(/ (entropy probabilities) total_of_probabilities)
+					)
 				)
 			)
 
+			;if all the neighbors have zero distance, return a 0
 			(= 0 (size non_zero_distances))
 			0
 
