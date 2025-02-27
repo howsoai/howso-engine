@@ -1,0 +1,232 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_rebalance_features.amlg"))
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		feature_attributes
+			(assoc
+				"color" (assoc "type" "nominal" "data_type" "string")
+				"size" (assoc "type" "nominal" "id_feature" (true) "data_type" "string")
+			)
+	))
+
+	(declare (assoc
+		result (null)
+		context_key (null)
+		features [ "x" "size" "color" ]
+		data
+			[
+				[1 "S" "red"]
+				[2 "S" "green"]
+				[1 "M" "green"]
+				[2 "M" "blue"]
+				[3 "M" "blue"]
+				[4 "M" "blue"]
+			]
+	))
+
+
+	(call_entity "howso" "train" (assoc
+		features features
+		cases data
+		session "unit_test"
+	))
+
+	(call_entity "howso" "analyze" (assoc
+		rebalance_features ["size"]
+		k_values [2]
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc
+				features [ ".session_training_index" ".case_weight" ".probability_mass"]
+				session "unit_test"
+			))
+
+	))
+
+	(print "rebalance feature weights and probability mass is stored: ")
+	(call assert_approximate (assoc
+		obs (get result (list 1 "payload" "cases"))
+		exp
+			[
+				[ 0 1.5 1 ]
+				[ 1 1.5 1 ]
+				[ 2 .75 1 ]
+				[ 3 .75 1 ]
+				[ 4 .75 1 ]
+				[ 5 .75 1 ]
+			]
+		percent .01
+	))
+
+	(call_entity "howso" "train" (assoc
+		features features
+		cases [ [1 "S" "red"]]
+		session "unit_test"
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc
+				features [ ".session_training_index" ".case_weight" ".probability_mass"]
+				session "unit_test"
+			))
+
+	))
+
+	(print "calculated new trained case feature weights ")
+	(call assert_approximate (assoc
+		obs (get result (list 1 "payload" "cases"))
+		exp
+			[
+				[ 0 1.5 1 ]
+				[ 1 1.5 1 ]
+				[ 2 .75 1 ]
+				[ 3 .75 1 ]
+				[ 4 .75 1 ]
+				[ 5 .75 1 ]
+				;class 'S' reciprocal is 1/(2+1)=0.333, new total of rebalance weights 2.333,
+				;new total mass is 7, thus scalar is 7 / 2.333 = 3, 0.333 * 3 = 1
+				[ 6 1.0 1 ]
+			]
+		percent .01
+	))
+
+
+	(call_entity "howso" "train" (assoc
+		features features
+		cases [ [4 "M" "red"]]
+		session "unit_test"
+		train_weights_only (true)
+		accumulate_weight_feature ".case_weight"
+	))
+
+
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc
+				features [ ".session_training_index" ".case_weight" ".probability_mass"]
+				session "unit_test"
+			))
+
+	))
+
+	(print "redistributed case feature weights without training: ")
+	(call assert_approximate (assoc
+		obs (get result (list 1 "payload" "cases"))
+		exp
+			[
+				[ 0 1.5 	1 ]
+				[ 1 1.5 	1 ]
+				[ 2 0.75 	1 ]
+				[ 3 0.75 	1 ]
+				;class 'M' reciprocal is 1/(4+1)=0.2, new total rebalance weight is 2.5333,
+				;new total mass is 8, thus scalar is 8 / 2.5333 = 3.158,  0.2 * 3.158 = 0.6316
+				;distributing about 0.6316 worth of weight among two cases with a 31/69 split:
+				[ 4 0.946 	1.31 ]
+				[ 5 1.186 	1.69 ]
+				[ 6 1		1 ]
+			]
+		percent .01
+	))
+
+
+	(call_entity "howso" "train" (assoc
+		features features
+		cases [ [2 "L" "blue"]]
+		session "unit_test"
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc
+				features [".session_training_index" ".case_weight" ".probability_mass"]
+				session "unit_test"
+			))
+
+	))
+
+	(print "train an unseen class with rebalance weights: ")
+	(call assert_approximate (assoc
+		obs (get result (list 1 "payload" "cases"))
+		exp
+			[
+				[ 0 1.5		1 ]
+				[ 1 1.5 	1 ]
+				[ 2 0.75 	1 ]
+				[ 3 0.75 	1 ]
+				[ 4 0.946 	1.31 ]
+				[ 5 1.186 	1.69 ]
+				[ 6 1 	 	1 ]
+				;unknown class 'L' value is (0.5+0.25)/2=0.375, new total rebalance weight is 2.908
+				;new total mass is 9, thus scalar is 9 / 2.908 = 3.095, 0.375 * 3.095 = 1.16
+				[ 8 1.16 	1 ]
+			]
+		percent .01
+	))
+
+	(call exit_if_failures (assoc msg "Basic Rebalance features."))
+
+
+	(call_entity "howso" "remove_cases")
+	(call_entity "howso" "reset_params")
+
+	(call_entity "howso" "train" (assoc
+		features features
+		cases data
+		session "unit_test2"
+	))
+
+	 (call_entity "howso" "set_auto_ablation_params" (assoc
+        auto_ablation_enabled (true)
+		min_num_cases 6
+		;auto_ablation_influence_weight_entropy_threshold 0.6
+		batch_size 1
+		ablated_cases_distribution_batch_size 1
+	 ))
+
+	(call_entity "howso" "analyze" (assoc
+		rebalance_features ["size"]
+		k_values [2]
+	))
+
+	;should be ablated because it's right between case indices 3 and 4
+	(call_entity "howso" "train" (assoc
+		features features
+		cases [ [2.5 "M" "blue"]]
+		session "unit_test2"
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "get_cases" (assoc
+				features [".session_training_index" ".case_weight" ".probability_mass"]
+				session "unit_test2"
+			))
+	))
+
+	(print "ablated a similar case with rebalancing: ")
+	(call assert_approximate (assoc
+		obs (get result (list 1 "payload" "cases"))
+		exp
+			[
+				[ 0 1.5		1 ]
+				[ 1 1.5		1 ]
+				[ 2 0.75	1 ]
+				;class 'M' reciprocal is 1/(4+1)=0.2, new total rebalance weight is 2.2,
+				;new total mass is 7, thus scalar is 7 / 2.2 = 3.182,  0.2 * 3.1818 = 0.63636
+				;distributing 0.63636 worth of weight evenly among case indices 3 and 4
+				[ 3 1.068	1.5 ]
+				[ 4 1.068	1.5 ]
+				[ 5 0.75  	1 ]
+
+			]
+		percent .01
+	))
+	(call exit_if_failures (assoc msg "Ablation with rebalancing."))
+
+	(call exit_if_failures (assoc msg unit_test_name ))
+)
+
