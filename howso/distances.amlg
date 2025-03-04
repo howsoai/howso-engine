@@ -726,6 +726,7 @@
 	; filtering_queries : optional, list of filtering queries to apply before computing entity distance
 	;					  contributions. Most useful for when calling this method when computing distance ratios.
 	; use_feature_deviations : optional, flag which determines whether feature_deviations are used in the query.
+	; output_value_if_zero : optional, flag, if true will output zero. otherwise will recursively call this method ignoring perfect matches
 	#!QueryLocalDataMaxDistance
 	(declare
 		(assoc
@@ -733,60 +734,94 @@
 			entity_ids_to_compute (list)
 			filtering_queries (list)
 			use_feature_deviations (false)
+			output_value_if_zero (false)
 		)
-		(if (= 1 (size entity_ids_to_compute))
-			(apply "max"
-				(values (compute_on_contained_entities
-					(append
-						filtering_queries
-						(query_not_in_entity_list entity_ids_to_compute)
-						(query_nearest_generalized_distance
-							1 ;entities_returned
-							feature_labels
-							(retrieve_from_entity (first entity_ids_to_compute) feature_labels)
-							feature_weights
-							!queryDistanceTypeMap
-							query_feature_attributes_map
-							(if (or use_feature_deviations (= "surprisal_to_prob" dt_parameter)) (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties"))
-							p_parameter
-							 ;dt = 1 means return computed distance to the case
-							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-							(null) ;weight_feature
-							(rand)
-							(null) ;radius
-							"precise"
-						)
+		(if (> (size entity_ids_to_compute) 1)
+			(conclude
+				;take the max of all the entities' nearest distances
+				(apply "max" (map
+					(lambda
+						(call !QueryLocalDataMaxDistance (assoc
+							feature_labels feature_labels
+							entity_ids_to_compute [ (current_value 2) ]
+							filtering_queries filtering_queries
+							use_feature_deviations use_feature_deviations
+						))
 					)
-				))
-			)
-
-			;else
-			;;;TODO: implement
-			(apply "max"
-				(values (compute_on_contained_entities
-					(append
-						filtering_queries
-						(compute_entity_distance_contributions
-							1 ;entities_returned
-							feature_labels
-							entity_ids_to_compute
-							feature_weights
-							!queryDistanceTypeMap
-							query_feature_attributes_map
-							(if (or use_feature_deviations (= "surprisal_to_prob" dt_parameter)) (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties"))
-							p_parameter
-							 ;dt = 1 means return computed distance to the case
-							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-							(null) ;weight_feature
-							(rand)
-							(null) ;radius
-							"precise"
-						)
-					)
+					entity_ids_to_compute
 				))
 			)
 		)
 
+		(declare (assoc
+			local_max_distance
+				(first
+					(values (compute_on_contained_entities
+						(append
+							filtering_queries
+							(query_not_in_entity_list entity_ids_to_compute)
+							(query_nearest_generalized_distance
+								1 ;entities_returned
+								feature_labels
+								(retrieve_from_entity (first entity_ids_to_compute) feature_labels)
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								(if (or use_feature_deviations (= "surprisal_to_prob" dt_parameter)) (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties"))
+								p_parameter
+								;dt = 1 means return computed distance to the case
+								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+								(null) ;weight_feature
+								(rand)
+								(null) ;radius
+								"precise"
+							)
+						)
+					))
+				)
+		))
 
+		;rerun query while explicitly ignoring all the perfect match neighbors
+		(if (= 0 local_max_distance)
+			(if output_value_if_zero
+				0
+
+				(call !QueryLocalDataMaxDistance (assoc
+					feature_labels feature_labels
+					entity_ids_to_compute entity_ids_to_compute
+					use_feature_deviations use_feature_deviations
+					;prevent recursing more in case the entire dataset is the same, just output zero
+					output_value_if_zero (true)
+					;find all cases within 0 distance of this case and ignores them
+					filtering_queries
+						(append
+							filtering_queries
+							(query_not_in_entity_list
+								(contained_entities [
+									(query_within_generalized_distance
+										0
+										feature_labels
+										(retrieve_from_entity (first entity_ids_to_compute) feature_labels)
+										(null) ;feature_weights
+										!queryDistanceTypeMap
+										query_feature_attributes_map
+										(if (or use_feature_deviations (= "surprisal_to_prob" dt_parameter)) (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties"))
+										p_parameter
+										(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+										(null) ; weight_feature (null)
+										(rand)
+										(null) ;radius
+										"precise"
+									)
+								])
+							)
+						)
+				))
+			)
+
+			;output the non-zero distance
+			local_max_distance
+		)
 	)
+
 )
