@@ -59,6 +59,11 @@
 					(if (~ 0 k_parameter) (min 16 (+ k_parameter 1)) k_parameter)
 					(+ sensitivity_bandwidth 1)
 				)
+			;dt = 1 means return computed distance to the case
+			dt_distance_parameter
+				(if generate_novel_case
+					(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+				)
 		))
 
 		;check if an exact duplicate already exists in the model and if so re-try up to 2 times to re-generate a novel case
@@ -193,7 +198,7 @@
 								(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
 								p_parameter
 								;dt = 1 means return computed distance to each case
-								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+								dt_distance_parameter
 								(null)  ;case weight is not relevant since it's the distance to the nearest that matters
 								"fixed rand seed"
 								(null) ;radius
@@ -287,10 +292,12 @@
 								;set epsilon for defining whether twa values are equal within acceptable precision as 2 * num features * DBL_EPSILON
 								epsilon (* 2 (size (if has_novel_substitions non_novel_context_features context_features)) 10e-16)
 								truncate_case_list (false)
+								;if sensitivity_bandwidth is set to 1, query_k_parameter will be 2 and we only need the first case
+								grab_first_case (= 2 query_k_parameter)
 							)
 
 							;non default bandwidth
-							(if (!= sensitivity_bandwidth 1)
+							(if (not grab_first_case)
 								(assign (assoc
 									k_index (- (size (first local_model_cases_tuple)) 2)
 									plusone_k_index (- (size (first local_model_cases_tuple)) 1)
@@ -302,10 +309,10 @@
 								;If the last and the second-to-last distances are same, need to expand the query to find all equidistant cases.
 								;if the delta between the last two values is within epsilon, consider the values to be equal due to decimal precision and expand the search
 								(if (<=
-										(abs (-
-											(get (last local_model_cases_tuple) k_index)
+										(-
 											(get (last local_model_cases_tuple) plusone_k_index)
-										))
+											(get (last local_model_cases_tuple) k_index)
+										)
 										epsilon
 									)
 									(call !ExpandLocalDataQuery (assoc expand_query_method "synthesis_validation"))
@@ -321,10 +328,15 @@
 										feature_labels (if has_novel_substitions non_novel_context_features context_features)
 										entity_ids_to_compute
 											(if truncate_case_list
-												(trunc (first local_model_cases_tuple))
+												(if grab_first_case
+													[ (get local_model_cases_tuple [0 0]) ]
+													(trunc (first local_model_cases_tuple))
+												)
+
 												(first local_model_cases_tuple)
 											)
-										use_feature_deviations (false)
+										;explicitly provide the already available case values if there's only one case to compare to
+										closest_case_values (if (= query_k_parameter 2) closest_case_values)
 									))
 							))
 
@@ -464,6 +476,16 @@
 			non_novel_context_features (null)
 			has_novel_substitions (and exclude_novel_nominals_from_uniqueness_check (size !novelSubstitionFeatureSet))
 			dt_parameter (get hyperparam_map "dt")
+			k_parameter (get hyperparam_map "k")
+		))
+
+		(declare (assoc
+			query_k_parameter
+				;bandwidth of 0 means use the analyzed k, else use the provided value
+				(if (= 0 sensitivity_bandwidth)
+					(if (~ 0 k_parameter) (min 16 (+ k_parameter 1)) k_parameter)
+					(+ sensitivity_bandwidth 1)
+				)
 		))
 
 		;find the closest cases using the same code as generate case, set generate_attempt to 2 so that it
@@ -476,6 +498,10 @@
 		;return true because this case is a duplicate
 		(if (= 0 dist_to_closest_case) (conclude (true)) )
 
+		(declare (assoc
+			dt_distance_parameter (if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+		))
+
 		;the specified case fails unique test if dist to closest case is less than the
 		;minimum entity distance contribution between neighbors.
 		(if (<
@@ -483,7 +509,6 @@
 				(call !QueryLocalDataMaxDistance (assoc
 					feature_labels (if has_novel_substitions non_novel_context_features context_features)
 					entity_ids_to_compute (first local_model_cases_tuple)
-					use_feature_deviations (false)
 				))
 			)
 			(conclude (true))
