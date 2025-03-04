@@ -25,7 +25,6 @@
 				))
 
 			threshold_feature_residuals_map (null)
-			closest_case (null)
 			dist_to_closest_case (null)
 			p_parameter 0.1
 
@@ -51,6 +50,15 @@
 			;override global residuals with calculated residuals per feature
 			threshold_feature_residuals_map
 				(append (get hyperparam_map "featureDeviations") (zip rand_ordered_features threshold_feature_residuals))
+		))
+
+		(declare (assoc
+			query_k_parameter
+				;bandwidth of 0 means use the analyzed k, else use the provided value
+				(if (= 0 sensitivity_bandwidth)
+					(if (~ 0 k_parameter) (min 16 (+ k_parameter 1)) k_parameter)
+					(+ sensitivity_bandwidth 1)
+				)
 		))
 
 		;check if an exact duplicate already exists in the model and if so re-try up to 2 times to re-generate a novel case
@@ -167,16 +175,14 @@
 				;find the closest case
 				(assign (assoc
 					local_model_cases_tuple
+						#!SynthValidationQuery
 						(compute_on_contained_entities (append
 							(if ignore_case
 								(query_not_in_entity_list (list ignore_case))
 								(list)
 							)
 							(query_nearest_generalized_distance
-								;limit the number of considered nearby neighbors by limiting the bandwidth of local minimum distance
-								;comparison for density-based anonymity preservation, for performance reasons.
-								;May be more accurate to remove the limit of 15 in the future.
-								(if (~ 0 k_parameter) (min 15 k_parameter) k_parameter)
+								query_k_parameter
 								(if has_novel_substitions non_novel_context_features context_features)
 								(if has_novel_substitions non_novel_context_values context_numeric_values)
 								feature_weights
@@ -188,8 +194,8 @@
 								p_parameter
 								;dt = 1 means return computed distance to each case
 								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-								(null) ;weight
-								(rand)
+								(null)  ;case weight is not relevant since it's the distance to the nearest that matters
+								"fixed rand seed"
 								(null) ;radius
 								"precise"
 								(true) ;output sorted list
@@ -200,7 +206,6 @@
 
 			;set closest case to be the one with the smallest distance
 			(assign (assoc
-				closest_case (first (first local_model_cases_tuple))
 				dist_to_closest_case
 					;if constraint_function_failed, then force distance to closest case to be 0 to fast-track the retries
 					(if constraint_function_failed
@@ -214,7 +219,8 @@
 			(if (> dist_to_closest_case 1e-13)
 				(seq
 					(assign (assoc
-						closest_case_values (retrieve_from_entity closest_case (if has_novel_substitions non_novel_context_features context_features))
+						closest_case_values
+							(retrieve_from_entity (first (first local_model_cases_tuple)) (if has_novel_substitions non_novel_context_features context_features) )
 						num_diff_features 0
 					))
 
@@ -272,20 +278,63 @@
 						(assign (assoc has_dupes (true)))
 					)
 
-					;if found one feature different enough, verify that the case itself is as far as any closest case in the local model
+					;if found one feature different enough, verify that the case itself is as far as any closest case in the local data
 					(if (not has_dupes)
-						;generated case fails unique test if dist to closest case is less than the
-						;minimum entity distance contribution between neighbors.
-						(if
-							(<
-								dist_to_closest_case
-								(call !QueryLocalModelMinDistanceContribution (assoc
-									feature_labels (if has_novel_substitions non_novel_context_features context_features)
-									entity_ids_to_compute (first local_model_cases_tuple)
-									use_feature_deviations (false)
+						(let
+							(assoc
+								k_index 0
+								plusone_k_index 1
+								;set epsilon for defining whether twa values are equal within acceptable precision as 2 * num features * DBL_EPSILON
+								epsilon (* 2 (size (if has_novel_substitions non_novel_context_features context_features)) 10e-16)
+								truncate_case_list (false)
+							)
+
+							;non default bandwidth
+							(if (!= sensitivity_bandwidth 1)
+								(assign (assoc
+									k_index (- (size (first local_model_cases_tuple)) 2)
+									plusone_k_index (- (size (first local_model_cases_tuple)) 1)
 								))
 							)
-							(assign (assoc has_dupes (true)))
+
+							;Only perform expansion and truncation of the extra case if not using dynamic k.
+							(if (~ 0 query_k_parameter)
+								;If the last and the second-to-last distances are same, need to expand the query to find all equidistant cases.
+								;if the delta between the last two values is within epsilon, consider the values to be equal due to decimal precision and expand the search
+								(if (<=
+										(abs (-
+											(get (last local_model_cases_tuple) k_index)
+											(get (last local_model_cases_tuple) plusone_k_index)
+										))
+										epsilon
+									)
+									(call !ExpandLocalDataQuery (assoc expand_query_method "synthesis_validation"))
+
+									;else will need to drop the k+1'th case from list
+									(assign (assoc truncate_case_list (true) ))
+								)
+							)
+
+							(declare (assoc
+								local_max_distance
+									(call !QueryLocalDataMaxDistance (assoc
+										feature_labels (if has_novel_substitions non_novel_context_features context_features)
+										entity_ids_to_compute
+											(if truncate_case_list
+												(trunc (first local_model_cases_tuple))
+												(first local_model_cases_tuple)
+											)
+										use_feature_deviations (false)
+									))
+							))
+
+							;generated case fails unique test if dist to closest case is less than the max entity distance between neighbors.
+							(if (< dist_to_closest_case local_max_distance)
+								;ensure the distances are actually different and not within epsilon
+								(if (< (+ dist_to_closest_case epsilon) local_max_distance)
+									(assign (assoc has_dupes (true) ))
+								)
+							)
 						)
 					)
 				)
@@ -359,7 +408,7 @@
 								case_indices case_indices
 								leave_case_out leave_case_out
 								preserve_feature_values preserve_feature_values
-								new_case_threshold new_case_threshold
+								sensitivity_bandwidth sensitivity_bandwidth
 								custom_extra_filtering_queries custom_extra_filtering_queries
 							))
 					)
@@ -431,7 +480,7 @@
 		;minimum entity distance contribution between neighbors.
 		(if (<
 				dist_to_closest_case
-				(call !QueryLocalModelMinDistanceContribution (assoc
+				(call !QueryLocalDataMaxDistance (assoc
 					feature_labels (if has_novel_substitions non_novel_context_features context_features)
 					entity_ids_to_compute (first local_model_cases_tuple)
 					use_feature_deviations (false)

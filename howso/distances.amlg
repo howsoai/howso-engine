@@ -6,11 +6,19 @@
 	(let
 		(assoc
 			dist_to_closest_case 0
-			;Search for 1 extra outside k to check for ties.
-			query_k_parameter (if (~ 0 k_parameter) (min 15 (+ 1 k_parameter)) k_parameter)
-			num_most_similar_case_indices (min most_similar_case_indices_parameter 15)
+			query_k_parameter
+				;bandwidth of 0 means use the analyzed k, else use the provided value
+				(if (= 0 sensitivity_bandwidth)
+					(if (~ 0 k_parameter) (min 16 (+ k_parameter 1)) k_parameter)
+					(+ sensitivity_bandwidth 1)
+				)
 			closest_case (null)
+			k_index 0
+			plusone_k_index 1
+			;set epsilon for defining whether twa values are equal within acceptable precision as 2 * num features * DBL_EPSILON
+			epsilon (* 2 (size context_features) 10e-16)
 		)
+
 		(declare (assoc
 			local_model_cases_tuple
 				#!DistanceRatioQuery
@@ -29,8 +37,7 @@
 						p_parameter
 						;dt of 1 queries distance in ascending order
 						(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-						(null) ;Weight_feature is set to null so the computation done here matches the rejection criteria
-								;in generate.amlg.
+						(null) ;case weight is not relevant since it's the distance to the nearest that matters
 						;Use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed").
 						"fixed rand seed"
 						(null) ;radius
@@ -43,68 +50,85 @@
 			dist_to_closest_case (first (last local_model_cases_tuple))
 		))
 
-		;If the last and the second-to-last distances are same, need to expand the query to find all equidistant cases.
-		(if (and
-				(=
-					(last (last local_model_cases_tuple))
-					(get (last local_model_cases_tuple) (- (size (last local_model_cases_tuple)) 2))
-				)
-				;Only perform the expansion if we are not using dynamic k.
-				(~ 0 k_parameter)
-			)
-			(let
-				(assoc
-					expandeded_cases_tuple (list)
-					expand (true)
-					num_cases (call !GetNumTrainingCases)
-					tie_distance (last (last local_model_cases_tuple))
-					expanded_case_distances (list)
-					previous_k 0
-				)
+		;non default bandwidth
+		(if (!= sensitivity_bandwidth 1)
+			(assign (assoc
+				k_index (- (size (first local_model_cases_tuple)) 2)
+				plusone_k_index (- (size (first local_model_cases_tuple)) 1)
+			))
+		)
 
-				(while expand
-					;Store pre-doubled value so that we don't reduce it further than this.
-					(assign (assoc previous_k query_k_parameter))
-					;Double the query k value to exapand the search.
-					(assign (assoc query_k_parameter (* 2 query_k_parameter) ))
-					(assign (assoc expandeded_cases_tuple (call !DistanceRatioQuery) ))
-
-					;Keep only distances that are <= tie_distance, but don't reduce past the previous_k.
-					(assign (assoc
-						expanded_case_distances
-							(filter
-								(lambda
-									(or
-										(<= (current_value) tie_distance)
-										(< (current_index) previous_k)
-									)
-								)
-								(last expandeded_cases_tuple)
-							)
+		;Only perform expansion and truncation of the extra case if not using dynamic k.
+		(if (~ 0 query_k_parameter)
+			;If the last and the second-to-last distances are same, need to expand the query to find all equidistant cases.
+			;if the delta between the last two values is within epsilon, consider the values to be equal due to decimal precision and expand the search
+			(if (<=
+					(abs (-
+						(get (last local_model_cases_tuple) k_index)
+						(get (last local_model_cases_tuple) plusone_k_index)
 					))
+					epsilon
+				)
+				#!ExpandLocalDataQuery
+				(let
+					(assoc
+						expandeded_cases_tuple (list)
+						expand (true)
+						num_cases (call !GetNumTrainingCases)
+						tie_distance (+ (get (last local_model_cases_tuple) k_index) epsilon)
+						expanded_case_distances (list)
+						previous_k 0
+					)
 
-					;If there are distances that were filtered out, we can stop expanding.
-					(if (< (size expanded_case_distances) (size (first expandeded_cases_tuple)) )
+					(while expand
+						;Store pre-doubled value so that we don't reduce it further than this.
+						(assign (assoc previous_k query_k_parameter))
+						;Double the query k value to exapand the search.
+						(assign (assoc query_k_parameter (* 2 query_k_parameter) ))
+
 						(assign (assoc
-							expand (false)
-							local_model_cases_tuple
-								(list
-									;keep the corresponding case ids
-									(trunc (first expandeded_cases_tuple) (size expanded_case_distances))
-									expanded_case_distances
+							expandeded_cases_tuple
+								(if (= "synthesis_validation" expand_query_method)
+									(call !SynthValidationQuery)
+									(call !DistanceRatioQuery)
 								)
 						))
-					)
 
-					;Stop if increased to size of dataset.
-					(if (>= query_k_parameter num_cases)
-						(assign (assoc expand (false)))
+						;Keep only distances that are <= tie_distance, but don't reduce past the previous_k.
+						(assign (assoc
+							expanded_case_distances
+								(filter
+									(lambda
+										(or
+											(<= (current_value) tie_distance)
+											(< (current_index) previous_k)
+										)
+									)
+									(last expandeded_cases_tuple)
+								)
+						))
+
+						;If there are distances that were filtered out, we can stop expanding.
+						(if (< (size expanded_case_distances) (size (first expandeded_cases_tuple)) )
+							(assign (assoc
+								expand (false)
+								local_model_cases_tuple
+									(list
+										;keep the corresponding case ids
+										(trunc (first expandeded_cases_tuple) (size expanded_case_distances))
+										expanded_case_distances
+									)
+							))
+						)
+
+						;Stop if increased to size of dataset.
+						(if (>= query_k_parameter num_cases)
+							(assign (assoc expand (false)))
+						)
 					)
 				)
-			)
 
-			;Else drop the k+1'th case.
-			(if (= (size (last local_model_cases_tuple)) (+ 1 k_parameter))
+				;else drop the k+1'th case for numeric k
 				(assign (assoc
 					local_model_cases_tuple
 						(list
@@ -115,11 +139,11 @@
 			)
 		)
 
-		;Compute distance contributions with k=1 to determine the smallest non-zero
+		;Compute distance contributions with k=1 to determine the max non-zero
 		;distance between any two cases in the local model.
-		(assign (assoc
-			local_model_min_distance_contribution
-				(call !QueryLocalModelMinDistanceContribution (assoc
+		(declare (assoc
+			local_data_max_distance
+				(call !QueryLocalDataMaxDistance (assoc
 					feature_labels context_features
 					entity_ids_to_compute (first local_model_cases_tuple)
 					filtering_queries filtering_queries
@@ -127,28 +151,15 @@
 				))
 		))
 
-		;Pull the session and session training index for the nearest neighbors.
 		(declare (assoc
-			audit_data
-				(if
-					(> num_most_similar_case_indices 0)
-					(map
-						(lambda
-							(set
-								(retrieve_from_entity (first (current_value)) ;case index
-									(zip (list ".session" ".session_training_index"))
-								)
-								".distance"
-								(last (current_value)) ;distance
-							)
-						)
-						(trunc (first local_model_cases_tuple) num_most_similar_case_indices)
-						(trunc (last local_model_cases_tuple) num_most_similar_case_indices)
+			num_most_similar_case_indices
+				(if (> most_similar_case_indices_parameter 0)
+					(min
+						most_similar_case_indices_parameter
+						(if (~ 0 query_k_parameter) query_k_parameter 15)
 					)
-					(list)
 				)
-			distance_ratio
-				(/ dist_to_closest_case local_model_min_distance_contribution)
+			distance_ratio (/ dist_to_closest_case local_data_max_distance)
 		))
 
 		(accum (assoc
@@ -167,10 +178,27 @@
 						)
 					"distance_ratio_parts"
 						(assoc
-							"local_distance_contribution" local_model_min_distance_contribution
+							"local_max_distance" local_data_max_distance
 							"nearest_distance" dist_to_closest_case
 						)
-					"most_similar_case_indices" audit_data
+					"most_similar_case_indices"
+						(if (> num_most_similar_case_indices 0)
+							(map
+								(lambda
+									;Pull the session and session training index for the nearest neighbors.
+									(set
+										(retrieve_from_entity (first (current_value)) ;case index
+											(zip (list ".session" ".session_training_index"))
+										)
+										".distance"
+										(last (current_value)) ;distance
+									)
+								)
+								(trunc (first local_model_cases_tuple) num_most_similar_case_indices)
+								(trunc (last local_model_cases_tuple) num_most_similar_case_indices)
+							)
+							(list)
+						)
 				)
 		))
 	)
@@ -690,20 +718,15 @@
 		))
 	)
 
-	;given a list of entity ids, determine the minimum distance contribution between
-	; all of those cases. Returns the minimum entity distance contribution.
+	;given a list of entity ids, determine the max distance between each case and their closest neighbor
+	; Returns the maximum distance
 	;parameters:
 	; feature_labels : list of feature labels to use for determining distance contributions
 	; entity_ids_to_compute : list of entity IDs to compute minimum distance between.
 	; filtering_queries : optional, list of filtering queries to apply before computing entity distance
 	;					  contributions. Most useful for when calling this method when computing distance ratios.
 	; use_feature_deviations : optional, flag which determines whether feature_deviations are used in the query.
-
-	; Queries local distances based on new_case_threshold
-	; max is the maximum local distance
-	; min is the minimum local distance
-	; most_similar is the closest distance of the most similar case
-	#!QueryLocalModelMinDistanceContribution
+	#!QueryLocalDataMaxDistance
 	(declare
 		(assoc
 			feature_labels (list)
@@ -711,7 +734,34 @@
 			filtering_queries (list)
 			use_feature_deviations (false)
 		)
-		(if (= "max" new_case_threshold)
+		(if (= 1 (size entity_ids_to_compute))
+			(apply "max"
+				(values (compute_on_contained_entities
+					(append
+						filtering_queries
+						(query_not_in_entity_list entity_ids_to_compute)
+						(query_nearest_generalized_distance
+							1 ;entities_returned
+							feature_labels
+							(retrieve_from_entity (first entity_ids_to_compute) feature_labels)
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							(if (or use_feature_deviations (= "surprisal_to_prob" dt_parameter)) (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties"))
+							p_parameter
+							 ;dt = 1 means return computed distance to the case
+							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+							(null) ;weight_feature
+							(rand)
+							(null) ;radius
+							"precise"
+						)
+					)
+				))
+			)
+
+			;else
+			;;;TODO: implement
 			(apply "max"
 				(values (compute_on_contained_entities
 					(append
@@ -735,66 +785,8 @@
 					)
 				))
 			)
-
-			(= "most_similar" new_case_threshold)
-			(seq
-				(if (= (null) closest_case)
-					(assign (assoc closest_case (first entity_ids_to_compute) ))
-				)
-				(assign (assoc
-					closest_dist_to_closest_case
-						(compute_on_contained_entities (append
-							(query_not_in_entity_list (list closest_case))
-							;Filters out the closest case itself
-							(query_nearest_generalized_distance
-								;limit the number of considered nearby neighbors by limiting the bandwidth of local minimum distance
-								;comparison for density-based anonymity preservation, for performance reasons.
-								;May be more accuraty to remove the limit of 15 in the future.
-								1
-								feature_labels
-								(retrieve_from_entity closest_case feature_labels)
-								feature_weights
-								!queryDistanceTypeMap
-								query_feature_attributes_map
-								;Feature deviations are not used in order to ensure that privacy is maximally preserved.
-								;If feature deviations are used, duplicate cases may be deemed private.
-								(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
-								p_parameter
-								;dt = 1 means return computed distance to each case
-								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-								(null) ;weight
-								(rand)
-								(null) ;radius
-								"precise"
-							)
-						))
-				))
-				(first (values closest_dist_to_closest_case))
-			)
-
-			(apply "min"
-				(values (compute_on_contained_entities
-					(append
-						filtering_queries
-						(compute_entity_distance_contributions
-							1 ;entities_returned
-							feature_labels
-							entity_ids_to_compute
-							feature_weights
-							!queryDistanceTypeMap
-							query_feature_attributes_map
-							(if (or use_feature_deviations (= "surprisal_to_prob" dt_parameter)) (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties"))
-							p_parameter
-							;dt = 1 means return computed distance to the case
-							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-							(null) ;weight_feature
-							(rand)
-							(null) ;radius
-							"precise"
-						)
-					)
-				))
-			)
 		)
+
+
 	)
 )
