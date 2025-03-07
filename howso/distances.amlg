@@ -66,45 +66,51 @@
 			;find any cases that are within epsilon of the farthest case in the local space,
 			;ignoring the cases that have alraedy been found
 			extra_equidistant_cases
-				(contained_entities (append
-					filtering_queries
-					(query_not_in_entity_list (first local_model_cases_tuple))
-					(query_within_generalized_distance
-						(+
-							;epsilon for defining whether two values are equal within acceptable precision: 2 * num features * DBL_EPSILON
-							(* 2 (size context_features) 2.220446049250313e-16)
-							(last (last local_model_cases_tuple))
+				;don't bother checking cases that are maximally surprising/far away
+				(if (= .infinity (last (last local_model_cases_tuple)))
+					[]
+
+					(contained_entities (append
+						filtering_queries
+						(query_not_in_entity_list (first local_model_cases_tuple))
+						(query_within_generalized_distance
+							;epsilon for defining whether two values are equal within acceptable precision
+							(+ 2.220446049250313e-16 (last (last local_model_cases_tuple)) )
+							context_features
+							context_values
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+							p_parameter
+							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+							(null) ;weight
+							"fixed rand seed"
+							(null) ;radius label
+							"precise"
 						)
-						context_features
-						context_values
-						feature_weights
-						!queryDistanceTypeMap
-						query_feature_attributes_map
-						(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
-						p_parameter
-						(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-						(null) ;weight
-						"fixed rand seed"
-						(null) ;radius label
-						"precise"
-					)
-				))
+					))
+				)
 		))
 
 		;Compute distance contributions with k=1 to determine the smallest non-zero
 		;distance between any two cases in the local model.
 		(assign (assoc
 			local_model_min_distance_contribution
-				(call !QueryLocalModelMinDistanceContribution (assoc
-					feature_labels context_features
-					entity_ids_to_compute
-						(if (size extra_equidistant_cases)
-							(append (first local_model_cases_tuple) extra_equidistant_cases)
-							(first local_model_cases_tuple)
-						)
-					filtering_queries filtering_queries
-					use_feature_deviations (false)
-				))
+				(if (= .infinity dist_to_closest_case)
+					.infinity
+
+					(call !QueryLocalModelMinDistanceContribution (assoc
+						feature_labels context_features
+						entity_ids_to_compute
+							(if (size extra_equidistant_cases)
+								(append (first local_model_cases_tuple) extra_equidistant_cases)
+								(first local_model_cases_tuple)
+							)
+						filtering_queries filtering_queries
+						use_feature_deviations (false)
+					))
+				)
 		))
 
 		;Pull the session and session training index for the nearest neighbors.
@@ -128,7 +134,10 @@
 					(list)
 				)
 			distance_ratio
-				(/ dist_to_closest_case local_model_min_distance_contribution)
+				(if (= .infinity dist_to_closest_case)
+					1
+					(/ dist_to_closest_case local_model_min_distance_contribution)
+				)
 		))
 
 		(accum (assoc
@@ -752,28 +761,95 @@
 				(first (values closest_dist_to_closest_case))
 			)
 
-			(apply "min"
-				(values (compute_on_contained_entities
-					(append
-						filtering_queries
-						(compute_entity_distance_contributions
-							1 ;entities_returned
-							feature_labels
+			;else "min" new_case_threshold
+			(let
+				(assoc
+					local_nearest_values
+						(map
+							(lambda (first
+								(compute_on_contained_entities (append
+									filtering_queries
+									(query_not_in_entity_list [(current_value 1)])
+									(query_nearest_generalized_distance
+										1
+										feature_labels
+										(retrieve_from_entity (current_value) feature_labels)
+										feature_weights
+										!queryDistanceTypeMap
+										query_feature_attributes_map
+										(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+										p_parameter
+										(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+										(null) ;weight
+										(rand)
+										(null) ;radius
+										"precise"
+									)
+								))
+							))
 							entity_ids_to_compute
-							feature_weights
-							!queryDistanceTypeMap
-							query_feature_attributes_map
-							(if (or use_feature_deviations (= "surprisal_to_prob" dt_parameter)) (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties"))
-							p_parameter
-							;dt = 1 means return computed distance to the case
-							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-							(null) ;weight_feature
-							(rand)
-							(null) ;radius
-							"precise"
 						)
+				)
+				(declare (assoc local_min (apply "min" local_nearest_values) ))
+				(if (> local_min 0) (conclude local_min) )
+
+				;replace all 0s with each of those cases' distances to their one closest non-zero distance neighbor
+				(apply "min"
+					(map
+						(lambda
+							(if (= 0 (current_value))
+								(let
+									(assoc
+										case_values (retrieve_from_entity (get entity_ids_to_compute (current_index 1)) feature_labels)
+									)
+									;grab the nearest case, while ignoring all cases (perfect matches) within epsilon of this case
+									(first
+										(compute_on_contained_entities (append
+											filtering_queries
+											(query_not_in_entity_list
+												(contained_entities [
+													(query_within_generalized_distance
+														2.220446049250313e-16
+														feature_labels
+														case_values
+														(null) ;feature_weights
+														!queryDistanceTypeMap
+														query_feature_attributes_map
+														(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+														p_parameter
+														(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+														(null) ; weight_feature (null)
+														(rand)
+														(null) ;radius
+														"precise"
+													)
+												])
+											)
+											(query_nearest_generalized_distance
+												1
+												feature_labels
+												case_values
+												feature_weights
+												!queryDistanceTypeMap
+												query_feature_attributes_map
+												(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+												p_parameter
+												(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+												(null) ;weight
+												(rand)
+												(null) ;radius
+												"precise"
+											)
+										))
+									)
+								)
+								;else leave value as-is
+								(current_value)
+							)
+						)
+						local_nearest_values
 					)
-				))
+				)
 			)
 		)
 	)
