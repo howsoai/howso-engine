@@ -6,114 +6,96 @@
 	(let
 		(assoc
 			dist_to_closest_case 0
-			;Search for 1 extra outside k to check for ties.
-			query_k_parameter (if (~ 0 k_parameter) (min 15 (+ 1 k_parameter)) k_parameter)
 			num_most_similar_case_indices (min most_similar_case_indices_parameter 15)
 			closest_case (null)
+			truncate_closest_cases_tuple (false)
 		)
+
+		;for non-surirpsal flows, if local_cases_tuple is already defined and it's more than 15, truncate it
+		(if (and
+				local_cases_tuple
+				(~ 0 k_parameter)
+				(> (size (first local_cases_tuple)) 15)
+			)
+			(assign (assoc truncate_closest_cases_tuple (true) ))
+		)
+
 		(declare (assoc
 			local_model_cases_tuple
-				#!DistanceRatioQuery
-				(compute_on_contained_entities (append
-					filtering_queries
-					(query_nearest_generalized_distance
-						query_k_parameter
-						context_features
-						context_values
-						feature_weights
-						!queryDistanceTypeMap
-						query_feature_attributes_map
-						;Feature deviations are not used in order to ensure that we are measuring privacy
-						;assuming it has been maximally preserved. Deviations make cases look farther away than they are.
-						(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
-						p_parameter
-						;dt of 1 queries distance in ascending order
-						(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-						(null) ;Weight_feature is set to null so the computation done here matches the rejection criteria
-								;in generate.amlg.
-						;Use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed").
-						"fixed rand seed"
-						(null) ;radius
-						"precise"
-						(true) ;output_sorted_list
+				(if local_cases_tuple
+					(if truncate_closest_cases_tuple
+						[
+							(trunc (first local_cases_tuple) 15)
+							(trunc (last local_cases_tuple) 15)
+						]
+						;else use it as-is
+						local_cases_tuple
 					)
-				))
+
+					;else query local cases here
+					(compute_on_contained_entities (append
+						filtering_queries
+						(query_nearest_generalized_distance
+							(if (~ 0 k_parameter) (min 15 (+ 1 k_parameter)) (append k_parameter 1))
+							context_features
+							context_values
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							;Feature deviations are not used in order to ensure that we are measuring privacy
+							;assuming it has been maximally preserved. Deviations make cases look farther away than they are.
+							(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+							p_parameter
+							;dt of 1 queries distance in ascending order
+							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+							(null) ;Weight_feature is set to null so the computation done here matches the rejection criteria
+									;in generate.amlg.
+							;Use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed").
+							"fixed rand seed"
+							(null) ;radius
+							"precise"
+							(true) ;output_sorted_list
+						)
+					))
+				)
 		))
+
 		(assign (assoc
 			dist_to_closest_case (first (last local_model_cases_tuple))
-		))
 
-		;If the last and the second-to-last distances are same, need to expand the query to find all equidistant cases.
-		(if (and
-				(=
-					(last (last local_model_cases_tuple))
-					(get (last local_model_cases_tuple) (- (size (last local_model_cases_tuple)) 2))
-				)
-				;Only perform the expansion if we are not using dynamic k.
-				(~ 0 k_parameter)
-			)
-			(let
-				(assoc
-					expandeded_cases_tuple (list)
-					expand (true)
-					num_cases (call !GetNumTrainingCases)
-					tie_distance (last (last local_model_cases_tuple))
-					expanded_case_distances (list)
-					previous_k 0
-				)
-
-				(while expand
-					;Store pre-doubled value so that we don't reduce it further than this.
-					(assign (assoc previous_k query_k_parameter))
-					;Double the query k value to exapand the search.
-					(assign (assoc query_k_parameter (* 2 query_k_parameter) ))
-					(assign (assoc expandeded_cases_tuple (call !DistanceRatioQuery) ))
-
-					;Keep only distances that are <= tie_distance, but don't reduce past the previous_k.
-					(assign (assoc
-						expanded_case_distances
-							(filter
-								(lambda
-									(or
-										(<= (current_value) tie_distance)
-										(< (current_index) previous_k)
-									)
-								)
-								(last expandeded_cases_tuple)
-							)
-					))
-
-					;If there are distances that were filtered out, we can stop expanding.
-					(if (< (size expanded_case_distances) (size (first expandeded_cases_tuple)) )
-						(assign (assoc
-							expand (false)
-							local_model_cases_tuple
-								(list
-									;keep the corresponding case ids
-									(trunc (first expandeded_cases_tuple) (size expanded_case_distances))
-									expanded_case_distances
-								)
-						))
-					)
-
-					;Stop if increased to size of dataset.
-					(if (>= query_k_parameter num_cases)
-						(assign (assoc expand (false)))
-					)
-				)
-			)
-
-			;Else drop the k+1'th case.
-			(if (= (size (last local_model_cases_tuple)) (+ 1 k_parameter))
-				(assign (assoc
-					local_model_cases_tuple
-						(list
-							(trunc (first local_model_cases_tuple))
-							(trunc (last local_model_cases_tuple))
+			;find any cases that are within epsilon of the farthest case in the local space,
+			;ignoring the cases that have already been found
+			extra_equidistant_cases
+				;look for extra equidistance cases only if the distance between last two cases are the same (within epsilon)
+				(if (<
+						(-
+							(last (last local_model_cases_tuple))
+							(get (last local_model_cases_tuple) (- (size (last local_model_cases_tuple)) 2))
 						)
-				))
-			)
-		)
+						2.220446049250313e-16
+					)
+					(contained_entities (append
+						filtering_queries
+						(query_not_in_entity_list (first local_model_cases_tuple))
+						(query_within_generalized_distance
+							;epsilon for defining whether two values are equal within acceptable precision
+							(+ 2.220446049250313e-16 (last (last local_model_cases_tuple)) )
+							context_features
+							context_values
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+							p_parameter
+							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+							(null) ;weight
+							"fixed rand seed"
+							(null) ;radius label
+							"precise"
+						)
+					))
+				)
+		))
 
 		;Compute distance contributions with k=1 to determine the smallest non-zero
 		;distance between any two cases in the local model.
@@ -121,7 +103,15 @@
 			local_model_min_distance_contribution
 				(call !QueryLocalModelMinDistanceContribution (assoc
 					feature_labels context_features
-					entity_ids_to_compute (first local_model_cases_tuple)
+					entity_ids_to_compute
+						(if extra_equidistant_cases
+							(append (first local_model_cases_tuple) extra_equidistant_cases)
+
+							(if (<= model_size k_parameter)
+								(first local_model_cases_tuple)
+								(trunc (first local_model_cases_tuple))
+							)
+						)
 					filtering_queries filtering_queries
 					use_feature_deviations (false)
 				))
@@ -135,11 +125,11 @@
 					(map
 						(lambda
 							(set
-								(retrieve_from_entity (first (current_value)) ;case index
+								(retrieve_from_entity (first (current_value))
 									(zip (list ".session" ".session_training_index"))
 								)
 								".distance"
-								(last (current_value)) ;distance
+								(last (current_value))
 							)
 						)
 						(trunc (first local_model_cases_tuple) num_most_similar_case_indices)
@@ -148,7 +138,10 @@
 					(list)
 				)
 			distance_ratio
-				(/ dist_to_closest_case local_model_min_distance_contribution)
+				(if (= .infinity dist_to_closest_case)
+					1
+					(/ dist_to_closest_case local_model_min_distance_contribution)
+				)
 		))
 
 		(accum (assoc
@@ -772,28 +765,95 @@
 				(first (values closest_dist_to_closest_case))
 			)
 
-			(apply "min"
-				(values (compute_on_contained_entities
-					(append
-						filtering_queries
-						(compute_entity_distance_contributions
-							1 ;entities_returned
-							feature_labels
+			;else "min" new_case_threshold
+			(let
+				(assoc
+					local_nearest_values
+						(map
+							(lambda (first
+								(compute_on_contained_entities (append
+									filtering_queries
+									(query_not_in_entity_list [(current_value 1)])
+									(query_nearest_generalized_distance
+										1
+										feature_labels
+										(retrieve_from_entity (current_value) feature_labels)
+										feature_weights
+										!queryDistanceTypeMap
+										query_feature_attributes_map
+										(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+										p_parameter
+										(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+										(null) ;weight
+										(rand)
+										(null) ;radius
+										"precise"
+									)
+								))
+							))
 							entity_ids_to_compute
-							feature_weights
-							!queryDistanceTypeMap
-							query_feature_attributes_map
-							(if (or use_feature_deviations (= "surprisal_to_prob" dt_parameter)) (get hyperparam_map "featureDeviations") (get hyperparam_map "nullUncertainties"))
-							p_parameter
-							;dt = 1 means return computed distance to the case
-							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-							(null) ;weight_feature
-							(rand)
-							(null) ;radius
-							"precise"
 						)
+				)
+				(declare (assoc local_min (apply "min" local_nearest_values) ))
+				(if (> local_min 0) (conclude local_min) )
+
+				;replace all 0s with each of those cases' distances to their one closest non-zero distance neighbor
+				(apply "min"
+					(map
+						(lambda
+							(if (= 0 (current_value))
+								(let
+									(assoc
+										case_values (retrieve_from_entity (get entity_ids_to_compute (current_index 1)) feature_labels)
+									)
+									;grab the nearest case, while ignoring all cases (perfect matches) within epsilon of this case
+									(first
+										(compute_on_contained_entities (append
+											filtering_queries
+											(query_not_in_entity_list
+												(contained_entities [
+													(query_within_generalized_distance
+														2.220446049250313e-16
+														feature_labels
+														case_values
+														(null) ;feature_weights
+														!queryDistanceTypeMap
+														query_feature_attributes_map
+														(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+														p_parameter
+														(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+														(null) ; weight_feature (null)
+														(rand)
+														(null) ;radius
+														"precise"
+													)
+												])
+											)
+											(query_nearest_generalized_distance
+												1
+												feature_labels
+												case_values
+												feature_weights
+												!queryDistanceTypeMap
+												query_feature_attributes_map
+												(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+												p_parameter
+												(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+												(null) ;weight
+												(rand)
+												(null) ;radius
+												"precise"
+											)
+										))
+									)
+								)
+								;else leave value as-is
+								(current_value)
+							)
+						)
+						local_nearest_values
 					)
-				))
+				)
 			)
 		)
 	)
