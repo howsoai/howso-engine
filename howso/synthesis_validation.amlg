@@ -27,8 +27,7 @@
 			closest_case (null)
 			dist_to_closest_case (null)
 
-			local_model_cases_map (assoc)
-			local_model_cases_tuple (list)
+			local_data_cases_tuple (list)
 			threshold_distance 0
 			closest_case_values (list)
 			ignore_case (if leave_case_out preserve_case_id)
@@ -163,7 +162,7 @@
 
 				;find the closest case
 				(assign (assoc
-					local_model_cases_tuple
+					local_data_cases_tuple
 						(compute_on_contained_entities (append
 							(if ignore_case
 								(query_not_in_entity_list (list ignore_case))
@@ -197,12 +196,12 @@
 
 			;set closest case to be the one with the smallest distance
 			(assign (assoc
-				closest_case (first (first local_model_cases_tuple))
+				closest_case (first (first local_data_cases_tuple))
 				dist_to_closest_case
 					;if constraint_function_failed, then force distance to closest case to be 0 to fast-track the retries
 					(if constraint_function_failed
 						0
-						(first (last local_model_cases_tuple))
+						(first (last local_data_cases_tuple))
 					)
 			))
 
@@ -271,28 +270,29 @@
 
 					;if found one feature different enough, verify that the case itself is as far as any closest case in the local model
 					(if (not has_dupes)
+						#!SynthCaseDistanceRatioCheck
 						(let
 							(assoc
 								extra_equidistant_cases
-									;look for extra equidistance cases only if the distance between last two cases are the same (within epsilon)
-									(if (<
+									;look for extra equidistance cases only if the distance between last two cases are the same (within dbl_precision_epsilon)
+									(if (<=
 											(-
-												(last (last local_model_cases_tuple))
-												(get (last local_model_cases_tuple) (- (size (last local_model_cases_tuple)) 2))
+												(last (last local_data_cases_tuple))
+												(get (last local_data_cases_tuple) (- (size (last local_data_cases_tuple)) 2))
 											)
-											2.220446049250313e-16
+											dbl_precision_epsilon
 										)
 										(contained_entities (append
 											(if ignore_case
 												(query_not_in_entity_list (list ignore_case))
 												(list)
 											)
-											;find any cases that are within epsilon of the farthest case in the local space,
+											;find any cases that are within dbl_precision_epsilon of the farthest case in the local space,
 											;ignoring the cases that have alraedy been found
-											(query_not_in_entity_list (first local_model_cases_tuple))
+											(query_not_in_entity_list (first local_data_cases_tuple))
 											(query_within_generalized_distance
-												;epsilon for defining whether two values are equal within acceptable precision
-												(+ 2.220446049250313e-16 (last (last local_model_cases_tuple)) )
+												;dbl_precision_epsilon for defining whether two values are equal within acceptable precision
+												(+ dbl_precision_epsilon (last (last local_data_cases_tuple)) )
 												(if has_novel_substitions non_novel_context_features context_features)
 												(if has_novel_substitions non_novel_context_values context_numeric_values)
 												feature_weights
@@ -315,14 +315,15 @@
 							(if
 								(<
 									dist_to_closest_case
-									(call !QueryLocalModelMinDistanceContribution (assoc
+									(call !QueryLocalDataMinDistance (assoc
 										feature_labels (if has_novel_substitions non_novel_context_features context_features)
 										entity_ids_to_compute
 											(if extra_equidistant_cases
-												(append (first local_model_cases_tuple) extra_equidistant_cases)
-												(trunc (first local_model_cases_tuple))
+												(append (first local_data_cases_tuple) extra_equidistant_cases)
+												(trunc (first local_data_cases_tuple))
 											)
 										use_feature_deviations (false)
+										dbl_precision_epsilon dbl_precision_epsilon
 									))
 								)
 								(assign (assoc has_dupes (true)))
@@ -446,7 +447,7 @@
 					feature (null)
 					weight_feature weight_feature
 				))
-			local_model_cases_tuple (null)
+			local_data_cases_tuple (null)
 		)
 		(declare (assoc
 			feature_weights (get hyperparam_map "featureWeights")
@@ -456,32 +457,26 @@
 			non_novel_context_features (null)
 			has_novel_substitions (and exclude_novel_nominals_from_uniqueness_check (size !novelSubstitionFeatureSet))
 			dt_parameter (get hyperparam_map "dt")
+			k_parameter (get hyperparam_map "k")
 		))
 
 		;find the closest cases using the same code as generate case, set generate_attempt to 2 so that it
 		;converts datetimes to numeric and rounds appropriately before finding closest cases
 		(call !FindClosestCasesForUniquenessCheck (assoc generate_attempt 2))
 
-		;set closest case to be the one with the smallest distance
-		(declare (assoc dist_to_closest_case (first (last local_model_cases_tuple)) ))
-
-		;return true because this case is a duplicate
-		(if (= 0 dist_to_closest_case) (conclude (true)) )
-
-		;the specified case fails unique test if dist to closest case is less than the
-		;minimum entity distance contribution between neighbors.
-		(if (<
-				dist_to_closest_case
-				(call !QueryLocalModelMinDistanceContribution (assoc
-					feature_labels (if has_novel_substitions non_novel_context_features context_features)
-					entity_ids_to_compute (first local_model_cases_tuple)
-					use_feature_deviations (false)
-				))
-			)
+		;if distance to closest case is 0 return true because this case is a duplicate,
+		(if (= 0 (first (last local_data_cases_tuple)) )
 			(conclude (true))
 		)
 
-		;return false - not a duplicate
-		(false)
+		(declare (assoc
+			dist_to_closest_case (first (last local_data_cases_tuple))
+			has_dupes (false)
+		))
+
+		(call !SynthCaseDistanceRatioCheck)
+
+		;if distance ratio check failed, has_dupes will be true, otherwise it'll return false - not a duplicate
+		has_dupes
 	)
 )
