@@ -3,12 +3,12 @@
 
 	;helper method to cache time series filter query for reuse in reacts into 'cached_time_series_filter_query'
 	;parameters:
-	; regional_model_context_features: list of context features
-	; regional_model_context_values: list of corresponding context values
+	; regional_context_features: list of context features
+	; regional_context_values: list of corresponding context values
 	#!CreateAndCacheTimeSeriesFilterQuery
 	(if (= 0 (size cached_time_series_filter_query))
 		(let
-			(assoc context_map (zip regional_model_context_features regional_model_context_values) )
+			(assoc context_map (zip regional_context_features regional_context_values) )
 			(if (contains_index context_map !tsTimeFeature)
 				(assign (assoc cached_time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
 			)
@@ -128,7 +128,7 @@
 									;treated like any other string.  Must use lambda in filter specifically to filter out (null) indices.
 									(filter
 										(lambda (!= (current_index) (null)))
-										(call !ComputeModelNominalClassProbabilities (assoc feature feature))
+										(call !ComputeNominalClassProbabilities (assoc feature feature))
 									)
 
 							))
@@ -302,7 +302,7 @@
 		)
 
 		(declare (assoc
-			global_class_probabilities_map (call !ComputeModelNominalClassProbabilities (assoc feature feature))
+			global_class_probabilities_map (call !ComputeNominalClassProbabilities (assoc feature feature))
 		))
 
 		;if there are less cases than (1-1/e)*classes, always use domain probabilities instead of global
@@ -396,95 +396,91 @@
 		(if (< desired_conviction 1)
 			(assign (assoc
 				local_class_probabilities_map
-					(let
-						(assoc local_model_has_zero_probability_classes (contains_value (values local_class_probabilities_map) 0))
+					;lowest conviction boundary is 0, and therefore lowest probabliity for all non-zero classes is 0
+					(if (contains_value (values local_class_probabilities_map) 0)
+						(let
+							(assoc zero_probability_classes_map (filter (lambda (= (current_value) 0)) local_class_probabilities_map))
+							(map
+								(lambda (let
+									(assoc
+										;all 0-probability classes have a 1/N probability where N is the count of all '0-probability' classes
+										zero_prob_class_zero_conv_probability_value (/ 1 (size zero_probability_classes_map))
+									)
 
-						;lowest conviction boundary is 0, and therefore lowest probabliity for all non-zero classes is 0
-						(if local_model_has_zero_probability_classes
-							(let
-								(assoc zero_probability_classes_map (filter (lambda (= (current_value) 0)) local_class_probabilities_map))
-								(map
-									(lambda (let
-										(assoc
-											;all 0-probability classes have a 1/N probability where N is the count of all '0-probability' classes
-											zero_prob_class_zero_conv_probability_value (/ 1 (size zero_probability_classes_map))
-										)
+									(if (not (contains_index zero_probability_classes_map (current_index)))
+										;the selected probability has a zero conviction probability value of 0, so just scale it directly
+										(* (current_value) desired_conviction)
 
-										(if (not (contains_index zero_probability_classes_map (current_index)))
-											;the selected probability has a zero conviction probability value of 0, so just scale it directly
-											(* (current_value) desired_conviction)
+										;probability for classes that had 0 probability approaches 0 as desired_conviction approaches 1
+										;and approaches zero_prob_class_zero_conv_probability_value as desired_conviction approaches 0
+										(- zero_prob_class_zero_conv_probability_value (* zero_prob_class_zero_conv_probability_value desired_conviction))
+									)
+								))
+								local_class_probabilities_map
+							)
+						)
 
-											;probability for classes that had 0 probability approaches 0 as desired_conviction approaches 1
-											;and approaches zero_prob_class_zero_conv_probability_value as desired_conviction approaches 0
-											(- zero_prob_class_zero_conv_probability_value (* zero_prob_class_zero_conv_probability_value desired_conviction))
-										)
-									))
-									local_class_probabilities_map
-								)
+						;else compute entropy to calculate the lowest conviction bound
+						(let
+							(assoc
+								;compute the entropy (expected surprisal) of the current set of probabilities for the action class
+								entropy_of_local_probabilities (entropy (values local_class_probabilities_map))
+								lowest_probability (apply "min" (values local_class_probabilities_map))
 							)
 
-							;else compute entropy to calculate the lowest conviction bound
-							(let
-								(assoc
-									;compute the entropy (expected surprisal) of the current set of probabilities for the action class
-									entropy_of_local_probabilities (entropy (values local_class_probabilities_map))
-									lowest_probability (apply "min" (values local_class_probabilities_map))
-								)
+							(declare (assoc
+								lowest_conviction_boundary
+									;entropy is zero if there's only one class in the local probabilities. then just set the boundary
+									;to 1 to just output the probability of this one class
+									(if (= 0 entropy_of_local_probabilities)
+										1
 
-								(declare (assoc
-									lowest_conviction_boundary
-										;entropy is zero if there's only one class in the local probabilities. then just set the boundary
-										;to 1 to just output the probability of this one class
-										(if (= 0 entropy_of_local_probabilities)
-											1
+										(/ entropy_of_local_probabilities (- (log lowest_probability )))
+									)
 
-											(/ entropy_of_local_probabilities (- (log lowest_probability )))
+								lowest_probability_classes_map (filter (lambda (= (current_value) lowest_probability )) local_class_probabilities_map)
+							))
+
+							(map
+								(lambda (let
+									(assoc
+										;all non-lowest classes have lowest probabilities of 0, all lowest are 1/N where N is the count of 'all lowest'
+										boundary_probability (/ 1 (size lowest_probability_classes_map))
+									)
+
+									(if (<= desired_conviction lowest_conviction_boundary)
+										(if (contains_index lowest_probability_classes_map (current_index))
+											boundary_probability
+
+											0
 										)
 
-									lowest_probability_classes_map (filter (lambda (= (current_value) lowest_probability )) local_class_probabilities_map)
-								))
+										;else need to linearly interpolate between lowest_conviction_boundary and 1
+										(let
+											(assoc
+												;invert and normalize the conviction value to be between 1 and 0:
+												;value approaches 1 as as conviction approaches the lowest boundary probability
+												;and approaches 0 as conviction approaches 1
+												inverted_one_to_boundary_conviction_value
+													(/ (- 1 desired_conviction) (- 1 lowest_conviction_boundary))
+											)
 
-								(map
-									(lambda (let
-										(assoc
-											;all non-lowest classes have lowest probabilities of 0, all lowest are 1/N where N is the count of 'all lowest'
-											boundary_probability (/ 1 (size lowest_probability_classes_map))
-										)
-
-										(if (<= desired_conviction lowest_conviction_boundary)
 											(if (contains_index lowest_probability_classes_map (current_index))
-												boundary_probability
-
-												0
-											)
-
-											;else need to linearly interpolate between lowest_conviction_boundary and 1
-											(let
-												(assoc
-													;invert and normalize the conviction value to be between 1 and 0:
-													;value approaches 1 as as conviction approaches the lowest boundary probability
-													;and approaches 0 as conviction approaches 1
-													inverted_one_to_boundary_conviction_value
-														(/ (- 1 desired_conviction) (- 1 lowest_conviction_boundary))
-												)
-
-												(if (contains_index lowest_probability_classes_map (current_index))
-													;lowest probability classes increase their probability as they approach boundary_probability
-													;original_low_prob + (boundary_probability - original_low_prob) * inverted_conv_value
-													(+ (current_value)
-														(* (- boundary_probability  (current_value))
-															inverted_one_to_boundary_conviction_value
-														)
+												;lowest probability classes increase their probability as they approach boundary_probability
+												;original_low_prob + (boundary_probability - original_low_prob) * inverted_conv_value
+												(+ (current_value)
+													(* (- boundary_probability  (current_value))
+														inverted_one_to_boundary_conviction_value
 													)
-
-													;original_prob - original_prob * inverted_conv_value
-													(- (current_value) (* (current_value) inverted_one_to_boundary_conviction_value))
 												)
+
+												;original_prob - original_prob * inverted_conv_value
+												(- (current_value) (* (current_value) inverted_one_to_boundary_conviction_value))
 											)
 										)
-									))
-									local_class_probabilities_map
-								)
+									)
+								))
+								local_class_probabilities_map
 							)
 						)
 					)
@@ -576,8 +572,8 @@
 					(not feature_is_ordinal)
 					(< (rand) (pow 2.718281828 (/ -1.693147181 desired_conviction)))
 				)
-			local_model_cases_map (assoc)
-			local_model_case_values_map (assoc)
+			local_cases_map (assoc)
+			local_case_values_map (assoc)
 
 			feature_weights
 				(if (= (null) (get hyperparam_map "featureMdaMap"))
@@ -611,7 +607,7 @@
 		)
 
 		(declare (assoc
-			local_model_cases_tuple
+			local_data_cases_tuple
 				#!NearestRegionalCasesQuery
 				(compute_on_contained_entities
 					(append
@@ -667,8 +663,8 @@
 			))
 		)
 
-		;if local_model_cases_tuple is too small to be viable, then remove dependent feature queries and recompute
-		;local_model_cases_tuple until sufficiently many cases are returned
+		;if local_data_cases_tuple is too small to be viable, then remove dependent feature queries and recompute
+		;local_data_cases_tuple until sufficiently many cases are returned
 		(if action_feature_is_dependent
 			(if action_feature_is_dependent_and_continuous
 				;continuous values should have at least 3 values for privacy when it should be generating new cases
@@ -676,23 +672,23 @@
 				(while
 					(and
 						(<
-							(size (first local_model_cases_tuple))
+							(size (first local_data_cases_tuple))
 							(if (= "no" generate_new_cases) 1 3)
 						)
 						(> (size dependent_queries_list) 0)
 					)
 					(assign (assoc dependent_queries_list (trunc dependent_queries_list)))
-					(assign (assoc local_model_cases_tuple (call !NearestRegionalCasesQuery) ))
+					(assign (assoc local_data_cases_tuple (call !NearestRegionalCasesQuery) ))
 				)
 
 				;nominals need to have at least one value
 				(while
 					(and
-						(= (size (first local_model_cases_tuple)) 0)
+						(= (size (first local_data_cases_tuple)) 0)
 						(> (size dependent_queries_list) 0)
 					)
 					(assign (assoc dependent_queries_list (trunc dependent_queries_list)))
-					(assign (assoc local_model_cases_tuple (call !NearestRegionalCasesQuery) ))
+					(assign (assoc local_data_cases_tuple (call !NearestRegionalCasesQuery) ))
 				)
 			)
 		)
@@ -700,46 +696,46 @@
 		;if approximating regional residual for continuous, need to truncate the regional model to output probabilities for local only
 		(if approximate_residual
 			(seq
-				(assign (assoc regional_case_ids (first local_model_cases_tuple) ))
+				(assign (assoc regional_case_ids (first local_data_cases_tuple) ))
 
 				;keep only the local k closest case ids
 				(assign (assoc local_case_ids (trunc regional_case_ids local_k)))
 
 				;keep only the local k cases in the map
 				(assign (assoc
-					local_model_cases_map (zip local_case_ids (trunc (get local_model_cases_tuple 1) local_k))
-					local_model_case_values_map (zip local_case_ids (trunc (last local_model_cases_tuple) local_k))
+					local_cases_map (zip local_case_ids (trunc (get local_data_cases_tuple 1) local_k))
+					local_case_values_map (zip local_case_ids (trunc (last local_data_cases_tuple) local_k))
 				))
 			)
 
 			;else the local case_ids are the same as the indices of local model map
 			(assign (assoc
-				local_case_ids (first local_model_cases_tuple)
-				local_model_cases_map (zip (first local_model_cases_tuple) (get local_model_cases_tuple 1))
-				local_model_case_values_map (zip (first local_model_cases_tuple) (last local_model_cases_tuple))
+				local_case_ids (first local_data_cases_tuple)
+				local_cases_map (zip (first local_data_cases_tuple) (get local_data_cases_tuple 1))
+				local_case_values_map (zip (first local_data_cases_tuple) (last local_data_cases_tuple))
 			))
 		)
 
-		(declare (assoc local_cases_total_weight (apply "+" (values local_model_cases_map))))
+		(declare (assoc local_cases_total_weight (apply "+" (values local_cases_map))))
 
 		;normalize the weights in the local model
 		(assign (assoc
-			local_model_cases_map
+			local_cases_map
 				;if has perfect matches, set their weight to 1, others to 0
 				(if (= .infinity local_cases_total_weight)
 					(map
 						(lambda (if (= .infinity (current_value)) 1 0))
-						local_model_cases_map
+						local_cases_map
 					)
 
 					;all equally terrible, set to even weight
 					(= 0 local_cases_total_weight)
-					(map (lambda (/ 1 (size local_model_cases_map))) local_model_cases_map)
+					(map (lambda (/ 1 (size local_cases_map))) local_cases_map)
 
 					;else just scale the weights
 					(map
 						(lambda (/ (current_value) local_cases_total_weight))
-						local_model_cases_map
+						local_cases_map
 					)
 				)
 		))
@@ -755,8 +751,8 @@
 									neighbor_id_to_values_map
 										;only keep perfect match neighbors that have a weight of 1
 										(filter
-											(lambda (= 1 (get local_model_cases_map (current_index))) )
-											local_model_case_values_map
+											(lambda (= 1 (get local_cases_map (current_index))) )
+											local_case_values_map
 										)
 								)
 
@@ -776,12 +772,12 @@
 								(lambda (+ (current_value 1) (current_value)))
 								;feature value for each case
 								(map
-									(lambda (get local_model_case_values_map (current_value)))
-									(indices local_model_cases_map)
+									(lambda (get local_case_values_map (current_value)))
+									(indices local_cases_map)
 								)
 
 								;weights of corresponding case
-								(values local_model_cases_map)
+								(values local_cases_map)
 							)
 						)
 				)
@@ -791,16 +787,16 @@
 					;returns the highest weighted categorical value
 					"action_value" (first (index_max categorical_value_weights_map))
 					"categorical_value_weights_map" categorical_value_weights_map
-					"local_model_cases_map" local_model_cases_map
+					"local_cases_map" local_cases_map
 				)
 			)
 
 			;else continuous action feature output
 			(assoc
 				;select action value by weighted probability using the weight of each cases's influence as the probability
-				"action_value" (get local_model_case_values_map (rand local_model_cases_map))
-				"local_model_case_values_map" (if output_continuous_case_values local_model_case_values_map {})
-				"local_model_cases_map" local_model_cases_map
+				"action_value" (get local_case_values_map (rand local_cases_map))
+				"local_case_values_map" (if output_continuous_case_values local_case_values_map {})
+				"local_cases_map" local_cases_map
 				"regional_case_ids" regional_case_ids
 				"local_case_ids" local_case_ids
 			)
