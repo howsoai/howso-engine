@@ -33,6 +33,10 @@
 			;{type ["boolean" "string"]}
 			;true or string, if true will use default value of "influence_weight_entropy"
 			influence_weight_entropy (null)
+			;{type "boolean"}
+			;flag, if set to true, will enable auto_analyze, analyze with these specified features computing their values.
+			;   Only applicable when reacting for the entire dataset,  when case_ids is null.
+			auto_analyze (false)
 			;{ref "UseCaseWeights"}
 			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
 			;	case weights will be used if the trainee has them.
@@ -96,6 +100,37 @@
 		;if user doesn't want to use case weights, change weight_feature to '.none'
 		(if (= (false) use_case_weights)
 			(assign (assoc weight_feature ".none"))
+		)
+
+		(if (and auto_analyze (= (null) case_ids))
+			(let
+				(assoc
+					;store map of type of computation -> stored feature name
+					computed_map
+						(filter (assoc
+							"familiarity_conviction_addition" familiarity_conviction_addition
+							"familiarity_conviction_removal" familiarity_conviction_removal
+							"p_value_of_addition" p_value_of_addition
+							"p_value_of_removal" p_value_of_removal
+							"distance_contribution" distance_contribution
+							"similarity_conviction" similarity_conviction
+							"influence_weight_entropy" influence_weight_entropy
+						))
+				)
+
+				(assign_to_entities (assoc
+					!computedFeaturesMap
+						(assoc
+							"computed_features" (values computed_map)
+							"computed_map" computed_map
+							"context_features" features
+							"weight_feature" (if use_case_weights weight_feature)
+						)
+					!autoAnalyzeEnabled (true)
+					!featureAttributes (append !featureAttributes (zip (values computed_map) {"type" "continuous" "data_type" "number"}) )
+					!queryDistanceTypeMap (append !queryDistanceTypeMap (zip (values computed_map) "continuous_numeric") )
+				))
+			)
 		)
 
 		(declare (assoc
@@ -379,6 +414,28 @@
 				(if (not (contains_value !reactIntoFeaturesList influence_weight_entropy))
 					(accum_to_entities (assoc !reactIntoFeaturesList influence_weight_entropy))
 				)
+			)
+		)
+
+		;kick off an analyze run if auto_analyze is enabled
+		(if (and auto_analyze (= (null) case_ids))
+			(if (!= (null) !savedAnalyzeParameterMap)
+				;prevent calling react_into_features during the analyze()
+				(call !Analyze (append !savedAnalyzeParameterMap (assoc "from_react_into_features" (true)) ))
+
+				(call !Analyze (assoc
+					targeted_model "targetless"
+					context_features !trainedFeatures
+					weight_feature
+						(if (and !autoAblationEnabled !autoAblationWeightFeature)
+							!autoAblationWeightFeature
+							weight_feature
+						)
+					use_case_weights (or (and !autoAblationEnabled !autoAblationWeightFeature) use_case_weights)
+					k_folds 1
+					;prevent calling react_into_features during the analyze()
+					from_react_into_features (true)
+				))
 			)
 		)
 
