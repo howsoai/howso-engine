@@ -102,6 +102,8 @@
 			(assign (assoc weight_feature ".none"))
 		)
 
+		(declare (assoc cache_values (false) ))
+
 		(if (and auto_analyze (= (null) case_ids))
 			(let
 				(assoc
@@ -129,6 +131,12 @@
 					!autoAnalyzeEnabled (true)
 					!featureAttributes (append !featureAttributes (zip (values computed_map) {"type" "continuous" "data_type" "number"}) )
 					!queryDistanceTypeMap (append !queryDistanceTypeMap (zip (values computed_map) "continuous_numeric") )
+				))
+
+				;need to cache computed values to be able to approximate any of these listed computations during future train calls
+				(assign (assoc
+					cache_values
+						(or  familiarity_conviction_addition p_value_of_addition familiarity_conviction_removal p_value_of_removal)
 				))
 			)
 		)
@@ -180,6 +188,80 @@
 		;meaning that the K must be at least 2 less than the model size
 		(if (and (~ 0 closest_k) (< dataset_size (+ closest_k 2)) )
 			(assign (assoc closest_k (- dataset_size 2)))
+		)
+
+		;will need to compute distance_contributions if caching values even if distance_contribution were not explicitly requested
+		(if (or distance_contribution cache_values)
+			(let
+				(assoc
+					case_to_dc_map
+						(compute_on_contained_entities (list
+							||(compute_entity_distance_contributions
+								closest_k
+								features
+								case_ids
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								(get hyperparam_map "p")
+								(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+								(if valid_weight_feature weight_feature (null))
+								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+								"fixed rand seed"
+								(null) ;radius
+								!numericalPrecision
+							)
+						))
+				)
+
+				(if distance_contribution
+					(seq
+						(call !StoreCaseValues (assoc
+							label_name distance_contribution
+							case_values_map case_to_dc_map
+						))
+
+						(if (not (contains_value !reactIntoFeaturesList distance_contribution))
+							(accum_to_entities (assoc !reactIntoFeaturesList distance_contribution))
+						)
+					)
+				)
+
+				;if computing for the whole model, update the calculated average distance contribution
+				(if (= (null) case_ids)
+					(assign_to_entities (assoc
+						!averageCaseDistanceContribution
+							(/
+								(apply "+" (values case_to_dc_map))
+								(size case_to_dc_map)
+							)
+					))
+				)
+
+				;cache converted distance_contributions into probabilities for future familiarity conviction approximations
+				(if cache_values
+					(let
+						(assoc
+							scale (/ dataset_size (+ 1 dataset_size))
+							total_dc (apply "+" (values case_to_dc_map))
+						)
+						(assign_to_entities (assoc
+							!cachedExpectedCaseProbabilities
+								;convert each dc value to a probability by dividing by the total_dc and scale it by the next expected case scale value
+								;e.g, given dc probabilities [ .1 .2 .3 .4 ], next case will be 5th, so its expected probability is (1/5 = 0.2)
+								;need to multiple each dc prob by 4/5 so the end result will be [ .08 .16 .24 .32 .2 ]
+								(append
+									(map
+										(lambda (* scale (/ (current_value) total_dc)) )
+										(values case_to_dc_map)
+									)
+									(/ 1 (+ 1 dataset_size))
+								)
+						))
+					)
+				)
+			)
 		)
 
 		(if (or familiarity_conviction_addition p_value_of_addition)
@@ -315,52 +397,6 @@
 							(accum_to_entities (assoc !reactIntoFeaturesList familiarity_conviction_removal))
 						)
 					)
-				)
-			)
-		)
-
-		(if distance_contribution
-			(let
-				(assoc
-					case_to_dc_map
-						(compute_on_contained_entities (list
-							||(compute_entity_distance_contributions
-								closest_k
-								features
-								case_ids
-								feature_weights
-								!queryDistanceTypeMap
-								query_feature_attributes_map
-								feature_deviations
-								(get hyperparam_map "p")
-								(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
-								(if valid_weight_feature weight_feature (null))
-								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-								"fixed rand seed"
-								(null) ;radius
-								!numericalPrecision
-							)
-						))
-				)
-
-				(call !StoreCaseValues (assoc
-					label_name distance_contribution
-					case_values_map case_to_dc_map
-				))
-
-				(if (not (contains_value !reactIntoFeaturesList distance_contribution))
-					(accum_to_entities (assoc !reactIntoFeaturesList distance_contribution))
-				)
-
-				;if computing for the whole model, update the calculated average distance contribution
-				(if (= (null) case_ids)
-					(assign_to_entities (assoc
-						!averageCaseDistanceContribution
-							(/
-								(apply "+" (values case_to_dc_map))
-								(size case_to_dc_map)
-							)
-					))
 				)
 			)
 		)
