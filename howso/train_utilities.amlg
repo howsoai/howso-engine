@@ -353,8 +353,209 @@
 
 	;;;TODO:
 	#!ComputeFeaturesDuringTrain
-	(seq
+	(let
+		(assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					context_features features
+					weight_feature
+						(or
+							(get !computedFeaturesMap "weight_feature")
+							(if !autoAblationEnabled !autoAblationWeightFeature ".none")
+						)
+				))
+			computed_map (get !computedFeaturesMap "computed_map")
+			computed_context_features (get !computedFeaturesMap "context_features")
+		)
+		(declare (assoc
+			dataset_size (call !GetNumTrainingCases)
+			weight_feature
+						(or
+							(get !computedFeaturesMap "weight_feature")
+							(if !autoAblationEnabled !autoAblationWeightFeature ".none")
+						)
+			feature_weights (get hyperparam_map "featureWeights")
+			feature_deviations  (get hyperparam_map "featureDeviations")
+			dt_parameter (get hyperparam_map "dt")
+			p_parameter (get hyperparam_map "p")
+			query_closest_k (get hyperparam_map "k")
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+		))
 
+		(declare (assoc
+			use_case_weights (or (!= (null) (get !computedFeaturesMap "weight_feature")) (!= weight_feature ".none"))
+			computed_feature_indices  (unzip (zip train_features (indices train_features)) computed_context_features)
+			compute_similarity_conviction (contains_index computed_map "similarity_conviction")
+			dc_feature_name (get computed_map "distance_contribution")
+			compute_fc_addition (contains_index computed_map "familiarity_conviction_addition")
+			compute_pval_addition (contains_index computed_map "p_value_of_addition")
+			compute_fc_removal (contains_index computed_map "familiarity_conviction_removal")
+			compute_pval_removal (contains_index computed_map "p_value_of_removal")
+			cached_average_entropy_addition (get !computedFeaturesMap "cached_average_entropy_addition")
+			cached_average_entropy_removal (get !computedFeaturesMap "cached_average_entropy_removal")
+		))
+
+		;pairs of [ distance_contribution similarity_conviction ]
+		(declare (assoc
+			case_dc_pairs
+				(if (size (remove computed_map "influence_weight_entropy"))
+					||(map
+						(lambda (let
+							(assoc case_values (unzip (current_value 1) computed_feature_indices) )
+
+							(declare (assoc
+								case_dc
+									(call !ComputeCandidateCaseDistanceContribution (assoc
+										features computed_context_features
+										feature_values
+											(if encode_features_on_train
+												(call !ConvertFromInput (assoc
+													feature_values case_values
+													features computed_context_features
+												))
+
+												;else use feature_values as-is
+												case_values
+											)
+										feature_weights feature_weights
+										feature_deviations feature_deviations
+										dt_parameter dt_parameter
+										p_parameter p_parameter
+										query_closest_k query_closest_k
+										query_feature_attributes_map query_feature_attributes_map
+										use_case_weights use_case_weights
+										weight_feature weight_feature
+									))
+							))
+
+							(declare (assoc
+								similarity_conviction
+									(if compute_similarity_conviction
+										(let
+											(assoc
+												local_cases
+													(contained_entities (append
+														(query_nearest_generalized_distance
+															!regionalMinSize
+															computed_context_features
+															case_values
+															feature_weights
+															!queryDistanceTypeMap
+															query_feature_attributes_map
+															feature_deviations
+															p_parameter
+															dt_parameter
+															(if use_case_weights weight_feature (null))
+															;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+															"fixed rand seed"
+															(null) ;radius
+															!numericalPrecision
+														)
+													))
+											)
+
+											(declare (assoc
+												local_distance_contributions_map
+													(map
+														(lambda (retrieve_from_entity (current_index) dc_feature_name) )
+														(zip local_cases)
+													)
+											))
+
+											;output similarity conviction as ratio of expected / calculated distance contribution
+											(/
+												(/
+													(apply "+" (values local_distance_contributions_map))
+													(size local_distance_contributions_map)
+												)
+												new_case_dc
+											)
+										)
+									)
+							))
+
+							;output a pair of [ dc sc ]
+							[case_dc similarity_conviction]
+						))
+						cases
+					)
+
+					;;;TODO: compute influence weight entropies
+				)
+		))
+
+		(declare (assoc
+			fc_tuple
+				(if (or compute_fc_addition compute_pval_addition compute_fc_removal compute_pval_removal)
+					||(map
+						(lambda (let
+								(assoc
+									expected_probability (last !cachedExpectedCaseProbabilities)
+									; expected_probability * case_dc / average_dc
+									new_probability (/ (* (last !cachedExpectedCaseProbabilities) (first (current_value)) ) !averageCaseDistanceContribution)
+								)
+								;will need to scale all existing existing probabilities so that all add up to 1 when added with new_probability
+								; (1- expected_probability) / (1 - new_probability)
+								(declare (assoc
+									new_scalar (/ (- 1 expected_prob) (- 1 new_probability) )
+								))
+
+								(declare (assoc
+									case_entropy_addition
+										(if (or compute_fc_addition compute_pval_addition)
+											(entropy
+												!cachedExpectedCaseProbabilities
+												;all existing probabilities scaled by the new scalar given the new probability
+												(append
+													(map
+														(lambda (/ (current_value) new_scalar))
+														(trunc !cachedExpectedCaseProbabilities)
+													)
+													new_probability
+												)
+											)
+										)
+								))
+
+								(declare (assoc
+									case_entropy_removal
+										(if (or compute_fc_removal compute_pval_removal)
+											(entropy
+												;all existing probabilities scaled by the new scalar given the new probability
+												(append
+													(map
+														(lambda (/ (current_value) new_scalar))
+														(trunc !cachedExpectedCaseProbabilities)
+													)
+													new_probability
+												)
+												!cachedExpectedCaseProbabilities
+											)
+										)
+								))
+
+								;output a tuple of [ fc_addition p_value_addition fc_removal p_value_removal ]
+								[
+									(if compute_fc_addition (/ cached_average_entropy_addition case_entropy_addition) )
+									(if compute_pval_addition (exp (- case_entropy_addition)) )
+									(if compute_fc_removal (/ cached_average_entropy_removal case_entropy_removal) )
+									(if compute_pval_removal (exp (- case_entropy_removal)) )
+								]
+						))
+						case_dc_pairs
+					)
+				)
+		))
+
+		;update all the cases with the computed features
+		(assign (assoc
+			train_features (append train_features TODO_FEATURES )
+			cases
+				(map
+					(lambda (append (current_value) TODO_VALUES ))
+					cases
+				)
+		))
 	)
 
 )
