@@ -95,61 +95,72 @@
 							feature feature
 							desired_conviction desired_conviction
 							local_class_probabilities_map local_class_probabilities_map
-							action_value action_value
 							allowed_values (get feature_bounds_map (list feature "allowed"))
-							feature_residual feature_residual
-							allow_nulls allow_nulls
 						))
 				)
 
 				;overwrite local_class_probabilities_map with the one that was actually used to select a value
 				(if (and output_details (contains_index case_detail_values_map "categorical_action_probabilities"))
-					(assign (assoc
-						case_detail_values_map
-							(set
-								case_detail_values_map
-								"categorical_action_probabilities"
-								(append
-									(get case_detail_values_map "categorical_action_probabilities")
-									(associate feature class_probabilities_map)
+					(let
+						(assoc
+							total_prob_values
+								(if (~ [] class_probabilities_map)
+									(size class_probabilities_map)
+									(apply "+" (values class_probabilities_map))
 								)
-							)
-					))
+						)
+						(assign (assoc
+							case_detail_values_map
+								(set
+									case_detail_values_map
+									"categorical_action_probabilities"
+									(append
+										(get case_detail_values_map "categorical_action_probabilities")
+										(associate
+											feature
+											(map
+												(lambda (/ (current_value) total_prob_values))
+												(if (~ [] class_probabilities_map)
+													(zip class_probabilities_map 1)
+													class_probabilities_map
+												)
+											)
+										)
+									)
+								)
+						))
+					)
 				)
 
+
+				;if nulls are not allowed, but there are no probabilities to choose from,
+				;output a randomly weighted global value with nulls filtered out
 				(if (= (false) allow_nulls)
-					(seq
-						;if nulls are not allowed, but there are no probabilities to choose from,
-						;output a randomly weighted global value with nulls filtered out
-						(if (= 0 (size class_probabilities_map))
-							(assign (assoc
-								class_probabilities_map
-									;nominals are enumerated, if there happens to be a class value of (null) it will be enumerated in the map and
-									;treated like any other string.  Must use lambda in filter specifically to filter out (null) indices.
-									(filter
-										(lambda (!= (current_index) (null)))
-										(call !ComputeNominalClassProbabilities (assoc feature feature))
-									)
+					(if (= 0 (size class_probabilities_map))
+						(assign (assoc
+							class_probabilities_map
+								;nominals are enumerated, if there happens to be a class value of (null) it will be enumerated in the map and
+								;treated like any other string.  Must use lambda in filter specifically to filter out (null) indices.
+								(filter
+									(lambda (!= (current_index) (null)))
+									(call !ComputeNominalClassProbabilities (assoc feature feature))
+								)
 
-							))
-						)
+						))
+					)
+				)
 
-						;output random class based on probability, doesn't contain nulls, non string nominals should be output as numeric
-						(if (contains_index !numericNominalFeaturesMap feature)
-							(+ (rand class_probabilities_map))
-							(rand class_probabilities_map)
-						)
+				;a list means it's uniform probabilities, output a random class, non string nominals should be output as numeric
+				(if (~ [] class_probabilities_map)
+					(if (contains_index !numericNominalFeaturesMap feature)
+						(+ (rand class_probabilities_map))
+						(rand class_probabilities_map)
 					)
 
-					;else output random class based on probabliity, nulls are allowed
-					(let
-						(assoc output_value (rand class_probabilities_map))
-
-						;non string nominals should be output as numeric
-						(if (contains_index !numericNominalFeaturesMap feature)
-							(+ output_value)
-							output_value
-						)
+					;output class with the highest probability
+					(if (contains_index !numericNominalFeaturesMap feature)
+						(+ (rand (index_max class_probabilities_map)))
+						(rand (index_max class_probabilities_map))
 					)
 				)
 			)
@@ -210,17 +221,14 @@
 			; F-value = AV - B (sign(R)) * ln(1 - 2 * abs(R))
 			(let
 				(assoc R (- (rand) 0.5))
-				(declare (assoc ln_const (log (- 1 (* 2 (abs R))))))
-
 				;there is no sign opcode in amalgam, so just add or subtract based on sign of R
 				(declare (assoc
 					feature_value
-						(if
-							(> R 0)
-							(- action_value (* feature_residual ln_const (/ 1 desired_conviction)))
+						(if (> R 0)
+							(- action_value (* feature_residual (log (- 1 (* 2 (abs R)))) (/ 1 desired_conviction)))
 
 							(< R 0)
-							(+ action_value (* feature_residual ln_const (/ 1 desired_conviction)))
+							(+ action_value (* feature_residual (log (- 1 (* 2 (abs R)))) (/ 1 desired_conviction)))
 
 							;else keep the action value as-is
 							action_value
@@ -234,273 +242,132 @@
 		)
 	)
 
-	;blend nominal class probabilities according to the desired conviction, using the feature_residual and categorical action probabilities
-	;
-	; local class probablities correspond to a desired conviction = 1.
-	;
-	; desired conviction >= 1:
-	; global class probabilities are used instead of local ones with a probability of (feature_residual / desired_conviction)
-	;
-	; example for a local model where all classes have a non-0 probability:
-	;
-	; 	 0	 0.5883	 1		inf
-	; 	--------------------------
-	; A* 0	 0		.5		.5
-	; B	 0	 0		.25	   	.25
-	; C .5	.5		.125	.125
-	; D	.5	.5		.125	.125
-	;
-	; infinite conviction:
-	; to mantain distributions probablities don't change for higher convictions
-	;
-	;
-	; desired conviction < 1:
-	;
-	; 0 conviction probability:
-	; step1 = (entropy (list .5 .25 .125 .125)) = 1.2130075659799042
-	; step2 = -ln of lowest probability, -ln(.125) = 2.0794415416798357
-	; step3 = step1/step2 ~ .5833 <- lowest conviction bound, can't go lower.
-	; all non-lowest classes have lowest probabilities of 0, all lowest are 1/N where N is the count of 'all lowest'
-	;
-	; for models where there are classes with 0 probability:
-	;
-	;  	 0		1		inf
-	; 	--------------------------
-	; A* 0		.5		.5
-	; B	 0		.25	   	.25
-	; C	 0		.125	.125
-	; D	 0		.125	.125
-	; E	.333	 0		0
-	; F	.333	 0		0
-	; G	.333	 0		0
-	;
-	; 0 conviction:
-	; all non-0 probability classes have a 0 probability
-	; all 0-probability classes have a 1/N probability where N is the count of all '0-probability' classes
-	;
-	; the probability of each class is linearly interpolated based on the conviction value and that clasess's corresponding probability
-	;
-	; outputs a map of class value and its blended probability
+	;returns local probabilities with laplace noise added. There's a probability that either global or domain/uniform
+	;probabilities will be output instead.
+	;Ouputs a list of classes when domain probabilities are returned (since they are all uniform)
+	;otherwise outputs an assoc of class -> probability.
 	;
 	;parameters:
 	;	feature : nominal feature name
-	;	desired_conviction : desired conviction value
+	;	desired_conviction : desired conviction (epsilon) value
 	;	local_class_probabilities_map : assoc of local class -> probability for a given prediction
-	;	action_value : the selected action value
 	;	allowed_values : optional list of allowed class values (boundaries)
-	;	feature_residual: residual for the nominal feature
-	;	allow_nulls : flag, if set to true will allow null to be generated as a valid feature value
 	#!BlendNominalClassProbabilities
 	(declare
 		(assoc
 			feature (null)
 			desired_conviction 1
 			local_class_probabilities_map (assoc)
-			action_value (null)
 			allowed_values (null)
-			allow_nulls (true)
 		)
 
 		(declare (assoc
 			global_class_probabilities_map (call !ComputeNominalClassProbabilities (assoc feature feature))
 		))
 
-		;if there are less cases than (1-1/e)*classes, always use domain probabilities instead of global
-		(if (<= num_cases (/ (size global_class_probabilities_map) 0.6321205588) )
+		;if allowed list is specified, filter out any values that aren't on the allowed list
+		(if (> (size allowed_values) 0)
 			(assign (assoc
 				global_class_probabilities_map
 					(zip
-						(indices global_class_probabilities_map)
-						(/ 1 (size global_class_probabilities_map))
+						allowed_values
+						(map
+							(lambda
+								(if (= (null) (current_value)) 0 (current_value))
+							)
+							(unzip global_class_probabilities_map allowed_values)
+						)
+					)
+				local_class_probabilities_map
+					(zip
+						allowed_values
+						(map
+							(lambda
+								(if (= (null) (current_value)) 0 (current_value))
+							)
+							(unzip local_class_probabilities_map allowed_values)
+						)
 					)
 			))
+
+			(= (false) allow_nulls)
+			(if (contains_index global_class_probabilities_map (null))
+				(assign (assoc global_class_probabilities_map (remove global_class_probabilities_map (parse (null))) ))
+			)
 		)
 
-		(if (>= desired_conviction 1)
-			;use local differential privacy to choose among the local distribution, the global distribution, and the domain distribution
-			;if rand < max( selection_probability (residual / desired_conviction)) , overwrite local probabilities with global or domain ones
-			;do not ovewrite for dependent features because the user has explicitly defined this feature to be dependent on another one in the local model
-			(if (and
-					(not action_feature_is_dependent)
-					;the larger the differential privacy epsilon, the smaller the value of nominal_selection_probability,
-					;thus decreasing the probability of selecting from a global or domain distribution and sticking with the local
-					(< (rand) (max nominal_selection_probability (/ feature_residual desired_conviction)))
-				)
-				;use domain probabilities with a 1 / num_classes if the dataset is too small or using same probability WRT feature_residual
-				(if (or
-						(< (rand) (max nominal_selection_probability (/ feature_residual desired_conviction)))
-						(< num_cases (max 30 (get hyperparam_map "k")))
-					)
-					(assign (assoc
-						local_class_probabilities_map
-							(zip
-								(indices global_class_probabilities_map)
-								(/ 1 (size global_class_probabilities_map))
-							)
-					))
-
-					;use global probabilities
-					(assign (assoc local_class_probabilities_map global_class_probabilities_map ))
-				)
+		;if there are less cases than (1-1/e)*classes, always use domain probabilities instead of global
+		(if (<= num_cases (/ (size global_class_probabilities_map) 0.6321205588) )
+			(conclude
+				(indices global_class_probabilities_map)
 			)
 		)
 
 		;if the case generation starts with a norminal value that's specified by user, there are no local probabilities since there was no
-		;react to get them, so set them to global ones for this initial value
+		;react to get them, set them to global ones for this initial value
 		(if (= 0 (size local_class_probabilities_map))
 			(assign (assoc local_class_probabilities_map global_class_probabilities_map ))
-
-			;else set all probablities of classes that aren't in the local map to be 0 for low desired conviction, except when generating dependents
-			(and (< desired_conviction 1) (not action_feature_is_dependent))
-			(assign (assoc
-				local_class_probabilities_map
-					(map
-						(lambda
-							(if (contains_index local_class_probabilities_map (current_index))
-								(get local_class_probabilities_map (current_index))
-								0
-							)
-						)
-						global_class_probabilities_map
-					)
-			))
 		)
 
-		(if (= (false) allow_nulls )
-			(assign (assoc
-				;nominals are enumerated, if there happens to be a class value of (null) it will be enumerated in the map and treated
-				;like any other string. Must use lambda in filter specifically to filter out (null) indices.
-				local_class_probabilities_map (filter (lambda (!= (current_index) (null))) local_class_probabilities_map )
-			))
+		(assign (assoc
+			local_class_probabilities_map
+				(map
+					;laplace noise around 0 using mean of 1
+					#!AddNominalLaplaceNoise
+					(lambda (let
+						(assoc R (- (rand) 0.5))
+						;there is no sign opcode in amalgam, so just add or subtract based on sign of R
+						(if (> R 0)
+							(- (current_value) (/ (log (- 1 (* 2 (abs R)))) desired_conviction))
+							(< R 0)
+							(+ (current_value) (/ (log (- 1 (* 2 (abs R)))) desired_conviction))
+							;else keep the probability value as-is
+							(current_value)
+						)
+					))
+					local_class_probabilities_map
+				)
+		))
+
+		;must use local values only since they are constrained by the dependency
+		(if action_feature_is_dependent
+			(conclude local_class_probabilities_map)
 		)
 
-		;if allowed list is specified, filter out any values that aren't on the allowed list
-		(if (and (!= (null) allowed_values) (> (size allowed_values) 0))
-			;set probabilities to 0 for those classes in the map that are not on the allowed list
-			(assign (assoc
-				local_class_probabilities_map
-					(map
-						(lambda
-							(if (contains_index local_class_probabilities_map (current_index))
-								(get local_class_probabilities_map (current_index))
-								0
-							)
-						)
-						(zip allowed_values)
-					)
-			))
-		)
+		;select from global probabilities instead if the outside probability is greater than any local one
+		(if (>= (call !OutsideProbabilityLaplaceNoise) (max (values local_class_probabilities_map)))
+			;if the dataset is tiny, use uniform domain probabilities
+			(if  (< num_cases (max 30 (get hyperparam_map "k")))
+				(conclude
+					(indices global_class_probabilities_map)
+				)
 
-		;create an interpolated probabilities map that's interpolated between local and global based on desired_conviction, where
-		;desired_conviction >=1 is local probabilities, 0=all classes except action_value are 1/N (uniform)
-		(if (< desired_conviction 1)
-			(assign (assoc
-				local_class_probabilities_map
-					;lowest conviction boundary is 0, and therefore lowest probabliity for all non-zero classes is 0
-					(if (contains_value (values local_class_probabilities_map) 0)
-						(let
-							(assoc zero_probability_classes_map (filter (lambda (= (current_value) 0)) local_class_probabilities_map))
-							(map
-								(lambda (let
-									(assoc
-										;all 0-probability classes have a 1/N probability where N is the count of all '0-probability' classes
-										zero_prob_class_zero_conv_probability_value (/ 1 (size zero_probability_classes_map))
-									)
-
-									(if (not (contains_index zero_probability_classes_map (current_index)))
-										;the selected probability has a zero conviction probability value of 0, so just scale it directly
-										(* (current_value) desired_conviction)
-
-										;probability for classes that had 0 probability approaches 0 as desired_conviction approaches 1
-										;and approaches zero_prob_class_zero_conv_probability_value as desired_conviction approaches 0
-										(- zero_prob_class_zero_conv_probability_value (* zero_prob_class_zero_conv_probability_value desired_conviction))
-									)
-								))
-								local_class_probabilities_map
-							)
-						)
-
-						;else compute entropy to calculate the lowest conviction bound
-						(let
-							(assoc
-								;compute the entropy (expected surprisal) of the current set of probabilities for the action class
-								entropy_of_local_probabilities (entropy (values local_class_probabilities_map))
-								lowest_probability (apply "min" (values local_class_probabilities_map))
-							)
-
-							(declare (assoc
-								lowest_conviction_boundary
-									;entropy is zero if there's only one class in the local probabilities. then just set the boundary
-									;to 1 to just output the probability of this one class
-									(if (= 0 entropy_of_local_probabilities)
-										1
-
-										(/ entropy_of_local_probabilities (- (log lowest_probability )))
-									)
-
-								lowest_probability_classes_map (filter (lambda (= (current_value) lowest_probability )) local_class_probabilities_map)
-							))
-
-							(map
-								(lambda (let
-									(assoc
-										;all non-lowest classes have lowest probabilities of 0, all lowest are 1/N where N is the count of 'all lowest'
-										boundary_probability (/ 1 (size lowest_probability_classes_map))
-									)
-
-									(if (<= desired_conviction lowest_conviction_boundary)
-										(if (contains_index lowest_probability_classes_map (current_index))
-											boundary_probability
-
-											0
-										)
-
-										;else need to linearly interpolate between lowest_conviction_boundary and 1
-										(let
-											(assoc
-												;invert and normalize the conviction value to be between 1 and 0:
-												;value approaches 1 as as conviction approaches the lowest boundary probability
-												;and approaches 0 as conviction approaches 1
-												inverted_one_to_boundary_conviction_value
-													(/ (- 1 desired_conviction) (- 1 lowest_conviction_boundary))
-											)
-
-											(if (contains_index lowest_probability_classes_map (current_index))
-												;lowest probability classes increase their probability as they approach boundary_probability
-												;original_low_prob + (boundary_probability - original_low_prob) * inverted_conv_value
-												(+ (current_value)
-													(* (- boundary_probability  (current_value))
-														inverted_one_to_boundary_conviction_value
-													)
-												)
-
-												;original_prob - original_prob * inverted_conv_value
-												(- (current_value) (* (current_value) inverted_one_to_boundary_conviction_value))
-											)
-										)
-									)
-								))
-								local_class_probabilities_map
-							)
-						)
-					)
-			))
-		)
-
-		(declare (assoc total_prob_values (apply "+" (values local_class_probabilities_map))))
-
-		;in the case of no probabilities, assign even probabilities to all
-		(if (= 0 total_prob_values)
-			(map
-				(lambda (/ 1 (size local_class_probabilities_map)))
-				local_class_probabilities_map
+				;else select from global probabilities
+				(assign (assoc
+					local_class_probabilities_map (map (call !AddNominalLaplaceNoise) global_class_probabilities_map)
+				))
 			)
+		)
 
-			;output normalized probabilities that all add up to 1
-			(map
-				(lambda (/ (current_value) total_prob_values))
-				local_class_probabilities_map
-			)
+		;select from domain/uniform probabilities instead if the outside probability is greater than any local one
+		(if (>= (call !OutsideProbabilityLaplaceNoise) (max (values local_class_probabilities_map)))
+			(indices global_class_probabilities_map)
+
+			;else output the local class probabilities
+			local_class_probabilities_map
+		)
+	)
+
+
+	;Helper method that returns laplace noise around 0 using mean of 1
+	#!OutsideProbabilityLaplaceNoise
+	(let
+		(assoc R (- (rand) 0.5) )
+		(if (> R 0)
+			(- (/ (log (- 1 (* 2 (abs R)))) desired_conviction))
+			(< R 0)
+			(/ (log (- 1 (* 2 (abs R)))) desired_conviction)
+			0
 		)
 	)
 
