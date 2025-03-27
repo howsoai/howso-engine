@@ -3,12 +3,12 @@
 
 	;helper method to cache time series filter query for reuse in reacts into 'cached_time_series_filter_query'
 	;parameters:
-	; regional_context_features: list of context features
-	; regional_context_values: list of corresponding context values
+	; context_features: list of context features
+	; context_values: list of corresponding context values
 	#!CreateAndCacheTimeSeriesFilterQuery
 	(if (= 0 (size cached_time_series_filter_query))
 		(let
-			(assoc context_map (zip regional_context_features regional_context_values) )
+			(assoc context_map (zip context_features context_values) )
 			(if (contains_index context_map !tsTimeFeature)
 				(assign (assoc cached_time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
 			)
@@ -87,27 +87,12 @@
 	#!GenerateFeatureValue
 	(seq
 		(if feature_is_nominal
-			(let
-				;calculate probabilities for action given desired conviction and local class probabilities
-				(assoc
-					class_probabilities_map
-						(call !BlendNominalClassProbabilities (assoc
-							feature feature
-							desired_conviction desired_conviction
-							local_class_probabilities_map local_class_probabilities_map
-							allowed_values (get feature_bounds_map (list feature "allowed"))
-						))
-				)
-
-				;overwrite local_class_probabilities_map with the one that was actually used to select a value
+			(seq
+				;store the original local_class_probabilities_map
 				(if (and output_details (contains_index case_detail_values_map "categorical_action_probabilities"))
 					(let
 						(assoc
-							total_prob_values
-								(if (~ [] class_probabilities_map)
-									(size class_probabilities_map)
-									(apply "+" (values class_probabilities_map))
-								)
+							total_prob_values (apply "+" (values local_class_probabilities_map))
 						)
 						(assign (assoc
 							case_detail_values_map
@@ -120,10 +105,7 @@
 											feature
 											(map
 												(lambda (/ (current_value) total_prob_values))
-												(if (~ [] class_probabilities_map)
-													(zip class_probabilities_map 1)
-													class_probabilities_map
-												)
+												local_class_probabilities_map
 											)
 										)
 									)
@@ -132,6 +114,16 @@
 					)
 				)
 
+				;calculate probabilities for action given desired conviction and local class probabilities
+				(declare (assoc
+					class_probabilities_map
+						(call !BlendNominalClassProbabilities (assoc
+							feature feature
+							desired_conviction desired_conviction
+							local_class_probabilities_map local_class_probabilities_map
+							allowed_values (get feature_bounds_map (list feature "allowed"))
+						))
+				))
 
 				;if nulls are not allowed, but there are no probabilities to choose from,
 				;output a randomly weighted global value with nulls filtered out
@@ -593,27 +585,22 @@
 
 		(declare (assoc local_cases_total_weight (apply "+" (values local_cases_map))))
 
-		;normalize the weights in the local model
-		(assign (assoc
-			local_cases_map
-				;if has perfect matches, set their weight to 1, others to 0
-				(if (= .infinity local_cases_total_weight)
-					(map
-						(lambda (if (= .infinity (current_value)) 1 0))
-						local_cases_map
-					)
+		;handle perfect matches or extremely surprising cases in the local data
+		(if (or (= .infinity local_cases_total_weight) (= 0 local_cases_total_weight))
+			(assign (assoc
+				local_cases_map
+					;if has perfect matches, set their weight to 1, others to 0
+					(if (= .infinity local_cases_total_weight)
+						(map
+							(lambda (if (= .infinity (current_value)) 1 0))
+							local_cases_map
+						)
 
-					;all equally terrible, set to even weight
-					(= 0 local_cases_total_weight)
-					(map (lambda (/ 1 (size local_cases_map))) local_cases_map)
-
-					;else just scale the weights
-					(map
-						(lambda (/ (current_value) local_cases_total_weight))
-						local_cases_map
+						;else all weights are 0, meaning all equally very surprising, set to even weight
+						(map (lambda (/ 1 (size local_cases_map))) local_cases_map)
 					)
-				)
-		))
+			))
+		)
 
 		;compute categorical action probabilities for nominal features
 		(if feature_is_nominal

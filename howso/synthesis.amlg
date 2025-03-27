@@ -170,8 +170,6 @@
 								)
 							feature_is_ordinal (contains_index ordinal_features_map (current_value 1))
 							local_class_probabilities_map (null)
-							regional_context_features (list)
-							regional_context_values (list)
 							regional_cases_map (null)
 							allow_nulls (!= (false) (get feature_bounds_map (list (current_value 2) "allow_null")))
 							cycle_length (get !cyclicFeaturesMap (current_value 1))
@@ -222,9 +220,9 @@
 								;if RMR flag is specified, recalculate residuals around this particular reaction
 								(if (and
 										use_regional_residuals
-										(> (size regional_context_features) 0)
+										(> (size context_features) 0)
 										;can't do regional residuals if only one feature is provided
-										(!= regional_context_features (list feature))
+										(!= context_features (list feature))
 									)
 									(call !AccurateRegionalResidual)
 
@@ -540,10 +538,7 @@
 	#!GetNextActionValueGivenContexts
 	(seq
 		(if use_time_series_filter_query
-			(call !CreateAndCacheTimeSeriesFilterQuery (assoc
-				regional_context_features context_features
-				regional_context_values context_values
-			))
+			(call !CreateAndCacheTimeSeriesFilterQuery)
 		)
 
 		(assign (assoc
@@ -578,11 +573,6 @@
 			)
 		)
 
-		(assign (assoc
-			regional_context_features (append context_features feature)
-			regional_context_values (append context_values action_value)
-		))
-
 		(if use_time_series_filter_query (call !CreateAndCacheTimeSeriesFilterQuery) )
 
 		;for continuous fetaures, when not running RR, pull the local case ids around the predicted value to approximate
@@ -592,8 +582,8 @@
 				(assign (assoc
 					react_map
 						(call !NearestRegionReact (assoc
-							context_features regional_context_features
-							context_values regional_context_values
+							context_features (append context_features feature)
+							context_values (append context_values action_value)
 							action_feature feature
 							allow_nulls allow_nulls
 							hyperparam_map hyperparam_map
@@ -647,18 +637,21 @@
 
 		(assign (assoc
 			action_value (retrieve_from_entity case_id feature)
-			regional_context_features action_features
-			regional_context_values (retrieve_from_entity case_id action_features)
 		))
 
-		(if use_time_series_filter_query (call !CreateAndCacheTimeSeriesFilterQuery) )
+		(if use_time_series_filter_query
+			(call !CreateAndCacheTimeSeriesFilterQuery (assoc
+				context_features action_features
+				context_values (retrieve_from_entity case_id action_features)
+			))
+		)
 
 		;find the localized area around the starting case to use for residual approximation for this feature
 		(assign (assoc
 			react_map
 				(call !NearestRegionReact (assoc
-					context_features regional_context_features
-					context_values regional_context_values
+					context_features action_features
+					context_values (retrieve_from_entity case_id action_features)
 					action_feature feature
 					allow_nulls allow_nulls
 					hyperparam_map hyperparam_map
@@ -702,8 +695,8 @@
 				(if action_feature_is_dependent
 					(call !ComputeDependentQueries (assoc
 						action_feature feature
-						context_features regional_context_features
-						context_values regional_context_values
+						context_features (append context_features feature)
+						context_values (append context_values action_value)
 					))
 					(list)
 				)
@@ -717,7 +710,10 @@
 				)
 			feature_deviations (get feature_hyperparam_map "featureDeviations")
 			k_parameter (get feature_hyperparam_map "k")
+			dt_parameter (get feature_hyperparam_map "dt")
 		))
+
+		(declare (assoc not_surprisal_space (!= "surprisal_to_prob" dt_parameter) ))
 
 		;use dynamic deviations subtrainee if present
 		(if (get feature_hyperparam_map "subtraineeName")
@@ -750,21 +746,14 @@
 					cached_time_series_filter_query
 					(query_nearest_generalized_distance
 						(if (~ 0 k_parameter) (max k_parameter 30) k_parameter )
-						regional_context_features
-						regional_context_values
-						;if weight for action feature is 0 and using suprisal, ensure weight is set to avg feature weight
-						(if (and
-								(= 0 (get feature_weights feature))
-								(= "surprisal_to_prob" (get feature_hyperparam_map "dt"))
-							)
-							(set feature_weights feature (/ 1 (size feature_weights)))
-							feature_weights
-						)
+						context_features
+						context_values
+						feature_weights
 						!queryDistanceTypeMap
 						(get feature_hyperparam_map "featureDomainAttributes")
 						feature_deviations
 						(get feature_hyperparam_map "p")
-						(get feature_hyperparam_map "dt")
+						dt_parameter
 						(if valid_weight_feature weight_feature (null))
 						(rand)
 						(null) ;radius
@@ -787,14 +776,134 @@
 			)
 		)
 
+		(if feature_is_nominal
+			;average out all the local probabilities
+			(let
+				(assoc
+					local_probability_maps
+						(map
+							(lambda (let
+								(assoc
+									local_data_cases_tuple
+										#!RegionalNominalProbabilitiesQuery
+										(compute_on_contained_entities (append
+											(if ignore_case
+												(query_not_in_entity_list (list ignore_case))
+												(list)
+											)
+											(if (not allow_nulls)
+													(query_not_equals feature (null))
+													(list)
+												)
+											(if custom_extra_filtering_queries
+												custom_extra_filtering_queries
+												(list)
+											)
+											dependent_queries_list
+											cached_time_series_filter_query
+											(query_nearest_generalized_distance
+												k_parameter
+												context_features
+												(retrieve_from_entity (current_value 1) context_features)
+												feature_weights
+												!queryDistanceTypeMap
+												(get feature_hyperparam_map "featureDomainAttributes")
+												feature_deviations
+												(get feature_hyperparam_map "p")
+												dt_parameter
+												(if valid_weight_feature weight_feature (null))
+												(rand)
+												(null) ;radius
+												!numericalPrecision
+												feature
+											)
+										))
+								)
+
+								(if goal_features
+									(call !UpdateLocalInfluencesForGoals (assoc
+										feature_weights feature_weights
+										context_features context_features
+										context_values (retrieve_from_entity (current_value 1) context_features)
+										custom_extra_filtering_queries custom_extra_filtering_queries
+										dt_parameter dt_parameter
+										query_label "!RegionalNominalProbabilitiesQuery"
+									))
+								)
+
+								(if (and not_surprisal_space (contains_value (get local_data_cases_tuple 1) .infinity))
+									(let
+										(assoc
+											neighbor_values
+												;only keep perfect match neighbors that have a weight of .infinity
+												(filter
+													(lambda (= .infinity (get local_data_cases_tuple [ 1 (current_index 1)])) )
+													(last local_data_cases_tuple)
+												)
+										)
+
+										;iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+										;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
+										(zip
+											(lambda (+ (current_value 1) (current_value)))
+											neighbor_values
+											;since these are perfect matches, they all have equal weight
+											(/ 1 (size neighbor_values))
+										)
+									)
+
+									;else iterate over all the nearby cases, to create the mapping between each categorical action value and its summed
+									;weight for this categorical feature.  for each unique categorical value in all the neighbors, sum up its weight
+									(zip
+										(lambda (+ (current_value 1) (current_value)))
+										;feature value for each case
+										(last local_data_cases_tuple)
+										;weights of corresponding case
+										(get local_data_cases_tuple 1)
+									)
+								)
+
+							))
+							(indices regional_cases_map)
+						)
+				)
+
+				(assign (assoc
+					local_class_probabilities_map
+						;take the average probability mass of each class from all the neighbors
+						(map
+							(lambda (/ (current_value) (size local_probability_maps)))
+							;add up all the individual class weights for all the neighbors
+							(reduce
+								(lambda
+									(map
+										(lambda
+											(+
+												(or (first (current_value)))
+												(or (last (current_value)))
+											)
+										)
+										(previous_result)
+										(current_value)
+									)
+
+								)
+								local_probability_maps
+							)
+						)
+				))
+
+				(conclude)
+			)
+		)
+
 		(assign (assoc
 			regional_residuals
-				;TODO: 14435 - don't bottom out value, check if residual is 0 for continuous
 				(call !ExpandResidualValuesToUncertainty  (assoc
 					feature_residuals_map
 						(call !ComputeRegionalResiduals (assoc
 							regional_cases_map regional_cases_map
-							features regional_context_features
+							features context_features
 							target_residual_feature feature
 							ignore_case ignore_case
 						))
@@ -845,8 +954,8 @@
 							cached_time_series_filter_query
 							(query_nearest_generalized_distance
 								k_parameter
-								regional_context_features
-								regional_context_values
+								context_features
+								context_values
 								;if weight for action feature is 0 and using suprisal, ensure weight is set to avg feature weight
 								(if (and
 										(= 0 (get feature_weights feature))
