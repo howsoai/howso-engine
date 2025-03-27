@@ -34,6 +34,19 @@
 			;value 0.0 - 1.0, percent of model to use in sampling (using sampling without replacement).
     		;	Applicable only to non-robust computation. Ignored if num_samples is specified.
 			sample_model_fraction (null)
+			;{type "assoc" additional_indices {ref "GoalFeatures"}}
+			; assoc of :
+			;		{ feature : { "goal" : "min"/"max", "value" : value }}
+			;		A mapping of feature name to the goals for the feature, which will be used to bias the sampling of cases used to compute
+			;		the desired metrics.  This is useful for conditioning responses when it is challenging or impossible to know appropriate
+			;		values ahead of time, such as maximizing the reward or minimizing cost for reinforcement learning, or conditioning a
+			;		forecast based on attempting to achieve some value.  Goal features will reevaluate the inference for the given context
+			;		optimizing for the specified goals. Valid keys in the map are:
+			;		"goal": "min" or "max", will make a prediction while minimizing or maximizing the value for the feature or
+			;		"value" : value, will make a prediction while approaching the specified value
+			;	note: nominal features only support 'value', 'goal' is ignored.
+			;		  for non-nominals, if both are provided, only 'goal' is considered.
+			goal_features_map (assoc)
 			;{type "list" values "string"}
 			;full path for hyperparameters to use for computation.
     		;	If specified for any residual computations, takes precendence over action_feature parameter.
@@ -364,6 +377,22 @@
 					))
 					(list)
 				)
+			computing_robust_influences
+				(apply "or"
+					(unzip
+						details
+						["feature_robust_prediction_contributions" "feature_robust_accuracy_contributions" "feature_robust_accuracy_contributions_permutation"]
+					)
+				)
+			computing_full_details
+				(apply "or"
+					(unzip
+						details
+						["prediction_stats" "feature_full_residuals" "feature_full_accuracy_contributions_permutation"
+						 "feature_full_accuracy_contributions" "feature_full_prediction_contributions" "feature_deviations"]
+					)
+				)
+			computing_robust_residuals (get details "feature_robust_residuals")
 		))
 
 		;if num_samples was explicitly specified, use that many, even if it means
@@ -371,60 +400,82 @@
 		;and by default sample 1000 out of the full model if num_samples wasn't specified
 		(declare (assoc
 			case_ids
-				(if num_samples
-					(call !SampleCases (assoc
-						num num_samples
-						case_weight_feature (if valid_weight_feature weight_feature)
-						query_conditions action_condition_filter_query
-					))
-
-					(> sample_model_fraction 0)
-					(call !AllCases (assoc
-						num (* sample_model_fraction num_training_cases)
-						query_conditions action_condition_filter_query
-						rand_seed (rand)
-					))
-
-					;otherwise sample 1000 or the whole model
-					(if (> num_training_cases 1000)
-						;if more than 1000 cases, sample 1000
+				(if computing_full_details
+					(if num_samples
 						(call !SampleCases (assoc
-							num 1000
+							num num_samples
 							case_weight_feature (if valid_weight_feature weight_feature)
 							query_conditions action_condition_filter_query
 						))
 
-						;otherwise just use all the cases
+						(> sample_model_fraction 0)
 						(call !AllCases (assoc
+							num (* sample_model_fraction num_training_cases)
 							query_conditions action_condition_filter_query
 							rand_seed (rand)
 						))
+
+						;otherwise sample 1000 or the whole model
+						(if (> num_training_cases 1000)
+							;if more than 1000 cases, sample 1000
+							(call !SampleCases (assoc
+								num 1000
+								case_weight_feature (if valid_weight_feature weight_feature)
+								query_conditions action_condition_filter_query
+							))
+
+							;otherwise just use all the cases
+							(call !AllCases (assoc
+								query_conditions action_condition_filter_query
+								rand_seed (rand)
+							))
+						)
 					)
 				)
 			robust_residual_case_ids
-				(call !SampleCases (assoc
-					num
-						(if num_robust_residual_samples
-							num_robust_residual_samples
+				(if computing_robust_residuals
+					(call !SampleCases (assoc
+						num
+							(if num_robust_residual_samples
+								num_robust_residual_samples
 
-							(* 1000 (+ 1 (log (size context_features))))
-						)
-					case_weight_feature (if valid_weight_feature weight_feature)
-					query_conditions action_condition_filter_query
-				))
+								(* 1000 (+ 1 (log (size context_features))))
+							)
+						case_weight_feature (if valid_weight_feature weight_feature)
+						query_conditions action_condition_filter_query
+					))
+				)
 			robust_influence_case_ids
-				(call !SampleCases (assoc
-					num
-						(if num_robust_influence_samples
-							num_robust_influence_samples
+				(if computing_robust_influences
+					(call !SampleCases (assoc
+						num
+							(if num_robust_influence_samples
+								num_robust_influence_samples
 
-							;Ideally this would be larger, but performance is of significant concern here.
-							300
-						)
-					case_weight_feature (if valid_weight_feature weight_feature)
-					query_conditions action_condition_filter_query
-				))
+								;Ideally this would be larger, but performance is of significant concern here.
+								300
+							)
+						case_weight_feature (if valid_weight_feature weight_feature)
+						query_conditions action_condition_filter_query
+					))
+				)
 		))
+
+		;update sampled cases to select the goal-optimizing influential case of each sampled case
+		(if (size goal_features_map)
+			(assign (assoc
+				case_ids
+					(if case_ids
+
+					)
+				robust_residual_case_ids
+					(if robust_residual_case_ids
+					)
+				robust_influence_case_ids
+					(if robust_influence_case_ids
+					)
+			))
+		)
 
 
 		;calculates prediction stats
