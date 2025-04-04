@@ -887,14 +887,18 @@
 			; then measure the average error on each time-distance for each feature
 			(let
 				(assoc
-					synth_start_case
+					synthesized_timesteps
 						(if num_existing_series_rows
-							(get series_data (- num_existing_series_rows 1))
-
-							(first series_data)
+							(tail series_data (- num_existing_series_rows))
+							series_data
 						)
 					time_feature_index (get feature_index_map !tsTimeFeature)
+					output_feature_index_map (zip output_features (indices output_features))
 				)
+
+				(declare (assoc
+					synth_start_case (first synthesized_timesteps)
+				))
 
 				(declare (assoc
 					time_synthesized
@@ -902,6 +906,7 @@
 							(get (last series_data) time_feature_index)
 							(get synth_start_case time_feature_index)
 						)
+					start_time (get synth_start_case time_feature_index)
 				))
 
 				;Get most similar timesteps that have enough time-remaining in their series
@@ -937,7 +942,8 @@
 				;sample the most similar case that has enough time left to forecast
 				(assign (assoc
 					most_similar_timesteps
-						(map
+						;filtering here in case a case couldn't be found
+						(filter (map
 							(lambda
 								(let
 									(assoc
@@ -988,6 +994,49 @@
 								)
 							)
 							series_ids_list
+						))
+				))
+
+				(declare (assoc
+					forecast_start_times (map (lambda (retrieve_from_entity (current_value) !tsTimeFeature)) most_similar_timesteps)
+					;get the range of output_feature's values for each time step from start_case's time until time_synthesized has elapsed
+					trained_series_lists
+						(map
+							(lambda
+								(let
+									(assoc
+										case_id (current_value 1)
+										series_id_values (retrieve_from_entity (current_value 1) series_id_features)
+									)
+
+									(declare (assoc
+										sorted_case_ids
+											(sort
+												(lambda (> (retrieve_from_entity (current_value) !tsTimeFeature) (retrieve_from_entity (current_value 1) !tsTimeFeature)) )
+												;the cases needed from the series within the time window
+												(contained_entities (append
+													;matching series_ids
+													(map
+														(lambda (query_equals (current_value) (get series_id_values (current_index))))
+														series_id_features
+													)
+													(query_between
+														!tsTimeFeature
+														(- (retrieve_from_entity case_id !tsTimeFeature) 1)
+														(+ (retrieve_from_entity case_id !tsTimeFeature) time_synthesized 1)
+													)
+												))
+											)
+									))
+
+
+									(map
+										(lambda (retrieve_from_entity (current_value) output_features))
+										sorted_case_ids
+									)
+								)
+							)
+							most_similar_timesteps
 						)
 				))
 
@@ -1001,7 +1050,6 @@
 									(assoc
 										case_id (current_value 1)
 										series_id_values (retrieve_from_entity (current_value 1) series_id_features)
-										output_feature_index_map (zip output_features (indices output_features))
 									)
 
 									(get
@@ -1012,6 +1060,7 @@
 											initial_values [(retrieve_from_entity case_id !tsTimeFeature)]
 											output_new_series_ids (false)
 											continue_series (true)
+											leave_series_out (true) ;TODO: should keep this way?
 											series_context_values []
 											series_context_features []
 											details {}
@@ -1023,11 +1072,65 @@
 									)
 								)
 							)
-							;filtering here in case a case couldn't be found
-							(filter most_similar_timesteps)
+							most_similar_timesteps
 						)
 				))
-				(+ 23.4)
+
+				(declare (assoc
+					forecast_time_index (get output_feature_index_map !tsTimeFeature)
+				))
+
+				(accum (assoc
+					series_detail_values_map
+						;for each timestep, get the MAE of the forecasts at the same amount of time elapsed
+						{
+							"series_uncertainty"
+								(map
+									(lambda
+										(let
+											(assoc
+												time_elapsed (- (get (current_value 1) time_feature_index) start_time)
+											)
+
+											(map
+												(lambda
+													;(current_index) = output feature to measure average MAE for
+													(/
+														(apply "+" (map
+															(lambda
+																;(current_value) = [forecast series_data]
+																(abs (-
+																	;interpolate the forecast
+																	(call !InterpolateSeriesValues (assoc
+																		time_values (map (lambda (get (current_value) forecast_time_index) ) (first (current_value 1)))
+																		feature_values (map (lambda (get (current_value) (get output_feature_index_map (current_index 3))) ) (first (current_value 1)))
+																		time (+ (get forecast_start_times (current_index 1)) time_elapsed)
+																	))
+																	;interpolate the trained series data
+																	(call !InterpolateSeriesValues (assoc
+																		time_values (map (lambda (get (current_value) forecast_time_index) ) (last (current_value 1)))
+																		feature_values (map (lambda (get (current_value) (get output_feature_index_map (current_index 3))) ) (last (current_value 1)))
+																		time (+ (get forecast_start_times (current_index 1)) time_elapsed)
+																	))
+																))
+															)
+															forecasts
+															trained_series_lists
+														))
+														(size forecasts)
+													)
+												)
+												;all continuous output features that are not the time feature
+												(remove (zip (filter (lambda (not (contains_index !nominalsMap (current_value)))) output_features)) [!tsTimeFeature])
+											)
+
+										)
+									)
+									synthesized_timesteps
+								)
+						}
+				))
+
 			)
 		)
 
