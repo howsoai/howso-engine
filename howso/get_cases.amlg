@@ -39,6 +39,7 @@
 	; num: number of samples to return
 	; rand_seed: optional random seed
 	; case_weight_feature: optional, if provided will use this feature to do case weighted sampling
+	; query_conditions: a set of queries that can limits the available cases for sampling
 	#!SampleCases
 	(declare
 		(assoc
@@ -61,6 +62,129 @@
 				query_conditions
 				(query_sample (call !GetNumTrainingCases) case_weight_feature (rand))
 			))
+		)
+	)
+
+	;for each case id given, gets its influential cases and selects the case that optimizes the goal
+	;parameters:
+	; goal_features_map: the map of goal features and their specified goals (value/max/min)
+	; goal_dependent_features: list of features that will not be ignored while optimizing the goal
+	; case_ids: the originally sampled case_ids
+	; query_conditions: a set of queries that can limits the available cases for selection
+	; features: a list of feature to robustly select from when querying for similar cases
+	#!SampleCasesForGoals
+	(declare
+		(assoc
+			goal_features_map (assoc)
+			goal_dependent_features (list)
+			case_ids (list)
+			query_conditions (list)
+			features (list)
+		)
+
+		(declare (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					feature ""
+					weight_feature (if valid_weight_feature weight_feature)
+				))
+			goal_features (indices goal_features_map)
+			goal_dependent_features_set (zip goal_dependent_features)
+		))
+
+		;setting up variables to use goal_feature influence code correctly
+		(declare (assoc
+			feature_weights (get hyperparam_map "featureWeights")
+			dt_parameter (get hyperparam_map "dt")
+			all_context_features (append features goal_dependent_features)
+		))
+
+		||(map
+			(lambda
+				(let
+					(assoc
+						case_id (current_value 1)
+						context_map
+							(zip
+								all_context_features
+								(retrieve_from_entity (current_value 1) all_context_features)
+							)
+						custom_extra_filtering_queries (append query_conditions (query_not_in_entity_list [(current_value 2)]))
+					)
+
+					;robustly select a set of features to use as contexts for the goal-optimized sample
+					(declare (assoc
+						context_features
+							(append
+								goal_dependent_features
+								(filter
+									(lambda (> 0.5 (rand)))
+									features
+								)
+							)
+					))
+					;loop to make sure at least one feature is selected
+					(while (not (size context_features))
+						(assign (assoc
+							context_features
+								(append
+									goal_dependent_features
+									(filter
+										(lambda (> 0.5 (rand)))
+										features
+									)
+								)
+						))
+					)
+
+					(declare (assoc
+						context_values (unzip context_map context_features)
+					))
+
+					(declare (assoc
+						similar_cases_map
+							#!GoalFeatureSamplingQuery
+							(compute_on_contained_entities (append
+								(query_exists !internalLabelSession)
+								custom_extra_filtering_queries
+								(query_nearest_generalized_distance
+									(get hyperparam_map "k")
+									context_features
+									context_values
+									feature_weights
+									!queryDistanceTypeMap
+									(get hyperparam_map "featureAttributes")
+									(get hyperparam_map "featureDeviations")
+									(get hyperparam_map "p")
+									dt_parameter
+									(if valid_weight_feature weight_feature (null))
+									;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+									"fixed rand seed"
+									(null) ;radius
+									!numericalPrecision
+								)
+							))
+					))
+
+					(assign (assoc
+						similar_cases_map
+							(call !UpdateLocalInfluencesForGoals (assoc
+								case_ids (append (indices similar_cases_map) case_id)
+								feature_weights feature_weights
+								context_features context_features
+								context_values context_values
+								;a ignore-this-case query was added to custom_extra_filtering queries above
+								;so removing it here so that the current case can still be chosen by the goal optimization
+								custom_extra_filtering_queries (trunc custom_extra_filtering_queries)
+								dt_parameter dt_parameter
+								query_label "!GoalFeatureSamplingQuery"
+							))
+					))
+
+					(first (index_max similar_cases_map))
+				)
+			)
+			case_ids
 		)
 	)
 
