@@ -33,6 +33,10 @@
 			;{type ["boolean" "string"]}
 			;true or string, if true will use default value of "influence_weight_entropy"
 			influence_weight_entropy (null)
+			;{type "boolean"}
+			;flag, if set to true, will enable auto_analyze and analyze with these specified features computing their values.
+			;   Only applicable when reacting for the entire dataset,  when case_ids is null.
+			analyze (null)
 			;{ref "UseCaseWeights"}
 			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
 			;	case weights will be used if the trainee has them.
@@ -98,6 +102,62 @@
 			(assign (assoc weight_feature ".none"))
 		)
 
+		(declare (assoc cache_values (false) ))
+
+		(if (and analyze (= (null) case_ids))
+			(let
+				(assoc
+					;store map of type of computation -> stored feature name
+					computed_map
+						(filter (assoc
+							"familiarity_conviction_addition" familiarity_conviction_addition
+							"familiarity_conviction_removal" familiarity_conviction_removal
+							"p_value_of_addition" p_value_of_addition
+							"p_value_of_removal" p_value_of_removal
+							"distance_contribution" distance_contribution
+							"similarity_conviction" similarity_conviction
+							"influence_weight_entropy" influence_weight_entropy
+						))
+				)
+
+				(assign_to_entities (assoc
+					!computedFeaturesMap
+						(assoc
+							"computed_features" (values computed_map)
+							"computed_map" computed_map
+							"context_features" features
+							"weight_feature" (if use_case_weights weight_feature)
+						)
+					!autoAnalyzeEnabled (true)
+					!featureAttributes
+						(append
+							!featureAttributes
+							(zip
+								(values computed_map)
+								(map
+									(lambda
+										(if (or (= "p_value_of_addition" (current_value)) (= "p_value_of_removal" (current_value)))
+											{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" 1} }
+
+											;else convictions, entropy and distance contribution ranges are 0 to infinity
+											{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" .infinity} }
+										)
+									)
+									(indices computed_map)
+								)
+							)
+						)
+					!queryDistanceTypeMap (append !queryDistanceTypeMap (zip (values computed_map) "continuous_numeric") )
+				))
+
+				;need to cache computed values to be able to approximate any of these listed computations during future train calls
+				(assign (assoc
+					cache_values
+						(or familiarity_conviction_addition p_value_of_addition familiarity_conviction_removal p_value_of_removal)
+				))
+			)
+		)
+
 		(declare (assoc
 			hyperparam_map
 				(call !GetHyperparameters (assoc
@@ -145,6 +205,80 @@
 		;meaning that the K must be at least 2 less than the model size
 		(if (and (~ 0 closest_k) (< dataset_size (+ closest_k 2)) )
 			(assign (assoc closest_k (- dataset_size 2)))
+		)
+
+		;will need to compute distance_contributions if caching values even if distance_contribution were not explicitly requested
+		(if (or distance_contribution cache_values)
+			(let
+				(assoc
+					case_to_dc_map
+						(compute_on_contained_entities (list
+							||(compute_entity_distance_contributions
+								closest_k
+								features
+								case_ids
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								(get hyperparam_map "p")
+								(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+								(if valid_weight_feature weight_feature (null))
+								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+								"fixed rand seed"
+								(null) ;radius
+								!numericalPrecision
+							)
+						))
+				)
+
+				(if distance_contribution
+					(seq
+						(call !StoreCaseValues (assoc
+							label_name distance_contribution
+							case_values_map case_to_dc_map
+						))
+
+						(if (not (contains_value !reactIntoFeaturesList distance_contribution))
+							(accum_to_entities (assoc !reactIntoFeaturesList distance_contribution))
+						)
+					)
+				)
+
+				;if computing for the whole model, update the calculated average distance contribution
+				(if (= (null) case_ids)
+					(assign_to_entities (assoc
+						!averageCaseDistanceContribution
+							(/
+								(apply "+" (values case_to_dc_map))
+								(size case_to_dc_map)
+							)
+					))
+				)
+
+				;cache converted distance_contributions into probabilities for future familiarity conviction approximations
+				(if cache_values
+					(let
+						(assoc
+							scale (/ dataset_size (+ 1 dataset_size))
+							total_dc (apply "+" (values case_to_dc_map))
+						)
+						(assign_to_entities (assoc
+							!cachedExpectedCaseProbabilities
+								;convert each dc value to a probability by dividing by the total_dc and scale it by the next expected case scale value
+								;e.g, given dc probabilities [ .1 .2 .3 .4 ], next case will be 5th, so its expected probability is (1/5 = 0.2)
+								;need to multiple each dc prob by 4/5 so the end result will be [ .08 .16 .24 .32 .2 ]
+								(append
+									(map
+										(lambda (* scale (/ (current_value) total_dc)) )
+										(values case_to_dc_map)
+									)
+									(/ 1 (+ 1 dataset_size))
+								)
+						))
+					)
+				)
+			)
 		)
 
 		(if (or familiarity_conviction_addition p_value_of_addition)
@@ -197,6 +331,10 @@
 							!storedCaseConvictionsFeatureAddition familiarity_conviction_addition
 							!storedConvictionsFeatureSet (sort features)
 						))
+
+						(if cache_values
+							(accum_to_entities (assoc !computedFeaturesMap (assoc "cached_average_entropy_addition" avg_entropy) ))
+						)
 
 						;store the conviction for the cases into the specified label name
 						(call !StoreCaseValues (assoc
@@ -265,6 +403,10 @@
 					(let
 						(assoc avg_entropy (/ (apply "+" (values entropies_map)) (size entropies_map) ) )
 
+						(if cache_values
+							(accum_to_entities (assoc !computedFeaturesMap (assoc "cached_average_entropy_removal" avg_entropy) ))
+						)
+
 						(call !StoreCaseValues (assoc
 							label_name familiarity_conviction_removal
 							case_values_map
@@ -280,52 +422,6 @@
 							(accum_to_entities (assoc !reactIntoFeaturesList familiarity_conviction_removal))
 						)
 					)
-				)
-			)
-		)
-
-		(if distance_contribution
-			(let
-				(assoc
-					case_to_dc_map
-						(compute_on_contained_entities (list
-							||(compute_entity_distance_contributions
-								closest_k
-								features
-								case_ids
-								feature_weights
-								!queryDistanceTypeMap
-								query_feature_attributes_map
-								feature_deviations
-								(get hyperparam_map "p")
-								(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
-								(if valid_weight_feature weight_feature (null))
-								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-								"fixed rand seed"
-								(null) ;radius
-								!numericalPrecision
-							)
-						))
-				)
-
-				(call !StoreCaseValues (assoc
-					label_name distance_contribution
-					case_values_map case_to_dc_map
-				))
-
-				(if (not (contains_value !reactIntoFeaturesList distance_contribution))
-					(accum_to_entities (assoc !reactIntoFeaturesList distance_contribution))
-				)
-
-				;if computing for the whole model, update the calculated average distance contribution
-				(if (= (null) case_ids)
-					(assign_to_entities (assoc
-						!averageCaseDistanceContribution
-							(/
-								(apply "+" (values case_to_dc_map))
-								(size case_to_dc_map)
-							)
-					))
 				)
 			)
 		)
@@ -379,6 +475,28 @@
 				(if (not (contains_value !reactIntoFeaturesList influence_weight_entropy))
 					(accum_to_entities (assoc !reactIntoFeaturesList influence_weight_entropy))
 				)
+			)
+		)
+
+		;kick off an analyze run if analyze is enabled
+		(if (and analyze (= (null) case_ids))
+			(if (!= (null) !savedAnalyzeParameterMap)
+				;prevent calling react_into_features during the analyze()
+				(call !Analyze (append !savedAnalyzeParameterMap (assoc "from_react_into_features" (true)) ))
+
+				(call !Analyze (assoc
+					targeted_model "targetless"
+					context_features !trainedFeatures
+					weight_feature
+						(if (and !autoAblationEnabled !autoAblationWeightFeature)
+							!autoAblationWeightFeature
+							weight_feature
+						)
+					use_case_weights (or (and !autoAblationEnabled !autoAblationWeightFeature) use_case_weights)
+					k_folds 1
+					;prevent calling react_into_features during the analyze()
+					from_react_into_features (true)
+				))
 			)
 		)
 
