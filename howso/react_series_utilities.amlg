@@ -396,6 +396,7 @@
 		(declare (assoc
 			requested_details (indices (filter (lambda (current_value)) details))
 			output_details (contains_value (values details) (true))
+			computing_residuals (apply "or" (unzip details ["feature_full_residuals" "feature_robust_residuals"]))
 		))
 
 		(if output_details
@@ -1054,6 +1055,48 @@
 			))
 		)
 
+		(if computing_residuals
+			;overwrite the per-timestep residuals to be accumulated
+			(assign (assoc
+				series_detail_values_map
+					(append
+						series_detail_values_map
+						(map
+							(lambda
+								;for each residual detail
+								(map
+									(lambda
+										;for each timestep
+										(map
+											(lambda
+												;for each feature
+												;at this point:
+												; (current_index) = feature to accumulate residuals for
+												; (current_value 1) = list of residuals for the given detail
+												; (current_index 1) = current timestep index of forecast
+												; take sqrt(sum of squares of residuals) for all timesteps up to
+												(sqrt
+													(apply "+" (map
+														(lambda (pow (current_value) 2))
+														(map
+															(lambda (get (current_value) (current_index 1)))
+															(trunc (current_value 2) (+ (current_index 1) 1))
+														)
+													))
+												)
+											)
+											(current_value)
+										)
+									)
+									(current_value)
+								)
+							)
+							(keep series_detail_values_map ["feature_full_residuals" "feature_robust_residuals"])
+						)
+					)
+			))
+		)
+
 
 		;output the series data
 		(assoc
@@ -1547,7 +1590,34 @@
 				case_detail_values_map
 					(map
 						(lambda
-							(append (current_value) (get react_output (current_index)))
+							(if (contains_value ["feature_full_residuals" "feature_robust_residuals"] (current_index))
+								;if residuals, need to derive them for continuous derived action features
+								(append
+									(current_value)
+									(get react_output (current_index))
+									;modify the react output to derive residuals for continuous derived action features
+									(map
+										(lambda
+											(if (= "delta" (get !featureAttributes [(current_index 1) "time_series" "type"]))
+												;same residual as delta
+												(get react_output [(current_index 2) (concat "." (current_index 1) "_delta_1")])
+
+												(= "rate" (get !featureAttributes [(current_index 1) "time_series" "type"]))
+												;rate1 residual * time_delta (TODO: this should be more complex, to account for higher order rate residuals as well)
+												(*
+													(get current_case_map (concat "." !tsTimeFeature "_delta_1"))
+													(get react_output [(current_index 2) (concat "." (current_index 1) "_rate_1")])
+												)
+
+												"ruh roh!"
+											)
+										)
+										(zip (filter (lambda (= "continuous" (get !featureAttributes [(current_value 1) "type"]))) derived_action_features))
+									)
+								)
+								;else just append as normal
+								(append (current_value) (get react_output (current_index)))
+							)
 						)
 						case_detail_values_map
 					)
