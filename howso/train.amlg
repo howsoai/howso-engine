@@ -692,6 +692,11 @@
 	(let
 		(assoc train_features features )
 
+		;need to compute features for these new cases and update them
+		(if !computedFeaturesMap
+			(call !ComputeFeaturesDuringTrain (assoc update_cases_and_features (true) ))
+		)
+
 		;if there exist rebalance_features, compute those case weights to store when creating each case
 		(if (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
 			(let
@@ -1028,6 +1033,31 @@
 			ablation_trained_instance_count (size indices_to_train)
 		))
 
+		;need to compute features for these new cases
+		(declare (assoc
+			computed_features_data_map
+				(if !computedFeaturesMap
+					(call !ComputeFeaturesDuringTrain (assoc
+						cases (unzip cases indices_to_train)
+						update_cases_and_features (false)
+					))
+				)
+		))
+
+		(declare (assoc
+			ablate_train_features
+				(if computed_features_data_map
+					(append
+						features
+						(get computed_features_data_map "computed_features")
+						;the weight specific features go at the end
+						(tail train_features (- (size features))
+					))
+					;else leave train_features as-is
+					train_features
+				)
+		))
+
 		(if rebalance_weights
 			(assign (assoc
 				rebalance_case_weights (call !ComputeRebalanceCaseWeights (assoc rebalance_cases (unzip cases indices_to_train) ))
@@ -1068,10 +1098,13 @@
 								))
 							)
 						)
+						(if computed_features_data_map
+							(accum (assoc feature_values (get computed_features_data_map ["computed_values" (current_index 2)]) ))
+						)
 
 						;create the case and output case id
 						(call !CreateCase (assoc
-							features train_features
+							features ablate_train_features
 							feature_values
 								(if rebalance_weights
 									;store rebalance weight and probability mass of 1
@@ -1141,356 +1174,6 @@
 		)
 
 		output_cases
-	)
-
-	;private helper method that checks if the conditions for auto-analyze are met, and calls the analyze if so
-	;this method should be called within #train
-	;
-	;parameters:
-	; skip_auto_analyze: flag, if true and auto-analyze is needed, then status_output will be assigned to "analyze".
-	;                    If false, and auto-analyze is needed, the analyze will be executed.
-	#!AutoAnalyzeIfNeeded
-	(if (>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
-		(if skip_auto_analyze
-			;if skip_auto_analyze, send back "analyze" status so users knows an analyze is needed/recommended
-			; rather than performing it now.
-			(assign (assoc status_output "analyze"))
-
-			;otherwise do the analyze
-			(seq
-				(if (!= (null) !savedAnalyzeParameterMap)
-					(call !Analyze !savedAnalyzeParameterMap)
-
-					(call !Analyze (assoc
-						targeted_model "targetless"
-						context_features !trainedFeatures
-						weight_feature
-							(if (and !autoAblationEnabled !autoAblationWeightFeature)
-								!autoAblationWeightFeature
-								".none"
-							)
-						use_case_weights (and !autoAblationEnabled !autoAblationWeightFeature)
-						k_folds 1
-					))
-				)
-				(assign (assoc status_output "analyzed"))
-			)
-		)
-	)
-
-	;set specified feature weights in all hyperparameter maps (!defaultHyperparameters and !hyperparameterMetadataMap)
-	;If weights haven't been defined yet, set them to 0 for invacitves and 1 for actives
-	;If already defined, will overwrite the weight of the specified features in feature_weights_map
-	;
-	;parameters:
-	; features_weights_map: assoc of feature -> weight to overwrite in all hyperparameter sets
-	; overwrite: flag, if set to true will assume that featureWeights already exist and overwrites them.
-	;			 When false, will create featureWeights in the hyperparameter set
-	#!SetFeatureWeightsForFeatures
-	(declare
-		(assoc
-			features_weights_map (assoc)
-			overwrite (false)
-		)
-
-		(declare (assoc
-			updated_hp_maps
-				(map
-					(lambda
-						(rewrite
-							;if this is a hp assoc, modify it
-							(lambda
-								(if (and (= (assoc) (get_type (current_value))) (contains_index (current_value) "k") )
-									;hp already have featureDeviations defined, overwrite where necessary
-									(if overwrite
-										(let
-											;take featureWeights in HP assoc and alter them
-											(assoc weights_map (get (current_value 1) "featureWeights") )
-
-											(map
-												(lambda
-													(assign (assoc
-														weights_map
-															(set
-																weights_map
-																(current_index 1)
-																(current_value 1)
-															)
-													))
-												)
-												features_weights_map
-											)
-
-											;append the updated deviations_map to this hp map
-											(append (current_value) (assoc "featureWeights" weights_map) )
-										)
-
-										(let
-											;create a feature weights assoc
-											(assoc weights_map (append (zip !trainedFeatures 1) features_weights_map) )
-
-											(append (current_value) (assoc "featureWeights" weights_map))
-										)
-									)
-
-									;else not the hp assoc, return original
-									(current_value)
-								)
-							)
-							(current_value)
-						)
-					)
-					(list !defaultHyperparameters !hyperparameterMetadataMap)
-				)
-		))
-
-		(assign_to_entities (assoc
-			!defaultHyperparameters (first updated_hp_maps)
-			!hyperparameterMetadataMap (last updated_hp_maps)
-		))
-	)
-
-	;Helper method for training, updates null flags and resets model level attributes based on the data such as
-	;model case entropies, marginal stats, expected values, etc.
-	#!ClearCachedDataProperties
-	(seq
-		(accum_to_entities (assoc
-			!featureNullRatiosMap
-				(map
-					(lambda (let
-						(assoc feature (current_index 1))
-						(if (current_value)
-							(set
-								(current_value)
-								"has_nulls"
-								;leave true as true, otherwise set to null
-								(if (get (current_value) "has_nulls") (true))
-							)
-
-							;else create the has_nulls key with a null
-							(assoc "has_nulls" (null))
-						)
-					))
-					(append (zip features) !featureNullRatiosMap)
-				)
-		))
-
-		;model has changed so clear out these cached value
-		#!ClearCachedCountsAndEntropies
-		(assign_to_entities (assoc
-			!averageCaseEntropyAddition (null)
-			!averageCaseEntropyRemoval (null)
-			!storedCaseConvictionsFeatureAddition (null)
-			!averageCaseDistanceContribution (null)
-			!staleOrdinalValuesCount (true)
-			!nominalClassProbabilitiesMap (assoc)
-			!expectedValuesMap (assoc)
-			!featureMarginalStatsMap (assoc)
-			!tsModelFeaturesMap (set !tsFeaturesMap ["minimum_time_bound"] (null))
-		))
-	)
-
-	;Helper method to prime query caches for all !trainedFeatures and update the !inactiveFeaturesMap
-	#!UpdateInactiveFeatures
-	(seq
-		;prime the caches for the query engine using all the trained features
-		(size
-			(contained_entities (append
-				(map (lambda (query_exists (current_value))) !trainedFeatures)
-			))
-		)
-
-		(declare (assoc
-			inactive_features_map
-				(filter
-					(lambda (let
-						(assoc feature (current_index 1))
-
-						;only keep those features that have no valid values (0 non-nulls)
-						(=
-							(size
-								(contained_entities (list
-									(query_exists !internalLabelSession)
-									(query_exists feature)
-									(query_not_equals feature (null))
-								))
-							)
-							0
-						)
-					))
-					(if !inactiveFeaturesMap
-						!inactiveFeaturesMap
-						(zip !trainedFeatures 0)
-					)
-				)
-		))
-
-		;if there are now less inactive features than there were, set the no-longer inactive feature weights to 1
-		(if (< (size inactive_features_map) (size !inactiveFeaturesMap))
-			(call !SetFeatureWeightsForFeatures (assoc
-				features_weights_map
-					(zip
-						(indices (remove !inactiveFeaturesMap (indices inactive_features_map)) )
-						1
-					)
-				overwrite (true)
-			))
-		)
-
-		(if (size inactive_features_map)
-			(seq
-				;if there are inactive features and they haven't been set yet, set their weight to 0
-				(if (!= !inactiveFeaturesMap inactive_features_map)
-					(call !SetFeatureWeightsForFeatures (assoc
-						features_weights_map inactive_features_map
-						overwrite (false)
-					))
-				)
-				(assign_to_entities (assoc
-					!inactiveFeaturesMap inactive_features_map
-					!inactiveFeaturesNeedCaching (false)
-				))
-			)
-
-			;else all features have some non-null values
-			(assign_to_entities (assoc
-				!inactiveFeaturesMap (null)
-				!inactiveFeaturesNeedCaching (false)
-			))
-		)
-	)
-
-	;sub method to compute and output rebalance case weights for provided rebalance_cases if there are rebalance features defined
-	#!ComputeRebalanceCaseWeights
-	(let
-		(assoc
-			hyperparam_map
-				(call !GetHyperparameters (assoc
-					context_features features
-					weight_feature (if !autoAblationEnabled !autoAblationWeightFeature ".case_weight")
-				))
-		)
-		(declare (assoc
-			dataset_size (call !GetNumTrainingCases)
-			weight_feature (if !autoAblationEnabled !autoAblationWeightFeature ".case_weight")
-			feature_weights (get hyperparam_map "featureWeights")
-			feature_deviations  (get hyperparam_map "featureDeviations")
-			dt_parameter (get hyperparam_map "dt")
-			p_parameter (get hyperparam_map "p")
-			query_closest_k (get hyperparam_map "k")
-			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
-			rebalance_feature_indices  (unzip (zip features (indices features)) !continuousRebalanceFeatures)
-			continuous_rebalance_features !continuousRebalanceFeatures
-			nominal_rebalance_features !nominalRebalanceFeatures
-			feature_value_weight_map (null)
-			nominal_rebalance_feature_indices (null)
-		))
-
-		;if there are nominal rebalance features, pull the corresponding nominal value weights
-		(if (size nominal_rebalance_features)
-			(assign (assoc
-				;assoc of { feature -> { value -> weight } }
-				feature_value_weight_map !cachedRebalanceClassValueWeightMap
-				nominal_rebalance_feature_indices (unzip (zip features (indices features)) nominal_rebalance_features)
-			))
-		)
-
-		||(map
-			(lambda (let
-				(assoc
-					distance_contribution
-						(if (size continuous_rebalance_features)
-							(call !ComputeCandidateCaseDistanceContribution (assoc
-								features continuous_rebalance_features
-								feature_values
-									(if encode_features_on_train
-										(call !ConvertFromInput (assoc
-											feature_values (unzip (current_value 3) rebalance_feature_indices)
-											features continuous_rebalance_features
-										))
-
-										;else use feature_values as-is
-										(unzip (current_value 2) rebalance_feature_indices)
-									)
-								feature_weights feature_weights
-								feature_deviations feature_deviations
-								dt_parameter dt_parameter
-								p_parameter p_parameter
-								query_closest_k query_closest_k
-								query_feature_attributes_map query_feature_attributes_map
-								use_case_weights !autoAblationEnabled
-								weight_feature weight_feature
-								rebalance_weight_feature !internalLabelProbabilityMass
-							))
-						)
-					;default nominal weight to 1
-					nominal_rebalance_features_weight 1
-				)
-
-				(if feature_value_weight_map
-					(let
-						(assoc
-							nominal_values
-									(if encode_features_on_train
-										(call !ConvertFromInput (assoc
-											feature_values (unzip (current_value 2) nominal_rebalance_feature_indices)
-											features nominal_rebalance_features
-										))
-
-										;else use feature_values as-is
-										(unzip (current_value 1) nominal_rebalance_feature_indices)
-									)
-						)
-
-						(assign (assoc
-							nominal_rebalance_features_weight
-								;grab the weight for this value of the one nominal rebalance feature
-								(if (= 1 (size nominal_values))
-									(or
-										(get
-											feature_value_weight_map
-											[ (first nominal_rebalance_features) (first nominal_values) ]
-										)
-										(get !cachedRebalanceUnknownValueWeightMap (first nominal_rebalance_features))
-									)
-
-									;multiple nominal rebalance feature weights are multiplied
-									(apply "*"
-										(map
-											(lambda
-												(or
-													(get
-														feature_value_weight_map
-														[ (current_value 1) (get nominal_values (current_index 1)) ]
-													)
-													(get !cachedRebalanceUnknownValueWeightMap (current_value))
-												)
-											)
-											nominal_rebalance_features
-										)
-									)
-								)
-						))
-					)
-				)
-
-				;product of all the rebalance feature weights
-				(if distance_contribution
-					(*
-						nominal_rebalance_features_weight
-						;convert suprisal to probability
-						(if (= "surprisal_to_prob" dt_parameter)
-							(- 1 (exp (- distance_contribution)) )
-							;else store DC as-is
-							distance_contribution
-						)
-					)
-					;else only the nominal rebalance weight
-					nominal_rebalance_features_weight
-				)
-			))
-			rebalance_cases
-		)
 	)
 
 )
