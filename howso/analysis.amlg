@@ -52,8 +52,9 @@
 			;{type "number" min 2}
 			;number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
 			analysis_sub_model_size (null)
-			;{type "list" values "number"}
-			;list of values for k (the number of cases making up a local model) to grid search during analysis
+			;{type "list" values ["number" "list"]}
+			;list of values for k (number of cases making up the local space) to grid search during analysis
+			;if a value is a list of values, treats the inner list as a tuple of: influence cutoff percentage, min K, max K and extra K.
 			k_values (null)
 			;{type "list" values "number"}
 			;list of values for p (the parameter of the Lebesgue space) to grid search during analysis
@@ -139,32 +140,6 @@
 			(assign (assoc k_folds num_cases))
 		)
 
-		;save the parameters that analyze was called with
-		(assign_to_entities (assoc
-			!savedAnalyzeParameterMap
-				(assoc
-					"context_features" context_features
-					"action_features" action_features
-					"k_folds" k_folds
-					"k_folds_by_indices" k_folds_by_indices
-					"bypass_hyperparameter_analysis" bypass_hyperparameter_analysis
-					"bypass_calculate_feature_residuals" bypass_calculate_feature_residuals
-					"bypass_calculate_feature_weights" bypass_calculate_feature_weights
-					"use_deviations" use_deviations
-					"num_samples" num_samples
-					"k_values" k_values
-					"p_values" p_values
-					"dt_values" dt_values
-					"targeted_model" targeted_model
-					"num_analysis_samples" num_analysis_samples
-					"analysis_sub_model_size" analysis_sub_model_size
-					"use_case_weights" use_case_weights
-					"weight_feature" weight_feature
-					"rebalance_features" rebalance_features
-					"use_sdm" use_sdm
-				)
-		))
-
 		(declare (assoc holdout_entity_name (null) ))
 
 		;if user specified how many samples to use for analysis, randomly hold out the rest
@@ -235,6 +210,32 @@
 					))
 			))
 		)
+
+		;save the parameters that analyze was called with
+		(assign_to_entities (assoc
+			!savedAnalyzeParameterMap
+				(assoc
+					"context_features" context_features
+					"action_features" action_features
+					"k_folds" k_folds
+					"k_folds_by_indices" k_folds_by_indices
+					"bypass_hyperparameter_analysis" bypass_hyperparameter_analysis
+					"bypass_calculate_feature_residuals" bypass_calculate_feature_residuals
+					"bypass_calculate_feature_weights" bypass_calculate_feature_weights
+					"use_deviations" use_deviations
+					"num_samples" num_samples
+					"k_values" k_values
+					"p_values" p_values
+					"dt_values" dt_values
+					"targeted_model" targeted_model
+					"num_analysis_samples" num_analysis_samples
+					"analysis_sub_model_size" analysis_sub_model_size
+					"use_case_weights" use_case_weights
+					"weight_feature" weight_feature
+					"rebalance_features" rebalance_features
+					"use_sdm" use_sdm
+				)
+		))
 
 		;if the bypass hyperparameter analysis flag is null or is false, analyze hyper parameters
 		(if (not bypass_hyperparameter_analysis)
@@ -471,6 +472,25 @@
 		(if (and !tsTimeFeature !tsTimeFeatureUniversal)
 			(call !UpdateMinimumTimeBound (assoc
 				hyperparam_map (call !GetHyperparameters (assoc feature (null) ))
+			))
+		)
+
+		;if there's a !computedFeaturesMap call react_into_features to recompute them,
+		;only if not being called from react_into_features to prevent infinite loop
+		(if (and !computedFeaturesMap (not from_react_into_features))
+			(call react_into_features (append
+				(get !computedFeaturesMap "computed_map")
+				{
+					features (get !computedFeaturesMap "context_features")
+					analyze (false)
+				}
+				(if (get !computedFeaturesMap "weight_feature")
+					(assoc
+						"use_case_weights" (true)
+						"weight_feature" (get !computedFeaturesMap "weight_feature")
+					)
+					{}
+				)
 			))
 		)
 
@@ -756,6 +776,17 @@
 			))
 		)
 
+		;if there are computed features (e.g., 'similarity_conviction') append them to context_features
+		(if !computedFeaturesMap
+			(assign (assoc
+				context_features
+					(append
+						(if (= 0 (size context_features)) !trainedFeatures context_features)
+						(get !computedFeaturesMap "computed_features")
+					)
+			))
+		)
+
 		;if analyze is being called without any context features, default them to the full set of all features
 		;targeted_model will already have be set to 'targetless' if no features are passed in
 		(if (= 0 (size context_features))
@@ -794,6 +825,70 @@
 						feature_name weight_feature
 						has_rebalance_features (!= 0 (size rebalance_features))
 					))
+				)
+			)
+		)
+
+		;This is being called from react_into_features
+		(if (and !computedFeaturesMap from_react_into_features)
+			;remove old hyperparameters for this feature set and from paths if they are found
+			(if (= 0 (size !hyperparameterParamPaths))
+				(assign_to_entities (assoc
+					!hyperparameterMetadataMap { }
+					!hyperparameterParamPaths []
+				))
+
+				(let
+					(assoc
+						orig_context_features (trunc context_features (- (size (get !computedFeaturesMap "computed_features"))) )
+					)
+					(declare (assoc
+						orig_context_path
+							(append
+								targeted_model
+								(call !BuildContextFeaturesKey (assoc context_features orig_context_features))
+								weight_feature
+							)
+					))
+					(if (contains_value !hyperparameterParamPaths orig_context_path)
+						(let
+							(assoc
+								;remove the case weight keyed parameters
+								cleaned_hp_map
+									(set !hyperparameterMetadataMap (trunc orig_context_path)
+										(remove
+											(get !hyperparameterMetadataMap (trunc orig_context_path))
+											(last orig_context_path)
+										)
+									)
+							)
+
+							;if the remaining context path is empty, remove it altogether at the target mode
+							(if (and
+									(= 1 (size (get cleaned_hp_map (first orig_context_path))))
+									(= 0 (size (get cleaned_hp_map (trunc orig_context_path))))
+								)
+								(assign (assoc cleaned_hp_map (remove cleaned_hp_map (first orig_context_path)) ))
+
+								;else remove only the middle context key node, leaving the target mode
+								(= 0 (size (get cleaned_hp_map (trunc orig_context_path))))
+								(assign (assoc
+									cleaned_hp_map
+										(set cleaned_hp_map (first orig_context_path)
+											(remove
+												(get cleaned_hp_map (first orig_context_path))
+												(get orig_context_path 1)
+											)
+										)
+								))
+							)
+
+							(assign_to_entities (assoc
+								!hyperparameterMetadataMap cleaned_hp_map
+								!hyperparameterParamPaths (filter (lambda (!= (current_value) orig_context_path)) !hyperparameterParamPaths)
+							))
+						)
+					)
 				)
 			)
 		)

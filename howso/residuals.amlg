@@ -560,6 +560,25 @@
 		)
 	)
 
+	;Helper method, return returns a binomial distrubution value for (n, k, p):
+	; (gamma(n+1) / (gamma(k+1) * gamma(n-k+1))) * (p**k) * ((1-p)**(n-k))
+	; compute in logarithmic space for stability with large values
+	#!BinomialDistribution
+	(exp
+		(+					
+			(-
+				(lgamma (+ n 1))
+				(lgamma (+ k 1))
+				(lgamma (- n k -1))
+			)
+			(* k (log p))
+			(*
+				(- n k)
+				(log (- 1 p))
+			)
+		)
+	)
+
 	;helper method for CalculateFeatureResiduals to calculate robust residuals
 	#!RunRobustResiduals
 	(seq
@@ -602,6 +621,35 @@
 				)
 			;create a backup of context_features for time series flows
 			original_context_features (if !tsTimeFeature (replace context_features))
+			num_features (size context_features)
+		))
+
+		;the number of features that will be used as contexts is random for every react, following a binomial distribution.
+		;since at least one feature must be predicted, the most number of features that can be used for any react is
+		;'(num_features - 1)'  therefore a binomial distribution for '(num_features - 1)' can be used to precompute the
+		;probabilities of how many features to use for any react. To undo the bias of those cases that have fewer
+		;features selected as contexts being used more often in computations, each probability is scaled down by the number of
+		;results (left out features). e.g., if there are 5 features, and all 5 are left out (0 selected), that case will be
+		;used 5x as often as a case that had only 1 feature left out (4 selected), so the binomial probability of selecting
+		;0 features would be divided by 5, but the probability of selecting 4 features would be divided by 1 and thus left as-is.
+		;These normalized scaled probabilities happen to be the same as a binomial distribution for 'num_features'
+		;with the tail probability for the last feature cut off.
+		;
+		;This creates the binomial probabilities map for enabling 0 to (num_features - 1) features, given num_features.
+		(declare (assoc
+			enabled_num_features_probability_map
+				#!ComputeNumEnabledFeaturesProbabilitiesMap
+				;map of num_enabled_features -> probability
+				(map
+					(lambda
+						(call !BinomialDistribution (assoc
+							k (current_index 1)
+							n num_features
+							p 0.5
+						))
+					)
+					(zip (range 0 (- num_features 1)))
+				)
 		))
 
 		;iterate over each case and accumulate residuals for all the feature(s)
@@ -611,19 +659,10 @@
 				||(map
 					(lambda (let
 						(assoc
-							;list of bits for each remaining (non-removed) feature
-							remaining_feature_flags (list)
-							all_flags_set (true)
-							;list of remaining context features
-							react_context_features (list)
-							;assoc of all removed features to their residual values
-							removed_features_map (assoc)
-							local_cases_map (assoc)
 							case_id (current_value 1)
 							;map of feature -> value for all the case values
 							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
 							time_series_filter_query (list)
-
 							feature_deviations (get hyperparam_map "featureDeviations")
 							feature_weights (get hyperparam_map "featureWeights")
 						)
@@ -638,21 +677,26 @@
 							))
 						)
 
+						;filter out a random number of context features
+						(declare (assoc
+							react_context_features
+								(rand
+									context_features
+									;number of features to enable is probabilistically weighted
+									(if (and !tsTimeFeature (!= (size context_features) num_features))
+										(rand
+											(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
+										)
 
-						;for robust computation we randomly (50/50) decide whether to remove a feature from the context
-						;by creating a random flag list to match each of the context features
-						;ensure that at least one feature is removed
-						;this while statement should only loop in rare edge cases
-						(while all_flags_set
-							(assign (assoc remaining_feature_flags (map (lambda (< (rand) 0.5)) context_features) ))
-							(assign (assoc all_flags_set (apply "and" remaining_feature_flags) ))
-						)
-						;filter out context features based on the bitmask and also create a set of all the removed features
-						(assign (assoc
-							react_context_features (filter (lambda (get remaining_feature_flags (current_index))) context_features)
+										(rand enabled_num_features_probability_map)
+									)
+									;unique random features (not with replacement)
+									(true)
+								)
 						))
 
-						(assign (assoc
+						;assoc of all removed features to their residual values
+						(declare (assoc
 							removed_features_map
 								(if target_residual_feature
 									(zip (list target_residual_feature))
@@ -664,7 +708,7 @@
 
 						(if !tsTimeFeature
 							(let
-								(assoc context_map (zip react_context_features (unzip case_values_map react_context_features)) )
+								(assoc context_map (keep case_values_map react_context_features) )
 								(if (contains_index context_map !tsTimeFeature)
 									(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
 								)
@@ -680,7 +724,7 @@
 							))
 						)
 
-						(assign (assoc
+						(declare (assoc
 							local_cases_map
 								;if empty context set, use global expected values for all features, set local_cases_map to null
 								(if (= 0 (size react_context_features))

@@ -315,6 +315,7 @@
 				||(map
 					(lambda (let
 						(assoc
+							;feature whose mda is being measured
 							feature (current_value 1)
 
 							;keep only indices of cases where feature was used in query and its residual is null
@@ -337,10 +338,27 @@
 						(map
 							(lambda (let
 								(assoc
+									;feature being predicted
 									mda_feature (current_value 1)
 									mda_feature_index (current_index 1)
 								)
+								;a feature should not have mda computed for itself
 								(if (= mda_feature feature) (conclude 0) )
+
+								(if (and
+										;if measuring mda for a feature that is the parent of a derived feature, skip it
+										;because they are not used when that feature is predicted within time-series flow
+										;allowing the other feature's weights to not be suppressed (the parent feature's MDA will be large)
+										(contains_index !derivedFeaturesMap mda_feature)
+										(= feature (get !derivedFeaturesMap mda_feature))
+									)
+									(conclude 0)
+								)
+
+								;if a single mda_action_feature is specified, only compute mda for that specific feature, skipping all the rest
+								(if (and mda_action_feature (!= mda_feature mda_action_feature))
+									(conclude)
+								)
 
 								(if reduce_memory_usage
 									;slower method that does not increase memory usage
@@ -370,10 +388,12 @@
 									avg_with_residuals
 										(/ (apply "+" with_feature_residuals) (size with_feature_residuals))
 								))
-								;output ratio of the (expectedly) larger residual computed without this feature / residual computed with this feature
-								(if (= 0 avg_without_residuals avg_with_residuals)
-									0
 
+								;output delta of the (expectedly) larger residual computed without this feature - residual computed with this feature
+								(if output_raw_mda
+									(- avg_without_residuals avg_with_residuals)
+
+									;cap the lower value for probability conversion
 									(max
 										(- avg_without_residuals avg_with_residuals)
 										(get !cachedFeatureMinResidualMap mda_feature)
@@ -387,6 +407,31 @@
 				)
 			num_features_m_one (- (size features) 1)
 		))
+
+		(if output_raw_mda
+			(conclude
+				(zip
+					features
+					;transpose the matrix, so every feature has its own (column) MDA values
+					(map
+						(lambda (let
+							(assoc feature_index (current_index 1))
+							(zip
+								features
+								(map
+									(lambda (get (current_value) feature_index))
+									mda_matrix
+								)
+							)
+						))
+						mda_matrix
+					)
+				)
+			)
+		)
+
+		;set smallest possible probability assuming the Jeffreys prior approach
+		(declare (assoc smallest_probability (/ 1 (+ 0.5 num_training_cases)) ))
 
 		;iterate over an assoc of MDA maps per feature and convert to a normalized probability feature mda matrix
 		(map
@@ -424,9 +469,12 @@
 								;Surprisal (surprisal - assumption) = surprisal - 1.5
 								;prob of observation = e^(-Surprisal)
 								;prob of contribution = 1 - prob of observation
-								(-
-									1
-									(exp (- (- (/ lk_value target_feature_residual) 1.5)))
+								(max
+									(-
+										1
+										(exp (- (- (/ lk_value target_feature_residual) 1.5)))
+									)
+									0
 								)
 							))
 							mda_map
@@ -435,12 +483,19 @@
 
 				(declare (assoc total_probs (apply "+" (values probabilities_of_contribution_map)) ))
 
+				;normalize probabilities for use as feature weights
 				(if total_probs
-					;normalize probabilities for use as feature weights
+					;replace 0's for any feature that isn't the target feature with smallest_probability
 					(map
-						(lambda (/ (current_value) total_probs))
+						(lambda
+							(if (or (> (current_value) 0) (= target_feature (current_index)))
+								(/ (current_value) total_probs)
+								smallest_probability
+							)
+						)
 						probabilities_of_contribution_map
 					)
+
 					;else set them all to 1 because this feature had no affect on others
 					(map 1 probabilities_of_contribution_map)
 				)
