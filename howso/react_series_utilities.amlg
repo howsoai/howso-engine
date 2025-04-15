@@ -396,6 +396,7 @@
 		(declare (assoc
 			requested_details (indices (filter (lambda (current_value)) details))
 			output_details (contains_value (values details) (true))
+			details_features (get details "features")
 		))
 
 		(if output_details
@@ -882,256 +883,14 @@
 		) ;while loop
 
 		(if (get details "series_uncertainty")
-			;do another set of forecasts on trained series that are the same length as this
-			;generated series
-			; then measure the average error on each time-distance for each feature
-			(let
-				(assoc
-					synthesized_timesteps
-						(if num_existing_series_rows
-							(tail series_data (- num_existing_series_rows))
-							series_data
-						)
-					time_feature_index (get feature_index_map !tsTimeFeature)
-					output_feature_index_map (zip output_features (indices output_features))
-					series_id_features (get !tsFeaturesMap "series_id_features")
-				)
+			(call !ComputeSeriesUncertainty)
+		)
 
-				(declare (assoc
-					synth_start_case (first synthesized_timesteps)
-				))
-
-				(declare (assoc
-					time_synthesized
-						(-
-							(get (last series_data) time_feature_index)
-							(get synth_start_case time_feature_index)
-						)
-					start_time (get synth_start_case time_feature_index)
-				))
-
-				;Get most similar timesteps that have enough time-remaining in their series
-				;to forecast far enough to match the length of this forecast
-				(declare (assoc
-					most_similar_timesteps
-						(compute_on_contained_entities (append
-							holdout_queries
-							(query_nearest_generalized_distance
-								(* (get hyperparam_map "k") 3) ;TODO: not this
-								features
-								synth_start_case
-								(get hyperparam_map "featureWeights")
-								!queryDistanceTypeMap
-								(get hyperparam_map "featureDomainAttributes")
-								(get hyperparam_map "featureDeviations")
-								(get hyperparam_map "p")
-								(get hyperparam_map "dt")
-								(if valid_weight_feature weight_feature (null))
-								(rand)
-								(null) ;radius
-								!numericalPrecision
-							)
-						))
-				))
-
-				(declare (assoc
-					series_ids_list
-						(map (lambda (retrieve_from_entity (current_value) series_id_features))  (indices most_similar_timesteps))
-				))
-
-				;for each series a case was sampled from (with repetition)
-				;sample the most similar case that has enough time left to forecast
-				(assign (assoc
-					most_similar_timesteps
-						;filtering here in case a case couldn't be found
-						(filter (map
-							(lambda
-								(let
-									(assoc
-										id_matching_queries
-											(map
-												(lambda (query_equals (get series_id_features (current_index)) (current_value)))
-												(current_value 1)
-											)
-									)
-
-									(declare (assoc
-										latest_time_for_series
-											(-
-												(retrieve_from_entity
-													(first (contained_entities (append
-														holdout_queries
-														id_matching_queries
-														(query_max !tsTimeFeature 1)
-													)))
-													!tsTimeFeature
-												)
-												time_synthesized
-											)
-									))
-
-									(first (contained_entities (append
-										holdout_queries
-										id_matching_queries
-										;not one of the currently found cases
-										(query_not_in_entity_list (filter (target)))
-										(query_less_or_equal_to !tsTimeFeature latest_time_for_series)
-										(query_nearest_generalized_distance
-											1
-											features
-											synth_start_case
-											(get hyperparam_map "featureWeights")
-											!queryDistanceTypeMap
-											(get hyperparam_map "featureDomainAttributes")
-											(get hyperparam_map "featureDeviations")
-											(get hyperparam_map "p")
-											(get hyperparam_map "dt")
-											(if valid_weight_feature weight_feature (null))
-											(rand)
-											(null) ;radius
-											!numericalPrecision
-										)
-									)))
-								)
-							)
-							series_ids_list
-						))
-				))
-
-				(declare (assoc
-					forecast_start_times (map (lambda (retrieve_from_entity (current_value) !tsTimeFeature)) most_similar_timesteps)
-					;get the range of output_feature's values for each time step from start_case's time until time_synthesized has elapsed
-					trained_series_lists
-						(map
-							(lambda
-								(let
-									(assoc
-										case_id (current_value 1)
-										series_id_values (retrieve_from_entity (current_value 1) series_id_features)
-									)
-
-									(declare (assoc
-										sorted_case_ids
-											(sort
-												(lambda (> (retrieve_from_entity (current_value) !tsTimeFeature) (retrieve_from_entity (current_value 1) !tsTimeFeature)) )
-												;the cases needed from the series within the time window
-												(contained_entities (append
-													;matching series_ids
-													(map
-														(lambda (query_equals (current_value) (get series_id_values (current_index))))
-														series_id_features
-													)
-													(query_between
-														!tsTimeFeature
-														(- (retrieve_from_entity case_id !tsTimeFeature) 1)
-														(+ (retrieve_from_entity case_id !tsTimeFeature) time_synthesized 1)
-													)
-												))
-											)
-									))
-
-									(map
-										(lambda (retrieve_from_entity (current_value) output_features))
-										sorted_case_ids
-									)
-								)
-							)
-							most_similar_timesteps
-						)
-				))
-
-
-				;Forecast from each of these timesteps at least 'time_synthesized'
-				(declare (assoc
-					forecasts
-						(map
-							(lambda
-								(let
-									(assoc
-										case_id (current_value 1)
-										series_id_values (retrieve_from_entity (current_value 1) series_id_features)
-									)
-
-									(get
-										(call !ReactSeries (assoc
-											series_id_features series_id_features
-											series_id_values series_id_values
-											initial_features [!tsTimeFeature]
-											initial_values [(retrieve_from_entity case_id !tsTimeFeature)]
-											output_new_series_ids (false)
-											continue_series (true)
-											leave_series_out (true) ;TODO: should keep this way?
-											series_context_values []
-											series_context_features []
-											details {}
-											track_progress (false)
-											output_features output_features
-											series_stop_map (associate !tsTimeFeature (assoc max (+ (retrieve_from_entity case_id !tsTimeFeature) time_synthesized)))
-										))
-										["payload" "action_values"]
-									)
-								)
-							)
-							most_similar_timesteps
-						)
-				))
-
-				(declare (assoc
-					forecast_time_index (get output_feature_index_map !tsTimeFeature)
-				))
-
-				(accum (assoc
-					series_detail_values_map
-						;for each timestep, get the MAE of the forecasts at the same amount of time elapsed
-						{
-							"series_uncertainty"
-								(map
-									(lambda
-										(let
-											(assoc
-												time_elapsed (- (get (current_value 1) time_feature_index) start_time)
-											)
-
-											(map
-												(lambda
-													;(current_index) = output feature to measure average MAE for
-													(/
-														(apply "+" (map
-															(lambda
-																;(current_value) = [forecast series_data]
-																(abs (-
-																	;interpolate the forecast
-																	(call !InterpolateSeriesValues (assoc
-																		time_values (map (lambda (get (current_value) forecast_time_index) ) (first (current_value 1)))
-																		feature_values (map (lambda (get (current_value) (get output_feature_index_map (current_index 3))) ) (first (current_value 1)))
-																		time (+ (get forecast_start_times (current_index 1)) time_elapsed)
-																	))
-																	;interpolate the trained series data
-																	(call !InterpolateSeriesValues (assoc
-																		time_values (map (lambda (get (current_value) forecast_time_index) ) (last (current_value 1)))
-																		feature_values (map (lambda (get (current_value) (get output_feature_index_map (current_index 3))) ) (last (current_value 1)))
-																		time (+ (get forecast_start_times (current_index 1)) time_elapsed)
-																	))
-																))
-															)
-															forecasts
-															trained_series_lists
-														))
-														(size forecasts)
-													)
-												)
-												;all continuous output features that are not the time feature
-												(remove (zip (filter (lambda (not (contains_index !nominalsMap (current_value)))) output_features)) [!tsTimeFeature])
-											)
-
-										)
-									)
-									synthesized_timesteps
-								)
-						}
-				))
-
-			)
+		;this gets clobbered and accumulated really uglily
+		(if details_features
+			(accum (assoc
+				series_detail_values_map {"features" details_features}
+			))
 		)
 
 		;grab the list of column indices corresponding to all the output_features
@@ -1932,5 +1691,151 @@
 			;else don't check for uniqueness if it's not necessary
 			(assign (assoc do_uniqueness_check (false) ))
 		)
+	)
+
+	#!ComputeMAD
+	(declare
+		(assoc
+			vals []
+		)
+
+		(declare (assoc
+			mean_value (/ (apply "+" vals) (size vals))
+		))
+
+		(/
+			;sum of absolute deviations from mean
+			(apply "+" (map
+				(lambda
+					(abs (- (current_value) mean_value))
+				)
+				vals
+			))
+			(size vals)
+		)
+	)
+
+	;helper macro for ReactSeries that computes the series uncertainty detail
+	;no parameters should be passed.
+	;This method computes a collection of generative series with the same parameters given
+	;to the react series call (except editing start/end) and computes the MAD of the forecasts
+	;at each time value of the output series providing an estimate of the forecast's uncertainty
+	#!ComputeSeriesUncertainty
+	(let
+		(assoc
+			synthesized_timesteps
+				(if num_existing_series_rows
+					(tail series_data (- num_existing_series_rows))
+					series_data
+				)
+			time_feature_index (get feature_index_map !tsTimeFeature)
+			output_feature_index_map (zip output_features (indices output_features))
+		)
+
+		(declare (assoc
+			start_time (get (first synthesized_timesteps) time_feature_index)
+			end_time (get (last synthesized_timesteps) time_feature_index)
+		))
+
+		;Forecast the same period of time
+		(declare (assoc
+			forecasts
+				||(map
+					(lambda
+						(let
+							(assoc
+						; 		case_id (current_value 1)
+						; 		series_id_values (retrieve_from_entity (current_value 1) series_id_features)
+							)
+
+							(get
+								(call !ReactSeries (assoc
+									skip_decoding (true)
+									details {}
+									track_progress (false)
+									output_features output_features
+									desired_conviction (if desired_conviction desired_conviction 1)
+									series_stop_map (associate !tsTimeFeature {"max" end_time})
+								))
+								["payload" "action_values"]
+							)
+						)
+					)
+					(range 0 (or (get details "series_uncertainty_num_samples") 30) 1)
+				)
+		))
+
+		(declare (assoc
+			forecast_time_index (get output_feature_index_map !tsTimeFeature)
+		))
+
+		(accum (assoc
+			series_detail_values_map
+				;for each timestep, get the MAE of the forecasts at the same amount of time elapsed
+				{
+					"series_uncertainty"
+						(map
+							(lambda
+								(let
+									(assoc
+										time_val
+											(if (get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+												(format
+													(get (current_value 1) time_feature_index)
+													(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+													"number"
+													(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+													(null)
+												)
+
+												;raw time value
+												(get (current_value 1) time_feature_index)
+											)
+
+									)
+
+									(map
+										(lambda
+											(call !ComputeMAD (assoc
+												vals
+													(map
+														(lambda
+															(call !InterpolateSeriesValues (assoc
+																time_values
+																	(if (get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+																		;must convert each time string to epoch
+																		(map
+																			(lambda
+																				(format
+																					(get (current_value) forecast_time_index)
+																					(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+																					"number"
+																					(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+																					(null)
+																				)
+																			)
+																			(current_value 1)
+																		)
+
+																		;else pull raw numeric time values
+																		(map (lambda (get (current_value) forecast_time_index)) (current_value 1))
+																	)
+																feature_values (map (lambda (get (current_value) (get output_feature_index_map (current_index 4)))) (current_value 1))
+																time time_val
+															))
+														)
+														forecasts
+													)
+											))
+										)
+										;all continuous output features that are not the time feature
+										(remove (zip output_features) (append (indices !nominalsMap) !tsTimeFeature) )
+									)
+								)
+							)
+							synthesized_timesteps
+						)
+				}
+		))
 	)
 )
