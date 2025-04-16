@@ -1010,4 +1010,232 @@
 		;call the react query again with the goal-oriented contexts and weights
 		(call (retrieve_from_entity query_label))
 	)
+
+	#rr_test
+	(let
+		(assoc
+			all_cases (call !AllCases)
+			continuous_features (filter (lambda (not (contains_index !nominalsMap (current_value)))) !trainedFeatures)
+			features_map (zip !trainedFeatures)
+		)
+
+		(declare (assoc
+			results
+				(map
+					(lambda (let
+						(assoc action_feature (current_value 1) )
+						(declare (assoc
+							context_features (filter (lambda (!= (current_value) action_feature)) !trainedFeatures)
+						))
+						(declare (assoc
+							hyperparam_map
+								(call !GetHyperparameters (assoc
+									feature action_feature
+									context_features context_features
+									weight_feature weight_feature
+								))
+						))
+
+						(declare (assoc
+							feature_weights
+								(if (= (null) (get hyperparam_map "featureMdaMap"))
+									(get hyperparam_map "featureWeights")
+									(get hyperparam_map ["featureMdaMap" action_feature])
+								)
+							feature_deviations (get hyperparam_map "featureDeviations")
+							k_parameter (get hyperparam_map "k")
+							p_parameter (get hyperparam_map "p")
+							dt_parameter (get hyperparam_map "dt")
+						))
+
+						(declare (assoc
+							maes
+								||(map
+									(lambda (let
+										(assoc
+											case_id (current_value 1)
+											case_values_map (retrieve_from_entity (current_value 1) features_map)
+										)
+
+										(declare (assoc
+											prediction
+												(call !ReactDiscriminative (assoc
+													ignore_case case_id
+													context_values (unzip case_values_map context_features)
+													context_features context_features
+													action_features [action_feature]
+													skip_encoding (true)
+													skip_decoding (true)
+													details { "influential_cases" (true)}
+												))
+										))
+										(declare (assoc
+											case_residual
+												(abs (-
+													(get prediction ["action_values" 0])
+													(get case_values_map action_feature)
+												))
+											;weighted mean
+											predicted_value (get prediction ["action_values" 0])
+										))
+
+										(declare (assoc
+											regional_cases_tuple
+												(compute_on_contained_entities [
+													(query_not_in_entity_list [case_id])
+													(query_nearest_generalized_distance
+														(if (~ 0 k_parameter) (max k_parameter 30) (append k_parameter 1) )
+														context_features
+														(unzip case_values_map context_features)
+														feature_weights
+														!queryDistanceTypeMap
+														(get hyperparam_map "featureDomainAttributes")
+														feature_deviations
+														p_parameter
+														dt_parameter
+														(if valid_weight_feature weight_feature (null))
+														(rand)
+														(null) ;radius
+														!numericalPrecision
+														action_feature
+													)
+												])
+										))
+										(declare (assoc
+											local_size (size (first regional_cases_tuple))
+										))
+
+										;mean absolute deviation to weighted mean (predicted value) of local data
+										(declare (assoc
+											mad
+												(apply "+"
+													(map
+														(lambda
+															(*
+																;weighted
+																;(get (current_value) ".influence_weight")
+
+																;unweighted
+																(/ 1 local_size)
+
+																(abs (-
+																	;(get (current_value) action_feature)
+																	(current_value)
+																	predicted_value
+																))
+															)
+														)
+														;(get prediction "influential_cases")
+														(last regional_cases_tuple)
+													)
+												)
+										))
+
+
+										(declare (assoc
+											regional_residuals
+												(call !ComputeRegionalResiduals (assoc
+													regional_cases_map (zip (first regional_cases_tuple))
+													features context_features
+													target_residual_feature action_feature
+													ignore_case case_id
+												))
+										))
+
+
+										(declare (assoc
+											max_gap
+												(max
+													(get !cachedFeatureHalfMinGapMap action_feature)
+													(compute_on_contained_entities (list
+														(query_in_entity_list (first regional_cases_tuple))
+														(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
+													))
+												)
+										))
+
+										[
+											case_residual
+
+											;original mad
+											mad
+
+											;max gap
+											max_gap
+
+											;rr
+											(get regional_residuals (list "residual_map" action_feature))
+										]
+									))
+
+									all_cases
+								)
+						))
+
+
+						(print
+							action_feature "\n"
+							"\tLOO MAE : "
+								(/
+									(apply "+" (map (lambda (first (current_value))) maes) )
+									(size maes)
+								)
+							"\n"
+							"\tmean MAD: "
+								(/
+									(apply "+" (map (lambda (get (current_value) 1)) maes) )
+									(size maes)
+								)
+							"\n"
+							"\tmax gap: "
+								(/
+									(apply "+" (map (lambda (get (current_value) 2)) maes) )
+									(size maes)
+								)
+							"\n"
+							"\tmean RR:  "
+								(/
+									(apply "+" (map (lambda (last (current_value))) maes) )
+									(size maes)
+								)
+							"\n"
+						)
+
+						maes
+					))
+					continuous_features
+				)
+		))
+
+		(store "rr_test.csv"
+			(append
+				[(apply "append"
+					(map
+						(lambda [
+							(concat (current_value 1) "_mae")
+							(concat (current_value 1) "_mad")
+							(concat (current_value 1) "_maxgap")
+							(concat (current_value 1) "_rr")
+						])
+						continuous_features
+					)
+				)]
+				(map
+					(lambda (let
+						(assoc case_idx (current_index 1))
+						(apply "append"
+							(map
+								(lambda
+									(get results [(current_index 1) case_idx])
+								)
+								continuous_features
+							)
+						)
+					))
+					all_cases
+				)
+			)
+		)
+
+	)
 )
