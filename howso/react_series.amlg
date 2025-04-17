@@ -77,8 +77,13 @@
 			;	If forecasting with 'continue_series', this defines the maximum length of the forecast.
 			max_series_length (null)
 			;{type "boolean"}
-			;flag, if false uses global feature residuals, if true calculates and uses regional residuals.
-			use_regional_residuals (true)
+			;flag, DEPRECATED, please use 'use_differential_privacy' instead.  Defaults to true, will not use differential privacy approach.
+			;If false computes differentially private residuals using max gap values. Only used when desired_conviction is specified.
+			use_regional_residuals (null)
+			;{type "boolean"}
+			;flag, if true will use differentially private approach to adding noise during generative reacts. Default is false, if specified will
+			;ignore 'use_regional_residuals'. Only used when desired_conviction is specified.
+			use_differential_privacy (null)
 			;{type "assoc" additional_indices {ref "FeatureBounds"}}
 			;assoc of :
 			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
@@ -165,6 +170,21 @@
 					errors (list (concat "Failed to react_series: invalid stopping condition specified for " invalid_react_parameters) )
 				))
 			)
+		)
+
+		;TODO: 23472 remove 'use_regional_residuals' and this block of code
+		(if (= (null) use_differential_privacy use_regional_residuals)
+			(assign (assoc
+				use_differential_privacy (false)
+				use_regional_residuals (true)
+			))
+
+			;overwrite use_regional_residuals with the opposite of use_differential_privacy
+			(!= (null) use_differential_privacy)
+			(assign (assoc use_regional_residuals (not use_differential_privacy) ))
+
+			;else set use_differential_privacy to opposite of use_regional_residuals
+			(assign (assoc use_differential_privacy (not use_regional_residuals) ))
 		)
 
 		(let
@@ -426,8 +446,13 @@
 			;	replaced after synthesis from uniqueness check.
 			exclude_novel_nominals_from_uniqueness_check (null)
 			;{type "boolean"}
-			;flag, if false uses global residuals, if true calculates and uses regional residuals.
-			use_regional_residuals (true)
+			;flag, DEPRECATED, please use 'use_differential_privacy' instead.  Defaults to true, will not use differential privacy approach.
+			;If false computes differentially private residuals using max gap values. Only used when desired_conviction is specified.
+			use_regional_residuals (null)
+			;{type "boolean"}
+			;flag, if true will use differentially private approach to adding noise during generative reacts. Default is false, if specified will
+			;ignore 'use_regional_residuals'. Only used when desired_conviction is specified.
+			use_differential_privacy (null)
 			;{type "assoc" additional_indices {ref "FeatureBounds"}}
 			;assoc of :
 			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
@@ -540,6 +565,21 @@
 					errors (list (concat "Failed to react_series: invalid stopping condition specified for " invalid_react_parameters) )
 				))
 			)
+		)
+
+		;TODO: 23472 remove 'use_regional_residuals' and this block of code
+		(if (= (null) use_differential_privacy use_regional_residuals)
+			(assign (assoc
+				use_differential_privacy (false)
+				use_regional_residuals (true)
+			))
+
+			;overwrite use_regional_residuals with the opposite of use_differential_privacy
+			(!= (null) use_differential_privacy)
+			(assign (assoc use_regional_residuals (not use_differential_privacy) ))
+
+			;else set use_differential_privacy to opposite of use_regional_residuals
+			(assign (assoc use_differential_privacy (not use_regional_residuals) ))
 		)
 
 		(let
@@ -752,6 +792,77 @@
 			data derived_data
 			column_order_indices (list time_feature_index)
 		))
+	)
+
+	;helper method that linearly interpolates a value given discrete samplings
+	;used for evaluating error of forecasts at a specific time value that does
+	;not generate the timestep at the exact time needed
+	#!InterpolateSeriesValues
+	(declare
+		(assoc
+			;list of time values, must be increasing
+			time_values (list)
+			;the time value to interpolate to
+			time (null)
+			;list of feature values to interpolate
+			feature_values (list)
+
+			;value to return if 'time' is less than the first value of 'time_values'
+			pre_domain_value (null)
+			;value to return if 'time' is greater than the last value of 'time_values'
+			post_domain_value (null)
+		)
+
+		(if (< time (first time_values))
+			(conclude pre_domain_value)
+
+			(> time (last time_values))
+			(conclude post_domain_value)
+		)
+
+		(declare (assoc
+			prev_index (null)
+		))
+
+		;this "infinite" loop iterates using the incrementing (current_index) and assumes
+		;time_values is sorted. it should always find a time_value greater than time
+		;because of the checks above
+		(while (true)
+			(if (> (get time_values (current_index)) time)
+				(conclude
+					(assign (assoc prev_index (- (current_index 1) 1) ))
+				)
+
+				(= (get time_values (current_index)) time)
+				;if find perfect match, just return value without interpolating
+				(conclude (conclude (get feature_values (current_index))))
+
+				(> (current_index) (size time_values))
+				;this should never be reached unless time_values are not sorted
+				;and no element is greater than time
+				(conclude)
+			)
+		)
+
+		(+
+			;value from previous time
+			(get feature_values prev_index)
+			(*
+				;percent way through time-gap
+				(/
+					(- time (get time_values prev_index))
+					(-
+						(get time_values (+ prev_index 1))
+						(get time_values prev_index)
+					)
+				)
+				;y-delta within gap
+				(-
+					(get feature_values (+ prev_index 1))
+					(get feature_values prev_index)
+				)
+			)
+		)
 	)
 
 )
