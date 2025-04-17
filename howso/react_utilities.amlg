@@ -492,23 +492,33 @@
 			(conclude)
 		)
 
+		;when using approximated max-gap residuals, local_k will always be a number
 		(declare (assoc
-			local_k (if (~ 0 (get hyperparam_map "k")) (get hyperparam_map "k") (get hyperparam_map ["k" 1]))
+			local_k
+				(if (~ 0 (get hyperparam_map "k"))
+					(if use_regional_residuals
+						(max (get hyperparam_map "k")  30)
+						;else get max of e*k and 30, needed to approximate with max gaps
+						(max (* 2.718281828459045 (get hyperparam_map "k")) 30)
+					)
+
+					(if use_regional_residuals
+						(get hyperparam_map ["k"])
+						;else get max of e*k and 30, needed to approximate with max gaps
+						(max (* 2.718281828459045 (get hyperparam_map ["k" 1])) 30)
+					)
+				)
 		))
 
 		(declare (assoc
-			regional_cases_tuple
+			cases_tuple
 				(compute_on_contained_entities (append
 					(if ignore_case
 						(query_not_in_entity_list (list ignore_case))
 						(list)
 					)
 					(query_nearest_generalized_distance
-						(if use_regional_residuals
-							(max local_k 30)
-
-							(max (* 2.718281828459045 local_k) 30)
-						)
+						local_k
 						context_features
 						context_values
 						(get hyperparam_map "featureWeights")
@@ -521,50 +531,90 @@
 						(rand)
 						(null) ;radius
 						!numericalPrecision
-						(true) ;output sorted list
+						;output a tuple
+						(true)
 					)
 				))
 		))
 
 		(if use_regional_residuals
-			(let
-				(assoc regional_cases_map (apply "zip" regional_cases_tuple) )
+			;update the the min/max for all the dependent context features from the computed local mean absolute deviation
+			(map
+				(lambda (let
+					(assoc feature (current_index 1) )
 
-				;update the the min/max for all the dependent context features from the computed regional residuals
-				(map
-					(lambda (let
-						(assoc
-							feature (current_index 1)
-							regional_residuals (assoc)
-							feature_residual 0
-						)
-						(assign (assoc
-							regional_residuals
-								(call !ExpandResidualValuesToUncertainty (assoc
-									feature_residuals_map
-										(call !ComputeRegionalResiduals (assoc
-											regional_cases_map regional_cases_map
-											features (append context_features feature)
-											target_residual_feature feature
-											ignore_case ignore_case
-										))
-								))
-						))
-						(assign (assoc feature_residual (get regional_residuals (list "residual_map" feature))  ))
-
-						(accum "dependent_features_map"
-							(list feature "min") (- (current_value) feature_residual)
-							(list feature "max") (+ (current_value) feature_residual)
-						)
+					;pull all the values for this feature from these cases in the same order as the case from the query above
+					(declare (assoc
+						values
+							(unzip
+								(map
+									(lambda (first (current_value)))
+									(compute_on_contained_entities [
+										(query_in_entity_list (first cases_tuple))
+										(query_exists feature)
+									])
+								)
+								(first cases_tuple)
+							)
 					))
-					dependent_continuous_features_map
-				)
+
+					(declare (assoc
+						total_influence (apply "+" (last cases_tuple))
+					))
+					(declare (assoc
+						normalized_weights
+							(map
+								(lambda (/ (current_value) total_influence))
+								(last cases_tuple)
+							)
+					))
+					(declare (assoc
+						weighted_mean_value ;(/ (apply "+" values) (size values))
+							(apply "+" (map
+								(lambda (* (first (current_value)) (last (current_value)) ))
+								normalized_weights
+								values
+							))
+					))
+					(declare (assoc
+						weighted_mad
+							(if (<= (size values) 1)
+								0
+
+								(apply "+" (map
+									(lambda
+										(*
+											(first (current_value))
+											(abs (- weighted_mean_value (last (current_value))))
+										)
+									)
+									normalized_weights
+									values
+								))
+							)
+					))
+
+					(declare (assoc
+						feature_residual
+							(max
+								(get !cachedFeatureMinResidualMap feature)
+								weighted_mad ;TODO: (call !ComputeMAD (assoc vals values))
+								(get !userSpecifiedFeatureErrorsMap feature)
+							)
+					))
+
+					(accum "dependent_features_map"
+						(list feature "min") (- (current_value) feature_residual)
+						(list feature "max") (+ (current_value) feature_residual)
+					)
+				))
+				dependent_continuous_features_map
 			)
 
 			;else approximate residual for each dependent context feature
 			(let
-				(assoc regional_case_ids (first regional_cases_tuple))
-				(declare (assoc local_case_ids (trunc regional_cases local_k) ))
+				(assoc regional_case_ids (first cases_tuple))
+				(declare (assoc local_case_ids (trunc (first cases_tuple) local_k) ))
 
 				(map
 					(lambda (let
