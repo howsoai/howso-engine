@@ -177,6 +177,7 @@
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
 			;get the min k if using dynamic k
 			k_parameter_value (if (~ 0 (get hyperparam_map "k")) (get hyperparam_map "k") (get hyperparam_map ["k" 1]) )
+			case_to_dc_map (null)
 		))
 
 		;output a warning when trainee has not been analyzed (using default hyperparameters w/o residuals)
@@ -209,8 +210,8 @@
 
 		;will need to compute distance_contributions if caching values even if distance_contribution were not explicitly requested
 		(if (or distance_contribution cache_values)
-			(let
-				(assoc
+			(seq
+				(assign (assoc
 					case_to_dc_map
 						(compute_on_contained_entities (list
 							||(query_entity_distance_contributions
@@ -230,7 +231,7 @@
 								!numericalPrecision
 							)
 						))
-				)
+				))
 
 				(if distance_contribution
 					(seq
@@ -437,7 +438,7 @@
 									feature_values (unzip (current_value 1) features)
 									use_case_weights use_case_weights
 									weight_feature weight_feature
-									filtering_queries (list (query_not_in_entity_list (list (current_index 3)) ))
+									;filtering_queries (list (query_not_in_entity_list (list (current_index 3)) ))
 									ignore_case_id (current_index 1)
 								))
 							)
@@ -800,33 +801,39 @@
 		)
 
 		(declare (assoc
-			new_case_dc
-				(first
-					(compute_on_contained_entities (append
-						filtering_queries
-						(query_distance_contributions
-							(get hyperparam_map "k")
-							features
-							[feature_values]
-							feature_weights
-							!queryDistanceTypeMap
-							(get hyperparam_map "featureDomainAttributes")
-							feature_deviations
-							(get hyperparam_map "p")
-							(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
-							(if use_case_weights weight_feature (null))
-							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-							"fixed rand seed"
-							(null) ;radius
-							!numericalPrecision
-						)
-					))
+			case_dc
+				;if ignore_case_id is specified, computing similarity_conviction on entire dataset, and case_to_dc_map already exists
+				(if ignore_case_id
+					(get case_to_dc_map ignore_case_id)
+
+					(first
+						(compute_on_contained_entities (append
+							filtering_queries
+							(query_distance_contributions
+								(get hyperparam_map "k")
+								features
+								[feature_values]
+								feature_weights
+								!queryDistanceTypeMap
+								(get hyperparam_map "featureDomainAttributes")
+								feature_deviations
+								(get hyperparam_map "p")
+								(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+								(if use_case_weights weight_feature (null))
+								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+								"fixed rand seed"
+								(null) ;radius
+								!numericalPrecision
+							)
+						))
+					)
 				)
-			num_cases_with_distance_contribution
-				(size (contained_entities [ (query_exists "distance_contribution") ] ))
 			local_cases
 				(contained_entities (append
-					filtering_queries
+					(if ignore_case_id
+						(query_not_in_entity_list [ignore_case_id] )
+						filtering_queries
+					)
 					(query_nearest_generalized_distance
 						(max k_parameter_value !regionalMinSize)
 						features
@@ -844,13 +851,16 @@
 						!numericalPrecision
 					)
 				))
-			local_distance_contributions_map (assoc)
 		))
 
-		(if (!= num_cases_with_distance_contribution (call !GetNumTrainingCases))
-			;not all cases have distance_contribution, must calculate distance_contribution for nearest neighbors
-			(assign (assoc
-				local_distance_contributions_map
+		(declare (assoc
+			local_distance_contributions_map
+				(if ignore_case_id
+					(zip local_cases (unzip case_to_dc_map local_cases))
+
+					;number of cases in datasets does not equal the number of cases with distance contributions,
+					;not all cases have distance_contribution, must calculate distance_contribution for nearest neighbors
+					(!= (size (contained_entities [ (query_exists "distance_contribution") ] )) (call !GetNumTrainingCases))
 					(compute_on_contained_entities (append
 						filtering_queries
 						||(query_entity_distance_contributions
@@ -870,19 +880,18 @@
 							!numericalPrecision
 						)
 					))
-			))
 
-			;cases have distance_contribution, just retrieve them from the local cases
-			(assign (assoc
-				local_distance_contributions_map
+					;cases have distance_contribution, just retrieve them from the local cases as an assoc of case id : dc value
 					(map
-						(lambda
-							(retrieve_from_entity (current_index) "distance_contribution")
-						)
-						(zip local_cases)
+						(lambda (first (current_value)))
+						;outputs an assoc of {case id : { feature : value } }
+						(compute_on_contained_entities [
+							(query_in_entity_list local_cases)
+							(query_exists "distance_contribution")
+						])
 					)
-			))
-		)
+				)
+		))
 
 		;average local cases' distance contributions
 		(declare (assoc
@@ -894,6 +903,6 @@
 		))
 
 		;output similarity conviction as ratio of expected / calculated distance contribution
-		(/ local_expected_distance_contribution new_case_dc)
+		(/ local_expected_distance_contribution case_dc)
 	)
 )
