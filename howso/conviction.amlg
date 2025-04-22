@@ -177,6 +177,7 @@
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
 			;get the min k if using dynamic k
 			k_parameter_value (if (~ 0 (get hyperparam_map "k")) (get hyperparam_map "k") (get hyperparam_map ["k" 1]) )
+			case_to_dc_map (null)
 		))
 
 		;output a warning when trainee has not been analyzed (using default hyperparameters w/o residuals)
@@ -209,8 +210,8 @@
 
 		;will need to compute distance_contributions if caching values even if distance_contribution were not explicitly requested
 		(if (or distance_contribution cache_values)
-			(let
-				(assoc
+			(seq
+				(assign (assoc
 					case_to_dc_map
 						(compute_on_contained_entities (list
 							||(query_entity_distance_contributions
@@ -230,7 +231,7 @@
 								!numericalPrecision
 							)
 						))
-				)
+				))
 
 				(if distance_contribution
 					(seq
@@ -437,8 +438,7 @@
 									feature_values (unzip (current_value 1) features)
 									use_case_weights use_case_weights
 									weight_feature weight_feature
-									filtering_queries (list (query_not_in_entity_list (list (current_index 3)) ))
-									ignore_case_id (current_index 1)
+									case_id (current_index 1)
 								))
 							)
 							;pull all relevant feature values for the cases
@@ -775,6 +775,7 @@
 	; features: list of features
 	; feature_values: list of corresponding feature values
 	; filtering_queries: (optional) list of filtering queries (such as ignoring a specific case) during computation
+	; case_id: optional, id of case to compute similarity conviction for
 	#!SimilarityConviction
 	(declare
 		(assoc
@@ -783,6 +784,7 @@
 			filtering_queries (list)
 			use_case_weights (false)
 			weight_feature ".case_weight"
+			case_id (null)
 		)
 
 		(declare (assoc
@@ -800,19 +802,43 @@
 		)
 
 		(declare (assoc
-			new_case_dc
-				(call !ComputeCandidateCaseDistanceContribution (assoc
-					features features
-					feature_values feature_values
-					filtering_queries filtering_queries
-					use_case_weights use_case_weights
-					weight_feature weight_feature
-				))
-			num_cases_with_distance_contribution
-				(size (contained_entities [ (query_exists "distance_contribution") ] ))
+			case_dc
+				;when computing similarity_conviction for all cases, distance_contribution is needed for all cases and
+				;was computed and stored into 'case_to_dc_map' earlier in the flow.  This method is being called for each case,
+				;thus if case_id is specified, this is part of computing similarity_conviction on the entire dataset,
+				;and 'case_to_dc_map' already exists, pull distance contribution value from 'case_to_dc_map' instead of computing it
+				(if case_id
+					(get case_to_dc_map case_id)
+
+					;else compute distance contribution for the provided case feature_values
+					(first
+						(compute_on_contained_entities (append
+							filtering_queries
+							(query_distance_contributions
+								(get hyperparam_map "k")
+								features
+								[feature_values]
+								feature_weights
+								!queryDistanceTypeMap
+								(get hyperparam_map "featureDomainAttributes")
+								feature_deviations
+								(get hyperparam_map "p")
+								(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+								(if use_case_weights weight_feature (null))
+								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+								"fixed rand seed"
+								(null) ;radius
+								!numericalPrecision
+							)
+						))
+					)
+				)
 			local_cases
 				(contained_entities (append
-					filtering_queries
+					(if case_id
+						(query_not_in_entity_list [case_id] )
+						filtering_queries
+					)
 					(query_nearest_generalized_distance
 						(max k_parameter_value !regionalMinSize)
 						features
@@ -830,13 +856,16 @@
 						!numericalPrecision
 					)
 				))
-			local_distance_contributions_map (assoc)
 		))
 
-		(if (!= num_cases_with_distance_contribution (call !GetNumTrainingCases))
-			;not all cases have distance_contribution, must calculate distance_contribution for nearest neighbors
-			(assign (assoc
-				local_distance_contributions_map
+		(declare (assoc
+			local_distance_contributions_map
+				(if case_id
+					(zip local_cases (unzip case_to_dc_map local_cases))
+
+					;number of cases in datasets does not equal the number of cases with distance contributions,
+					;not all cases have distance_contribution, must calculate distance_contribution for nearest neighbors
+					(!= (size (contained_entities [ (query_exists "distance_contribution") ] )) (call !GetNumTrainingCases))
 					(compute_on_contained_entities (append
 						filtering_queries
 						||(query_entity_distance_contributions
@@ -856,19 +885,18 @@
 							!numericalPrecision
 						)
 					))
-			))
 
-			;cases have distance_contribution, just retrieve them from the local cases
-			(assign (assoc
-				local_distance_contributions_map
+					;cases have distance_contribution, just retrieve them from the local cases as an assoc of case id : dc value
 					(map
-						(lambda
-							(retrieve_from_entity (current_index) "distance_contribution")
-						)
-						(zip local_cases)
+						(lambda (first (current_value)))
+						;outputs an assoc of {case id : { feature : value } }
+						(compute_on_contained_entities [
+							(query_in_entity_list local_cases)
+							(query_exists "distance_contribution")
+						])
 					)
-			))
-		)
+				)
+		))
 
 		;average local cases' distance contributions
 		(declare (assoc
@@ -880,255 +908,6 @@
 		))
 
 		;output similarity conviction as ratio of expected / calculated distance contribution
-		(/ local_expected_distance_contribution new_case_dc)
-	)
-
-	;compute distance contribution for the specified feature values of a hypothetical candidate case
-	;returns the distance contribution value
-
-	;parameters:
-	; features: list of features
-	; feature_values: list of corresponding feature values
-	; hyperparameters for the query may also be passed in and are explicitly listed below in the declare block
-	#!ComputeCandidateCaseDistanceContribution
-	(declare
-		(assoc
-			features (list)
-			feature_values (list)
-
-			filtering_queries (list)
-			feature_weights (null)
-			feature_deviations (null)
-			p_parameter (null)
-			query_closest_k (null)
-			dt_parameter (null)
-			dataset_size (null)
-			use_case_weights (false)
-			weight_feature ".case_weight"
-			rebalance_weight_feature (null)
-		)
-
-		;if parameters aren't passed in, set them here
-		(if (= (null) p_parameter)
-			(let
-				(assoc
-					hyperparam_map
-						(call !GetHyperparameters (assoc
-							feature (null)
-							context_features features
-							weight_feature weight_feature
-						))
-				)
-
-				(assign (assoc
-					feature_weights (get hyperparam_map "featureWeights")
-					feature_deviations  (get hyperparam_map "featureDeviations")
-					dataset_size (call !GetNumTrainingCases)
-					dt_parameter (get hyperparam_map "dt")
-					p_parameter (get hyperparam_map "p")
-					query_closest_k (get hyperparam_map "k")
-					query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
-				))
-
-				(if (get hyperparam_map "subtraineeName")
-					(call !UseDynamicDeviationsAndWeights (assoc
-						context_features features
-						context_values feature_values
-						hyperparam_map hyperparam_map
-					))
-				)
-			)
-		)
-
-		(declare (assoc
-			number_of_closest_k_neighbors query_closest_k
-			;map of case -> distance to feature_values
-			closest_cases_distances_map (assoc)
-			non_zero_distances 0
-			done (false)
-			harmonic_mean_of_non_zero_neighbors 0
-			dc_weight_feature
-				(if use_case_weights
-					(if rebalance_weight_feature
-						rebalance_weight_feature
-						weight_feature
-					)
-				)
-		))
-
-		(while (not done)
-			(assign (assoc
-				closest_cases_distances_map
-					(compute_on_contained_entities (append
-						filtering_queries
-						(query_nearest_generalized_distance
-							query_closest_k
-							features
-							feature_values
-							feature_weights
-							!queryDistanceTypeMap
-							query_feature_attributes_map
-							feature_deviations
-							p_parameter
-							;if weighted, pull surprisal because we'll need both probabilities and surprisals for computations
-							;for unweighted we only need probabilities
-							(if (= "surprisal_to_prob" dt_parameter)
-								(if dc_weight_feature "surprisal" "surprisal_to_prob")
-								;pull distance and not influence to compute distance contribution
-								1
-							)
-							dc_weight_feature
-							(rand)
-							(null) ;radius
-							!numericalPrecision
-						)
-					))
-			))
-
-			(assign (assoc
-				non_zero_distances (filter (lambda (> (current_value) 1e-13)) (values closest_cases_distances_map))
-			))
-
-			;dynamic k (when query_closest_k is a tuple and not a number) doesn't need smart expansion
-			(if (!~ 0 query_closest_k) (conclude) )
-
-			(if (or (> (size non_zero_distances) 0) (= query_closest_k dataset_size))
-				(assign (assoc done (true)))
-
-				;else double the k and try again, don't go past the model size
-				(assign (assoc query_closest_k (min (* 2 query_closest_k) dataset_size)))
-			)
-		)
-
-		;query_closest_k is larger than it started if had to expand search, grab only the smallest of the distances
-		(if (> query_closest_k number_of_closest_k_neighbors )
-			(seq
-				;the new scale is going to be the 1 smallest + number of 0s
-				(assign (assoc number_of_closest_k_neighbors (+ 1 (- query_closest_k (size non_zero_distances) )) ))
-				;keep the smallest of the distances
-				(assign (assoc non_zero_distances (list (apply "min" non_zero_distances)) ))
-			)
-		)
-
-		;if the distance weight exponent is not the default value of -1, apply the negative value of it to all the distances
-		(if (and (!= -1 dt_parameter) (!= "surprisal_to_prob" dt_parameter))
-			(assign (assoc
-				non_zero_distances
-					(map (lambda (pow (current_value) (- dt_parameter))) non_zero_distances)
-			))
-		)
-
-		(assign (assoc
-			;calculate the harmonic mean of all the neighbors that have a non-zero distance
-			;by taking the generalized_distance for p = -1 and multiplying it by the size of the list
-			harmonic_mean_of_non_zero_neighbors
-				(*
-					(generalized_distance
-						(null) ;weights
-						(null) ;types
-						(null) ;limits
-						(null) ;feature_deviations
-						-1     ;p parameter
-						non_zero_distances
-					)
-					(size non_zero_distances)
-				)
-		))
-
-		(if (= "surprisal_to_prob" dt_parameter)
-			(let
-				(assoc
-					probabilities
-						;multiply probabilities by their corresponding case weight
-						(if dc_weight_feature
-							;ensure order of probabilities stays consistent by unzipping by indices of closest_cases_distances_map
-							(unzip
-								(map
-									(lambda
-										(*
-											;convert unweighted surprisal to probability
-											(exp (- (first (current_value))))
-											(or (get (current_value) [1 dc_weight_feature]) 1)
-										)
-									)
-									;assoc of cased id -> surprisal value
-									closest_cases_distances_map
-									;assoc of caseid -> { dc_weight_feature : case weight }
-									(compute_on_contained_entities [
-										(query_in_entity_list (indices closest_cases_distances_map))
-										(query_exists dc_weight_feature)
-									])
-								)
-								(indices closest_cases_distances_map)
-							)
-
-							;else unweigthed, simply use the probabilities
-							(values closest_cases_distances_map)
-						)
-				)
-
-				(declare (assoc total_of_probabilities (apply "+" probabilities) ))
-
-				;if the case is extremely surprising, use the most similar surprisal value
-				(if (= 0 total_of_probabilities)
-					(if dc_weight_feature
-						;closest_cases_distance_map contains surprisal values
-						(apply "min" (values closest_cases_distances_map))
-
-						;else closest_cases_distance_map contains probabilities, need to compute and return the one closest surprisal value
-						(first (values
-							(compute_on_contained_entities (append
-								filtering_queries
-								(query_nearest_generalized_distance
-									1
-									features
-									feature_values
-									feature_weights
-									!queryDistanceTypeMap
-									query_feature_attributes_map
-									feature_deviations
-									p_parameter
-									"surprisal"
-									(null) ;weight feature
-									(rand)
-									(null) ;radius
-									!numericalPrecision
-								)
-							))
-						))
-					)
-
-					;normalize by total probabilities
-					(if dc_weight_feature
-						;sum of multiplied surprisals by their corresponding normalized weighted probabilities
-						(apply "+"
-							(map
-								(lambda
-									(*
-										(/ (first (current_value)) total_of_probabilities)
-										(last (current_value))
-									)
-								)
-								probabilities
-								(values closest_cases_distances_map)
-							)
-						)
-
-						;else can simply normalize the entropy of the probabilities
-						(/ (entropy probabilities) total_of_probabilities)
-					)
-				)
-			)
-
-			;if all the neighbors have zero distance, return a 0
-			(= 0 (size non_zero_distances))
-			0
-
-			;else scale the harmonic mean by corresponding count of zero distance neighbors
-			(/
-				harmonic_mean_of_non_zero_neighbors
-				(+ 1 (- number_of_closest_k_neighbors (size non_zero_distances)) )
-			)
-		)
+		(/ local_expected_distance_contribution case_dc)
 	)
 )
