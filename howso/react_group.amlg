@@ -1,7 +1,8 @@
 ;Contains helper methods for group reacting.
 (null
 
-	;computes the convictions of an average case for each given hypothetical set of cases specified
+	;computes the convictions of an average case for each given set of cases specified by either a list of
+	;case indices, a condition, or given data.
 	; output an assoc react key -> list of corresponding values from each individual group.
 	; example output for 2 groups:
 	; (assoc
@@ -17,10 +18,17 @@
 			;{type "list" values "string"}
 			;list of feature names
 			features (list)
-			;{type "list" values {type "list" values {type "list"} } required (true)}
+			;{type "list" values {type "list" values {type "list"} } min_size 1}
 			;a list of lists of lists of values corresponding to a list of sets of feature values, where the values are ordered corresponding to
 			;	the features
 			new_cases (null)
+			;{type "list" values {ref "CaseIndices"} min_size 1}
+			;a list of lists of tuples containing the session id and index that uniquely select trained cases. Each outer sublist makes a list of case indices
+			;that define a group of trained cases to react to.
+			case_indices (null)
+			;{type "list" values {ref "Condition"} min_size 1}
+			;a list of assocs defining conditions that each select a collection of cases to react to.
+			conditions (null)
 			;{type "boolean"}
 			;calculate and output familiarity conviction of adding the specified new_cases in the output assoc
 			familiarity_conviction_addition (true)
@@ -52,6 +60,28 @@
 		)
 		(call !ValidateParameters)
 
+		(if (not (xor
+				new_cases
+				conditions
+				case_indices
+			))
+			(conclude
+				(call !Return (assoc
+					errors ["Only one of `new_cases`, `conditions`, or `case_indices` should be specified."]
+				))
+			)
+		)
+
+		(if (and (size new_cases) (not (size features)))
+			(conclude
+				(call !Return (assoc
+					errors ["`features` must be specified when using `new_cases`."]
+				))
+			)
+		)
+
+		(declare (assoc warnings (assoc) ))
+
 		(declare (assoc
 			react_results
 				;don't run in parallel since SingleReactGroup creates and destroys entities
@@ -59,7 +89,9 @@
 					(lambda
 						(call !SingleReactGroup (assoc
 							features features
-							new_cases (current_value 1)
+							new_cases (get new_cases (current_index 1))
+							condition (get conditions (current_index 1))
+							case_indices (get case_indices (current_index 1))
 							familiarity_conviction_addition familiarity_conviction_addition
 							familiarity_conviction_removal familiarity_conviction_removal
 							kl_divergence_addition kl_divergence_addition
@@ -71,13 +103,12 @@
 							use_case_weights use_case_weights
 						))
 					)
-					new_cases
+					(or new_cases conditions case_indices)
 				)
 		))
 
 		;convert react_results to a dict of react key -> lists of values (one per group)
 		;e.g., for 3 groups: (assoc "distance_contributions" (list 1 2 3) )
-
 		(declare (assoc react_group_keys (indices (first react_results)) ))
 
 		(call !Return (assoc
@@ -95,6 +126,7 @@
 						react_group_keys
 					)
 				)
+			warnings (indices warnings)
 		))
 	)
 
@@ -104,6 +136,8 @@
 	;parameters:
 	; features: list of feature names
 	; new_cases: a list of lists of values corresponding to sets of feature values, where the values are ordered corresponding to the features
+	; condition: a map specifying conditions that select a collection of trained cases
+	; case_indices: a list of tuples describing case indices
 	; distance_contributions : calculate and output distance contribution ratios in the output assoc
 	; familiarity_conviction_addition: calculate and output familiarity conviction of adding the specified new_cases in the output assoc
 	; familiarity_conviction_removal: calculate and output familiarity conviction of removing the specified new_cases in the output assoc
@@ -120,6 +154,8 @@
 		(assoc
 			features (list)
 			new_cases (list)
+			condition (assoc)
+			case_indices (list)
 			skip_encoding (false)
 			familiarity_conviction_addition (true)
 			familiarity_conviction_removal (false)
@@ -159,7 +195,7 @@
 		)
 
 		;if features need to be encoded, overwrite the values in the new_cases list with the encoded values
-		(if (and !hasFeaturesNeedEncodingFromInput (not skip_encoding))
+		(if (and (size new_cases) !hasFeaturesNeedEncodingFromInput (not skip_encoding))
 			(assign (assoc
 				new_cases
 					(map
@@ -228,21 +264,38 @@
 			(call !CacheAverageCaseDistanceContribution)
 		)
 
-		;create new cases
-		(assign (assoc
-			new_case_ids
-				(map
-					(lambda
-						(call !CreateCase (assoc
-							features features
-							feature_values (current_value 1)
-							session "none"
-							session_index 0
-						))
+		;get the case_ids, creating if necessary
+		(declare (assoc
+			new_cases_created (< 0 (size new_cases))
+			case_ids
+				(if (size new_cases)
+					(map
+						(lambda
+							(call !CreateCase (assoc
+								features features
+								feature_values (current_value 1)
+								session "none"
+								session_index 0
+							))
+						)
+						new_cases
 					)
-					new_cases
+
+					(size condition)
+					;get cases that match the condition
+					(call !GetCasesByCondition (assoc condition condition))
+
+					(size case_indices)
+					;get the entity IDs of the cases with these case indices
+					(call !GetCaseIds (assoc case_indices case_indices))
 				)
 		))
+
+		(if (not (size case_ids))
+			(accum (assoc
+				warnings (associate "No case ids were selected for one of the given inputs. Please check your condition, case indices, or given value for new_cases")
+			))
+		)
 
 		(if distance_contributions
 			(call !ComputeNewCasesDistanceContributions)
@@ -257,7 +310,9 @@
 		)
 
 		;clean up temporary cases
-		(map (lambda (destroy_entities (current_value))) new_case_ids)
+		(if new_cases_created
+			(apply "destroy_entities" case_ids)
+		)
 
 		;output only the requested keys
 		(append
