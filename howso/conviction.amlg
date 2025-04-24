@@ -84,13 +84,19 @@
 			(assign (assoc influence_weight_entropy "influence_weight_entropy"))
 		)
 
+		;flag set to true if similarity_conviction was requested without distance_contribution
+		(declare (assoc only_similiarity_conviction (false) ))
+
 		(if (and
 				(!= (null) similarity_conviction)
 				(or (= (null) distance_contribution) (= (false) distance_contribution))
 				(= (null) case_ids)
 			)
 			;if computing similarity_conviction for all cases, distance_contribution is needed for all cases
-			(assign (assoc distance_contribution "distance_contribution"))
+			(assign (assoc
+				distance_contribution "distance_contribution"
+				only_similiarity_conviction (true)
+			))
 		)
 
 		(if (= (null) features)
@@ -102,51 +108,70 @@
 			(assign (assoc weight_feature ".none"))
 		)
 
-		(declare (assoc cache_values (false) ))
+		(declare (assoc
+			cache_values (false)
+			;create assoc of type of computation -> stored feature name
+			computed_map
+				(filter
+					(lambda (current_value))
+					(assoc
+						"familiarity_conviction_addition" familiarity_conviction_addition
+						"familiarity_conviction_removal" familiarity_conviction_removal
+						"p_value_of_addition" p_value_of_addition
+						"p_value_of_removal" p_value_of_removal
+						"distance_contribution" distance_contribution
+						"similarity_conviction" similarity_conviction
+						"influence_weight_entropy" influence_weight_entropy
+					)
+				)
+		))
+
+		;when storing values for entire dataset, update feature attributes with the feature so it's known that the feature has been cached
+		(if (= (null) case_ids)
+			(assign_to_entities (assoc
+				!featureAttributes
+					(append
+						!featureAttributes
+						(zip
+							(values computed_map)
+							(map
+								(lambda
+									(if (or (= "p_value_of_addition" (current_value)) (= "p_value_of_removal" (current_value)))
+										{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" 1} }
+
+										;else convictions, entropy and distance contribution ranges are 0 to infinity
+										{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" .infinity} }
+									)
+								)
+								(indices computed_map)
+							)
+						)
+					)
+			))
+		)
 
 		(if (and analyze (= (null) case_ids))
-			(let
-				(assoc
-					;store map of type of computation -> stored feature name
-					computed_map
-						(filter (assoc
-							"familiarity_conviction_addition" familiarity_conviction_addition
-							"familiarity_conviction_removal" familiarity_conviction_removal
-							"p_value_of_addition" p_value_of_addition
-							"p_value_of_removal" p_value_of_removal
-							"distance_contribution" distance_contribution
-							"similarity_conviction" similarity_conviction
-							"influence_weight_entropy" influence_weight_entropy
-						))
-				)
-
+			(seq
 				(assign_to_entities (assoc
 					!computedFeaturesMap
 						(assoc
-							"computed_features" (values computed_map)
-							"computed_map" computed_map
+							"computed_features"
+								(values
+									;don't use distance_contribution as a feature for analysis if only similarity_conviction was explicitly specified
+									(if only_similiarity_conviction
+										(remove computed_map "distance_contribution")
+										computed_map
+									)
+								)
+							"computed_map"
+								(if only_similiarity_conviction
+									(set computed_map "distance_contribution" (false))
+									computed_map
+								)
 							"context_features" features
 							"weight_feature" (if use_case_weights weight_feature)
 						)
 					!autoAnalyzeEnabled (true)
-					!featureAttributes
-						(append
-							!featureAttributes
-							(zip
-								(values computed_map)
-								(map
-									(lambda
-										(if (or (= "p_value_of_addition" (current_value)) (= "p_value_of_removal" (current_value)))
-											{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" 1} }
-
-											;else convictions, entropy and distance contribution ranges are 0 to infinity
-											{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" .infinity} }
-										)
-									)
-									(indices computed_map)
-								)
-							)
-						)
 					!queryDistanceTypeMap (append !queryDistanceTypeMap (zip (values computed_map) "continuous_numeric") )
 				))
 
@@ -674,8 +699,8 @@
 				)
 			avg_new_cases_distance_contribution
 				(/
-					(apply "+" (unzip combined_distance_contributions_map new_case_ids))
-					(size new_case_ids)
+					(apply "+" (unzip combined_distance_contributions_map case_ids))
+					(size case_ids)
 				)
 		))
 	)
@@ -690,7 +715,7 @@
 					||(query_entity_group_kl_divergence
 						closest_k
 						features
-						new_case_ids
+						case_ids
 						feature_weights
 						!queryDistanceTypeMap
 						query_feature_attributes_map
@@ -713,14 +738,14 @@
 						1.0
 
 						;return conviction by taking the average case entropy dividing be the average new case entropy
-						(/ !averageCaseEntropyAddition (/ new_case_entropies_value (size new_case_ids)))
+						(/ !averageCaseEntropyAddition (/ new_case_entropies_value (size case_ids)))
 					)
 				)
 			p_value_of_addition_value
 				(if p_value_of_addition
-					(exp (- (/ new_case_entropies_value (size new_case_ids))) )
+					(exp (- (/ new_case_entropies_value (size case_ids))) )
 				)
-			kl_divergence_addition_value (/ new_case_entropies_value (size new_case_ids))
+			kl_divergence_addition_value (/ new_case_entropies_value (size case_ids))
 		))
 	)
 
@@ -734,7 +759,7 @@
 					||(query_entity_group_kl_divergence
 						closest_k
 						features
-						new_case_ids
+						case_ids
 						feature_weights
 						!queryDistanceTypeMap
 						query_feature_attributes_map
@@ -758,14 +783,14 @@
 						1.0
 
 						;return conviction by taking the average case entropy dividing be the average new case entropy
-						(/ !averageCaseEntropyRemoval (/ new_case_entropies_value (size new_case_ids)))
+						(/ !averageCaseEntropyRemoval (/ new_case_entropies_value (size case_ids)))
 					)
 				)
 			p_value_of_removal_value
 				(if p_value_of_removal
-					(exp (- (/ new_case_entropies_value (size new_case_ids))) )
+					(exp (- (/ new_case_entropies_value (size case_ids))) )
 				)
-			kl_divergence_removal_value (/ new_case_entropies_value (size new_case_ids))
+			kl_divergence_removal_value (/ new_case_entropies_value (size case_ids))
 		))
 	)
 
