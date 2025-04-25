@@ -935,4 +935,133 @@
 		;output similarity conviction as ratio of expected / calculated distance contribution
 		(/ local_expected_distance_contribution case_dc)
 	)
+
+
+	#!RobustDistanceContributions
+	(declare
+		(assoc
+			features (list)
+			feature_values (null)
+			use_case_weights (false)
+			weight_feature ".case_weight"
+			num_cases 1000
+			num_feature_samples 1000
+		)
+
+		(declare (assoc
+			case_ids
+				(if (<= (call !GetNumTrainingCases) 1024
+					(call !AllCases)
+
+					;else sample without replacement, 1000 cases
+					(call !AllCases (assoc
+						num num_cases
+						rand_seed (rand)
+					))
+				)
+			enabled_num_features_probability_map
+				(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc
+					num_features (size features)
+				))
+		))
+
+		;list of robust feature sets
+		(declare (assoc
+			feature_permutations
+				;todo: add logic if there are < 11 features,  set this to be all the possible permutations
+				(if (< (size features) 11)
+					;list of sets of all possible enabled feature permutations
+					;eg, for three features A, B and C, this would output:
+					; [ {A null} {B null} {A null B null} {C null} {A null C null} {B null C null} {A null B null C null} ]
+					(range
+						(lambda (let
+							(assoc
+								n (current_index 1)
+								bits []
+							)
+							(while (> n 0)
+								;store the index of the enabled bit
+								(if (mod n 2) (accum (assoc bits (current_index 1)) ))
+								(assign (assoc n (floor (/ n 2)) ))
+							)
+							;output as a set
+							(zip (unzip features bits))
+						))
+						1 (- (pow 2 (size features)) 1) 1
+					)
+					;sample a random number of unique features and output as set
+					(range
+						(lambda (zip
+							(rand features (rand enabled_num_features_probability_map) (true))
+						))
+						1 num_feature_samples 1
+					)
+				)
+		))
+
+		(declare (assoc
+			feature_permutations_dcs
+				(map
+					(lambda (let
+						(assoc
+							dc_map
+								(compute_on_contained_entities [
+									||(query_entity_distance_contributions
+										(get hyperparam_map "k")
+										(indices (current_value 2))
+										case_ids
+										feature_weights
+										!queryDistanceTypeMap
+										(get hyperparam_map "featureDomainAttributes")
+										feature_deviations
+										(get hyperparam_map "p")
+										(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+										(if use_case_weights weight_feature (null))
+										"fixed rand seed"
+										(null) ;radius
+										!numericalPrecision
+									)
+								])
+						))
+
+						;output average dc for this feature set
+						(/ (apply "+" (values dc_map)) (size dc_map) )
+					)
+					feature_permutations
+				)
+		))
+
+		(map
+			(lambda (let
+				(assoc feature (current_index 1))
+				(declare (assoc
+					;indices from feature_permutations where feature was used to compute DC
+					indices_with_feature
+						(filter
+							(lambda (contains_index (get feature_permutations (current_value)) feature))
+							(indices feature_permutations)
+						)
+
+					;indices from feature_permutations where feature was not used to compute DC
+					indices_without_feature
+						(filter
+							(lambda (not (contains_index (get feature_permutations (current_value)) feature)))
+							(indices feature_permutations)
+						)
+				))
+
+				(-
+					(/
+						(apply "+" (unzip feature_permutations_dcs indices_with_feature))
+						(size indices_with_feature)
+					)
+					(/
+						(apply "+" (unzip feature_permutations_dcs indices_without_feature))
+						(size indices_without_feature)
+					)
+				)
+			))
+			(zip eatures)
+		)
+	)
 )
