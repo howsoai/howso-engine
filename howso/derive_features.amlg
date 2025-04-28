@@ -53,6 +53,7 @@
 					))
 					derived_features
 				)
+			time_feature_delta (concat "." !tsTimeFeature "_delta_1")
 		))
 
 		;derive all the lag features in one pass
@@ -66,35 +67,93 @@
 			derived_features (filter (lambda (not (contains_value lag_features (current_value)))) derived_features)
 		))
 
-		(map
-			(lambda (let
-				(assoc
-					feature (current_value 1)
-					feature_attribute_map (get !featureAttributes (list (current_value 2) "auto_derive_on_train"))
-				)
-
-				(if
-					;code-based derived feature
-					(= "custom" (get feature_attribute_map "derive_type"))
-					(call !DeriveCustomFeatureFromCode (assoc
-						features features
-						feature feature
-						raw_code_string (get feature_attribute_map "code")
-						series_id_features (get feature_attribute_map "series_id_features")
-						series_ordered_by_features (get feature_attribute_map "ordered_by_features")
-					))
-
-					;create .series_progress, .series_progress_delta and .series_index features
-					(= "progress" (get feature_attribute_map "derive_type"))
-					(call !CreateSeriesProgressFeatures (assoc
-						feature feature
-						series_id_features (get feature_attribute_map "series_id_features")
-					))
-
-					;else do nothing, invalid feature specified
-				)
+		;create .series_progress, .series_progress_delta and .series_index features
+		(if (contains_value derived_features ".series_progress")
+			(call !CreateSeriesProgressFeatures (assoc
+				feature ".series_progress"
+				series_id_features (get !featureAttributes [".series_progress" "auto_derive_on_train" "series_id_features"])
 			))
+		)
+
+		;derive time feature delta before any of the other derived features
+		(if (contains_value derived_features time_feature_delta)
+			(call !CreateCustomFeaturesFromCode (assoc
+				features features
+				derived_features [time_feature_delta]
+			))
+		)
+
+		;keep only features that have a custom derivation specified and aren't time_feature_delta which was derived above
+		(assign (assoc
 			derived_features
+				(filter
+					(lambda (and
+						(!= time_feature_delta (current_value))
+						(= "custom" (get !featureAttributes [(current_value 1) "auto_derive_on_train" "derive_type"]))
+					))
+					derived_features
+				)
+		))
+
+		;features whose attributes were not set by the default set_feature_attributes flow and were specified by a user
+		;may have a custom sort order or different series id features and must be created one at a time
+		(declare (assoc
+			non_default_order_derived_features
+				(filter
+					(lambda (or
+						(!= (null) (get !featureAttributes [(current_value 1) "auto_derive_on_train" "ordered_by_features"]))
+						(!= (null) (get !featureAttributes [(current_value 1) "auto_derive_on_train" "series_id_features"]))
+					))
+					derived_features
+				)
+		))
+
+		;remove any non default features from derived features
+		(if (size non_default_order_derived_features)
+			derived_features
+				(filter (lambda (not (contains_value non_default_order_derived_features (current_value)))) derived_features)
+		)
+
+		;compute the maximum order of rate or deltas needed, since higher orders depend on lower ones and need to be derived sequentially
+		;e.g., 1st order for a rate feature needs to be derived before the 2nd order rate feature, etc.
+		(declare (assoc
+			max_order
+				(apply "max"
+					(map (lambda (get !featureAttributes [(current_value 1) "ts_order"])) derived_features)
+				)
+		))
+
+		;create all derived_features for each order in one pass, starting with 1st order.
+		(if (size derived_features)
+			(range
+				(lambda (let
+					(assoc order (current_index 1))
+					(call !CreateCustomFeaturesFromCode (assoc
+						features features
+						derived_features
+							(filter
+								(lambda (= order (get !featureAttributes [(current_value 1) "ts_order"])))
+								derived_features
+							)
+					))
+				))
+				1 max_order 1
+			)
+		)
+
+		;create any non default features last, one at a time
+		(if (size non_default_order_derived_features)
+			(map
+				(lambda (let
+					(assoc feature (current_value 1) )
+					(call !CreateCustomFeaturesFromCode (assoc
+						features features
+						derived_features [feature]
+						feature_attribute_map (get !featureAttributes [feature "auto_derive_on_train"])
+					))
+				))
+				non_default_order_derived_features
+			)
 		)
 	)
 
@@ -319,8 +378,8 @@
 		)
 
 		(declare (assoc
-			series_id_features (get !featureAttributes (list (first lag_features) "auto_derive_on_train" "series_id_features"))
-			series_ordered_by_features (get !featureAttributes (list (first lag_features) "auto_derive_on_train" "ordered_by_features"))
+			series_id_features (get !tsFeaturesMap "series_id_features")
+			series_ordered_by_features [!tsTimeFeature]
 		))
 		(declare (assoc
 			;list of features that are necessary to be able to derive the specified lag features, i.e., the original non-lagged features
