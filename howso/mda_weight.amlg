@@ -304,10 +304,6 @@
 	(declare
 		(assoc features features)
 
-		(declare (assoc
-			reduce_memory_usage (> (size features) 250)
-		))
-
 		;for each feature, create a list, also length of features, where each column value is the mda
 		;for the column feature computed with and without the row feature
 		(declare (assoc
@@ -360,42 +356,35 @@
 									(conclude)
 								)
 
-								(if reduce_memory_usage
-									;slower method that does not increase memory usage
-									(declare (assoc
-										with_feature_residuals
-											(filter (unzip
-												(replace (get feature_residuals_lists mda_feature_index))
-												case_indices_with_feature
-											))
-										without_feature_residuals
-											(filter (unzip
-												(replace (get feature_residuals_lists mda_feature_index))
-												case_indices_without_feature
-											))
-									))
-
-									;fast method that uses more memory
-									(declare (assoc
-										with_feature_residuals (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature))
-										without_feature_residuals (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature))
-									))
-								)
-
-								(declare (assoc
-									avg_without_residuals
-										(/ (apply "+" without_feature_residuals) (size without_feature_residuals))
-									avg_with_residuals
-										(/ (apply "+" with_feature_residuals) (size with_feature_residuals))
-								))
-
 								;output delta of the (expectedly) larger residual computed without this feature - residual computed with this feature
 								(if output_raw_mda
-									(- avg_without_residuals avg_with_residuals)
+									(-
+										;avg_without_residuals
+										(/
+											(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
+											(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
+										)
+										;average with residuals
+										(/
+											(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
+											(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
+										)
+									)
 
 									;cap the lower value for probability conversion
 									(max
-										(- avg_without_residuals avg_with_residuals)
+										(-
+											;avg_without_residuals
+											(/
+												(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
+												(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
+											)
+											;average with residuals
+											(/
+												(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
+												(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
+											)
+										)
 										(get !cachedFeatureMinResidualMap mda_feature)
 									)
 								)
@@ -434,102 +423,95 @@
 		(declare (assoc smallest_probability (/ 1 (+ 0.5 num_training_cases)) ))
 
 		;iterate over an assoc of MDA maps per feature and convert to a normalized probability feature mda matrix
-		(map
-			(lambda (let
-				(assoc
-					target_feature (current_index 1)
-					mda_map (current_value 1)
-					target_feature_residual (get baseline_hyperparameter_map ["featureResiduals" (current_index 2)])
-				)
-
-				(declare (assoc
-					probabilities_of_contribution_map
-						(map
-							(lambda (let
-								(assoc mda (current_value 1) )
-
-								;skip if mda_feature = target_feature
-								(if (= (current_index) target_feature) (conclude 0) )
-
-								;LK metric
-								;mda + 0.5 * e(-mda/residual) * (3 * residual + mda)
-								(declare (assoc
-									lk_value
-										(+
-											mda
-											(*
-												0.5
-												(exp (- (/ mda target_feature_residual)) )
-												(+ (* 3 target_feature_residual) mda)
-											)
-										)
-								))
-
-								;surprisal =  lk_value / target_feature_residual
-								;Surprisal (surprisal - assumption) = surprisal - 1.5
-								;prob of observation = e^(-Surprisal)
-								;prob of contribution = 1 - prob of observation
-								(max
-									(-
-										1
-										(exp (- (- (/ lk_value target_feature_residual) 1.5)))
-									)
-									0
-								)
-							))
-							mda_map
-						)
-				))
-
-				(declare (assoc total_probs (apply "+" (values probabilities_of_contribution_map)) ))
-
-				;normalize probabilities for use as feature weights
-				(if total_probs
-					;replace 0's for any feature that isn't the target feature with smallest_probability
-					(map
-						(lambda
-							(if (or (> (current_value) 0) (= target_feature (current_index)))
-								(/ (current_value) total_probs)
-								smallest_probability
-							)
-						)
-						probabilities_of_contribution_map
+		(zip
+			features
+			||(map
+				(lambda (let
+					(assoc
+						target_feature (current_value 1)
+						feature_index (current_index 1)
+						target_feature_residual (get baseline_hyperparameter_map ["featureResiduals" (current_value 2)])
 					)
 
-					;else set them all to 1 because this feature had no affect on others
-					(map 1 probabilities_of_contribution_map)
-				)
-			))
-
-			;iterate over an assoc of MDA maps per feature
-			;eg, if there are three features, A[0-10], B[0-100], C[0-1000] with the following mda_matrix of residuals:
-			; [
-			;  	[0	20	300]
-			;	[4	0	100]
-			;	[-2	40	0  ]
-			; ]
-			;it would be transposed into:
-			; {
-			;	"A"	{ "A" 0   "B" 4   "C" -2 }
-			;	"B" { "A" 20  "B" 0   "C" 40 }
-			;	"C"	{ "A" 300 "B" 100 "C" 0  }
-			; }
-			(zip
-				features
-				;transpose the matrix, so every feature has its own (column) MDA values
-				(map
-					(lambda (let
-						(assoc feature_index (current_index 1))
-						(zip
-							features
+					(declare (assoc
+						probabilities_of_contribution_map
+							;iterate over an assoc map of MDA values per feature and convert to probabilities
 							(map
-								(lambda (get (current_value) feature_index))
-								mda_matrix
+								(lambda (let
+									(assoc mda (current_value 1) )
+
+									;skip if mda_feature = target_feature
+									(if (= (current_index) target_feature) (conclude 0) )
+
+									;LK metric
+									;mda + 0.5 * e(-mda/residual) * (3 * residual + mda)
+									(declare (assoc
+										lk_value
+											(+
+												mda
+												(*
+													0.5
+													(exp (- (/ mda target_feature_residual)) )
+													(+ (* 3 target_feature_residual) mda)
+												)
+											)
+									))
+
+									;surprisal =  lk_value / target_feature_residual
+									;Surprisal (surprisal - assumption) = surprisal - 1.5
+									;prob of observation = e^(-Surprisal)
+									;prob of contribution = 1 - prob of observation
+									(max
+										(-
+											1
+											(exp (- (- (/ lk_value target_feature_residual) 1.5)))
+										)
+										0
+									)
+								))
+								;eg, if mda_matrix has three features, A[0-10], B[0-100], C[0-1000] with the following residuals:
+								; [
+								;  	[0	20	300]
+								;	[4	0	100]
+								;	[-2	40	0  ]
+								; ]
+								;it could be transposed and converted into:
+								; {
+								;	"A"	{ "A" 0   "B" 4   "C" -2 }
+								;	"B" { "A" 20  "B" 0   "C" 40 }
+								;	"C"	{ "A" 300 "B" 100 "C" 0  }
+								; }
+								;this outputs an assoc for for the current single target_feature, e.g.: "B" { "A" 20 "B" 0 "C" 40}
+								(zip
+									features
+									(map
+										(lambda (get (current_value) feature_index))
+										mda_matrix
+									)
+								)
 							)
-						)
 					))
-					mda_matrix
-				)
+
+					(declare (assoc total_probs (apply "+" (values probabilities_of_contribution_map)) ))
+
+					;normalize probabilities for use as feature weights
+					(if total_probs
+						;replace 0's for any feature that isn't the target feature with smallest_probability
+						(map
+							(lambda
+								(if (or (> (current_value) 0) (= target_feature (current_index)))
+									(/ (current_value) total_probs)
+									smallest_probability
+								)
+							)
+							probabilities_of_contribution_map
+						)
+
+						;else set them all to 1 because this feature had no affect on others
+						(map 1 probabilities_of_contribution_map)
+					)
+				))
+				features
 			)
 		)
 	)
