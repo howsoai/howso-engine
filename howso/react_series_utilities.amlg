@@ -28,6 +28,7 @@
             single_max_length (= 1 (size max_series_lengths))
 			single_series_context (= 1 (size series_context_values))
             num_reacts 1
+			errors (assoc)
 
             has_series_context_values (false)
         )
@@ -135,6 +136,12 @@
 					0 (- num_reacts 1) 1
 				)
 		))
+
+		(if (size errors)
+			(conclude
+				(assoc "payload" (null) "errors" (indices errors))
+			)
+		)
 
 		(assoc
 			"payload"
@@ -427,7 +434,6 @@
 			))
 		)
 
-
 		;if initial features are provided, ensure there aren't any that do not appear in features. any extra features are deleted and ignored.
 		#!InitializeInitialSeriesFeatures
 		(if (size initial_features)
@@ -449,6 +455,61 @@
 
 		(if continue_series
 			(call !PrepContinueReactSeries)
+		)
+
+		(if (contains_index series_stop_map [!tsTimeFeature "max"])
+			(let
+				(assoc
+					start_time
+						(if (contains_index initial_features_map !tsTimeFeature)
+							(get initial_features_map !tsTimeFeature)
+
+							(and has_series_context_values (contains_value series_context_features !tsTimeFeature))
+							(get series_context_values [0 (get (zip series_context_features (indices series_context_features)) !tsTimeFeature) ] )
+
+							(size series_data)
+							(get series_data [-1 (get feature_index_map !tsTimeFeature) ] )
+						)
+				)
+
+				(if (contains_index !featureDateTimeMap !tsTimeFeature)
+					(assign (assoc
+						start_time
+							(format
+								start_time
+								(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+								"number"
+								(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+								(null)
+							)
+					))
+				)
+
+				(if (and
+						start_time
+						(< (get series_stop_map [!tsTimeFeature "max"]) start_time)
+					)
+					(seq
+						(accum (assoc
+							errors (associate "The specified stop time for the series is before the starting point of the series.")
+						))
+						;accum to errors and return them in this returned assoc so it functions for both single_react_series and standard react_series
+						(conclude (conclude (assoc "payload" (assoc "action_values" (list)) "errors" (indices errors)) ))
+					)
+
+					(and
+						start_time
+						(= (get series_stop_map [!tsTimeFeature "max"]) start_time)
+					)
+					(accum (assoc
+						warnings
+							(associate (concat
+								"The specified stop time for the series is equal to the starting point of the series. "
+								"Consider using `max_series_lengths` if only one timestep is desired."
+							))
+					))
+				)
+			)
 		)
 
 		;loop until series stopping condition is met
@@ -1738,6 +1799,10 @@
 								output_features output_features
 								desired_conviction (if desired_conviction desired_conviction 1)
 								series_stop_map (associate !tsTimeFeature {"max" end_time})
+
+								;want to absorb and ignore any raised here
+								errors (assoc)
+								warnings (assoc)
 							))
 							["payload" "action_values"]
 						)
