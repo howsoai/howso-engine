@@ -606,6 +606,20 @@
 			))
 		)
 
+		(if forecast_window_length
+			(seq
+				(assign (assoc
+					case_ids (call !GetTimestepsForForecastAccuracy (assoc case_ids case_ids))
+				))
+
+				(if (= 0 (size case_ids))
+					(conclude
+						(call !Return (assoc errors ["The given `forecast_window_length` is too large, no trained series can be used to evaluate this forecast length."]))
+					)
+				)
+			)
+		)
+
 
 		;calculates prediction stats
 		(if (get details "prediction_stats")
@@ -626,6 +640,7 @@
 							case_ids case_ids
 							strict_case_ids (!= 0 (size action_condition_filter_query))
 							features_to_derive features_to_derive
+							forecast_window_length forecast_window_length
 						))
 					selected_prediction_stats
 						(call !ProcessSelectedPredictionStats (assoc selected_prediction_stats (or (get details "selected_prediction_stats") [])))
@@ -955,5 +970,75 @@
 		)
 
 		selected_prediction_stats
+	)
+
+	;helper method for react_aggregate that finds the timesteps to measure forecasts starting from given
+	;a list of randomly sampled case-ids and a set length of forecasts to evaluate
+	;parameters:
+	; case_ids: a list of randomyly sampled case ids (without the TS/forecast requirements)
+	; forecast_window_length: (passed implicitly) the length of time needed after the cases to forecast
+	#!GetTimestepsForForecastAccuracy
+	(declare
+		(assoc
+			case_ids (null)
+		)
+
+		(declare (assoc
+			series_id_features (get !tsFeaturesMap "series_id_features")
+		))
+
+		(declare (assoc
+			;map of each unique set of series-id-values to the number of cases sampled from that series
+			series_ids_counts
+				(zip
+					(lambda (+ (current_value) (current_value 1)))
+					(map (lambda (retrieve_from_entity (current_value) series_id_features)) case_ids)
+					1
+				)
+		))
+
+		(apply "append"
+			(values (map
+				(lambda
+					(let
+						(assoc
+							series_id_values (current_index 1)
+							cases_to_sample (current_value 1)
+						)
+
+						(declare (assoc
+							id_matching_queries
+								(map
+									(lambda (query_equals (get series_id_features (current_index)) (current_value)) )
+									series_id_values
+								)
+						))
+
+						(declare (assoc
+							latest_valid_time_for_series
+								(-
+									(retrieve_from_entity
+										(first (contained_entities (append
+											id_matching_queries
+											(query_max !tsTimeFeature 1)
+										)))
+										!tsTimeFeature
+									)
+									forecast_window_length
+								)
+						))
+
+						;randomly sample the amount of cases needed from the series that have
+						;enough "time" trained remaining in the series
+						(contained_entities (append
+							id_matching_queries
+							(query_less_or_equal_to !tsTimeFeature latest_valid_time_for_series)
+							(query_sample cases_to_sample) ;TODO: use weight feature here?
+						))
+					)
+				)
+				series_ids_counts
+			))
+		)
 	)
 )
