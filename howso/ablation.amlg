@@ -8,7 +8,7 @@
 	; use_case_weights: optional flag default true. if false, case weights will not be used during the react
 	; weight_feature: optional, default '.case_weight'. name of feature whose values to use as case weights
 	; output_most_influential: optional, boolean, default false. when false outputs influential cases' entropy,
-	;	when true will output a pair of [ entropy, most influential case values ]
+	;	when true will output a tuple of [ entropy,, most influential case id, distance to most influential case ]
 	#!ComputeInfluenceWeightEntropy
 	(declare
 		(assoc
@@ -18,63 +18,64 @@
 			use_case_weights (true)
 			weight_feature !autoAblationWeightFeature
 			output_most_influential (false)
-
-			;internal only
-			react_kwargs (assoc)
 		)
 
 		(if (not use_case_weights)
 			(assign (assoc weight_feature ".none"))
 		)
 
-		(assign (assoc
-			react_kwargs
-				(assoc
-					context_features features
-					use_case_weights use_case_weights
-					weight_feature weight_feature
-					details (assoc influential_cases (true) influential_cases_raw_weights (true))
-					skip_encoding (true)
-					skip_decoding (true)
-				)
-		))
-
-		(if
-			;if context_values are not null, we are reacting to a new case
-			(!= feature_values (null))
-			(accum "react_kwargs" (assoc context_values feature_values) )
-			;elif case_id is not null, we are reacting to an existing case
-			(!= case_id (null))
-			(accum "react_kwargs" (assoc
-				case_indices (retrieve_from_entity case_id (list ".session" ".session_training_index") )
-				preserve_feature_values features
-				leave_case_out (true)
-			))
-		)
-
 		(declare (assoc
-			influential_cases (get (call !ReactDiscriminative react_kwargs) "influential_cases")
-		))
-
-		(if
-			;if feature_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
-			(!= feature_values (null))
-			(if (= feature_values (unzip (first influential_cases) features))
-				(conclude [ .infinity (null) ])
-			)
-		)
-
-		;compute the entropy of the influence weights as retrieved by react
-		(declare (assoc
-			influence_weight_entropy
-				(entropy (map
-					(lambda (get (current_value) ".influence_weight") )
-					influential_cases
+			local_cases_pairs
+				(compute_on_contained_entities (append
+					(if case_id (query_not_in_entity_list [case_id]) [])
+					(query_nearest_generalized_distance
+						closest_k
+						features
+						(if case_id (retrieve_from_entity case_id features) feature_values)
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						p_parameter
+						dt_parameter
+						(if use_case_weights weight_feature)
+						(rand)
+						(null) ;radius
+						!numericalPrecision
+						;output as ordered pair
+						(true)
+					)
 				))
 		))
 
+		;if feature_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
+		;and a case is identical if its probability is 1 or weight is .infinity
+		(if (and
+				(!= feature_values (null))
+				(or
+					(and
+						(= 1 (last (first local_cases_pairs)))
+						(= "surprisal_to_prob" dt_parameter)
+					)
+					(= .infinity (last (first local_cases_pairs)) )
+				)
+			)
+			(conclude [ .infinity (null) ])
+		)
+
+		(declare (assoc total_influence (apply "+" (last local_cases_pairs)) ))
+
+		(declare (assoc
+			influence_weight_entropy
+				(entropy (map
+					(lambda (/ (current_value) total_influence))
+					(last local_cases_pairs)
+				))
+		))
+
+		;outputs the case id of the most influential and distance to it, else output just the entropy value
 		(if output_most_influential
-			[ influence_weight_entropy (first influential_cases) ]
+			[ influence_weight_entropy (first (first local_cases_pairs)) (first (last local_cases_pairs)) ]
 			influence_weight_entropy
 		)
 	)
@@ -91,7 +92,6 @@
 						(call !ComputeInfluenceWeightEntropy (assoc
 							case_id (current_index 1)
 							features features
-							use_case_weights use_case_weights
 							weight_feature weight_feature
 						))
 					)
@@ -429,6 +429,22 @@
 			))
 		)
 
+		(declare  (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					context_features features
+					weight_feature weight_feature
+				))
+		))
+		(declare (assoc
+			closest_k (get hyperparam_map "k")
+			p_parameter (get hyperparam_map "p")
+			dt_parameter (get hyperparam_map "dt")
+			feature_weights (get hyperparam_map "featureWeights")
+			feature_deviations (get hyperparam_map "featureDeviations")
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+		))
+
 		;Also ensure that we have influence weight entropies and that they are as up-to-date
 		; as possible.
 		(call !ComputeAndStoreInfluenceWeightEntropies (assoc
@@ -600,7 +616,7 @@
 		)
 
 		(declare (assoc
-			influentials_entropy_pair
+			influentials_entropy_tuple
 				(call !ComputeInfluenceWeightEntropy (assoc
 					features features
 					feature_values feature_values
@@ -611,40 +627,55 @@
 		(+
 			(or
 				;case should be kept because influentials are not evenly distributed (their entropy is low)
-				(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_pair))
+				(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_tuple))
 					(true)
 
 					;always ablate perfect matches/identical cases
-					(= .infinity (first influentials_entropy_pair))
+					(= .infinity (first influentials_entropy_tuple))
 					(false)
 
 					;else ablate? check distance to closest vs its distance to its K'th closest
 					(let
 						(assoc
-							dist_to_closest_case (/ 1 (get influentials_entropy_pair [1 ".raw_influence_weight"]))
-							react_kwargs
-								(assoc
-								 	use_case_weights use_case_weights
-									weight_feature weight_feature
-									details (assoc influential_cases (true) influential_cases_raw_weights (true))
-									context_features features
-									case_indices (unzip (last influentials_entropy_pair) [".session" ".session_training_index"] )
-									preserve_feature_values features
-									leave_case_out (true)
-									skip_encoding (true)
-								)
+							neighbor_cases_pairs
+								(compute_on_contained_entities [
+									(query_not_in_entity_list [(get influentials_entropy_tuple 1)])
+									(query_nearest_generalized_distance
+										closest_k
+										features
+										(retrieve_from_entity (get influentials_entropy_tuple 1) features)
+										feature_weights
+										!queryDistanceTypeMap
+										query_feature_attributes_map
+										feature_deviations
+										p_parameter
+										dt_parameter ;TODO: should be (if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+										weight_feature
+										(rand)
+										(null) ;radius
+										!numericalPrecision
+										;output as ordered pair
+										(true)
+									)
+								])
 						)
 
 						(declare (assoc
-							neighbor_influential_cases (get (call !ReactDiscriminative react_kwargs) "influential_cases")
-						))
+							dist_to_closest_neighbor (/ 1 (last influentials_entropy_tuple))
+								;TODO: convert to raw surprisal and below shoud just be itself if surprisal is returned above
+								; (if (= "surprisal_to_prob" dt_parameter)
+								; 	(- (log (last influentials_entropy_tuple)))
 
-						(declare (assoc
-							neighbor_dist_to_farthest_case (/ 1 (get (last neighbor_influential_cases) ".raw_influence_weight"))
+								; 	(/ 1 (last influentials_entropy_tuple))
+								; )
+							neighbor_dist_to_its_farthest_case (/ 1 (last (last neighbor_cases_pairs)) )
 						))
 
 						;keep case if its distance to closest existing case is relatively large
-						(> dist_to_closest_case neighbor_dist_to_farthest_case)
+						(>
+							dist_to_closest_neighbor
+							neighbor_dist_to_its_farthest_case
+						)
 					)
 				)
 
