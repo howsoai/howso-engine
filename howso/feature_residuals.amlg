@@ -1453,6 +1453,7 @@
 		))
 
 		(declare (assoc
+			feature_index_map (zip all_features (indices all_features))
 			derived_context_features
 				(filter
 					(lambda (contains_value action_features (get !derivedFeaturesMap (current_value))))
@@ -1492,62 +1493,170 @@
 							)
 
 							(declare (assoc
-								; previous_case_ids
-								; 	(call !RetrieveTrainedSeriesData (assoc
-								; 		id_values_map (zip series_id_features series_id_values)
-								; 		exclusive_upper_time_bound case_time_value
-								; 		num_cases_needed largest_max_row_lag
-								; 	))
 								end_time (+ case_time_value forecast_window_length)
 							))
 
-							;TODO BEFORE MERGE: finish forecast and eval for each feature
+							(if (contains_index !featureDateTimeMap !tsTimeFeature)
+								(declare (assoc
+									end_datetime
+										(format
+											end_time
+											"number"
+											(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+											(null)
+											(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+										)
+									case_time_datetime
+										(format
+											case_time_value
+											"number"
+											(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+											(null)
+											(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+										)
+								))
+							)
+
 							(declare (assoc
 								forecast_result
 									(call !ReactSeries (assoc
 										continue_series (true)
 										leave_series_out (true)
+										track_progress (false)
 										desired_conviction (null)
 										details (assoc)
-										output_features features
-										series_stop_map
-											(associate
-												!tsTimeFeature
-													(assoc
-														"max"
-															(if (contains_index !featureDateTimeMap !tsTimeFeature)
-																(format
-																	end_time
-																	"number"
-																	(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
-																	(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
-																	(null)
-																)
-
-																end_time
-															)
-													)
-											)
+										output_features all_features
+										series_stop_map (associate !tsTimeFeature {"max" end_time} )
 										series_id_features series_id_features
 										series_id_values series_id_values
+										include_start_time_case (true)
 
 										initial_features [!tsTimeFeature]
-										initial_values [case_time_value]
-										; series_context_features all_features
-										; series_context_values
-										; 	(map
-										; 		(lambda (retrieve_from_entity (current_value) all_features))
-										; 		(append previous_case_ids case_id)
-										; 	)
+										initial_values
+											(if (contains_index !featureDateTimeMap !tsTimeFeature)
+												[(format
+													case_time_value
+													"number"
+													(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+													(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+													(null)
+												)]
+
+												[case_time_value]
+											)
 									))
 							))
-							(+ 23.4)
+							(declare (assoc
+								forecast_time_values
+									(if (contains_index !featureDateTimeMap !tsTimeFeature)
+										(map
+											(lambda
+												(format
+													(get (current_value) (get feature_index_map !tsTimeFeature))
+													(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+													"number"
+													(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+													(null)
+												)
+
+											)
+											(get forecast_result ["payload" "action_values"])
+										)
+
+										(map
+											(lambda (get (current_value) (get feature_index_map !tsTimeFeature)) )
+											(get forecast_result ["payload" "action_values"])
+										)
+									)
+							))
+
+							(declare (assoc
+								trained_series_cases
+									(map
+										(lambda (retrieve_from_entity (current_value) all_features))
+										(contained_entities (append
+											(map
+												(lambda (query_equals (get series_id_features (current_index)) (current_value)))
+												series_id_values
+											)
+											(query_greater_or_equal_to !tsTimeFeature case_time_value)
+										))
+									)
+							))
+
+							(assign (assoc
+								trained_series_cases
+									(sort
+										(lambda (>
+											(get (current_value) (get feature_index_map !tsTimeFeature))
+											(get (current_value 1) (get feature_index_map !tsTimeFeature))
+										))
+										trained_series_cases
+									)
+							))
+							(declare (assoc
+								trained_time_values
+									(map
+										(lambda (get (current_value) (get feature_index_map !tsTimeFeature)) )
+										trained_series_cases
+									)
+							))
+							;TODO BEFORE MERGE: eval for each feature
+
+							(map
+								(lambda
+									(let
+										(assoc
+											feat_to_diff (current_value 1)
+											feat_index (get feature_index_map (current_value 1))
+										)
+
+										(call !ComputeDiffTuple (assoc
+											interpolated_value
+												;interpolated value for forecast
+												(call !InterpolateSeriesValues (assoc
+													time_values forecast_time_values
+													feature_values
+														(map
+															(lambda (get (current_value) feat_index))
+															(get forecast_result ["payload" "action_values"])
+														)
+													time end_time
+
+													;hopefully don't need these
+													pre_domain_value (get forecast_result ["payload" "action_values" 0 feat_index])
+													post_domain_value (get forecast_result ["payload" "action_values" -1 feat_index])
+												))
+											case_feature_value
+												;interpolated value for trained data
+												(call !InterpolateSeriesValues (assoc
+													time_values trained_time_values
+													feature_values
+														(map
+															(lambda (get (current_value) feat_index))
+															trained_series_cases
+														)
+													time end_time
+
+													;these definitely should not be needed
+													pre_domain_value (null)
+													post_domain_value (null)
+												))
+
+										))
+									)
+								)
+								features
+							)
 						)
 					)
 					case_ids
 				)
 		))
-	)
 
+		(assign (assoc
+			feature_residuals_lists (call !TransposeResidualLists)
+		))
+	)
 
 )
