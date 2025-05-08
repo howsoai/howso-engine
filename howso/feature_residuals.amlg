@@ -218,6 +218,8 @@
 	; expand_confusion_matrices: flag, optional, default true. When use_shared_deviations is true, if there are confusion matrices for shared features, they will be copied over
 	;		for all non-primary shared features. When false, confusion matrices will not be copied and remain only for the primary features.
 	; features_to_derive: a list of features whose values should be derived rather than interpolated
+	; forecast_window_length: a length of time to evaluate forecasts over (in seconds when the time feature is a datetime).
+	;		When specified (only for full residuals/prediction_stats), computes forecasts and evaluates error at the end of the forecasts
 	; output_raw_mda: flag, optional, default false. When robust_residuals is "robust_mda" and this flag is true, will output raw MDA values in 'feature_mda_map'
 	; mda_action_feature: string, optional.  When robust_residuals is "robust_mda" and this is set, will output only this specified feature's MDA values
 	#!CalculateFeatureResiduals
@@ -248,6 +250,7 @@
 			use_shared_deviations (false)
 			expand_confusion_matrices (true)
 			features_to_derive (list)
+			forecast_window_length (null)
 
 			output_raw_mda (false)
 			mda_action_feature (null)
@@ -310,7 +313,12 @@
 			))
 
 			;else
-			(call !RunFullResiduals)
+			(if forecast_window_length
+				;do the forecasting evaluation
+				(call !RunForecastResiduals)
+
+				(call !RunFullResiduals)
+			)
 		)
 
 		;for computing the feature mda matrix, only robust residuals were needed, the rest of the flow below
@@ -1426,6 +1434,288 @@
 			)
 		))
 		confusion_matrix_map
+	)
+
+	;run a series of forecasts from each case in case_ids and evaluate the error in predicting each feature
+	;at the end of the forecast of length specified by forecast_window_length
+	#!RunForecastResiduals
+	(seq
+		(declare (assoc
+			series_id_features (get !tsFeaturesMap "series_id_features")
+			;find and store the largest referenced lag value among derived_context_features
+			largest_max_row_lag
+				;or with 0 to prevent null
+				(or 0 (apply "max"
+					(values (map
+						(lambda (get (current_value ) "max_row_lag"))
+						!featureAttributes
+					))
+				))
+			all_features (values (append features context_features) (true))
+			action_features features
+		))
+
+		(declare (assoc
+			feature_index_map (zip all_features (indices all_features))
+			derived_context_features
+				(filter
+					(lambda (contains_value all_features (get !derivedFeaturesMap (current_value))))
+					(get !tsFeaturesMap "lag_features")
+				)
+			derived_action_features
+				(append
+					(filter
+						(lambda (contains_value all_features (get !derivedFeaturesMap (current_value))))
+						(get !tsFeaturesMap "derived_order_features")
+					)
+					(filter
+						(lambda (not (contains_index series_id_features_set (current_value))))
+						;list of original features (ones not starting with a '.') that have derived_feature_code should be derived for output
+						(filter
+							(lambda
+								(and
+									(!= "." (first (current_value)))
+									(get !featureAttributes (list (current_value 1) "derived_feature_code"))
+								)
+							)
+							all_features
+						)
+					)
+				)
+		))
+
+		(declare (assoc
+			series_action_features
+				(append
+					(filter
+						(lambda
+							(or
+								;categorical features are in the "delta_features" list...
+								(!= "continuous" (get !featureAttributes [(current_value 1) "type"]))
+								(contains_value derived_action_features (get !derivedFeaturesMap (current_value)))
+							)
+						)
+						(get !tsFeaturesMap "delta_features")
+					)
+					(filter
+						(lambda (contains_value derived_action_features (get !derivedFeaturesMap (current_value))))
+						(get !tsFeaturesMap "rate_features")
+					)
+				)
+		))
+
+		(assign (assoc
+			case_residuals_lists
+				||(map
+					(lambda
+						(let
+							(assoc
+								case_id (current_value 1)
+								series_id_values (retrieve_from_entity (current_value 1) series_id_features)
+								case_time_value (retrieve_from_entity (current_value 1) !tsTimeFeature)
+							)
+
+							(declare (assoc
+								end_time (+ case_time_value forecast_window_length)
+							))
+
+							(declare (assoc
+								forecast_result
+									(call !ReactSeries (assoc
+										continue_series (true)
+										leave_series_out (true)
+										track_progress (false)
+										desired_conviction (null)
+										details (assoc categorical_action_probabilities (true))
+										output_features all_features
+										series_stop_map (associate !tsTimeFeature {"max" end_time} )
+										action_features series_action_features
+										series_id_features series_id_features
+										series_id_values series_id_values
+										include_start_time_case (true)
+
+										initial_features [!tsTimeFeature]
+										initial_values
+											(if (contains_index !featureDateTimeMap !tsTimeFeature)
+												[(format
+													case_time_value
+													"number"
+													(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+													(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+													(null)
+												)]
+
+												[case_time_value]
+											)
+									))
+								trained_series_cases
+									(values (map
+										(lambda (unzip (current_value) all_features))
+										(compute_on_contained_entities (append
+											(map
+												(lambda (query_equals (get series_id_features (current_index)) (current_value)))
+												series_id_values
+											)
+											(query_greater_or_equal_to !tsTimeFeature case_time_value)
+											(map (lambda (query_exists (current_value))) all_features)
+										))
+									))
+							))
+							(declare (assoc
+								forecast_time_values
+									(if (contains_index !featureDateTimeMap !tsTimeFeature)
+										(map
+											(lambda
+												(format
+													(get (current_value) (get feature_index_map !tsTimeFeature))
+													(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+													"number"
+													(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+													(null)
+												)
+
+											)
+											(get forecast_result ["payload" "action_values"])
+										)
+
+										(map
+											(lambda (get (current_value) (get feature_index_map !tsTimeFeature)) )
+											(get forecast_result ["payload" "action_values"])
+										)
+									)
+							))
+
+							(assign (assoc
+								trained_series_cases
+									(sort
+										(lambda (>
+											(get (current_value) (get feature_index_map !tsTimeFeature))
+											(get (current_value 1) (get feature_index_map !tsTimeFeature))
+										))
+										trained_series_cases
+									)
+							))
+							(declare (assoc
+								trained_time_values
+									(map
+										(lambda (get (current_value) (get feature_index_map !tsTimeFeature)) )
+										trained_series_cases
+									)
+							))
+
+							(map
+								(lambda
+									(let
+										(assoc
+											feat_to_diff (current_value 1)
+											feat_index (get feature_index_map (current_value 1))
+										)
+
+										(if (= "continuous" (get !featureAttributes [feat_to_diff "type"]))
+											(call !ComputeDiffTuple (assoc
+												interpolated_value
+													;interpolated value for forecast
+													(call !InterpolateSeriesValuesContinuous (assoc
+														time_values forecast_time_values
+														feature_values
+															(map
+																(lambda (get (current_value) feat_index))
+																(get forecast_result ["payload" "action_values"])
+															)
+														time end_time
+
+														;hopefully don't need these
+														pre_domain_value (get forecast_result ["payload" "action_values" 0 feat_index])
+														post_domain_value (get forecast_result ["payload" "action_values" -1 feat_index])
+													))
+												case_feature_value
+													;interpolated value for trained data
+													(call !InterpolateSeriesValuesContinuous (assoc
+														time_values trained_time_values
+														feature_values
+															(map
+																(lambda (get (current_value) feat_index))
+																trained_series_cases
+															)
+														time end_time
+
+														;these definitely should not be needed
+														pre_domain_value (null)
+														post_domain_value (null)
+													))
+
+											))
+
+											(= "nominal" (get !featureAttributes [feat_to_diff "type"]))
+											(call !ComputeDiffTuple (assoc
+												feature_is_nominal (true)
+												feature feat_to_diff
+												interpolated_value
+													;interpolated value for forecast
+													(call !InterpolateSeriesValuesNominal (assoc
+														time_values forecast_time_values
+														feature_values
+															(map
+																(lambda (get (current_value) feat_index))
+																(get forecast_result ["payload" "action_values"])
+															)
+														time end_time
+
+														;hopefully don't need these
+														pre_domain_value (get forecast_result ["payload" "action_values" 0 feat_index])
+														post_domain_value (get forecast_result ["payload" "action_values" -1 feat_index])
+													))
+												case_feature_value
+													;interpolated value for trained data
+													(call !InterpolateSeriesValuesNominal (assoc
+														time_values trained_time_values
+														feature_values
+															(map
+																(lambda (get (current_value) feat_index))
+																trained_series_cases
+															)
+														time end_time
+
+														;these definitely should not be needed
+														pre_domain_value (null)
+														post_domain_value (null)
+													))
+												candidate_cases_lists [[1]]
+												categorical_action_probabilities_map
+													(associate
+														feat_to_diff
+															(call !InterpolateSeriesCAPs (assoc
+																time_values forecast_time_values
+																caps_values
+																	(map
+																		(lambda (get (current_value) feat_to_diff))
+																		(get forecast_result ["payload" "categorical_action_probabilities"])
+																	)
+																time end_time
+
+																pre_domain_value (get forecast_result ["payload" "categorical_action_probabilities" 0 feat_to_diff])
+																post_domain_value (get forecast_result ["payload" "categorical_action_probabilities" -1 feat_to_diffs])
+															))
+													)
+											))
+
+											;otherwise null, not supported for edit-distance/other types
+											(null)
+										)
+
+									)
+								)
+								features
+							)
+						)
+					)
+					case_ids
+				)
+		))
+
+		(assign (assoc
+			feature_residuals_lists (call !TransposeResidualLists)
+		))
 	)
 
 )
