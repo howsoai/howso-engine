@@ -48,6 +48,9 @@
 			;if true will output p value of removal
 			p_value_of_removal (false)
 			;{type "boolean"}
+			;calculate and output the mean similarity conviction of cases in each group
+			similarity_conviction (false)
+			;{type "boolean"}
 			;calculate and output distance contribution ratios in the output assoc
 			distance_contributions (false)
 			;{ref "UseCaseWeights"}
@@ -99,6 +102,7 @@
 							p_value_of_addition p_value_of_addition
 							p_value_of_removal p_value_of_removal
 							distance_contributions distance_contributions
+							similarity_conviction similarity_conviction
 							weight_feature weight_feature
 							use_case_weights use_case_weights
 						))
@@ -164,6 +168,7 @@
 			p_value_of_addition (false)
 			p_value_of_removal (false)
 			distance_contributions (false)
+			similarity_conviction (true)
 			use_case_weights (null)
 			weight_feature ".case_weight"
 		)
@@ -233,6 +238,7 @@
 			kl_divergence_removal_value (null)
 			p_value_of_addition_value (null)
 			p_value_of_removal_value (null)
+			mean_similarity_conviction (null)
 		))
 
 		(call !UpdateCaseWeightParameters)
@@ -295,10 +301,22 @@
 			(accum (assoc
 				warnings (associate "No case ids were selected for one of the given inputs. Please check your condition, case indices, or given value for new_cases")
 			))
+
+			(and
+				(size condition)
+				(< (size case_ids) 3)
+			)
+			(accum (assoc
+				warnings (associate (concat "Only " (size case_ids) " case(s) were selected when using the following condition: " (format condition "code" "json")))
+			))
 		)
 
 		(if distance_contributions
 			(call !ComputeNewCasesDistanceContributions)
+		)
+
+		(if similarity_conviction
+			(call !ComputeGroupMeanSimilarityConviction)
 		)
 
 		(if (or familiarity_conviction_addition p_value_of_addition kl_divergence_addition)
@@ -348,9 +366,267 @@
 				)
 				(assoc)
 			)
+			(if similarity_conviction
+				(assoc "similarity_conviction" mean_similarity_conviction)
+				(assoc)
+			)
 		)
 	)
 
+	;Helper method to compute and cache average case entropy of addition for the model
+	#!CacheAverageCaseEntropyAddition
+	(let
+		(assoc
+			entropies_map
+				(compute_on_contained_entities (list
+					||(query_entity_kl_divergences
+						closest_k
+						features
+						(null)
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(get hyperparam_map "p")
+						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						!numericalPrecision
+					)
+				))
+		)
+
+		(assign_to_entities (assoc
+			!averageCaseEntropyAddition
+				(/
+					(apply "+" (values entropies_map))
+					(size entropies_map)
+				)
+		))
+	)
+
+	;Helper method to compute and cache average case entropy of removal for the model
+	#!CacheAverageCaseEntropyRemoval
+	(let
+		(assoc
+			entropies_map
+				(compute_on_contained_entities (list
+					||(query_entity_kl_divergences
+						closest_k
+						features
+						(null)
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(get hyperparam_map "p")
+						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						!numericalPrecision
+						(true) ;conviction_of_removal
+					)
+				))
+		)
+
+		(assign_to_entities (assoc
+			!averageCaseEntropyRemoval
+				(/
+					(apply "+" (values entropies_map))
+					(size entropies_map)
+				)
+		))
+	)
+
+	;Helper method to compute and cache average case distance contribution for the model
+	#!CacheAverageCaseDistanceContribution
+	(let
+		(assoc
+			base_distance_contributions_map
+				(compute_on_contained_entities (list
+					||(query_entity_distance_contributions
+						closest_k
+						features
+						(null)
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(get hyperparam_map "p")
+						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						!numericalPrecision
+					)
+				))
+		)
+
+		(assign_to_entities (assoc
+			!averageCaseDistanceContribution
+				(/
+					(apply "+" (values base_distance_contributions_map))
+					(size base_distance_contributions_map)
+				)
+		))
+	)
+
+	;Helper method to compute model avg distance contribution and new cases' avg distance contribution
+	#!ComputeNewCasesDistanceContributions
+	(let
+		(assoc
+			combined_distance_contributions_map
+				(compute_on_contained_entities (list
+					||(query_entity_distance_contributions
+						closest_k
+						features
+						(null)
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(get hyperparam_map "p")
+						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						!numericalPrecision
+					)
+				))
+		)
+
+		(assign (assoc
+			combined_average_distance_contribution
+				(/
+					(apply "+" (values combined_distance_contributions_map))
+					(size combined_distance_contributions_map)
+				)
+			avg_new_cases_distance_contribution
+				(/
+					(apply "+" (unzip combined_distance_contributions_map case_ids))
+					(size case_ids)
+				)
+		))
+	)
+
+	;Helper method to compute model avg new cases familiarity convction of addition and p value of addition
+	#!ComputeNewCasesFamiliarityConvictionAddition
+	(seq
+		;compute entropies of the new cases
+		(assign (assoc
+			new_case_entropies_value
+				(compute_on_contained_entities (list
+					||(query_entity_group_kl_divergence
+						closest_k
+						features
+						case_ids
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(get hyperparam_map "p")
+						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						!numericalPrecision
+					)
+				))
+		))
+		(assign (assoc
+			average_new_cases_conviction_addition
+				(if familiarity_conviction_addition
+					;if the average entropy is 0, that means all cases have entropy of 0, thus return 1 for conviction
+					(if (= 0 !averageCaseEntropyAddition)
+						1.0
+
+						;return conviction by taking the average case entropy dividing be the average new case entropy
+						(/ !averageCaseEntropyAddition (/ new_case_entropies_value (size case_ids)))
+					)
+				)
+			p_value_of_addition_value
+				(if p_value_of_addition
+					(exp (- (/ new_case_entropies_value (size case_ids))) )
+				)
+			kl_divergence_addition_value (/ new_case_entropies_value (size case_ids))
+		))
+	)
+
+	;Helper method to compute model avg new cases familiarity convction of removal and p value of removal
+	#!ComputeNewCasesFamiliarityConvictionRemoval
+	(seq
+		;compute entropies of the new cases
+		(assign (assoc
+			new_case_entropies_value
+				(compute_on_contained_entities (list
+					||(query_entity_group_kl_divergence
+						closest_k
+						features
+						case_ids
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(get hyperparam_map "p")
+						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						!numericalPrecision
+						(true) ;conviction_of_removal
+					)
+				))
+		))
+		(assign (assoc
+			average_new_cases_conviction_removal
+				(if familiarity_conviction_removal
+					;if the average entropy is 0, that means all cases have entropy of 0, thus return 1 for conviction
+					(if (= 0 !averageCaseEntropyRemoval)
+						1.0
+
+						;return conviction by taking the average case entropy dividing be the average new case entropy
+						(/ !averageCaseEntropyRemoval (/ new_case_entropies_value (size case_ids)))
+					)
+				)
+			p_value_of_removal_value
+				(if p_value_of_removal
+					(exp (- (/ new_case_entropies_value (size case_ids))) )
+				)
+			kl_divergence_removal_value (/ new_case_entropies_value (size case_ids))
+		))
+	)
+
+	;helper method for react group to compute the mean similarity conviction of a group of cases
+	#!ComputeGroupMeanSimilarityConviction
+	(seq
+		(declare (assoc
+			case_similarity_convictions
+				(map
+					(lambda
+						(call !SimilarityConviction (assoc
+							features features
+							feature_values (retrieve_from_entity (current_value 1) features)
+							use_case_weights use_case_weights
+							weight_feature weight_feature
+							filtering_queries [(query_not_in_entity_list case_ids)]
+						))
+					)
+					case_ids
+				)
+		))
+
+		(assign (assoc
+			mean_similarity_conviction (/ (apply "+" case_similarity_convictions) (size case_similarity_convictions))
+		))
+	)
 
 	#!PredictGroup
 	(declare
