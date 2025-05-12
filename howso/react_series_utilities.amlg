@@ -28,6 +28,7 @@
             single_max_length (= 1 (size max_series_lengths))
 			single_series_context (= 1 (size series_context_values))
             num_reacts 1
+			errors (assoc)
 
             has_series_context_values (false)
         )
@@ -136,6 +137,12 @@
 				)
 		))
 
+		(if (size errors)
+			(conclude
+				(assoc "payload" (null) "errors" (indices errors))
+			)
+		)
+
 		(assoc
 			"payload"
 				(append
@@ -157,7 +164,7 @@
 							;explicitly do not include these specific selection details in the output for react details
 							(remove
 								(zip requested_details)
-								["num_most_similar_cases" "num_most_similar_case_indices" "num_boundary_cases" "selected_prediction_stats"]
+								["num_most_similar_cases" "num_most_similar_case_indices" "num_boundary_cases" "selected_prediction_stats" "features" "series_residuals_num_samples"]
 							)
 						)
 						(assoc)
@@ -401,14 +408,18 @@
 
 		(declare (assoc
 			requested_details (indices (filter (lambda (current_value)) details))
-			output_details (contains_value (values details) (true))
+			output_details (contains_value details (true))
 		))
 
 		(if output_details
-			(declare (assoc
-				case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
-				series_detail_values_map (map (lambda (list)) (zip requested_details))
-			))
+			(seq
+				(declare (assoc
+					case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
+				))
+				(declare (assoc
+					series_detail_values_map (map (lambda (list)) (zip (indices case_detail_values_map)))
+				))
+			)
 		)
 
 		(let
@@ -452,6 +463,61 @@
 			(call !PrepContinueReactSeries)
 		)
 
+		(if (contains_index series_stop_map [!tsTimeFeature "max"])
+			(let
+				(assoc
+					start_time
+						(if (contains_index initial_features_map !tsTimeFeature)
+							(get initial_features_map !tsTimeFeature)
+
+							(and has_series_context_values (contains_value series_context_features !tsTimeFeature))
+							(get series_context_values [0 (get (zip series_context_features (indices series_context_features)) !tsTimeFeature) ] )
+
+							(size series_data)
+							(get series_data [-1 (get feature_index_map !tsTimeFeature) ] )
+						)
+				)
+
+				(if (contains_index !featureDateTimeMap !tsTimeFeature)
+					(assign (assoc
+						start_time
+							(format
+								start_time
+								(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+								"number"
+								(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+								(null)
+							)
+					))
+				)
+
+				(if (and
+						start_time
+						(< (get series_stop_map [!tsTimeFeature "max"]) start_time)
+					)
+					(seq
+						(accum (assoc
+							errors (associate "The specified stop time for the series is before the starting point of the series.")
+						))
+						;accum to errors and return them in this returned assoc so it functions for both single_react_series and standard react_series
+						(conclude (conclude (assoc "payload" (assoc "action_values" (list)) "errors" (indices errors)) ))
+					)
+
+					(and
+						start_time
+						(= (get series_stop_map [!tsTimeFeature "max"]) start_time)
+					)
+					(accum (assoc
+						warnings
+							(associate (concat
+								"The specified stop time for the series is equal to the starting point of the series. "
+								"Consider using `max_series_lengths` if only one timestep is desired."
+							))
+					))
+				)
+			)
+		)
+
 		;loop until series stopping condition is met
 		(assign (assoc
 			entire_series_data
@@ -487,7 +553,7 @@
 					)
 
 					;if initial conditions were provided, use them as contexts for the first case
-					(if (and first_generated_row (> (size initial_features_map) 0))
+					(if (and first_generated_row (> (size initial_features_map) 0) (not include_start_time_case))
 						(assign (assoc
 							use_initial_context_features (true)
 							;update initial map to be the stationary context overwritten by the provided initial values
@@ -508,7 +574,7 @@
 					;add each new row to series data with all initial context values
 					(assign (assoc
 						new_row
-							(if use_initial_context_features
+							(if (and use_initial_context_features (not include_start_time_case))
 								(list
 									(unzip (append original_context_map initial_features_map) features)
 								)
@@ -853,6 +919,10 @@
 				) ;while loop
 		))
 
+		(if (get details "series_residuals")
+			(call !ComputeSeriesUncertainty)
+		)
+
 		;grab the list of column indices corresponding to all the output_features
 		(declare (assoc
 			action_feature_indices (unzip feature_index_map output_features)
@@ -1195,7 +1265,8 @@
 						(call !RetrieveTrainedSeriesData (assoc
 							id_values_map id_values_map
 							num_cases_needed largest_max_row_lag
-							exclusive_upper_time_bound
+							exclusive (not include_start_time_case)
+							upper_time_bound
 								;if an initial time value is provided, limit existing series cases to those before the specified initial time
 								(if (contains_index initial_features_map !tsTimeFeature)
 									(if (contains_index !featureDateTimeMap !tsTimeFeature)
@@ -1221,7 +1292,7 @@
 				)
 
 				;if there is more than one existing series case, we'll need to sort them by the time feature to ensure ascending order
-				(if (> largest_max_row_lag 1)
+				(if (> (size existing_series_cases) 1)
 					(assign (assoc
 						existing_series_cases
 							(sort
@@ -1362,7 +1433,8 @@
 	#!RetrieveTrainedSeriesData
 	;params:
 	;  id_values_map: assoc of series id feature name to id value
-	;  exclusive_upper_time_bound: an upper bound time value that all retrieved cases must be before chronologically
+	;  upper_time_bound: an upper bound time value that all retrieved cases must be before chronologically
+	;  exclusive: boolean, if true then the time bound will be exclusive, otherwise inclusive
 	;  num_cases_needed: the number of cases to retrieve
 	(contained_entities (append
 		(map
@@ -1370,11 +1442,11 @@
 			(indices id_values_map)
 		)
 		;if a lower bound for time is provided, limit existing series cases to those before the specified initial time
-		(if exclusive_upper_time_bound
-			(list
+		(if upper_time_bound
+			(append
+				[(query_less_or_equal_to !tsTimeFeature upper_time_bound)]
 				;using both query_less_or_equal_to and query_not_equals is same effect as 'query less than'
-				(query_less_or_equal_to !tsTimeFeature exclusive_upper_time_bound)
-				(query_not_equals  !tsTimeFeature exclusive_upper_time_bound)
+				(if exclusive (query_not_equals  !tsTimeFeature upper_time_bound) [] )
 			)
 			(list)
 		)
@@ -1698,5 +1770,164 @@
 			;else don't check for uniqueness if it's not necessary
 			(assign (assoc do_uniqueness_check (false) ))
 		)
+	)
+
+	;helper macro for ReactSeries that computes the series uncertainty detail
+	;no parameters should be passed.
+	;This method computes a collection of generative series with the same parameters given
+	;to the react series call (except editing start/end) and computes the MAD of the forecasts
+	;at each time value of the output series providing an estimate of the forecast's uncertainty
+	#!ComputeSeriesUncertainty
+	(let
+		(assoc
+			synthesized_timesteps
+				(if num_existing_series_rows
+					(tail series_data (- num_existing_series_rows))
+					series_data
+				)
+			time_feature_index (get feature_index_map !tsTimeFeature)
+			output_feature_index_map (zip output_features (indices output_features))
+		)
+
+		(declare (assoc
+			end_time (get (last synthesized_timesteps) time_feature_index)
+		))
+
+		;convert end_time to epoch if necessary
+		(if (contains_index !featureDateTimeMap !tsTimeFeature)
+			(assign (assoc
+				end_time
+					(format
+						end_time
+						(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+						"number"
+						(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+						(null)
+					)
+			))
+		)
+
+		;Forecast the same period of time
+		(declare (assoc
+			forecasts
+				||(map
+					(lambda
+						(get
+							(call !ReactSeries (assoc
+								details {}
+								track_progress (false)
+								series_has_terminators (false)
+								total_progress 0
+								output_features output_features
+								desired_conviction (if desired_conviction desired_conviction 1)
+								series_stop_map (associate !tsTimeFeature {"max" end_time})
+
+								;want to absorb and ignore any raised here
+								errors (assoc)
+								warnings (assoc)
+							))
+							["payload" "action_values"]
+						)
+					)
+					(range 1 (or (get details "series_residuals_num_samples") 30) 1)
+				)
+		))
+
+		(declare (assoc
+			forecast_time_index (get output_feature_index_map !tsTimeFeature)
+		))
+
+		;transpose forecasts to be a list of forecasts where each forecast is the list
+		;of "columns" where each "column" are the values of a feature throughout the forecast
+		;this helps performance so that these list of feature values need only be allocated once
+		(assign (assoc
+			forecasts
+				(map
+					(lambda
+						(map
+							(lambda
+								(if (get !featureDateTimeMap (list (current_value 1) "date_time_format"))
+									;if its a datetime, format its values here
+									(map
+										(lambda
+											(format
+												(get (current_value) (current_index 1))
+												(get !featureDateTimeMap (list (current_value 2) "date_time_format"))
+												"number"
+												(assoc "locale" (get !featureDateTimeMap (list (current_value 2) "locale")))
+												(null)
+											)
+										)
+										(current_value 1)
+									)
+
+									;else can get values directly
+									(map
+										(lambda
+											(get (current_value) (current_index 1))
+										)
+										(current_value 1)
+									)
+								)
+							)
+							output_features
+						)
+					)
+					forecasts
+				)
+		))
+
+		(accum (assoc
+			series_detail_values_map
+				;for each timestep, get the MAD of the forecasts at the same points in time
+				{
+					"series_residuals"
+						(map
+							(lambda
+								(let
+									(assoc
+										time_val
+											(if (get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+												(format
+													(get (current_value 1) time_feature_index)
+													(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+													"number"
+													(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+													(null)
+												)
+
+												;raw time value
+												(get (current_value 1) time_feature_index)
+											)
+
+									)
+
+									(map
+										(lambda
+											(call !ComputeMAD (assoc
+												vals
+													(map
+														(lambda
+															(call !InterpolateSeriesValuesContinuous (assoc
+																time_values (get (current_value 1) forecast_time_index)
+																feature_values (get (current_value 1) (get output_feature_index_map (current_index 3)))
+																pre_domain_value (first (get (current_value 1) (get output_feature_index_map (current_index 3))))
+																post_domain_value (last (get (current_value 1) (get output_feature_index_map (current_index 3))))
+																time time_val
+															))
+														)
+														forecasts
+													)
+											))
+										)
+										;all continuous output features that are not the time feature
+										(remove (zip (or (get details "features") output_features)) (append (indices !nominalsMap) !tsTimeFeature) )
+									)
+								)
+							)
+							synthesized_timesteps
+						)
+				}
+		))
 	)
 )

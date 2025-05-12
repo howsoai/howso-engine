@@ -4,25 +4,46 @@
 	;derive new features using a custom code string and store into model
 	;parameters:
 	; features: list of features the dataset was trained with originally
-	; feature : name of feature to create / derive
-	; raw_code_string : string, code defining how the feature should be derived
-	; series_id_features: list of feature names that specify the series id for which to derive this feature.
-	;		If more than one specified, a unique 'series id' is then the conjuction of the specified ids.
-	;		E.g., if 'sender' and 'reciever' are specified, a 'series id' is then each unique pair of sender-reciever.
-	; series_ordered_by_features : list of features names by which to sort the series.  Multi-sorts by the specified features if several specified.
-	#!DeriveCustomFeatureFromCode
+	; derived_features : names of feature to create + derive
+	; feature_attribute_map: optional, map of auto_derive_on_train attributes specific to the one feature that's being specified as derived_features
+	#!CreateCustomFeaturesFromCode
 	(declare
 		(assoc
 			features (list)
-			feature ""
-			raw_code_string ""
-			series_id_features (list)
-			series_ordered_by_features (list)
+			derived_features (list)
+			feature_attribute_map (null)
 		)
 
 		(declare (assoc
-			sourced_features (indices (get_all_labels (parse raw_code_string)))
+			;list of all features referenced by derived_features, needed to derive them
+			sourced_features
+				(values
+					(apply "append" (map
+						(lambda
+							(indices (get_all_labels
+								(parse (get !featureAttributes [(current_value 1) "auto_derive_on_train" "code"]) )
+							))
+						)
+						derived_features
+					))
+					(true)
+				)
 			cycle_length (null)
+
+			;list of feature names that specify the series id for which to derive this feature.
+			;	If more than one specified, a unique 'series id' is then the conjuction of the specified ids.
+			;	E.g., if 'sender' and 'reciever' are specified, a 'series id' is then each unique pair of sender-reciever.
+			series_id_features
+				(if feature_attribute_map
+					(get feature_attribute_map "series_id_features")
+					(get !tsFeaturesMap "series_id_features")
+				)
+			;list of features names by which to sort the series.  Multi-sorts by the specified features if several specified.
+			series_ordered_by_features
+				(if feature_attribute_map
+					(get feature_attribute_map "ordered_by_features")
+					[!tsTimeFeature]
+				)
 		))
 
 		;declare all the features that are necessary that are needed to derive this feature,
@@ -41,10 +62,6 @@
 					)
 				)
 			ts_series_length_limit (retrieve_from_entity "!tsSeriesLimitLength")
-
-			;store whether this is a rate or delta feature and the order, e.g., 'rate' and 2
-			feature_time_series_type (get !featureAttributes (list feature "ts_type"))
-			feature_time_series_order (get !featureAttributes (list feature "ts_order"))
 		))
 
 		;process each series individually
@@ -109,52 +126,80 @@
 						)
 				))
 
-				;overwrite series data with just the new generated series values
+				;overwrite series data with the derived features values
 				(assign (assoc
 					series_data
-						(call !AddDerivedCodeFeature (assoc
-							feature feature
+						(call !AddDerivedIndependentCodeFeatures (assoc
+							derived_features derived_features
 							features necessary_features
 							series_data series_data
 						))
 				))
 
-				;add feature, setting each case's corresponding value
-				(call !StoreCaseValues (assoc
-					;map of case id -> value
-					case_values_map (zip series_case_ids series_data)
-					label_name feature
-					overwrite (true)
-				))
+				;since all derived features are being created in bulk, we only need to check if one exists
+				;to decide whether they all exist or none exist
+				(declare (assoc first_derived_feature (first derived_features) ))
 
-				;if derived feature was inactive, remove it from inactive list
-				(if (contains_index !inactiveFeaturesMap feature)
-					(if
-						(size (contained_entities (list (query_not_equals feature (null)))) )
-						(let
-							(assoc updated_inactive_features_map (remove !inactiveFeaturesMap feature) )
-
-							(if (size updated_inactive_features_map)
-								(assign_to_entities (assoc !inactiveFeaturesMap updated_inactive_features_map ))
-
-								;else all features have some non-null values
-								(assign_to_entities (assoc
-									!inactiveFeaturesMap (null)
-									!inactiveFeaturesNeedCaching (false)
-								))
+				(map
+					(lambda (let
+						(assoc case_id (current_index 1) )
+						(if (contains_label case_id first_derived_feature)
+							(assign_to_entities
+								case_id
+								(zip derived_features (current_value))
 							)
-
-							(call !SetFeatureWeightsForFeatures (assoc
-								features_weights_map (associate feature 1)
-								overwrite (true)
-							))
+							;else these labels don't exist yet, need to append them to the entity
+							(accum_entity_roots
+								case_id
+								(zip_labels derived_features (current_value))
+							)
 						)
-					)
+					))
+					(zip series_case_ids series_data)
 				)
 			))
 
 			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
 			(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+		)
+
+		;list of derived_features that were inactive
+		(declare (assoc
+			inactive_derived_features (filter (lambda (contains_index !inactiveFeaturesMap (current_value))) derived_features)
+		))
+
+		;if there are inactive derived_features, keep only those that now have values and will need to be removed from inactive list
+		(if (size inactive_derived_features)
+			(assign (assoc
+				inactive_derived_features
+					(filter
+						(lambda
+							(size (contained_entities [ (query_not_equals (current_value 1) (null))]) )
+						)
+						inactive_derived_features
+					)
+			))
+		)
+		;remove these remaining inactive features from the inactives list
+		(if (size inactive_derived_features)
+			(let
+				(assoc updated_inactive_features_map (remove !inactiveFeaturesMap inactive_derived_features) )
+
+				(if (size updated_inactive_features_map)
+					(assign_to_entities (assoc !inactiveFeaturesMap updated_inactive_features_map ))
+
+					;else all features have some non-null values
+					(assign_to_entities (assoc
+						!inactiveFeaturesMap (null)
+						!inactiveFeaturesNeedCaching (false)
+					))
+				)
+
+				(call !SetFeatureWeightsForFeatures (assoc
+					features_weights_map (zip inactive_derived_features 1)
+					overwrite (true)
+				))
+			)
 		)
 
 		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
@@ -228,7 +273,7 @@
 			op_limit (* (size series_data) !sandboxedComputeLimit)
 		))
 
-		(map
+		||(map
 			(lambda (let
 				(assoc series_row_index (current_index 1) )
 

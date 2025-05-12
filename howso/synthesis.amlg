@@ -141,6 +141,17 @@
 			use_time_series_filter_query (!= (null) !tsTimeFeature)
 			goal_features (if (size goal_features_map) (indices goal_features_map))
 			react_map (assoc)
+
+			;if computing mean absolute deviations, and using dynamic k, scale the value up by the percent captured influential eighbors
+			;to account for missing data by dividing mad by this value: ( 1 - cutoff_percent )
+			mad_scaler
+				(if (not use_differential_privacy)
+					(if (!~ 0 (get hyperparam_map "k"))
+						(- 1 (get hyperparam_map ["k" 0]))
+						1
+					)
+					1
+				)
 		))
 
 		;if user specified context features and there are dependents, precompute all residuals for dependent continuous features
@@ -219,18 +230,8 @@
 									(call !GetInitialActionValue)
 								)
 
-								;if RMR flag is specified, recalculate residuals around this particular reaction
-								(if (and
-										use_regional_residuals
-										(> (size regional_context_features) 0)
-										;can't do regional residuals if only one feature is provided
-										(!= regional_context_features (list feature))
-									)
-									(call !AccurateRegionalResidual)
-
-									;else local and regional model feature gaps to approximate regional residual for the feature
-									(call !ApproximateRegionalResidual)
-								)
+								;calculate residuals around this particular reaction
+								(call !ComputeLocalResidual)
 							)
 						)
 
@@ -686,245 +687,66 @@
 		(if output_influential_cases (assign (assoc local_cases_map (get react_map "local_cases_map") )) )
 	)
 
-	;Helper method for GenerateCase to computes the regional model residual instead of the approximate one
-	#!AccurateRegionalResidual
-	(let
-		(assoc
-			feature_hyperparam_map
-				(call !GetHyperparameters (assoc
-					feature feature
-					context_features context_features
-					weight_feature weight_feature
-				))
-			ignore_case (if leave_case_out preserve_case_id)
-			regional_residuals (null)
-			dependent_queries_list
-				(if action_feature_is_dependent
-					(call !ComputeDependentQueries (assoc
-						action_feature feature
-						context_features regional_context_features
-						context_values regional_context_values
-					))
-					(list)
-				)
-		)
-
-		(declare (assoc
-			feature_weights
-				(if (= (null) (get feature_hyperparam_map "featureMdaMap"))
-					(get feature_hyperparam_map "featureWeights")
-					(get feature_hyperparam_map ["featureMdaMap" feature])
-				)
-			feature_deviations (get feature_hyperparam_map "featureDeviations")
-			k_parameter (get feature_hyperparam_map "k")
-		))
-
-		;use dynamic deviations subtrainee if present
-		(if (get feature_hyperparam_map "subtraineeName")
-			(call !UseDynamicDeviationsAndWeights (assoc
-				context_features context_features
-				context_values context_values
-				hyperparam_map feature_hyperparam_map
-			))
-		)
-
-		(if use_time_series_filter_query (call !CreateAndCacheTimeSeriesFilterQuery) )
-
-		(assign (assoc
-			regional_cases_map
-				#!NearestRegionalResidualCasesQuery
-				(compute_on_contained_entities (append
-					(if ignore_case
-						(query_not_in_entity_list (list ignore_case))
-						(list)
-					)
-					(if custom_extra_filtering_queries
-						custom_extra_filtering_queries
-						(list)
-					)
-					dependent_queries_list
-					cached_time_series_filter_query
-					(query_nearest_generalized_distance
-						(if (~ 0 k_parameter) (max k_parameter 30) k_parameter )
-						regional_context_features
-						regional_context_values
-						;if weight for action feature is 0 and using surprisal, ensure weight is set to avg feature weight
-						(if (and
-								(= 0 (get feature_weights feature))
-								(= "surprisal_to_prob" (get feature_hyperparam_map "dt"))
-							)
-							(set feature_weights feature (/ 1 (size feature_weights)))
-							feature_weights
-						)
-						!queryDistanceTypeMap
-						(get feature_hyperparam_map "featureDomainAttributes")
-						feature_deviations
-						(get feature_hyperparam_map "p")
-						(get feature_hyperparam_map "dt")
-						(if valid_weight_feature weight_feature (null))
-						(rand)
-						(null) ;radius
-						!numericalPrecision
-					)
-				))
-		))
-
-		;reduce dependent feature queries list if regional_cases_map is too small, as appropriate
-		;if regional_cases_map is too small to be viable, then remove dependent feature queries and recompute
-		;regional_cases_map until sufficiently many cases are returned
-		(if action_feature_is_dependent
-			(while
-				(and
-					(< (size regional_cases_map) 3)
-					(> (size dependent_queries_list) 0)
-				)
-				(assign (assoc dependent_queries_list (trunc dependent_queries_list)))
-				(assign (assoc regional_cases_map (call !NearestRegionalResidualCasesQuery) ))
-			)
-		)
-
-		(assign (assoc
-			regional_residuals
-				;TODO: 14435 - don't bottom out value, check if residual is 0 for continuous
-				(call !ExpandResidualValuesToUncertainty  (assoc
-					feature_residuals_map
-						(call !ComputeRegionalResiduals (assoc
-							regional_cases_map regional_cases_map
-							features regional_context_features
-							target_residual_feature feature
-							ignore_case ignore_case
-						))
-				))
-		))
-
-		(if feature_is_ordinal
-			(assign (assoc
-				ordinal_residual  (get regional_residuals (list "ordinal_residual_map" feature))
-				feature_residual (get regional_residuals (list "residual_map" feature))
-			))
-
-			(assign (assoc
-				feature_residual (get regional_residuals (list "residual_map" feature))
-			))
-		)
-
-		;don't allow feature residual of 1, set it to: 1 - smallest theoretical residual
-		(if (and feature_is_nominal (= 1 feature_residual))
-			(assign (assoc feature_residual (- 1 (get !cachedFeatureMinResidualMap feature))))
-		)
-
-		;for continuous features, we may need to output  store the map of case -> value to check whether they are all the same
-		;in the local model and then probabilistically output the value as-is, i.e., not add any noise to that value.
-		;Improve performance by only outputting these values when the feature is purely continuous and probability is computed as:
-		;entropy of a Laplace distribution is ln(2*r*e), using r=1 because of LK and IRW scaling, entropy = 1.693147
-		;probability = e^(-surprisal), conviction = entropy/surprisal, solve for probability as e^(-entropy/conviction), so
-		;probability of deciding not to add Laplace noise is: e^(-1.693147/desired_conviction)
-		(if (and
-				(not feature_is_nominal)
-				(not feature_is_ordinal)
-				(< (rand) (pow 2.718281828 (/ -1.693147181 desired_conviction)))
-			)
-			(seq
-				;TODO: 14477 - if residual is 0 for a continuous feature, we know that all values are same, skip this query
-				(assign (assoc
-					regional_cases_map
-						(compute_on_contained_entities (append
-							(if ignore_case
-								(query_not_in_entity_list (list ignore_case))
-								(list)
-							)
-							(if custom_extra_filtering_queries
-								custom_extra_filtering_queries
-								(list)
-							)
-							dependent_queries_list
-							cached_time_series_filter_query
-							(query_nearest_generalized_distance
-								k_parameter
-								regional_context_features
-								regional_context_values
-								;if weight for action feature is 0 and using surprisal, ensure weight is set to avg feature weight
-								(if (and
-										(= 0 (get feature_weights feature))
-										(= "surprisal_to_prob" (get feature_hyperparam_map "dt"))
-									)
-									(set feature_weights feature (/ 1 (size feature_weights)))
-									feature_weights
-								)
-								!queryDistanceTypeMap
-								(get feature_hyperparam_map "featureDomainAttributes")
-								feature_deviations
-								(get feature_hyperparam_map "p")
-								(get feature_hyperparam_map "dt")
-								(if valid_weight_feature weight_feature (null))
-								(rand)
-								(null) ;radius
-								!numericalPrecision
-								;output associated list of feature values
-								feature
-							)
-						))
-				))
-
-				(assign (assoc
-					local_case_values_map
-						(zip
-							(first regional_cases_map)
-							(last regional_cases_map)
-						)
-				))
-			)
-		)
-	)
-
-	;Helper method for GenerateCase to compute the approximate regional model residual
-	#!ApproximateRegionalResidual
+	;Helper method for GenerateCase to compute the residual for adding noise to computed value
+	#!ComputeLocalResidual
 	(seq
-		;set residual to be the max(min feature gap/2, min(local_max_gap, regional_max_gap))
 		(if (and (not feature_is_nominal) (> (size local_case_ids) 1))
-			(assign (assoc
-				feature_residual
-					;for first (initial) synthed value, use max(local_max_gap, dataset_max_gap)
-					(if (= 0 (size context_features))
-						(max
-							(get !cachedFeatureMaxGapMap feature)
+			(if use_differential_privacy
+				;use max gap to approximate residual, use the max(min feature gap/2, min(local_max_gap, regional_max_gap))
+				(assign (assoc
+					feature_residual
+						;for first (initial) synthed value, use max(local_max_gap, dataset_max_gap)
+						(if (= 0 (size context_features))
+							(max
+								(get !cachedFeatureMaxGapMap feature)
 
-							(compute_on_contained_entities (list
-								(query_in_entity_list local_case_ids)
-								(query_max_difference feature (get !cyclicFeaturesMap feature))
-							))
-						)
-
-						;else consider max gaps from local and regional space
-						(max
-							(get !cachedFeatureHalfMinGapMap feature)
-
-							(if (contains_index !editDistanceFeatureTypesMap feature)
-								(call !ComputeEditDistanceApproximateResidual (assoc
-									feature feature
-									local_case_ids local_case_ids
-									regional_case_ids (get react_map "regional_case_ids")
+								(compute_on_contained_entities (list
+									(query_in_entity_list local_case_ids)
+									(query_max_difference feature (get !cyclicFeaturesMap feature))
 								))
+							)
 
-								;For determining sensitivity for privacy oriented tasks,
-								;if the feature is dense and not very predictable, the bandwidth reflected the
-								;local model may overestimate the sensitivity of that part of the data,
-								;so we choose the lesser of the max gap of the local and the regional model.
-								(min
-									(compute_on_contained_entities (list
-										(query_in_entity_list local_case_ids)
-										(query_max_difference feature (get !cyclicFeaturesMap feature))
+							;else consider max gaps from local and regional space
+							(max
+								(get !cachedFeatureHalfMinGapMap feature)
+
+								(if (contains_index !editDistanceFeatureTypesMap feature)
+									(call !ComputeEditDistanceApproximateResidual (assoc
+										feature feature
+										local_case_ids local_case_ids
+										regional_case_ids (get react_map "regional_case_ids")
 									))
 
-									(compute_on_contained_entities (list
-										(query_in_entity_list (get react_map "regional_case_ids"))
-										(query_max_difference feature (get !cyclicFeaturesMap feature))
-									))
+									;For determining sensitivity for privacy oriented tasks,
+									;if the feature is dense and not very predictable, the bandwidth reflected the
+									;local model may overestimate the sensitivity of that part of the data,
+									;so we choose the lesser of the max gap of the local and the regional model.
+									(min
+										(compute_on_contained_entities (list
+											(query_in_entity_list local_case_ids)
+											(query_max_difference feature (get !cyclicFeaturesMap feature))
+										))
+
+										(compute_on_contained_entities (list
+											(query_in_entity_list (get react_map "regional_case_ids"))
+											(query_max_difference feature (get !cyclicFeaturesMap feature))
+										))
+									)
 								)
 							)
 						)
-					)
-			))
+				))
+
+				;else use the Mean Absolute Deviation as the local residual
+				(assign (assoc
+					feature_residual
+						(max
+							(get !cachedFeatureMinResidualMap feature)
+							(/ (get react_map "feature_mad") mad_scaler)
+							(get !userSpecifiedFeatureErrorsMap feature)
+						)
+				))
+			)
 
 			;nominal features just use global residual
 			(seq
@@ -975,7 +797,16 @@
 		)
 
 		(if feature_is_ordinal
-			(assign (assoc ordinal_residual (get hyperparam_map (list "featureOrdinalDeviations" feature))))
+			(assign (assoc
+				ordinal_residual
+					(if use_differential_privacy
+						;use global ordinal residual
+						(get hyperparam_map (list "featureOrdinalDeviations" feature))
+
+						;else compute it from the MAD residual
+						(/ feature_residual (get !ordinalFeaturesRangesMap feature))
+					)
+			))
 		)
 
 		;if there is no residual for nominal features, set it to be the smallest allowed value
