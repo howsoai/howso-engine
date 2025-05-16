@@ -45,7 +45,21 @@
 						))
 					)
 				)
+			per_feature_weights (false)
+			num_test_cases (size case_ids)
 		))
+
+		(if (and in_analyze (size (get hyperparam_map "featureMdaMap")))
+			(assign (assoc
+				single_query_per_case (false)
+				per_feature_weights (true)
+				num_test_cases
+					(min
+						num_test_cases
+						(max 50 (/ 10000 (size features)))
+					)
+			))
+		)
 
 		;iterate over each case and accumulate residuals for all the feature(s)
 		#!AccumulateLocalFeatureDeviations
@@ -128,23 +142,35 @@
 													(let
 														(assoc
 															query_context_features
-																;context features + feature being predicted
-																(values (append
-																	(if (contains_index features_for_derivation_map feature)
-																		;if this feature should be derived, need to hold out the features that will be used to derive it
-																		(filter
-																			(lambda (or
-																				(not (contains_value (get features_for_derivation_map feature) (current_value)))
-																				(!= feature (get !derivedFeaturesMap (current_value)))
-																				(contains_value (get !tsFeaturesMap "lag_features") (current_value))
-																			))
-																			context_features
-																		)
+																(if per_feature_weights
+																	context_features
 
-																		context_features
+																	;context features + feature being predicted
+																	(values
+																		(append
+																			(if (contains_index features_for_derivation_map feature)
+																				;if this feature should be derived, need to hold out the features that will be used to derive it
+																				(filter
+																					(lambda (or
+																						(not (contains_value (get features_for_derivation_map feature) (current_value)))
+																						(!= feature (get !derivedFeaturesMap (current_value)))
+																						(contains_value (get !tsFeaturesMap "lag_features") (current_value))
+																					))
+																					context_features
+																				)
+
+																				context_features
+																			)
+																			feature
+																		)
+																		(true)
 																	)
-																	feature
-																) (true))
+																)
+															feature_weights
+																(if per_feature_weights
+																	(get hyperparam_map ["featureMdaMap" feature])
+																	(get hyperparam_map "featureWeights")
+																)
 														)
 
 														(compute_on_contained_entities (append
@@ -161,7 +187,7 @@
 																k_parameter
 																query_context_features
 																(unzip case_values_map query_context_features)
-																(get hyperparam_map "featureWeights")
+																feature_weights
 																!queryDistanceTypeMap
 																query_feature_attributes_map
 																(get hyperparam_map "featureDeviations")
@@ -225,7 +251,11 @@
 						;return the computed values as a list
 						(unzip feature_residual_map features)
 					))
-					case_ids
+					(if (and per_feature_weights (< num_test_cases (size case_ids)) )
+						(rand case_ids num_test_cases (true))
+						case_ids
+					)
+
 				)
 		))
 
@@ -302,7 +332,14 @@
 
 	#!ComputeRobustTargetlessMDA
 	(declare
-		(assoc features features)
+		(assoc
+			features features
+			expected_feature_weight
+				(min
+					1
+					(- 1 (/ 1 (size features)) )
+				)
+		)
 
 		;for each feature, create a list, also length of features, where each column value is the mda
 		;for the column feature computed with and without the row feature
@@ -499,8 +536,12 @@
 						;replace 0's for any feature that isn't the target feature with smallest_probability
 						(map
 							(lambda
-								(if (or (> (current_value) 0) (= target_feature (current_index)))
+								(if (> (current_value) 0)
 									(/ (current_value) total_probs)
+
+									(= target_feature (current_index))
+									expected_feature_weight
+
 									smallest_probability
 								)
 							)
