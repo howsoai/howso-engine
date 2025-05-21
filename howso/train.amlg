@@ -1155,7 +1155,7 @@
 
 		;if there are ablated cases to accumulate influence weights to, do it here
 		;also increase !dataMassChangeSinceLastAnalyze by the ablated cases and recompute influence weights entropy
-		(if (and accumulate_weight_feature (< (size indices_to_train) (size cases)) )
+		(if (and (not read_only_mode) accumulate_weight_feature (< (size indices_to_train) (size cases)) )
 			(call !AccumulateCaseInfluenceWeights (assoc
 				features features
 				accumulate_weight_feature accumulate_weight_feature
@@ -1199,6 +1199,134 @@
 		)
 
 		output_cases
+	)
+
+	;alternate read-only train call that given cases, returns the case data that should be trained and the case-id -> weight accumulating maps to be used on a
+	;write-permissioned follow up call to the Trainee
+	#precompute_train
+	(declare
+		(assoc
+			;{type "list" values {type "list" min_size 1} min_size 1  required (true)}
+			;list of cases, ie a list of lists of values.
+			cases (null)
+			;{type "list" values "string" required (true)}
+			;the list of features.
+			features (null)
+			;{type "list" values "string"}
+			;list of features to derive in the specified order. If this list is not provided, features with
+			;	the 'auto_derive_on_train' feature attribute set to True will be auto-derived. If provided an empty list, will not derive any features.
+			;	Any derived_features that are already in the 'features' list will not be derived since their values are being explicitly provided.
+			derived_features (null)
+			;{type "boolean"}
+			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
+			input_is_substituted (false)
+			;{type "boolean"}
+			;flag, allows feature names beginning with "." if true, otherwise an error will be given if any features start with ".".
+			allow_training_reserved_features (false)
+		)
+		(call !ValidateParameters)
+
+		(if (not !autoAblationEnabled)
+			(call !Return (assoc
+				errors ["`precompute_train` should only be used on a Trainee that has auto-ablation enabled."]
+			))
+		)
+
+		(declare (assoc
+			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
+			total_instance_count (retrieve_from_entity session ".total_instance_count")
+			status_output (null)
+			message (null)
+			ablated_indices_list (list)
+			warnings (assoc)
+		))
+
+		;parameter and data checks, returns on error
+		(call !PreTrainChecks)
+
+		;get time series derived features list, if applicable
+		(if (and (= (null) derived_features) (!= (null) !tsTimeFeature) )
+			(assign (assoc
+				derived_features (get !tsFeaturesMap "ts_derived_features")
+			))
+		)
+
+		;unsubstitute nominal feature values if necessary
+		(if
+			(and input_is_substituted !hasSubstituteFeatureValues)
+			(assign (assoc
+				cases
+					(map
+						(lambda
+							(call !UnsubstituteFeatureValues (assoc
+								features features
+								feature_values (current_value 1)
+							))
+						)
+						cases
+					)
+			))
+		)
+
+		(declare (assoc encode_features_on_train (retrieve_from_entity "!hasFeaturesNeedEncodingFromInput") ))
+
+		;if dataset has features that are for derivation output only and are not being explicitly trained on
+		;then add them to the training data with nulls
+		(if (size (remove (zip !trainedFeatures) features))
+			(let
+				(assoc
+					;keep only those features that aren't specified in 'features', that have 'derived_feature_code' but
+					;will not be auto derived and aren't the built-in '.series_progress_delta'
+					derive_only_features
+						(filter
+							(lambda
+								(and
+									(not (contains_value features (current_value)))
+									(!= (null) (get !featureAttributes [(current_value 1) "derived_feature_code"]) )
+									(= (null) (get !featureAttributes [(current_value 1) "auto_derive_on_train"]) )
+									(!= (current_value) ".series_progress_delta")
+								)
+							)
+							!trainedFeatures
+						)
+				)
+
+				;store nulls for every derive_only_features  feature in input cases
+				(if (size derive_only_features)
+					(let
+						(assoc nulls (map (lambda (null)) derive_only_features) )
+						(assign (assoc
+							features (append features derive_only_features)
+							cases
+								(map
+									(lambda (append (current_value) nulls) )
+									cases
+								)
+						))
+					)
+				)
+			)
+		)
+
+		(declare (assoc
+			num_cases (call !GetNumTrainingCases)
+
+			;flags needed to prevent write ops in Train code
+			read_only_mode (true)
+			skip_reduce_data (true)
+			skip_auto_analyze (true)
+			run_autoanalyze_check (false)
+		))
+
+		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
+		(declare (assoc
+			indices_to_train
+				(if !tsTimeFeature
+					(call !TrainTimeSeriesAblation)
+
+					(call !TrainCasesWithAblation)
+				)
+		))
 	)
 
 )
