@@ -916,6 +916,7 @@
 				batch_data_mass
 			)
 			(assign (assoc
+				;this gets case data when read_only_mode is set, otherwise case_ids
 				output_case_ids
 					(call !AblateCases (assoc
 						cases (unzip cases (range input_case_index (+ input_case_index batch_size -1)) )
@@ -969,7 +970,7 @@
 			output_case_ids
 		)
 
-		(if rebalance_weights
+		(if (and (not read_only_mode) rebalance_weights)
 			(assign_to_entities (assoc
 			 	!cachedTotalMass total_mass
 				!cachedRebalanceTotalMass total_rebalance_mass
@@ -1082,6 +1083,8 @@
 					train_features
 				)
 		))
+		;assign this to an outer variable that in a scope that must handle the derived case data returned here
+		(if read_only_mode (assign (assoc derived_case_features ablate_train_features)) )
 
 		(if rebalance_weights
 			(assign (assoc
@@ -1125,6 +1128,21 @@
 						)
 						(if computed_features_data_map
 							(accum (assoc feature_values (get computed_features_data_map ["computed_values" (current_index 2)]) ))
+						)
+
+						(if read_only_mode
+							(conclude
+								(if rebalance_weights
+									;store rebalance weight and probability mass of 1
+									(append feature_values [ rebalance_case_weight 1 ])
+
+									;if auto ablate is enabled, populate the weight feature for this case
+									!autoAblationEnabled
+									(append feature_values 1)
+
+									feature_values
+								)
+							)
 						)
 
 						;create the case and output case id
@@ -1237,7 +1255,6 @@
 			total_instance_count (retrieve_from_entity session ".total_instance_count")
 			status_output (null)
 			message (null)
-			ablated_indices_list (list)
 			warnings (assoc)
 		))
 
@@ -1316,16 +1333,35 @@
 			skip_reduce_data (true)
 			skip_auto_analyze (true)
 			run_autoanalyze_check (false)
+
+			ablated_indices_list (list)
+			derived_case_features (list)
 		))
 
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc
-			indices_to_train
+			derived_case_data
 				(if !tsTimeFeature
 					(call !TrainTimeSeriesAblation)
 
 					(call !TrainCasesWithAblation)
 				)
+		))
+
+		(declare (assoc
+			orig_feature_indices
+				(unzip (zip derived_case_features (indices derived_case_features)) features)
+		))
+
+		;TODO: The below call is fine, just needs a bunch of parameters set first: mostly query params
+
+		;Somehow copy the majority of the logic for !AccumulateCaseInfluenceWeights
+		;to get a series of weights/case_id dicts to return
+		(declare (assoc
+			weight_accumulation_maps
+				(call !ComputeClosestCasesMapsForAccumulation (assoc
+					batch_of_cases (map (lambda (unzip (current_value) orig_feature_indices) ) derived_case_data)
+				))
 		))
 	)
 
