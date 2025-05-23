@@ -144,63 +144,83 @@
 				)
 		))
 
-		(declare (assoc
-			orig_feature_indices (unzip (zip derived_case_features (indices derived_case_features)) features)
-		))
 
-		(declare (assoc
-			hyperparam_map
-				(call !GetHyperparameters (assoc
-					feature (null)
-					context_features features
-					weight_feature accumulate_weight_feature
+		(if (size ablated_indices_list)
+			(seq
+				(declare (assoc
+					hyperparam_map
+						(call !GetHyperparameters (assoc
+							feature (null)
+							context_features features
+							weight_feature accumulate_weight_feature
+						))
+					context_features (filter (lambda (!= (current_value) accumulate_weight_feature)) features)
+					rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
 				))
-			context_features (filter (lambda (!= (current_value) accumulate_weight_feature)) features)
-		))
-		(declare (assoc k_param (get hyperparam_map "k") ))
-		;if k_param is a dynamic k tuple, use the max k value to compute the larger possible max_influence_entropy
-		(declare (assoc k_value (if (~ 0 k_param) k_param (last k_param)) ))
+				(declare (assoc k_param (get hyperparam_map "k") ))
+				;if k_param is a dynamic k tuple, use the max k value to compute the larger possible max_influence_entropy
+				(declare (assoc k_value (if (~ 0 k_param) k_param (last k_param)) ))
 
-		;Somehow copy the majority of the logic for !AccumulateCaseInfluenceWeights
-		;to get a series of weights/case_id dicts to return
-		(declare (assoc
-			cases_to_accumulate_weights (unzip cases ablated_indices_list)
-			weight_feature_index (get (zip features (indices features)) accumulate_weight_feature)
-			weight_accumulation_maps
-				(call !ComputeClosestCasesMapsForAccumulation (assoc
-					batch_of_cases (unzip cases ablated_indices_list)
+				(declare (assoc
+					cases_to_accumulate_weights (unzip cases ablated_indices_list)
+					weight_feature_index (get (zip features (indices features)) accumulate_weight_feature)
+					weight_accumulation_maps
+						(call !ComputeClosestCasesMapsForAccumulation (assoc
+							batch_of_cases (unzip cases ablated_indices_list)
+						))
+					total_added_rebalance_mass 0
 				))
-		))
 
-		(assign (assoc
-			weight_accumulation_maps
-				;normalize and multiply by weight if specified for the cases
-				(map
-					(lambda
-						;(current_value) = map of case id to weight value to accumulate
-						;(current_index) = index of ablated cases whose accumulated weights are
-						;being modified
-						(let
-							(assoc
-								case_weight (get cases_to_accumulate_weights [(current_index 2) weight_feature_index])
-								total_influence_weight (apply "+" (values (current_value 1)))
-							)
+				(if rebalance_weights
+					(declare (assoc
+						rebalance_case_weights (call !ComputeRebalanceCaseWeights (assoc rebalance_cases cases_to_accumulate_weights))
+					))
+				)
 
-							(map
-								(lambda
-									(if case_weight
-										(* case_weight (/ (current_value) total_influence_weight))
+				(assign (assoc
+					weight_accumulation_maps
+						;normalize and multiply by weight if specified for the cases
+						(map
+							(lambda
+								;(current_value) = map of case id to weight value to accumulate
+								;(current_index) = index of ablated cases whose accumulated weights are
+								;being modified
+								(let
+									(assoc
+										case_weight (or (get cases_to_accumulate_weights [(current_index 2) weight_feature_index]) 1)
+										total_influence_weight (apply "+" (values (current_value 1)))
+									)
 
-										(/ (current_value) total_influence_weight)
+									(if rebalance_weights
+										(seq
+											(accum (assoc
+												total_added_rebalance_mass (get rebalance_case_weights (current_index 1))
+											))
+											;scale case weight so the total mass of the dataset remains the same, as though it wasn't rebalanced
+											(assign (assoc
+												case_weight
+													(*
+														case_weight
+														(get rebalance_case_weights (current_index 1))
+														(/ total_mass total_rebalance_mass)
+													)
+											))
+										)
+									)
+
+									(map
+										(lambda
+											(* case_weight (/ (current_value) total_influence_weight))
+										)
+										(current_value)
 									)
 								)
-								(current_value)
 							)
+							weight_accumulation_maps
 						)
-					)
-					weight_accumulation_maps
-				)
-		))
+				))
+			)
+		)
 
 		(call !Return (assoc
 			payload
@@ -209,6 +229,7 @@
 					"cases" derived_case_data
 					"weight_accumulation_maps" weight_accumulation_maps
 					"case_edit_map" case_edit_map
+					"additional_rebalance_weight" total_added_rebalance_mass
 				}
 		))
 	)
@@ -245,6 +266,8 @@
 			;{type "boolean"}
 			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
 			skip_reduce_data (false)
+			;{type "number"}
+			additional_rebalance_weight (null)
 		)
 		(call !ValidateParameters)
 
@@ -261,6 +284,10 @@
 		(if (= (null) session)
 			(assign (assoc session "none"))
 		)
+
+		(declare (assoc
+			rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+		))
 
 		;create the training session if it does not already exist
 		(if (not (contains_entity session))
@@ -324,6 +351,12 @@
 						)
 					)
 					weight_accumulation_maps
+				)
+				(if (and rebalance_weights additional_rebalance_weight)
+					(accum_to_entities (assoc
+						!cachedRebalanceTotalMass additional_rebalance_weight
+						!cachedTotalMass (size weight_accumulation_maps)
+					))
 				)
 				(accum_to_entities session (assoc
 					".total_instance_count" (size weight_accumulation_maps)
