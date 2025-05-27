@@ -50,16 +50,25 @@
 		))
 
 		;TODO: pass max_accuracy_deviations
-		(if (and max_accuracy_deviations (size (get hyperparam_map "featureMdaMap")))
-			(assign (assoc
-				single_query_per_case (false)
-				per_feature_weights (true)
-				num_test_cases
-					(min
-						num_test_cases
-						(max 50 (/ 10000 (size features)))
-					)
-			))
+		(if (and max_accuracy_deviations (size custom_mda_map))
+			(seq
+				(assign (assoc
+					single_query_per_case (false)
+					per_feature_weights (true)
+					num_test_cases
+						(min
+							num_test_cases
+							(max 50 (/ 10000 (size features)))
+						)
+					hyperparam_map (set hyperparam_map "featureMdaMap" custom_mda_map)
+				))
+
+				(if custom_residuals_map
+					(assign (assoc
+						hyperparam_map (set hyperparam_map "featureDeviations" custom_residuals_map)
+					))
+				)
+			)
 		)
 
 		;iterate over each case and accumulate residuals for all the feature(s)
@@ -506,7 +515,16 @@
 		)
 
 		;set smallest possible probability assuming the Jeffreys prior approach
-		(declare (assoc smallest_probability (/ 1 (+ 0.5 num_training_cases)) ))
+		(declare (assoc
+			smallest_probability (/ 1 (+ 0.5 num_training_cases))
+
+			;baseline isn't specified, declare it on the stack here
+			baseline_hyperparameter_map hyperparam_map
+		))
+
+		(if custom_residuals_map
+			(set baseline_hyperparameter_map "featureResiduals" custom_residuals_map)
+		)
 
 		;iterate over an assoc of MDA maps per feature and convert to a normalized probability feature mda matrix
 		(zip
@@ -527,7 +545,7 @@
 									(assoc mda (current_value 1) )
 
 									;skip if mda_feature = target_feature
-									(if (= (current_index) target_feature) (conclude 0) )
+									(if (and (not max_accuracy_deviations) (= (current_index) target_feature)) (conclude 0) )
 
 									;LK metric
 									;mda + 0.5 * e(-mda/residual) * (3 * residual + mda)
@@ -669,6 +687,92 @@
 
 			;Mean Absolute Deviation
 			(/ (apply "+" errors) (size errors))
+		)
+	)
+
+	#!ComputeEstimatedResidualLowerBound
+	(seq
+
+		(assign (assoc
+			residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features features
+					robust_residuals "robust_mda"
+					num_samples 10000
+
+					max_accuracy_deviations (true)
+					;;;custom_hyperparam_map baseline_hyperparameter_map
+
+					compute_all_statistics (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+		))
+
+		(declare (assoc
+			estimated_residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features features
+					robust_residuals "deviations"
+					num_samples 1000
+
+					max_accuracy_deviations (true)
+					;;;custom_hyperparam_map baseline_hyperparameter_map
+					custom_mda_map (get residuals_map "feature_mda_map")
+
+					compute_all_statistics (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+		))
+
+		(assign (assoc
+			residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features features
+					robust_residuals "robust_mda"
+					num_samples 10000
+
+					max_accuracy_deviations (true)
+					;;;custom_hyperparam_map baseline_hyperparameter_map
+					custom_residuals_map (get estimated_residuals_map "residual_map")
+
+					compute_all_statistics (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+		))
+
+		(declare (assoc
+			updated_estimated_residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features features
+					robust_residuals "deviations"
+					num_samples 1000
+
+					max_accuracy_deviations (true)
+					;;;custom_hyperparam_map baseline_hyperparameter_map
+					custom_residuals_map (get estimated_residuals_map "residual_map")
+					custom_mda_map (get residuals_map "feature_mda_map")
+
+					compute_all_statistics (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+		))
+
+		(map
+			(lambda (apply "min" (current_value)))
+			(get updated_estimated_residuals_map "residual_map")
+			(get estimated_residuals_map "residual_map")
 		)
 	)
 
