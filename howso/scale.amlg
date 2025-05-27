@@ -47,6 +47,7 @@
 		(declare (assoc
 			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
 			total_instance_count (retrieve_from_entity session ".total_instance_count")
+			rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
 			status_output (null)
 			message (null)
 			warnings (assoc)
@@ -133,6 +134,14 @@
 
 			case_edit_map (assoc)
 		))
+		(declare (assoc ablation_trained_instance_count num_cases ))
+
+		(if rebalance_weights
+			(declare (assoc
+				total_mass (replace !cachedTotalMass)
+				total_rebalance_mass (replace !cachedRebalanceTotalMass)
+			))
+		)
 
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc
@@ -155,7 +164,6 @@
 							weight_feature accumulate_weight_feature
 						))
 					context_features (filter (lambda (!= (current_value) accumulate_weight_feature)) features)
-					rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
 				))
 				(declare (assoc k_param (get hyperparam_map "k") ))
 				;if k_param is a dynamic k tuple, use the max k value to compute the larger possible max_influence_entropy
@@ -168,7 +176,7 @@
 						(call !ComputeClosestCasesMapsForAccumulation (assoc
 							batch_of_cases (unzip cases ablated_indices_list)
 						))
-					total_added_rebalance_mass 0
+
 				))
 
 				(if rebalance_weights
@@ -194,7 +202,8 @@
 									(if rebalance_weights
 										(seq
 											(accum (assoc
-												total_added_rebalance_mass (get rebalance_case_weights (current_index 1))
+												total_rebalance_mass (get rebalance_case_weights (current_index 1))
+												total_mass 1
 											))
 											;scale case weight so the total mass of the dataset remains the same, as though it wasn't rebalanced
 											(assign (assoc
@@ -229,7 +238,8 @@
 					"cases" derived_case_data
 					"weight_accumulation_maps" weight_accumulation_maps
 					"case_edit_map" case_edit_map
-					"additional_rebalance_weight" total_added_rebalance_mass
+					"new_total_mass" total_mass
+					"new_total_rebalance_mass" total_rebalance_mass
 				}
 		))
 	)
@@ -267,7 +277,9 @@
 			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
 			skip_reduce_data (false)
 			;{type "number"}
-			additional_rebalance_weight (null)
+			new_total_mass (null)
+			;{type "number"}
+			new_total_rebalance_mass (null)
 		)
 		(call !ValidateParameters)
 
@@ -287,6 +299,8 @@
 
 		(declare (assoc
 			rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+			weight_feature_index (get (zip features (indices features)) weight_feature)
+			status_output (null)
 		))
 
 		;create the training session if it does not already exist
@@ -313,6 +327,21 @@
 			total_instance_count (retrieve_from_entity session ".total_instance_count")
 			num_cases (call !GetNumTrainingCases)
 		))
+
+		(if rebalance_weights
+			(if (not (and new_total_rebalance_mass new_total_mass))
+				(conclude
+					(call !Return (assoc
+						errors ["If the Trainee is using rebalance features, then `new_total_rebalance_mass` and `new_total_mass` should be given."]
+					))
+				)
+
+				(assign_to_entities (assoc
+					!cachedRebalanceTotalMass new_total_rebalance_mass
+					!cachedTotalMass new_total_mass
+				))
+			)
+		)
 
 		(if (size weight_accumulation_maps)
 			(seq
@@ -352,12 +381,6 @@
 					)
 					weight_accumulation_maps
 				)
-				(if (and rebalance_weights additional_rebalance_weight)
-					(accum_to_entities (assoc
-						!cachedRebalanceTotalMass additional_rebalance_weight
-						!cachedTotalMass (size weight_accumulation_maps)
-					))
-				)
 				(accum_to_entities session (assoc
 					".total_instance_count" (size weight_accumulation_maps)
 				))
@@ -381,12 +404,52 @@
 							)
 							cases
 						)
-				))
+					mass_to_accumulate
+						(if weight_feature_index
+							(apply "+" (map (get (current_value) weight_feature_index) cases))
 
-				(call !UpdateSessionAndFeaturesAfterTrain)
+							(size cases)
+						)
+				))
+				(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze mass_to_accumulate))
 				(accum_to_entities session (assoc
 					".total_instance_count" (size cases)
 				))
+				(call !UpdateSessionAndFeaturesAfterTrain)
+				(call !AutoAnalyzeIfNeeded)
+
+				;reduceDataIfNeeded
+				;if the number of cases will exceed the reduce_data threshold since the last reduce_data call, run it again
+				;the default !reduceDataInfluenceWeightEntropyThreshold of 0.6 will ensure that approximately 1/e of the data is removed
+				(if
+					(and
+						(>= (+ !dataMassChangeSinceLastDataReduction (size cases)) !autoAblationMaxNumCases)
+						(not skip_reduce_data)
+						(size !hyperparameterMetadataMap)
+					)
+					(call reduce_data (assoc
+						abs_threshold_map !autoAblationAbsThresholdMap
+						delta_threshold_map !autoAblationDeltaThresholdMap
+						rel_threshold_map !autoAblationRelThresholdMap
+						skip_auto_analyze skip_auto_analyze
+					))
+
+					;else, add the new cases to the total number since the last data reduction
+					; and notify the user that a reduce_data call is needed/recommended if skip_reduce_data is set
+					; rather than performing it now.
+					(seq
+						;ensure we only set the reduce_data status output if a reduction is actually necessary.
+						(if (and
+								(>= (+ !dataMassChangeSinceLastDataReduction (size cases)) !autoAblationMaxNumCases)
+								skip_reduce_data
+							)
+							(assign (assoc status_output "reduce_data"))
+						)
+						(accum_to_entities (assoc
+							!dataMassChangeSinceLastDataReduction (size cases)
+						))
+					)
+				)
 			)
 		)
 
@@ -401,7 +464,7 @@
 		(call !Return (assoc
 			payload
 				(assoc
-					"num_trained" (size new_case_ids)
+					"num_cases_trained" (size new_case_ids)
 					"status" status_output
 				)
 		))
