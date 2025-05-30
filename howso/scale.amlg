@@ -18,6 +18,12 @@
 			;	the 'auto_derive_on_train' feature attribute set to True will be auto-derived. If provided an empty list, will not derive any features.
 			;	Any derived_features that are already in the 'features' list will not be derived since their values are being explicitly provided.
 			derived_features (null)
+			;{type "string"}
+			;the session label to record these cases to.  If not specified, refers to this entity's label of same name.
+			session (null)
+			;{type "string"}
+			;This parameter is not truly supported in this method, but this endpoint should be able to take Train parameters.
+			series (null)
 			;{type "boolean"}
 			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
 			input_is_substituted (false)
@@ -28,8 +34,25 @@
 			;name of feature into which to accumulate neighbors' influences as weight for ablated cases. Will default to the default auto ablation weight
 			;feature if unspecified
 			accumulate_weight_feature (null)
+			;{type "boolean"}
+			;flag, if set to true, and accumulate_weight_feature is provided, will not train on the cases, but instead accumulate all of their neighbor weights.
+			train_weights_only (false)
+			;{type "boolean"}
+			;flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended.
+			;This flag is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
+			skip_auto_analyze (false)
+			;{type "boolean"}
+			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
+			;This flag is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
+			skip_reduce_data (false)
 		)
 		(call !ValidateParameters)
+
+		(if series
+			(call !Return (assoc
+				errors ["The functionality provided by `series` is not supported in `compute_train_payload`."]
+			))
+		)
 
 		(if (not !autoAblationEnabled)
 			(call !Return (assoc
@@ -146,15 +169,20 @@
 		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
 		(declare (assoc
 			derived_case_data
-				(if !tsTimeFeature
-					(call !TrainTimeSeriesAblation)
+				(if train_weights_only
+					[]
 
-					(call !TrainCasesWithAblation)
+					;else derive the case data and assign ablated indices
+					(if !tsTimeFeature
+						(call !TrainTimeSeriesAblation)
+
+						(call !TrainCasesWithAblation)
+					)
 				)
 		))
 
 
-		(if (size ablated_indices_list)
+		(if (or train_weights_only (size ablated_indices_list))
 			(seq
 				(declare (assoc
 					hyperparam_map
@@ -170,7 +198,12 @@
 				(declare (assoc k_value (if (~ 0 k_param) k_param (last k_param)) ))
 
 				(declare (assoc
-					cases_to_accumulate_weights (unzip cases ablated_indices_list)
+					cases_to_accumulate_weights
+						(if train_weights_only
+							cases
+
+							(unzip cases ablated_indices_list)
+						)
 					weight_feature_index (get (zip features (indices features)) accumulate_weight_feature)
 					weight_accumulation_maps
 						(call !ComputeClosestCasesMapsForAccumulation (assoc
@@ -235,10 +268,14 @@
 			warnings warnings
 			payload
 				{
-					"features" derived_case_features
 					"cases" derived_case_data
+					"features" derived_case_features
 					"weight_accumulation_maps" weight_accumulation_maps
 					"case_edit_map" ts_case_edits_map
+					"weight_feature" accumulate_weight_feature
+					"session" session
+					"skip_auto_analyze" skip_auto_analyze
+					"skip_reduce_data" skip_reduce_data
 					"new_total_mass" total_mass
 					"new_total_rebalance_mass" total_rebalance_mass
 				}
@@ -246,7 +283,7 @@
 	)
 
 
-	;sister method of #compute_train_payload that takes that endpoints return data as input.
+	;sibling method of #compute_train_payload that takes that endpoints return data as input.
 	;this method simply trains the given case data, accumulates to the weight feature, and makes
 	;any case edits that are given
 	;{long_running (false) use_active_session (true)}
