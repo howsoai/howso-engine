@@ -1,0 +1,523 @@
+;Contains Trainee methods/code related to scaling up the Trainee for distributed systems/larger workflows
+(null
+	;alternate read-only train call that given cases, returns the case data that should be trained and the case-id -> weight accumulating maps to be used on a
+	;write-permissioned follow up call to the Trainee
+	;{long_running (true) read_only (true)}
+	#compute_train_payload
+	(declare
+		;{ref "ComputeTrainPayloadResponse"}
+		(assoc
+			;{type "list" values {type "list" min_size 1} min_size 1  required (true)}
+			;list of cases, ie a list of lists of values.
+			cases (null)
+			;{type "list" values "string" required (true)}
+			;the list of features.
+			features (null)
+			;{type "list" values "string"}
+			;list of features to derive in the specified order. If this list is not provided, features with
+			;	the 'auto_derive_on_train' feature attribute set to True will be auto-derived. If provided an empty list, will not derive any features.
+			;	Any derived_features that are already in the 'features' list will not be derived since their values are being explicitly provided.
+			derived_features (null)
+			;{type "string"}
+			;the session label to record these cases to.  If not specified, refers to this entity's label of same name.
+			session (null)
+			;{type "string"}
+			;This parameter is not truly supported in this method, but this endpoint should be able to take Train parameters.
+			series (null)
+			;{type "boolean"}
+			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
+			input_is_substituted (false)
+			;{type "boolean"}
+			;flag, allows feature names beginning with "." if true, otherwise an error will be given if any features start with ".".
+			allow_training_reserved_features (false)
+			;{type "string"}
+			;name of feature into which to accumulate neighbors' influences as weight for ablated cases. Will default to the default auto ablation weight
+			;feature if unspecified
+			accumulate_weight_feature (null)
+			;{type "boolean"}
+			;flag, if set to true, and accumulate_weight_feature is provided, will not train on the cases, but instead accumulate all of their neighbor weights.
+			train_weights_only (false)
+			;{type "boolean"}
+			;flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended.
+			;This flag is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
+			skip_auto_analyze (false)
+			;{type "boolean"}
+			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
+			;This flag is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
+			skip_reduce_data (false)
+		)
+		(call !ValidateParameters)
+
+		(if series
+			(call !Return (assoc
+				errors ["The functionality provided by `series` is not supported in `compute_train_payload`."]
+			))
+		)
+
+		(if (not !autoAblationEnabled)
+			(call !Return (assoc
+				errors ["`compute_train_payload` should only be used on a Trainee that has auto-ablation enabled."]
+			))
+		)
+
+		(assign (assoc
+			accumulate_weight_feature
+				(if (and !autoAblationEnabled (= (null) accumulate_weight_feature))
+					!autoAblationWeightFeature
+					accumulate_weight_feature
+				)
+		))
+
+		(declare (assoc
+			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
+			total_instance_count (retrieve_from_entity session ".total_instance_count")
+			rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+			status_output (null)
+			message (null)
+			warnings (assoc)
+			ts_case_edits_map (assoc)
+		))
+
+		;parameter and data checks, returns on error
+		(call !PreTrainChecks)
+
+		;get time series derived features list, if applicable
+		(if (and (= (null) derived_features) (!= (null) !tsTimeFeature) )
+			(assign (assoc
+				derived_features (get !tsFeaturesMap "ts_derived_features")
+			))
+		)
+
+		;unsubstitute nominal feature values if necessary
+		(if
+			(and input_is_substituted !hasSubstituteFeatureValues)
+			(assign (assoc
+				cases
+					(map
+						(lambda
+							(call !UnsubstituteFeatureValues (assoc
+								features features
+								feature_values (current_value 1)
+							))
+						)
+						cases
+					)
+			))
+		)
+
+		(declare (assoc encode_features_on_train (retrieve_from_entity "!hasFeaturesNeedEncodingFromInput") ))
+
+		;if dataset has features that are for derivation output only and are not being explicitly trained on
+		;then add them to the training data with nulls
+		(if (size (remove (zip !trainedFeatures) features))
+			(let
+				(assoc
+					;keep only those features that aren't specified in 'features', that have 'derived_feature_code' but
+					;will not be auto derived and aren't the built-in '.series_progress_delta'
+					derive_only_features
+						(filter
+							(lambda
+								(and
+									(not (contains_value features (current_value)))
+									(!= (null) (get !featureAttributes [(current_value 1) "derived_feature_code"]) )
+									(= (null) (get !featureAttributes [(current_value 1) "auto_derive_on_train"]) )
+									(!= (current_value) ".series_progress_delta")
+								)
+							)
+							!trainedFeatures
+						)
+				)
+
+				;store nulls for every derive_only_features  feature in input cases
+				(if (size derive_only_features)
+					(let
+						(assoc nulls (map (lambda (null)) derive_only_features) )
+						(assign (assoc
+							features (append features derive_only_features)
+							cases
+								(map
+									(lambda (append (current_value) nulls) )
+									cases
+								)
+						))
+					)
+				)
+			)
+		)
+
+		(declare (assoc
+			num_cases (call !GetNumTrainingCases)
+
+			;flags needed to prevent write ops in Train code
+			read_only_mode (true)
+			skip_reduce_data (true)
+			skip_auto_analyze (true)
+			run_autoanalyze_check (false)
+
+			ablated_indices_list (list)
+			derived_case_features (list)
+		))
+		(declare (assoc ablation_trained_instance_count num_cases ))
+
+		(if rebalance_weights
+			(declare (assoc
+				total_mass (replace !cachedTotalMass)
+				total_rebalance_mass (replace !cachedRebalanceTotalMass)
+			))
+		)
+
+		;iterate over the input cases and create them, only returning case ids for cases that were able to be created
+		(declare (assoc
+			derived_case_data
+				(if train_weights_only
+					[]
+
+					;else derive the case data and assign ablated indices
+					(if !tsTimeFeature
+						(call !TrainTimeSeriesAblation)
+
+						(call !TrainCasesWithAblation)
+					)
+				)
+		))
+
+
+		(if (or train_weights_only (size ablated_indices_list))
+			(seq
+				(declare (assoc
+					hyperparam_map
+						(call !GetHyperparameters (assoc
+							feature (null)
+							context_features features
+							weight_feature accumulate_weight_feature
+						))
+					context_features (filter (lambda (!= (current_value) accumulate_weight_feature)) features)
+				))
+				(declare (assoc k_param (get hyperparam_map "k") ))
+				;if k_param is a dynamic k tuple, use the max k value to compute the larger possible max_influence_entropy
+				(declare (assoc k_value (if (~ 0 k_param) k_param (last k_param)) ))
+
+				(declare (assoc
+					cases_to_accumulate_weights
+						(if train_weights_only
+							cases
+
+							(unzip cases ablated_indices_list)
+						)
+					weight_feature_index (get (zip features (indices features)) accumulate_weight_feature)
+					weight_accumulation_maps
+						(call !ComputeClosestCasesMapsForAccumulation (assoc
+							batch_of_cases (unzip cases ablated_indices_list)
+						))
+
+				))
+
+				(if rebalance_weights
+					(declare (assoc
+						rebalance_case_weights (call !ComputeRebalanceCaseWeights (assoc rebalance_cases cases_to_accumulate_weights))
+					))
+				)
+
+				(assign (assoc
+					weight_accumulation_maps
+						;normalize and multiply by weight if specified for the cases
+						(map
+							(lambda
+								;(current_value) = map of case id to weight value to accumulate
+								;(current_index) = index of ablated cases whose accumulated weights are
+								;being modified
+								(let
+									(assoc
+										case_weight (or (get cases_to_accumulate_weights [(current_index 2) weight_feature_index]) 1)
+										total_influence_weight (apply "+" (values (current_value 1)))
+									)
+
+									(if rebalance_weights
+										(seq
+											(accum (assoc
+												total_rebalance_mass (get rebalance_case_weights (current_index 1))
+												total_mass 1
+											))
+											;scale case weight so the total mass of the dataset remains the same, as though it wasn't rebalanced
+											(assign (assoc
+												case_weight
+													(*
+														case_weight
+														(get rebalance_case_weights (current_index 1))
+														(/ total_mass total_rebalance_mass)
+													)
+											))
+										)
+									)
+
+									(map
+										(lambda
+											(* case_weight (/ (current_value) total_influence_weight))
+										)
+										(current_value)
+									)
+								)
+							)
+							weight_accumulation_maps
+						)
+				))
+			)
+		)
+
+		(call !Return (assoc
+			warnings warnings
+			payload
+				{
+					"cases" derived_case_data
+					"features" derived_case_features
+					"weight_accumulation_maps" weight_accumulation_maps
+					"case_edit_map" ts_case_edits_map
+					"weight_feature" accumulate_weight_feature
+					"session" session
+					"skip_auto_analyze" skip_auto_analyze
+					"skip_reduce_data" skip_reduce_data
+					"new_total_mass" total_mass
+					"new_total_rebalance_mass" total_rebalance_mass
+				}
+		))
+	)
+
+
+	;sibling method of #compute_train_payload that takes that endpoints return data as input.
+	;this method simply trains the given case data, accumulates to the weight feature, and makes
+	;any case edits that are given
+	;{long_running (false) use_active_session (true)}
+	#process_train_payload
+	(declare
+		;{ref "ProcessTrainPayloadResponse"}
+		(assoc
+			;{type "list" values {type "list" min_size 1}}
+			;list of cases, ie a list of lists of values.
+			cases (null)
+			;{type "list" values "string"}
+			;the list of features.
+			features (null)
+			;{type "list" values {type "assoc" values "number"}}
+			;a list of maps defining values to accumulate to each case-id's weight feature
+			weight_accumulation_maps (null)
+			;{type "assoc" values {type "assoc" values "any"}}
+			;a map of maps defining case-ids to features to values that should be used to overwrite that case's
+			;current feature value
+			case_edit_map (null)
+			;{type "string"}
+			;The name of the weight feature used in ablation.
+			weight_feature (null)
+			;{type "string"}
+			;The session name to train the new cases into
+			session (null)
+			;{type "boolean"}
+			;flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended
+			skip_auto_analyze (false)
+			;{type "boolean"}
+			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
+			skip_reduce_data (false)
+			;{type "number"}
+			;The new value to update the Trainee's cached total mass to after the operation is completed.
+			new_total_mass (null)
+			;{type "number"}
+			;The new value to update the Trainee's cached total rebalance mass to after the operation is completed.
+			new_total_rebalance_mass (null)
+		)
+		(call !ValidateParameters)
+
+		(if (not !autoAblationEnabled)
+			(call !Return (assoc
+				errors ["`process_train_payload` should only be used on a Trainee that has auto-ablation enabled."]
+			))
+		)
+
+		(if (= (null) weight_feature)
+			(assign (assoc weight_feature !autoAblationWeightFeature ))
+		)
+
+		(if (= (null) session)
+			(assign (assoc session "none"))
+		)
+
+		(declare (assoc
+			rebalance_weights (or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+			weight_feature_index (get (zip features (indices features)) weight_feature)
+			status_output (null)
+		))
+
+		;create the training session if it does not already exist
+		(if (not (contains_entity session))
+			;overwrite the session variable in case creating a new session without a name
+			(assign (assoc
+				session
+					(first (create_entities session (lambda
+						(null
+							##.replay_steps (list)
+							##.indices_map (assoc)
+							;total count of cases trained
+							##.trained_instance_count 0
+							;total count of cases observed (incl ablated, trained as weights, etc)
+							##.total_instance_count 0
+							##.metadata (assoc)
+						)
+					)))
+			))
+		)
+
+		(declare (assoc
+			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
+			total_instance_count (retrieve_from_entity session ".total_instance_count")
+			num_cases (call !GetNumTrainingCases)
+		))
+
+		(if rebalance_weights
+			(if (not (and new_total_rebalance_mass new_total_mass))
+				(conclude
+					(call !Return (assoc
+						errors ["If the Trainee is using rebalance features, then `new_total_rebalance_mass` and `new_total_mass` should be given."]
+					))
+				)
+
+				(assign_to_entities (assoc
+					!cachedRebalanceTotalMass new_total_rebalance_mass
+					!cachedTotalMass new_total_mass
+				))
+			)
+		)
+
+		(if (size weight_accumulation_maps)
+			(seq
+				(map
+					(lambda
+						;(current_value) = (assoc of case_id to weight to accumulate (not normalized))
+						(let
+							(assoc
+								total_influence_weight (apply "+" (values (current_value 1)))
+								influence_map (current_value 1)
+							)
+
+							(map
+								(lambda
+									;if weight_feature label doesn't exist in this case, add it with a weight `1`
+									(if (not (contains_label (current_index) weight_feature))
+										(accum_entity_roots (current_index)
+											(zip_labels
+												(list weight_feature)
+												(list (+ 1 (/ (current_value 1) total_influence_weight)) )
+											)
+										)
+
+										;else label exists, accumulate to it
+										(accum_to_entities
+											(current_index)
+											(associate
+												weight_feature
+													(/ (current_value 1) total_influence_weight)
+											)
+										)
+									)
+								)
+								influence_map
+							)
+						)
+					)
+					weight_accumulation_maps
+				)
+				(accum_to_entities session (assoc
+					".total_instance_count" (size weight_accumulation_maps)
+				))
+			)
+		)
+
+		(if (size case_edit_map)
+			(map
+				(lambda
+					(assign_to_entities (current_index) (current_value))
+				)
+				case_edit_map
+			)
+		)
+
+
+		(if (size cases)
+			(seq
+				(declare (assoc
+					new_case_ids
+						(map
+							(lambda
+								;create the case and output case id
+								(call !CreateCase (assoc
+									features features
+									feature_values (current_value 1)
+									session (get_value session)
+									session_training_index (+ total_instance_count (current_index 1))
+								))
+							)
+							cases
+						)
+					mass_to_accumulate
+						(if weight_feature_index
+							(apply "+" (map (lambda (get (current_value) weight_feature_index)) cases))
+
+							(size cases)
+						)
+				))
+				(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze mass_to_accumulate))
+				(accum_to_entities session (assoc
+					".total_instance_count" (size cases)
+				))
+				(call !UpdateSessionAndFeaturesAfterTrain)
+				(call !AutoAnalyzeIfNeeded)
+
+				;reduceDataIfNeeded
+				;if the number of cases will exceed the reduce_data threshold since the last reduce_data call, run it again
+				;the default !reduceDataInfluenceWeightEntropyThreshold of 0.6 will ensure that approximately 1/e of the data is removed
+				(if
+					(and
+						(>= (+ !dataMassChangeSinceLastDataReduction (size cases)) !autoAblationMaxNumCases)
+						(not skip_reduce_data)
+						(size !hyperparameterMetadataMap)
+					)
+					(call reduce_data (assoc
+						abs_threshold_map !autoAblationAbsThresholdMap
+						delta_threshold_map !autoAblationDeltaThresholdMap
+						rel_threshold_map !autoAblationRelThresholdMap
+						skip_auto_analyze skip_auto_analyze
+					))
+
+					;else, add the new cases to the total number since the last data reduction
+					; and notify the user that a reduce_data call is needed/recommended if skip_reduce_data is set
+					; rather than performing it now.
+					(seq
+						;ensure we only set the reduce_data status output if a reduction is actually necessary.
+						(if (and
+								(>= (+ !dataMassChangeSinceLastDataReduction (size cases)) !autoAblationMaxNumCases)
+								skip_reduce_data
+							)
+							(assign (assoc status_output "reduce_data"))
+						)
+						(accum_to_entities (assoc
+							!dataMassChangeSinceLastDataReduction (size cases)
+						))
+					)
+				)
+			)
+		)
+
+		(call !UpdateDependentFeaturesMaps)
+		;if there are features that have nulls, check if they still have nulls next time we react or analyze
+		(if !inactiveFeaturesMap
+			(assign_to_entities (assoc !inactiveFeaturesNeedCaching (true) ))
+		)
+
+		(accum_to_entities (assoc !revision 1))
+
+		(call !Return (assoc
+			payload
+				(assoc
+					"num_trained" (size new_case_ids)
+					"status" status_output
+				)
+		))
+	)
+)
