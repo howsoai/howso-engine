@@ -45,7 +45,32 @@
 						))
 					)
 				)
+			per_feature_weights (false)
+			num_test_cases (size case_ids)
 		))
+
+		(if (and estimating_residual_lower_bound (size custom_mda_map))
+			(seq
+				(assign (assoc
+					single_query_per_case (false)
+					;use feature weights for each feature being predicted
+					per_feature_weights (true)
+					;limit the number of cases (reacts) per feature to a minimum of 50 cases per feature
+					num_test_cases
+						(min
+							num_test_cases
+							(max 50 (/ 10000 (size features)))
+						)
+					hyperparam_map (set hyperparam_map "featureMdaMap" custom_mda_map)
+				))
+
+				(if custom_residuals_map
+					(assign (assoc
+						hyperparam_map (set hyperparam_map "featureDeviations" custom_residuals_map)
+					))
+				)
+			)
+		)
 
 		;iterate over each case and accumulate residuals for all the feature(s)
 		#!AccumulateLocalFeatureDeviations
@@ -128,23 +153,35 @@
 													(let
 														(assoc
 															query_context_features
-																;context features + feature being predicted
-																(values (append
-																	(if (contains_index features_for_derivation_map feature)
-																		;if this feature should be derived, need to hold out the features that will be used to derive it
-																		(filter
-																			(lambda (or
-																				(not (contains_value (get features_for_derivation_map feature) (current_value)))
-																				(!= feature (get !derivedFeaturesMap (current_value)))
-																				(contains_value (get !tsFeaturesMap "lag_features") (current_value))
-																			))
-																			context_features
-																		)
+																(if per_feature_weights
+																	context_features
 
-																		context_features
+																	;context features + feature being predicted
+																	(values
+																		(append
+																			(if (contains_index features_for_derivation_map feature)
+																				;if this feature should be derived, need to hold out the features that will be used to derive it
+																				(filter
+																					(lambda (or
+																						(not (contains_value (get features_for_derivation_map feature) (current_value)))
+																						(!= feature (get !derivedFeaturesMap (current_value)))
+																						(contains_value (get !tsFeaturesMap "lag_features") (current_value))
+																					))
+																					context_features
+																				)
+
+																				context_features
+																			)
+																			feature
+																		)
+																		(true)
 																	)
-																	feature
-																) (true))
+																)
+															feature_weights
+																(if per_feature_weights
+																	(get hyperparam_map ["featureMdaMap" feature])
+																	(get hyperparam_map "featureWeights")
+																)
 														)
 
 														(compute_on_contained_entities (append
@@ -161,7 +198,7 @@
 																k_parameter
 																query_context_features
 																(unzip case_values_map query_context_features)
-																(get hyperparam_map "featureWeights")
+																feature_weights
 																!queryDistanceTypeMap
 																query_feature_attributes_map
 																(get hyperparam_map "featureDeviations")
@@ -225,7 +262,11 @@
 						;return the computed values as a list
 						(unzip feature_residual_map features)
 					))
-					case_ids
+					(if (and per_feature_weights (< num_test_cases (size case_ids)) )
+						(rand case_ids num_test_cases (true))
+						case_ids
+					)
+
 				)
 		))
 
@@ -316,18 +357,34 @@
 
 							;keep only indices of cases where feature was used in query and its residual is null
 							case_indices_with_feature
-								(filter
-									(lambda (= (null) (get feature_residuals_lists [(current_index 3) (current_value 1)])) )
-									;indices of all residual values for this feature
-									(indices (get feature_residuals_lists (current_index 1)))
+								(if estimating_residual_lower_bound
+									(filter
+										(lambda (= (true) (get feature_residuals_lists [(current_index 3) (current_value 1) 0])) )
+										;indices of all residual values for this feature
+										(indices (get feature_residuals_lists (current_index 1)))
+									)
+
+									(filter
+										(lambda (= (null) (get feature_residuals_lists [(current_index 3) (current_value 1)])) )
+										;indices of all residual values for this feature
+										(indices (get feature_residuals_lists (current_index 1)))
+									)
 								)
 
 							;keep only indices of cases where feature was not used in query and has a residual value
 							case_indices_without_feature
-								(filter
-									(lambda (!= (null) (get feature_residuals_lists [(current_index 3) (current_value 1)])) )
-									;indices of all residual values for this feature
-									(indices (get feature_residuals_lists (current_index 1)))
+								(if estimating_residual_lower_bound
+									(filter
+										(lambda (= (false) (get feature_residuals_lists [(current_index 3) (current_value 1) 0])) )
+										;indices of all residual values for this feature
+										(indices (get feature_residuals_lists (current_index 1)))
+									)
+
+									(filter
+										(lambda (!= (null) (get feature_residuals_lists [(current_index 3) (current_value 1)])) )
+										;indices of all residual values for this feature
+										(indices (get feature_residuals_lists (current_index 1)))
+									)
 								)
 						)
 
@@ -341,7 +398,7 @@
 									mda_feature_index (current_index 1)
 								)
 								;a feature should not have mda computed for itself
-								(if (= mda_feature feature) (conclude 0) )
+								(if (and (not estimating_residual_lower_bound) (= mda_feature feature)) (conclude 0) )
 
 								(if (and
 										;if measuring mda for a feature that is the parent of a derived feature, skip it
@@ -377,16 +434,53 @@
 
 									;cap the lower value for probability conversion
 									(max
-										(-
-											;avg_without_residuals
-											(/
-												(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
-												(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
+										;if estimating lower bound residuals, must pull residual value from each pair
+										(if estimating_residual_lower_bound
+											(-
+												;avg_without_residuals
+												(/
+													(apply "+"
+														(filter (map
+															(lambda (last (current_value)))
+															(unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)
+														))
+													)
+													(size
+														(filter (map
+															(lambda (last (current_value)))
+															(unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)
+														))
+													)
+												)
+												;average with residuals
+												(/
+													(apply "+"
+														(filter (map
+															(lambda (last (current_value)))
+															(unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)
+														))
+													)
+													(size
+														(filter (map
+															(lambda (last (current_value)))
+															(unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)
+														))
+													)
+												)
 											)
-											;average with residuals
-											(/
-												(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
-												(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
+
+											;else the lists are residual values, can simply unzip the lists by their indices
+											(-
+												;avg_without_residuals
+												(/
+													(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
+													(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
+												)
+												;average with residuals
+												(/
+													(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
+													(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
+												)
 											)
 										)
 										(get !cachedFeatureMinResidualMap mda_feature)
@@ -424,7 +518,17 @@
 		)
 
 		;set smallest possible probability assuming the Jeffreys prior approach
-		(declare (assoc smallest_probability (/ 1 (+ 0.5 num_training_cases)) ))
+		(declare (assoc
+			smallest_probability (/ 1 (+ 0.5 num_training_cases))
+
+			;baseline isn't specified, declare it on the stack here
+			baseline_hyperparameter_map hyperparam_map
+		))
+
+		;overwrite featureResiduals if custom ones are provided
+		(if custom_residuals_map
+			(set baseline_hyperparameter_map "featureResiduals" custom_residuals_map)
+		)
 
 		;iterate over an assoc of MDA maps per feature and convert to a normalized probability feature mda matrix
 		(zip
@@ -445,7 +549,7 @@
 									(assoc mda (current_value 1) )
 
 									;skip if mda_feature = target_feature
-									(if (= (current_index) target_feature) (conclude 0) )
+									(if (and (not estimating_residual_lower_bound) (= (current_index) target_feature)) (conclude 0) )
 
 									;LK metric
 									;mda + 0.5 * e(-mda/residual) * (3 * residual + mda)
@@ -505,6 +609,7 @@
 							(lambda
 								(if (or (> (current_value) 0) (= target_feature (current_index)))
 									(/ (current_value) total_probs)
+
 									(if (contains_index !inactiveFeaturesMap (current_index))
 										0
 										smallest_probability
@@ -586,6 +691,114 @@
 
 			;Mean Absolute Deviation
 			(/ (apply "+" errors) (size errors))
+		)
+	)
+
+	#!ComputeEstimatedResidualLowerBound
+	(seq
+
+		(assign (assoc
+			residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features features
+					robust_residuals "robust_mda"
+					num_samples 10000
+
+					estimating_residual_lower_bound (true)
+
+					compute_all_statistics (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+		))
+
+		(declare (assoc
+			estimated_residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features action_features
+					context_features context_features
+					robust_residuals "deviations"
+					num_samples 1000
+
+					estimating_residual_lower_bound (true)
+
+					custom_mda_map (get residuals_map "feature_mda_map")
+
+					compute_all_statistics (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+		))
+
+		(assign (assoc
+			residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features features
+					robust_residuals "robust_mda"
+					num_samples 10000
+
+					estimating_residual_lower_bound (true)
+
+					custom_residuals_map (get estimated_residuals_map "residual_map")
+
+					compute_all_statistics (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+		))
+
+		(declare (assoc
+			updated_estimated_residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features action_features
+					context_features context_features
+					robust_residuals "deviations"
+					num_samples 1000
+
+					estimating_residual_lower_bound (true)
+
+					custom_residuals_map (get estimated_residuals_map "residual_map")
+					custom_mda_map (get residuals_map "feature_mda_map")
+
+					compute_all_statistics (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+			dbl_precision_epsilon (call !ComputePrecisionEpsilon)
+		))
+
+		;output the smallest computed residual
+		(map
+			(lambda (let
+				(assoc
+					smallest_residual
+						(apply
+							"min"
+							(append
+								(current_value 1)
+								;compare with originally computed residuals by doubling the half-sized ones that are stored in hyperparameters
+								(* 2 (get updated_estimated_residuals_map ["hyperparam_map" "featureResiduals" (current_index 2)]))
+							)
+						)
+				)
+
+				;if smallest_residual is 0, replace with cached min residual, otherwise output the computed value
+				(if (<= smallest_residual dbl_precision_epsilon)
+					(get !cachedFeatureMinResidualMap (current_index))
+					smallest_residual
+				)
+			))
+			;only for the specified action_features
+			(keep (get updated_estimated_residuals_map "residual_map") action_features)
+			(keep (get estimated_residuals_map "residual_map") action_features)
 		)
 	)
 
