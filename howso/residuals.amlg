@@ -132,22 +132,24 @@
 
 							;For unique features:
 							;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
-							;estimating the probability of having no incorrect predictions. We chose .5 assuming the Jeffreys prior approach
+							;estimating the probability of having no incorrect predictions. We chose .5 assuming the Jeffreys prior approach.
 							;ensure value is not larger than 0.5
 							(contains_index !uniqueNominalsSet (current_index))
 							(min 0.5 (/ 1 (+ 0.5 num_training_cases)) )
 
 							;else set nominal lower residual bound to:  gap / (num_cases + 1)
+							;multiply (current_value) by 2 because (current_value) is the 'half gap' value
 							(contains_index !nominalsMap (current_index))
 							(/ (* 2 (current_value)) (+ 1 num_training_cases))
 
-							;else set continuous lower residual bound to:  gap / ln(num_cases + 1)
+							;else set continuous lower residual bound to:  gap / ( 0.5 + num_cases)
+							;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
+							;estimating the probability of having no incorrect predictions.  We chose .5 assuming the Jeffreys prior approach.
 							(if (current_value)
-								(/ (* 2 (current_value)) (log (+ 1 num_training_cases)) )
+								;multiply (current_value) by 2 because (current_value) is the 'half gap' value
+								(/ (* 2 (current_value)) (+ 0.5 num_training_cases))
 
-								;if gap is 0, to prevent a 0 smallest residual,
-								;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
-								;estimating the probability of having no incorrect predictions.  We chose .5 assuming the Jeffreys prior approach.
+								;else gap is 0, prevent a 0 smallest residual
 								(/ 1 (+ 0.5 num_training_cases))
 							)
 						)
@@ -186,8 +188,12 @@
 			temp_residual_map
 				(map
 					(lambda
-						;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
-						(if (contains_index !nominalsMap (current_index))
+						;inactive features are bound to min residual
+						(if (contains_index !inactiveFeaturesMap (current_index))
+							(get !cachedFeatureMinResidualMap (current_index))
+
+							;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
+							(contains_index !nominalsMap (current_index))
 							(let
 								(assoc
 									;map of class -> count
@@ -557,6 +563,17 @@
 				)
 			)
 		)
+
+		;don't bother using inactive features in any way for residuals
+		(if (size !inactiveFeaturesMap)
+			(seq
+				(assign (assoc excluded_inactive_features_map (keep !inactiveFeaturesMap features) ))
+				(assign (assoc
+					features (filter (lambda (not (contains_index excluded_inactive_features_map (current_value)))) features)
+					context_features (filter (lambda (not (contains_index !inactiveFeaturesMap (current_value)))) context_features)
+				))
+			)
+		)
 	)
 
 	;Helper method, return returns a binomial distrubution value for (n, k, p):
@@ -649,6 +666,12 @@
 					)
 					(zip (range 0 (- num_features 1)))
 				)
+			all_features_map (zip features)
+			feature_deviations
+				(if custom_residuals_map
+					custom_residuals_map
+					(get hyperparam_map "featureDeviations")
+				)
 		))
 
 		;iterate over each case and accumulate residuals for all the feature(s)
@@ -662,7 +685,6 @@
 							;map of feature -> value for all the case values
 							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
 							time_series_filter_query (list)
-							feature_deviations (get hyperparam_map "featureDeviations")
 							feature_weights (get hyperparam_map "featureWeights")
 						)
 
@@ -763,6 +785,7 @@
 						(assign (assoc
 							removed_features_map
 								(map
+									#!ComputeFeatureDiff
 									(lambda (let
 										(assoc
 											feature (current_index 1)
@@ -784,38 +807,41 @@
 										(declare (assoc
 											candidate_cases_lists
 												(if (!= (null) local_cases_map)
-													(list
-														(indices local_cases_map)
-														(values local_cases_map)
-														;pull the feature value from these local cases
-														(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
+													(if (get feature_may_have_nulls_map feature)
+														(let
+															(assoc
+																filtered_local_cases_maps
+																	(compute_on_contained_entities [
+																		(query_in_entity_list (indices local_cases_map))
+																		(query_not_equals feature (null))
+																		(query_exists feature)
+																	])
+															)
+
+															(if (size filtered_local_cases_maps)
+																[
+																	(indices filtered_local_cases_maps)
+																	(unzip local_cases_map (indices filtered_local_cases_maps))
+																	(map (lambda (first (current_value))) (values filtered_local_cases_maps))
+																]
+
+																(list
+																	[(first (indices local_cases_map))]
+																	[(first (values local_cases_map))]
+																	[(null)]
+																)
+															)
+														)
+
+														(list
+															(indices local_cases_map)
+															(values local_cases_map)
+
+															(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
+														)
 													)
 												)
 										))
-										(if (get feature_may_have_nulls_map feature)
-											(let
-												(assoc
-													null_indices
-														(filter
-															(lambda (= (null) (get candidate_cases_lists (list 2 (current_value 1))) ) )
-															(indices (last candidate_cases_lists))
-														)
-												)
-												(if (size null_indices)
-													(assign (assoc
-														candidate_cases_lists
-															;only remove cases with null values if there are going to be some remaining
-															(if (< (size null_indices) (size (first candidate_cases_lists)))
-																(list
-																	(remove (first candidate_cases_lists) null_indices)
-																	(remove (get candidate_cases_lists 1) null_indices)
-																	(remove (last candidate_cases_lists) null_indices)
-																)
-															)
-													))
-												)
-											)
-										)
 
 										(call !InterpolateAndComputeDiffToCase)
 									))
@@ -823,12 +849,37 @@
 								)
 						))
 
+						(declare (assoc
+							with_features_map
+								(if estimating_residual_lower_bound
+									(map
+										(call !ComputeFeatureDiff)
+										(remove all_features_map (indices removed_features_map))
+									)
+								)
+						))
+
 						;return the computed value for this one feature as a list
 						(if target_residual_feature
 							(values removed_features_map)
 
-							;else output list of: residual value for each removed feature and null for each feature used as a context
-							(unzip removed_features_map features)
+							;output a list of pairs of [ with diff ] : if feature was used in contexts 'with' is (true)
+							;and (false) if it was removed from contexts, and 'diff' is the computed diff
+							(if estimating_residual_lower_bound
+								(map
+									(lambda [
+										(contains_index with_features_map (current_value 1) )
+										(if (contains_index with_features_map (current_value 1) )
+											(get with_features_map (current_value 1))
+											(get removed_features_map (current_value 1))
+										)
+									])
+									features
+								)
+
+								;else output list of: residual value for each removed feature and null for each feature used as a context
+								(unzip removed_features_map features)
+							)
 						)
 					))
 					case_ids
@@ -884,7 +935,12 @@
 									(lambda (size
 										(if leave_nulls_in_results
 											;need to have nulls removed for this part and they weren't if leave_nulls_in_results was true
-											(filter (current_value))
+											;(current_value) is a list of pairs of [with diff], this checks that the diff isn't null
+											(if estimating_residual_lower_bound
+												(filter (lambda (last (current_value))) (current_value) )
+												(filter (current_value))
+											)
+											;else this is already a filtered list of values
 											(current_value)
 										)
 									))
@@ -1267,8 +1323,12 @@
 									)
 							)
 
-							;output the tuple
-							[diff ordinal_diff]
+							;output only diff if computing mda for feature weights during analyze
+							;otherwise output the tuple for residual aggregation flows
+							(if computing_mda
+								diff
+								[diff ordinal_diff]
+							)
 						)
 
 						;else output it as-is
