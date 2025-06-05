@@ -51,7 +51,7 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
 (seq
     (load_entity "./howso.amlg" "howso")
     (assign_to_entities "howso" (assoc filepath "./"))
-    (set_entity_root_permission "howso" 1)
+    (set_entity_permissions "howso" {std_out_and_std_err (true) load (true) store (true) })
 
     (call_entity "howso" "set_feature_attributes" (assoc
         feature_attributes {"species" {assoc "type" "nominal"}}
