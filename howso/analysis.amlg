@@ -44,10 +44,15 @@
 			;	of deviations, when false will not use deviations. If unspecified, the better performing option will be selected.
 			use_deviations (null)
 			;{type "number" min 2}
-			;number of cases to use to approximate residuals
-			num_samples (null)
+			;number of cases to use to approximate deviations and residuals for both targetless and targeted flows.
+			;defaults to 1000 if unspecified.
+			num_deviation_samples (null)
 			;{type "number" min 2}
-			;number of cases to sample during analysis. only applies for k_folds = 1. defaults to 10000 for targetless and 1000 for targeted.
+			;number of samples to use to compute feature probabilities, only applies to targetless flow.
+			;defaults to 10000 if unspecified.
+			num_feature_probability_samples (null)
+			;{type "number" min 2}
+			;number of cases to sample used for grid search for the targeted flow. only applies for k_folds = 1. defaults to 1000.
 			num_analysis_samples (null)
 			;{type "number" min 2}
 			;number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
@@ -223,12 +228,13 @@
 					"bypass_calculate_feature_residuals" bypass_calculate_feature_residuals
 					"bypass_calculate_feature_weights" bypass_calculate_feature_weights
 					"use_deviations" use_deviations
-					"num_samples" num_samples
+					"num_deviation_samples" num_deviation_samples
 					"k_values" k_values
 					"p_values" p_values
 					"dt_values" dt_values
 					"targeted_model" targeted_model
 					"num_analysis_samples" num_analysis_samples
+					"num_feature_probability_samples" num_feature_probability_samples
 					"analysis_sub_model_size" analysis_sub_model_size
 					"use_case_weights" use_case_weights
 					"weight_feature" weight_feature
@@ -250,7 +256,8 @@
 				k_folds_by_indices k_folds_by_indices
 				targeted_model targeted_model
 				num_analysis_samples num_analysis_samples
-				residual_num_samples (if (> num_samples 0) num_samples 1000)
+				num_feature_probability_samples (if (> num_feature_probability_samples 0) num_feature_probability_samples 10000)
+				num_deviation_samples (if (> num_deviation_samples 0) num_deviation_samples 1000)
 				use_case_weights use_case_weights
 				weight_feature weight_feature
 				use_dynamic_deviations use_dynamic_deviations
@@ -282,7 +289,7 @@
 									(call !CalculateResidualsAndUpdateParameters (assoc
 										context_features all_features
 										;default the num_samples to 1000
-										num_samples (if (> num_samples 0) num_samples 1000)
+										num_samples (if (> num_deviation_samples 0) num_deviation_samples 1000)
 										robust_residuals (= "targetless" targeted_mode)
 										;use the specific action feature's hyperparameters
 										hyperparameter_feature (current_value 2)
@@ -355,8 +362,9 @@
 					targeted_model targeted_model
 					context_features context_features
 					action_feature (if (!= "targetless" targeted_model) (first action_features))
-					residual_num_samples residual_num_samples
+					num_deviation_samples num_deviation_samples
 					num_analysis_samples num_analysis_samples
+					num_feature_probability_samples num_feature_probability_samples
 				))
 
 				;else single_targeted but with multiple action features, all feature analyze iterations should be 'robust' until the last one which is 'full'
@@ -371,7 +379,7 @@
 							targeted_model "single_targeted"
 							context_features accumulated_context_features
 							action_feature action_feature
-							residual_num_samples residual_num_samples
+							num_deviation_samples num_deviation_samples
 						))
 
 						;accumulate the action feature to the contexts for the next iteration
@@ -393,7 +401,7 @@
 						targeted_model "single_targeted"
 						context_features filtered_context_features
 						action_feature action_feature
-						residual_num_samples residual_num_samples
+						num_deviation_samples num_deviation_samples
 					))
 				))
 				action_features
@@ -541,7 +549,7 @@
 	; context_features: list of context features to analyze for
 	; action_features: list of action features to analyze for
 	; num_analysis_samples: optional. number of cases to sample during analysis. only applies for k_folds = 1
-	; residual_num_samples: optional. initial number of samples to use for computing residuals
+	; num_deviation_samples: optional. initial number of samples to use for computing residuals
 	; derived_auto_analyzed: optional, if true, will set the 'derivedAutoAnalyzed' parameter to true in the hyperparameter set,
 	;			denoting that these parameters were auto-analyzed during derive features flow.
 	#!AnalyzeHyperparameters
@@ -551,7 +559,8 @@
 			context_features (list)
 			action_feature (null)
 			num_analysis_samples (null)
-			residual_num_samples 1000
+			num_deviation_samples 1000
+			num_feature_probability_samples 10000
 		)
 
 		(declare (assoc
@@ -986,12 +995,8 @@
 
 		;for k_folds = 1, set the default num_analysis_samples to be 1000 for targeted flows
 		(if (and (= 1 k_folds) (= (null) num_analysis_samples ))
-			(assign (assoc
-				num_analysis_samples
-					(if (= "targetless" targeted_model) 10000 1000)
-			))
+			(assign (assoc num_analysis_samples 1000 ))
 		)
-
 
 		;pre-compute and cache all the expected feature values and nominal probabilities so that they don't have to be
 		;lazy computed later during residual computations
@@ -1032,7 +1037,6 @@
 					dt_values dt_values
 					k_folds_by_indices k_folds_by_indices
 					num_analysis_samples num_analysis_samples
-					targetless (= targeted_model "targetless")
 					baseline_hyperparameter_map baseline_hyperparameter_map
 				))
 		))
@@ -1055,7 +1059,6 @@
 	; p_param_categorical_mean : optional parameter to specify the lp space for calculating the mean of Mean Absolute Errors for categorical features
 	; p_param_accuracy_mean : optional parameter to specify the lp space for calculating the mean of Mean Absolute Errors among all features
 	; k_folds_by_indices : optional flag, if true will do k_folds ordered by session id indices
-	; targetless : optional flag, if true will randomly select a context feature as an action feature for each case during grid search
 	; num_analysis_samples : optional. number of cases to sample during analysis. only applies for k_folds = 1
 	; baseline_hyperparameter_map : the base hyperparameters to use for computation
 	#!ComputeResidualsAcrossParametersAndSelectOptimal
@@ -1073,7 +1076,6 @@
 			p_param_categorical_mean 1
 			p_param_accuracy_mean 0.2
 			k_folds_by_indices (false)
-			targetless (false)
 			num_analysis_samples (null)
 			baseline_hyperparameter_map (assoc)
 		)
@@ -1093,59 +1095,41 @@
 
 		(if (= (null) k_values)
 			(assign (assoc
-				k_values
-					(if (= targeted_model "targetless")
-						;20 is the maximum cutoff for a total marginal probability of ~95% using dynamic K
-						[ [ (exp -3) 5 20] ]
-
-						;grid search fibonacci sequence for single targeted
-						[3 5 8 13 21 34 55 89 144]
-					)
+				;grid search fibonacci sequence for single targeted
+				k_values [3 5 8 13 21 34 55 89 144]
 			))
 		)
 		(if (= (null) p_values)
 			(assign (assoc
-				p_values
-					(if (= targeted_model "targetless")
-						[1]
-
-						[0.1 0.5 1 2]
-					)
+				p_values [0.1 0.5 1 2]
 			))
 		)
 
 		;if dt is null, default it to -1, if it's empty list set it to the recommended default search list
 		(if (= (null) dt_values )
 			(assign (assoc
-				dt_values
-					(if (= targeted_model "targetless")
-						["surprisal_to_prob"]
-
-						[-1]
-					)
+				dt_values [-1]
 			))
 
 			(= (list) dt_values)
 			(assign (assoc dt_values (list -8 -2 -1 -0.5 0)))
 		)
 
-		(if (!= targeted_model "targetless")
-			;if the dataset is smaller than the max K value, reduce the possible k_values search
-			(let
-				(assoc smallest_k (first (sort k_values)) )
-				(if (<= num_cases (apply "max" k_values))
-					(assign (assoc k_values (filter (lambda (< (current_value) num_cases)) k_values)))
-				)
-				;if there are no valid k_values because they have all been filtered out, use the smallest one
-				(if (= (list) k_values)
-					(assign (assoc k_values (list smallest_k)))
-				)
-
-				;ensure the k_values are sorted largest to smallest,(ie there's a knn cache internally, when the largest K value is processed and cached
-				;subsequent calls with smaller Ks will be fast)
-				(assign (assoc k_values (sort (false) k_values)))
-			)
+		;if the dataset is smaller than the max K value, reduce the possible k_values search
+		(declare (assoc
+			smallest_k (first (sort k_values))
+		))
+		(if (<= num_cases (apply "max" k_values))
+			(assign (assoc k_values (filter (lambda (< (current_value) num_cases)) k_values)))
 		)
+		;if there are no valid k_values because they have all been filtered out, use the smallest one
+		(if (= (list) k_values)
+			(assign (assoc k_values (list smallest_k)))
+		)
+
+		;ensure the k_values are sorted largest to smallest,(ie there's a knn cache internally, when the largest K value is processed and cached
+		;subsequent calls with smaller Ks will be fast)
+		(assign (assoc k_values (sort (false) k_values)))
 
 		(if (not use_k_values)
 			(assign (assoc k_values (list (get baseline_hyperparameter_map "k"))))
@@ -1170,83 +1154,7 @@
 			best_accuracy_distance .infinity
 			best_params_key (null)
 			output_map (assoc)
-			;list of features to match each case, specific for targetless flow
-			case_feature_list (list)
 		))
-
-		;targetless flow
-		(if targetless
-			(seq
-				;only consider active features that have > 1 non-null value and aren't 'unique'
-				;can't compute error for features with only unique values or features with < 2 values
-				(assign (assoc
-					action_features
-						(filter
-							(lambda (and
-								(not (contains_index !inactiveFeaturesMap (current_value)))
-								(not (contains_index !uniqueNominalsSet (current_value)))
-								(>
-									;count of all the non-null cases
-									(size (contained_entities [ (query_not_equals (current_value 1) (null)) ] ))
-									1
-								)
-							))
-							;action_features are empty for targetless, select them from the set of context features
-							context_features
-						)
-				))
-
-				(if (size action_features)
-					(seq
-						;select features at random, num_analysis_samples worth (or num_cases/2 * sqrt(num_features) for smaller datasets)
-						;to be more sensitive to the number for features instead of the number of cases for smaller datasets
-						(assign (assoc
-							case_feature_list
-								(range
-									(lambda (rand action_features))
-									1
-									(if user_specified_num_samples
-										num_analysis_samples
-
-										(max
-											;statistical minimum for tiny datasets
-											30
-											(min
-												(* 0.5 num_cases (sqrt (size action_features)))
-												num_analysis_samples
-											)
-										)
-									)
-									1
-								)
-							valid_weight_feature (and use_case_weights (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight")) )
-						))
-
-						;pick a case at random for every randomly selected feature with a non-null value
-						(assign (assoc
-							sample_case_ids
-								(map
-									(lambda
-										(first
-											(contained_entities (list
-												(query_not_equals (current_value 1) (null))
-												(query_sample 1 (if valid_weight_feature weight_feature))
-											))
-										)
-									)
-									case_feature_list
-								)
-						))
-					)
-
-					;else dataset has no valid features to test
-					(assign (assoc
-						sample_case_ids (list)
-						case_feature_list (list)
-					))
-				)
-			)
-		)
 
 		;grid search over the P, K and DT values
 		;
@@ -1339,8 +1247,6 @@
 	;output model Mean Absolute Error (MAE) for the provided baseline_hyperparameter_map
 	#!ComputeResidualForParameters
 	(seq
-		(if targetless (assign (assoc action_features context_features)))
-
 		(declare (assoc
 			sample_case_ids
 				(if (!= (null) num_analysis_samples)
