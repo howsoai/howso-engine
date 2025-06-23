@@ -300,15 +300,21 @@
 
 				;action feature is not also a context feature
 				;output as a list
-				(assign (assoc
-					react_action_values
-						(list
+				(let
+					(assoc
+						reaction_map
+							;map of action_value, categorical_action_probabilities, and influence_weights_map
 							(call !GenerateReaction (assoc
 								allow_nulls allow_nulls
 								custom_extra_filtering_queries filtering_queries
 							))
-						)
-				))
+					)
+					(assign (assoc
+						react_action_values [(get reaction_map "action_value")]
+						categorical_action_probabilities_map (get reaction_map "categorical_action_probabilities_map")
+						influence_weights_map (get reaction_map "influence_weights_map")
+					))
+				)
 			)
 
 			;else no action features, ensure correct case is ignored if applicable (eg, explaining an existing case)
@@ -325,6 +331,7 @@
 					context_features_param context_features
 					context_values_param context_values
 					action_value ""
+					reaction_map (null)
 					;TODO: 1998 research react in order of feature conviction? default to react in order of action_features
 					ordered_action_features (filter (lambda (not (contains_value context_features (current_value)))) action_features)
 					action_feature ""
@@ -375,7 +382,7 @@
 					))
 
 					(assign (assoc
-						action_value
+						reaction_map
 							(call !GenerateReaction (assoc
 								allow_nulls allow_nulls
 								context_features context_features_param
@@ -383,6 +390,10 @@
 								action_features (list action_feature)
 								custom_extra_filtering_queries filtering_queries
 							))
+					))
+
+					(assign (assoc
+						action_value (get reaction_map "action_value")
 					))
 
 					(if (contains_index feature_post_process_code_map action_feature)
@@ -498,6 +509,7 @@
 	; candidate_case_values : a list of action feature values for each of the candidate cases
 	; action_feature: the action feature
 	; allow_nulls : flag, if set to true will allow interpolate to return null values if there are nulls in the local model for the action features
+	;returns an assoc with action_value, categorical_action_probabilities_map, and influence_weights_map
 	#!InterpolateActionValues
 	(declare
 		(assoc
@@ -612,14 +624,6 @@
 						)
 						(declare (assoc half_cycle_value (/ cycle_length 2)))
 
-						(if output_influence_weights
-							(call !AccumulateInfluenceWeights (assoc
-								case_ids candidate_case_ids
-								;scaled weights for each neighbor
-								weights (map (lambda (/ (current_value) total_weight)) candidate_case_weights)
-							))
-						)
-
 						;calculate the sum of all the cyclic weights
 						(declare (assoc
 							weighted_neighbor_values
@@ -653,30 +657,43 @@
 						;if sum has gone past the min value, increase by the length of cycle, i.e., -10 degrees becomes 350
 						(if (< sum 0) (accum (assoc sum cycle_length)))
 
-						;output the weighted sum
-						sum
+						{
+							;output the weighted sum
+							"action_value" sum
+							"influence_weights_map"
+								(if output_influence_weights
+									(call !AccumulateInfluenceWeights (assoc
+										case_ids candidate_case_ids
+										;scaled weights for each neighbor
+										weights (map (lambda (/ (current_value) total_weight)) candidate_case_weights)
+									))
+								)
+						}
 					)
 
 					;else: regular continuous, retrieve the value for each neighbor,  multiply it by the weight for that case
 					;then sum the weight-modified features and divide by the sum of the total weight
-					(seq
-						(if output_influence_weights
-							(call !AccumulateInfluenceWeights (assoc
-								case_ids candidate_case_ids
-								weights (map (lambda (/ (current_value) total_weight)) candidate_case_weights)
-							))
-						)
+					{
+						;output the weighted sum
+						"action_value"
+							(if (contains_index !editDistanceFeatureTypesMap action_feature)
+								(call !CombineCode (assoc
+									sources candidate_case_values
+									weights candidate_case_weights
+								))
 
-						(if (contains_index !editDistanceFeatureTypesMap action_feature)
-							(call !CombineCode (assoc
-								sources candidate_case_values
-								weights candidate_case_weights
-							))
-
-							;divide the dot product by the total weight
-							(/ (dot_product candidate_case_values candidate_case_weights) total_weight)
-						)
-					)
+								;divide the dot product by the total weight
+								(/ (dot_product candidate_case_values candidate_case_weights) total_weight)
+							)
+						"influence_weights_map"
+							(if output_influence_weights
+								(call !AccumulateInfluenceWeights (assoc
+									case_ids candidate_case_ids
+									;scaled weights for each neighbor
+									weights (map (lambda (/ (current_value) total_weight)) candidate_case_weights)
+								))
+							)
+					}
 				)
 			)
 
@@ -694,12 +711,6 @@
 							candidate_case_weights
 						)
 				)
-				(if output_influence_weights
-					(call !AccumulateInfluenceWeights  (assoc
-						case_ids candidate_case_ids
-						weights candidate_case_weights
-					))
-				)
 
 				(if output_categorical_action_probabilities
 					(call !AccumulateCategoricalActionProbabilties (assoc
@@ -708,14 +719,32 @@
 					))
 				)
 
-				(if (contains_index !numericNominalFeaturesMap action_feature)
-					(+ (first (index_max categorical_value_weights_map)))
+				{
+					"action_value"
+						(if (contains_index !numericNominalFeaturesMap action_feature)
+							(+ (first (index_max categorical_value_weights_map)))
 
-					(contains_index !ordinalNumericFeaturesSet action_feature)
-					(+ (first (index_max categorical_value_weights_map)))
+							(contains_index !ordinalNumericFeaturesSet action_feature)
+							(+ (first (index_max categorical_value_weights_map)))
 
-					(first (index_max categorical_value_weights_map))
-				)
+							(first (index_max categorical_value_weights_map))
+						)
+					"influence_weights_map"
+						(if output_influence_weights
+							(call !AccumulateInfluenceWeights (assoc
+								case_ids candidate_case_ids
+								;scaled weights for each neighbor
+								weights (map (lambda (/ (current_value) total_weight)) candidate_case_weights)
+							))
+						)
+					"categorical_action_probabilities_map"
+						(if output_categorical_action_probabilities
+							(call !AccumulateCategoricalActionProbabilties (assoc
+								action_feature action_feature
+								categorical_value_weights_map categorical_value_weights_map
+							))
+						)
+				}
 			)
 		)
 	)
