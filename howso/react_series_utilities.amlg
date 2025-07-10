@@ -389,6 +389,7 @@
 			original_derived_context_features derived_context_features
 			original_action_features action_features
 			previous_row_failed (false)
+			non_derived_post_process_features (null)
 			;find and store the largest referenced lag value among derived_context_features
 			largest_max_row_lag
 				;or with 0 to prevent null
@@ -1631,30 +1632,59 @@
 		;overwrite the values for the action features in the current case map now that they have values
 		(accum (assoc current_case_map (zip action_features (get react_output "action_values")) ))
 
-		(if (size (keep feature_post_process_code_map action_features))
-			;if any of the action features have a custom post_process, update their values using them
-			(accum (assoc
-				current_case_map
-					(map
-						(lambda
-							(get_value
-								(call_sandboxed (current_value) (assoc
-									series_data
-										;need to use series_data with the updated feature value
-										(append
-											(trunc series_data)
-											[(unzip current_case_map features)]
-										)
-									series_row_index last_series_index
-									feature_index_map feature_index_map
-									!featureDateTimeMap !featureDateTimeMap
-									!ConvertDateToEpoch !ConvertDateToEpoch
-								) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
-							)
+		;there may be features than need post processing
+		(if (size feature_post_process_code_map)
+			(let
+				(assoc
+					non_derived_action_features
+						;keep only those action_features that have not been derived
+						(filter
+							(lambda (not (contains_value derived_action_features (current_value))) )
+							action_features
 						)
-						(keep feature_post_process_code_map action_features)
-					)
-			))
+				)
+
+				;get the list of non derived features that can be post processed here because the features they need
+				;for post processing already have values and do not need to be derived yet
+				;e.g., if a feature's post processing needs the ".value_lag_1" feature, it can be post processed here
+				;but not if it needs "value" because "value" needs to be derived below.
+				(assign (assoc
+					non_derived_post_process_features
+						(indices (filter
+							(lambda
+								;keep only features whose needed features do not need to be derived below
+								(= 0 (size (remove (current_value) non_derived_action_features)))
+							)
+							post_process_needed_features_map
+						))
+				))
+
+				(if (size (keep feature_post_process_code_map non_derived_post_process_features))
+					;if any of the action features have a custom post_process, update their values using them
+					(accum (assoc
+						current_case_map
+							(map
+								(lambda
+									(get_value
+										(call_sandboxed (current_value) (assoc
+											series_data
+												;need to use series_data with the updated feature value
+												(append
+													(trunc series_data)
+													[(unzip current_case_map features)]
+												)
+											series_row_index last_series_index
+											feature_index_map feature_index_map
+											!featureDateTimeMap !featureDateTimeMap
+											!ConvertDateToEpoch !ConvertDateToEpoch
+										) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+									)
+								)
+								(keep feature_post_process_code_map non_derived_post_process_features)
+							)
+					))
+				)
+			)
 		)
 
 		;overwrite the last row in series data with the values from the updated current case
@@ -1704,6 +1734,53 @@
 						case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
 						done (true)
 					))
+
+					;else derivation succeeded, post process the derived action features here if needed
+					(size feature_post_process_code_map)
+					(let
+						(assoc
+							derived_post_process_features
+								;keep all the remaining features that can be post processed now that action features are derived
+								(filter
+									(lambda (not (contains_value non_derived_post_process_features (current_value))))
+									action_features
+								)
+
+						)
+
+						;post process any remaining features that need these avalailable derived features
+						(if (size (keep feature_post_process_code_map derived_post_process_features))
+							(let
+								(assoc
+									post_processed_map
+										(map
+											(lambda
+												(get_value
+													(call_sandboxed (current_value) (assoc
+														series_data series_data
+														series_row_index last_series_index
+														feature_index_map feature_index_map
+														!featureDateTimeMap !featureDateTimeMap
+														!ConvertDateToEpoch !ConvertDateToEpoch
+													) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+												)
+											)
+											(keep feature_post_process_code_map derived_post_process_features)
+										)
+								)
+								(assign (assoc
+									series_data
+										(append
+											(trunc series_data)
+											[(unzip
+												(append (zip features (last series_data)) post_processed_map)
+												features
+											)]
+										)
+								))
+							)
+						)
+					)
 				)
 			)
 		)
