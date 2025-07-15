@@ -1402,6 +1402,56 @@
 				)
 		)
 
+		;if the number of context_features is less than all the specified features without the action_feature
+		;and there are enough of them (i.e. more than one context feature) to need redistribution, do it here
+		;this code is inlined here for performance, matching the code in !RedistributeFeatureWeights
+		(if (and
+				(!= (null) (get hyperparam_map "featureMdaMap"))
+				(< (size context_features) (- (size feature_deviations) 1))
+				(> (size context_features) 1)
+			)
+			(assign (assoc
+				feature_weights
+					(map
+						(lambda
+							(+ (first (current_value)) (or (last (current_value)) 0)  )
+						)
+						feature_weights
+						;add up all the values for each feature, resulting in one assoc of feature weights to distribute
+						(reduce
+							(lambda
+								(map
+									(lambda (+ (first (current_value)) (last (current_value))))
+									(previous_result)
+									(current_value)
+								)
+							)
+							;list of normalized weight assocs, i.e. if 'A' is responsible for 30% of weight to predict 'target' but isn't in the context
+							;while 'B' has 25% ,'C' has 50% and 'target' has 25% to predict 'A',  ignoring 'target', we normalize B's 25% and C's 50%,
+							;to distribute the original 30%  as { "B" 0.1 "C" 0.2}.  This outputs a list of such assocs that are added up in the lambda above.
+							(map
+								(lambda (let
+									(assoc
+										removed_weight_map
+											(keep
+												(get hyperparam_map ["featureMdaMap" (current_value 2)])
+												context_features
+											)
+										remove_feature_weight (get hyperparam_map ["featureMdaMap" (first action_features) (current_value 2)] )
+									)
+									(declare (assoc total (apply "+" (values removed_weight_map)) ))
+
+									;normalized weights for the remaining context features multipled by the feature weight amount they are contributing
+									(map (lambda (* (/ (current_value) total) remove_feature_weight)) removed_weight_map)
+								))
+								;remaining features whose weights should be redistributed (features that are not in context_features or action_features)
+								(indices (remove feature_weights (append context_features action_features)))
+							)
+						)
+					)
+			))
+		)
+
 		;for all time series where the time feature is a context,
 		;filter out future data based on whether the time feature is universal
 		(if !tsTimeFeature
