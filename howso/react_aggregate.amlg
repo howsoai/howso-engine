@@ -55,25 +55,20 @@
 			goal_dependent_features (list)
 			;{type "list" values "string"}
 			;full path for hyperparameters to use for computation.
-			;	If specified for any residual computations, takes precendence over action_feature parameter.
+			;	If specified for any residual computations, takes precendence over prediction_stats_action_feature and feature_influences_action_feature
+			;	parameters for hyperparameter selection.
 			hyperparameter_param_path (null)
 			;{type "number" min 0}
 			;if specified will calculate only on a sub model of the specified size from the full model.
 			;	Applicable only to models > 1000 cases.
 			sub_model_size (null)
 			;{type "string"}
-			;target feature for which to do feature influences computations (accuracy contributions or prediction contributions). If "prediction_stats_action_feature" and "feature_influences_action_feature"
-			;	are not provided, they will default to this value.
-			action_feature (null)
-			;{type "string"}
-			;When calculating residuals and prediction stats, uses this target features's hyperparameters. The trainee must have been analyzed
-			;   with this feature as the action feature first. If both "prediction_stats_action_feature" and "action_feature" are not provided,
-			;	or "action_feature" is provided and this value is an empty string "", residuals and prediction stats uses "targetless" hyperparameters.
-			;	If this value is not specified but "action_feature" is provided, this value will default to the value of "action_feature".
+			;When calculating residuals and prediction stats, uses this target features's hyperparameters. The trainee should have been analyzed
+			;   with this feature as the action feature first. If "prediction_stats_action_feature" is not provided, residuals and prediction
+			;	stats uses "targetless" hyperparameters.
 			prediction_stats_action_feature (null)
 			;{type "string"}
 			;When computing feature influences such as prediction contributions or accuracy contributions, use this feature as the action feature.
-			;	If not provided, will default to the "action_feature" if provided.
 			feature_influences_action_feature (null)
 			;{type "any"}
 			;When specified and requesting prediction stats or full residuals, forecasts will be made this length and their accuracy will be evaluated.
@@ -122,13 +117,13 @@
 			;		feature_robust_residuals: optional, none/true/false. For each context_feature, computes, caches, and returns the same stats as residuals but using the robust
 			;				(power set/permutations) set of all other context_features to predict the feature. Uses robust computation.
 			;		feature_full_prediction_contributions: optional, none/true/false. For each context_feature, use the full set of all other context_features to compute the
-			;				mean absolute delta between prediction of action_feature with and without the context_feature in the model. Uses full computation.
+			;				mean absolute delta between prediction of feature_influences_action_feature with and without the context_feature in the model. Uses full computation.
 			;		feature_robust_prediction_contributions: optional, none/true/false. For each context_feature, use the robust (power set/permutation) set of all other context_features
-			;				to compute the mean absolute delta between prediction of action_feature with and without the context_feature in the model. Uses robust computation.
+			;				to compute the mean absolute delta between prediction of feature_influences_action_feature with and without the context_feature in the model. Uses robust computation.
 			;				Uses robust computation.
 			;		feature_deviations: optional, none/true/false. if true will compute feature deviations for each feature in action_features. The feature deviation is the mean absolute
 			;				error of predicting the feature using all the context features as well as value of the feature being predicted as the context for each prediction.
-			;		feature_full_accuracy_contributions: optional, none/true/false. if true will compute Accuracy Contributions for each context feature at predicting action_feature.
+			;		feature_full_accuracy_contributions: optional, none/true/false. if true will compute Accuracy Contributions for each context feature at predicting feature_influences_action_feature.
 			;				Drop each feature and use the full set of remaining context features for each prediction. Uses full computation.
 			;		feature_full_accuracy_contributions_permutation: optional, none/true/false. Compute Accuracy Contributions by scrambling each feature and using the full set of remaining context features
 			;				for each prediction.  Uses full computation.
@@ -181,8 +176,9 @@
 			;	)
 			details (null)
 		)
-
 		(call !ValidateParameters)
+		(call !ValidateFeatures)
+		(call !ValidateGoalFeaturesMap)
 
 		(declare (assoc
 			output (assoc)
@@ -202,24 +198,12 @@
 			)
 		)
 
-		;if there is an action_feature, default the other types of action features if they are null
-		(if action_feature
-			(seq
-				(if (= (null) feature_influences_action_feature)
-					(assign (assoc feature_influences_action_feature action_feature))
-				)
-				(if (= (null) prediction_stats_action_feature)
-					(assign (assoc prediction_stats_action_feature action_feature))
-				)
-			)
-		)
-
 		;use "targetless" hyperparameters by setting prediction_stats_action_feature to null
 		(if (= "" prediction_stats_action_feature)
 			(assign (assoc prediction_stats_action_feature (null) ))
 		)
 
-		;action_feature must be specified if doing any influences
+		;feature_influences_action_feature must be specified if doing any influences
 		(if (and
 				(= (null) feature_influences_action_feature)
 				(contains_value
@@ -237,7 +221,7 @@
 				)
 			)
 			(conclude
-				(call !Return (assoc errors (list "action_feature must be specified when computing Accuracy Contributions or Prediction Contributions.")))
+				(call !Return (assoc errors (list "`feature_influences_action_feature` must be specified when computing Accuracy Contributions or Prediction Contributions.")))
 			)
 		)
 
@@ -332,6 +316,35 @@
 			)
 		)
 
+		(if (or
+				(size (get details "context_condition"))
+				(size (get details "action_condition"))
+			)
+			(let
+				(assoc
+					condition_errors
+						(filter (map
+							(lambda
+								(call !ValidateConditionMap (assoc
+									given_map (last (current_value 1))
+									parameter_name (first (current_value 1))
+								))
+							)
+							[
+								["context_condition" (get details "context_condition")]
+								["action_condition" (get details "action_condition")]
+							]
+						))
+				)
+
+				(if (size condition_errors)
+					(conclude
+						(call !Return (assoc errors condition_errors))
+					)
+				)
+			)
+		)
+
 		(if (= 0 (size context_features))
 			(assign (assoc context_features !trainedFeatures ))
 		)
@@ -381,7 +394,7 @@
 							(not (contains_index !derivedFeaturesMap (current_value))) ;not TS-model features
 							(get !featureAttributes [(current_value 1) "derived_feature_code"])
 						))
-						(values (append action_features action_feature feature_influences_action_feature) (true))
+						(values (append action_features feature_influences_action_feature) (true))
 					)
 			))
 		)
@@ -428,10 +441,10 @@
 				(assoc
 					num_cases_selected
 						(size
-							(contained_entities (append
+							(contained_entities
 								(query_exists !internalLabelSession)
 								action_condition_filter_query
-							))
+							)
 						)
 				)
 
@@ -453,10 +466,10 @@
 				(assoc
 					num_cases_selected
 						(size
-							(contained_entities (append
+							(contained_entities
 								(query_exists !internalLabelSession)
 								context_condition_filter_query
-							))
+							)
 						)
 				)
 
@@ -638,13 +651,13 @@
 
 				(if (<
 						forecast_window_length
-						(compute_on_contained_entities (list
+						(compute_on_contained_entities
 							(query_quantile
 								(concat "." !tsTimeFeature "_delta_1")
 								0.5
 								(if valid_weight_feature weight_feature)
 							)
-						))
+						)
 					)
 					(accum (assoc
 						warnings
@@ -1077,11 +1090,11 @@
 							latest_valid_time_for_series
 								(-
 									(first
-										(first (compute_on_contained_entities (append
+										(first (compute_on_contained_entities
 											id_matching_queries
 											(query_max !tsTimeFeature 1)
 											(query_exists !tsTimeFeature)
-										)))
+										))
 									)
 									forecast_window_length
 								)
@@ -1089,12 +1102,12 @@
 
 						;randomly sample the amount of cases needed from the series that have
 						;enough "time" trained remaining in the series
-						(contained_entities (append
+						(contained_entities
 							id_matching_queries
 							(if action_condition_filter_query action_condition_filter_query [])
 							(query_less_or_equal_to !tsTimeFeature latest_valid_time_for_series)
 							(query_sample cases_to_sample (if valid_weight_feature weight_feature (null)))
-						))
+						)
 					)
 				)
 				series_ids_counts

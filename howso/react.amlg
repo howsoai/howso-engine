@@ -23,7 +23,10 @@
 			action_values (null)
 			;{type "list" values "string"}
 			;list of context features whose values should be computed from the provided contexts in the specified order.
-			;	Must be different than context_features.
+			;	Must be different than context_features. May include similarity conviction and distance contribution features,
+			;	however, if either of those features are requested, then `react_into_features` must be called first with those features
+			; 	selected. For those features, the name must match the name specified when calling `react_into_features`. If not specified
+			;	in `react_into_features`, then they default to "similarity_conviction" and "distance_contribution".
 			derived_context_features (list)
 			;{type "list" values "string"}
 			;list of action features whose values should be computed from the resulting action prior to output, in the specified
@@ -345,6 +348,7 @@
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
+		(call !ValidateGoalFeaturesMap)
 
 		;determine number of reacts to batch
 		(declare (assoc
@@ -661,7 +665,7 @@
 			;list of feature names that will be made available during the execution of post_process feature attributes
 			post_process_features (list)
 			;{type "list"}
-			;list of values corresponding to post_process_features that will be made available during the execution fo post_process feature attributes
+			;list of values corresponding to post_process_features that will be made available during the execution of post_process feature attributes
 			post_process_values (list)
 			;{type "list" values "string"}
 			;list of additional features to return with audit data
@@ -776,12 +780,11 @@
 			; 		null: the minimum local distance
 			new_case_threshold "min"
 		)
-
 		(call !ValidateParameters)
+		(call !ValidateFeatures)
+		(call !ValidateGoalFeaturesMap)
 
 		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
-
-		(call !ValidateFeatures)
 
 		;if both action_features and derived_action_features are specified,
 		;ensure that derived_action_features are a subset of action_features, then separate the two into distinct lists
@@ -1022,13 +1025,35 @@
 		)
 
 
+		(declare (assoc
+			invalid_derived_context_features
+				(indices (remove (zip derived_context_features) (indices !featureAttributes)))
+		))
+
 		;derive context features prior to react and append the computed values to context values
 		(if (size derived_context_features)
 			(seq
+				; Extract and filter out any invalid context features who do not currently exist in the feature attributes.
+				(assign (assoc
+					invalid_derived_context_features
+						(filter
+							(lambda (not (contains_value (indices !featureAttributes) (current_value))) )
+							derived_context_features
+						)
+				))
+				(if (size invalid_derived_context_features)
+					(assign (assoc
+						derived_context_features
+							(filter
+								(lambda (not (contains_value invalid_derived_context_features (current_value)) ))
+								derived_context_features
+							)
+					))
+				)
 				(assign (assoc
 					context_values
 						(append context_values
-							(call !ComputeFeatureValuesFromCode (assoc
+							(call !ComputeDerivedFeatureValues (assoc
 								derived_features derived_context_features
 								feature_values_map (zip context_features context_values)
 							))
@@ -1263,7 +1288,7 @@
 				(if (size derived_action_features)
 					;append the derived action values to the end of the predicted action_values
 					(accum "generated_case" (list "action_values")
-						(call !ComputeFeatureValuesFromCode (assoc
+						(call !ComputeDerivedFeatureValues (assoc
 							derived_features derived_action_features
 							feature_values_map
 								;append generated actions to contexts, clobbering the contexts to prevent duplicates
@@ -1308,7 +1333,7 @@
 				(if (size derived_action_features)
 					;append the derived action values to the end of the predicted action_values
 					(accum "output_case" (list "action_values")
-						(call !ComputeFeatureValuesFromCode (assoc
+						(call !ComputeDerivedFeatureValues (assoc
 							derived_features derived_action_features
 							feature_values_map
 								;append reacted actions to contexts, clobbering the contexts to prevent duplicates
@@ -1387,7 +1412,7 @@
 			feature_weights
 				(if (= (null) (get hyperparam_map "featureMdaMap"))
 					(get hyperparam_map "featureWeights")
-					(get hyperparam_map ["featureMdaMap" (first action_features)])
+					(get hyperparam_map "featureMdaMap")
 				)
 
 			;check if action_feature has nulls, if not, the no need to filter them out since they don't exist
@@ -1400,56 +1425,6 @@
 					;else nulls are allowed
 					(false)
 				)
-		)
-
-		;if the number of context_features is less than all the specified features without the action_feature
-		;and there are enough of them (i.e. more than one context feature) to need redistribution, do it here
-		;this code is inlined here for performance, matching the code in !RedistributeFeatureWeights
-		(if (and
-				(!= (null) (get hyperparam_map "featureMdaMap"))
-				(< (size context_features) (- (size feature_deviations) 1))
-				(> (size context_features) 1)
-			)
-			(assign (assoc
-				feature_weights
-					(map
-						(lambda
-							(+ (first (current_value)) (or (last (current_value)) 0)  )
-						)
-						feature_weights
-						;add up all the values for each feature, resulting in one assoc of feature weights to distribute
-						(reduce
-							(lambda
-								(map
-									(lambda (+ (first (current_value)) (last (current_value))))
-									(previous_result)
-									(current_value)
-								)
-							)
-							;list of normalized weight assocs, i.e. if 'A' is responsible for 30% of weight to predict 'target' but isn't in the context
-							;while 'B' has 25% ,'C' has 50% and 'target' has 25% to predict 'A',  ignoring 'target', we normalize B's 25% and C's 50%,
-							;to distribute the original 30%  as { "B" 0.1 "C" 0.2}.  This outputs a list of such assocs that are added up in the lambda above.
-							(map
-								(lambda (let
-									(assoc
-										removed_weight_map
-											(keep
-												(get hyperparam_map ["featureMdaMap" (current_value 2)])
-												context_features
-											)
-										remove_feature_weight (get hyperparam_map ["featureMdaMap" (first action_features) (current_value 2)] )
-									)
-									(declare (assoc total (apply "+" (values removed_weight_map)) ))
-
-									;normalized weights for the remaining context features multipled by the feature weight amount they are contributing
-									(map (lambda (* (/ (current_value) total) remove_feature_weight)) removed_weight_map)
-								))
-								;remaining features whose weights should be redistributed (features that are not in context_features or action_features)
-								(indices (remove feature_weights (append context_features action_features)))
-							)
-						)
-					)
-			))
 		)
 
 		;for all time series where the time feature is a context,
@@ -1490,41 +1465,40 @@
 			local_data_cases_tuple
 				#!ReactionQuery
 				(compute_on_contained_entities
-					(append
-						not_null_features_queries
-						;if ignoring null action feature, query for cases where action feature is not null
-						(if ignore_null_action_feature
-							(query_not_equals (first action_features) (null))
-							(list)
+					not_null_features_queries
+					;if ignoring null action feature, query for cases where action feature is not null
+					(if ignore_null_action_feature
+						(query_not_equals (first action_features) (null))
+						(null)
+					)
+					dependent_queries_list
+					(if (size custom_extra_filtering_queries)
+						custom_extra_filtering_queries
+						(null)
+					)
+					(if ignore_case
+						(if focal_case
+							(query_not_in_entity_list (list ignore_case focal_case))
+							(query_not_in_entity_list (list ignore_case))
 						)
-						dependent_queries_list
-						(if (size custom_extra_filtering_queries)
-							custom_extra_filtering_queries
-							(list)
-						)
-						(if ignore_case
-							(if focal_case
-								(query_not_in_entity_list (list ignore_case focal_case))
-								(query_not_in_entity_list (list ignore_case))
-							)
-							(list)
-						)
-						(query_nearest_generalized_distance
-							k_parameter
-							context_features
-							context_values
-							feature_weights
-							!queryDistanceTypeMap
-							(get hyperparam_map "featureDomainAttributes")
-							feature_deviations
-							(get hyperparam_map "p")
-							(get hyperparam_map "dt")
-							(if valid_weight_feature weight_feature (null))
-							tie_break_random_seed
-							(null) ;radius
-							!numericalPrecision
-							(first action_features)
-						)
+						(null)
+					)
+					(query_nearest_generalized_distance
+						k_parameter
+						context_features
+						context_values
+						(get hyperparam_map "p")
+						feature_weights
+						!queryDistanceTypeMap
+						(get hyperparam_map "featureDomainAttributes")
+						feature_deviations
+						(first action_features) ;used to select the feature weights
+						(get hyperparam_map "dt")
+						(if valid_weight_feature weight_feature (null))
+						tie_break_random_seed
+						(null) ;radius
+						!numericalPrecision
+						(first action_features)
 					)
 				)
 		))
@@ -1661,7 +1635,7 @@
 						["minimum_time_bound"]
 						(retrieve_from_entity
 							(last
-								(contained_entities (list
+								(contained_entities
 									(query_exists !tsTimeFeature)
 									(query_min
 										!tsTimeFeature
@@ -1670,7 +1644,7 @@
 											(get hyperparam_map ["k" 1])
 										)
 									)
-								))
+								)
 							)
 							!tsTimeFeature
 						)
