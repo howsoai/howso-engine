@@ -92,9 +92,9 @@
 									(apply "min"
 										(map
 											(lambda
-												(compute_on_contained_entities (list
-													(query_min_difference (current_value 1) (get !cyclicFeaturesMap (current_value 1)) )
-												))
+												(compute_on_contained_entities
+													(query_min_difference (current_value) (get !cyclicFeaturesMap (current_value)) )
+												)
 											)
 											feature_grouping
 										)
@@ -132,22 +132,24 @@
 
 							;For unique features:
 							;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
-							;estimating the probability of having no incorrect predictions. We chose .5 assuming the Jeffreys prior approach
+							;estimating the probability of having no incorrect predictions. We chose .5 assuming the Jeffreys prior approach.
 							;ensure value is not larger than 0.5
 							(contains_index !uniqueNominalsSet (current_index))
 							(min 0.5 (/ 1 (+ 0.5 num_training_cases)) )
 
 							;else set nominal lower residual bound to:  gap / (num_cases + 1)
+							;multiply (current_value) by 2 because (current_value) is the 'half gap' value
 							(contains_index !nominalsMap (current_index))
 							(/ (* 2 (current_value)) (+ 1 num_training_cases))
 
-							;else set continuous lower residual bound to:  gap / ln(num_cases + 1)
+							;else set continuous lower residual bound to:  gap / ( 0.5 + num_cases)
+							;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
+							;estimating the probability of having no incorrect predictions.  We chose .5 assuming the Jeffreys prior approach.
 							(if (current_value)
-								(/ (* 2 (current_value)) (log (+ 1 num_training_cases)) )
+								;multiply (current_value) by 2 because (current_value) is the 'half gap' value
+								(/ (* 2 (current_value)) (+ 0.5 num_training_cases))
 
-								;if gap is 0, to prevent a 0 smallest residual,
-								;Using n+1, n+2, or n+.5 are all possible considerations of Laplacian smoothing to apply a Bayesian approach for
-								;estimating the probability of having no incorrect predictions.  We chose .5 assuming the Jeffreys prior approach.
+								;else gap is 0, prevent a 0 smallest residual
 								(/ 1 (+ 0.5 num_training_cases))
 							)
 						)
@@ -186,8 +188,12 @@
 			temp_residual_map
 				(map
 					(lambda
-						;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
-						(if (contains_index !nominalsMap (current_index))
+						;inactive features are bound to min residual
+						(if (contains_index !inactiveFeaturesMap (current_index))
+							(get !cachedFeatureMinResidualMap (current_index))
+
+							;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
+							(contains_index !nominalsMap (current_index))
 							(let
 								(assoc
 									;map of class -> count
@@ -216,16 +222,16 @@
 												;list of each feature's class count assocs
 												(map
 													(lambda
-														(compute_on_contained_entities (list
-															(query_value_masses (current_value 1) (null) (contains_index !numericNominalFeaturesMap  (current_value 1)) )
-														))
+														(compute_on_contained_entities
+															(query_value_masses (current_value) (null) (if (contains_index !numericNominalFeaturesMap  (current_value)) "number" "string") )
+														)
 													)
 													feature_grouping
 												)
 											)
 
 											(compute_on_contained_entities (list
-												(query_value_masses current_feature (null) (contains_index !numericNominalFeaturesMap current_feature) )
+												(query_value_masses current_feature (null) (if (contains_index !numericNominalFeaturesMap current_feature) "number" "string") )
 											))
 										)
 								))
@@ -398,13 +404,20 @@
 							(call !AllCases (assoc num num_samples rand_seed (rand)))
 						)
 
-						;else the model is small, use the smaller of num_samples or (num_cases * 2^f) because that's the amount of all possible combinations
-						;for local (superfull) deviations use more samples than in dataset to compute SDM values
 						(if robust_residuals
-							(call !SampleCases (assoc
-								num (min num_samples (* num_training_cases (pow 2 (size features))))
-								case_weight_feature (if valid_weight_feature weight_feature)
-							))
+							(if (= "deviations" robust_residuals)
+								;for local (superfull) deviations, if the dataset is tiny, use more samples than in dataset to compute SDM values
+								(call !SampleCases (assoc
+									num (min num_samples (* num_training_cases (pow 2 (size features))))
+									case_weight_feature (if valid_weight_feature weight_feature)
+								))
+
+								(call !SampleCases (assoc
+									num num_samples
+									case_weight_feature (if valid_weight_feature weight_feature)
+								))
+							)
+
 							;else just use all the case ids because the model size is <= num_samples or the model is small
 							(seq
 								(declare (assoc using_all_cases (true) ))
@@ -484,6 +497,17 @@
 					;else reset unique_features_for_populating_output back to null
 					(assign (assoc unique_features_for_populating_output (null) ))
 				)
+			)
+		)
+
+		;don't bother using inactive features in any way for residuals
+		(if (size !inactiveFeaturesMap)
+			(seq
+				(assign (assoc excluded_inactive_features_map (keep !inactiveFeaturesMap features) ))
+				(assign (assoc
+					features (filter (lambda (not (contains_index excluded_inactive_features_map (current_value)))) features)
+					context_features (filter (lambda (not (contains_index !inactiveFeaturesMap (current_value)))) context_features)
+				))
 			)
 		)
 	)
@@ -578,6 +602,12 @@
 					)
 					(zip (range 0 (- num_features 1)))
 				)
+			all_features_map (zip features)
+			feature_deviations
+				(if custom_residuals_map
+					custom_residuals_map
+					(get hyperparam_map "featureDeviations")
+				)
 		))
 
 		;iterate over each case and accumulate residuals for all the feature(s)
@@ -591,7 +621,6 @@
 							;map of feature -> value for all the case values
 							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
 							time_series_filter_query (list)
-							feature_deviations (get hyperparam_map "featureDeviations")
 							feature_weights (get hyperparam_map "featureWeights")
 						)
 
@@ -659,7 +688,7 @@
 									(null)
 
 									;else compute the local model around the case using the robust set of react_context_features
-									(compute_on_contained_entities (append
+									(compute_on_contained_entities
 										(if focal_case
 											(query_not_in_entity_list (list (replace case_id) (replace focal_case)))
 											(query_not_in_entity_list (list (replace case_id)))
@@ -673,18 +702,19 @@
 											(replace k_parameter)
 											(replace react_context_features)
 											(replace (unzip case_values_map react_context_features))
+											(replace p_parameter)
 											(replace feature_weights)
 											(replace !queryDistanceTypeMap)
 											(replace query_feature_attributes_map)
 											(replace feature_deviations)
-											(replace p_parameter)
+											(null)
 											(replace dt_parameter)
 											(if valid_weight_feature (replace weight_feature) (null))
 											(replace tie_break_random_seed)
 											(null) ;radius
 											(replace !numericalPrecision)
 										)
-									))
+									)
 								)
 						))
 
@@ -692,6 +722,7 @@
 						(assign (assoc
 							removed_features_map
 								(map
+									#!ComputeFeatureDiff
 									(lambda (let
 										(assoc
 											feature (current_index 1)
@@ -713,38 +744,41 @@
 										(declare (assoc
 											candidate_cases_lists
 												(if (!= (null) local_cases_map)
-													(list
-														(indices local_cases_map)
-														(values local_cases_map)
-														;pull the feature value from these local cases
-														(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
+													(if (get feature_may_have_nulls_map feature)
+														(let
+															(assoc
+																filtered_local_cases_maps
+																	(compute_on_contained_entities
+																		(query_in_entity_list (indices local_cases_map))
+																		(query_not_equals feature (null))
+																		(query_exists feature)
+																	)
+															)
+
+															(if (size filtered_local_cases_maps)
+																[
+																	(indices filtered_local_cases_maps)
+																	(unzip local_cases_map (indices filtered_local_cases_maps))
+																	(map (lambda (first (current_value))) (values filtered_local_cases_maps))
+																]
+
+																(list
+																	[(first (indices local_cases_map))]
+																	[(first (values local_cases_map))]
+																	[(null)]
+																)
+															)
+														)
+
+														(list
+															(indices local_cases_map)
+															(values local_cases_map)
+
+															(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
+														)
 													)
 												)
 										))
-										(if (get feature_may_have_nulls_map feature)
-											(let
-												(assoc
-													null_indices
-														(filter
-															(lambda (= (null) (get candidate_cases_lists (list 2 (current_value 1))) ) )
-															(indices (last candidate_cases_lists))
-														)
-												)
-												(if (size null_indices)
-													(assign (assoc
-														candidate_cases_lists
-															;only remove cases with null values if there are going to be some remaining
-															(if (< (size null_indices) (size (first candidate_cases_lists)))
-																(list
-																	(remove (first candidate_cases_lists) null_indices)
-																	(remove (get candidate_cases_lists 1) null_indices)
-																	(remove (last candidate_cases_lists) null_indices)
-																)
-															)
-													))
-												)
-											)
-										)
 
 										(call !InterpolateAndComputeDiffToCase)
 									))
@@ -752,12 +786,37 @@
 								)
 						))
 
+						(declare (assoc
+							with_features_map
+								(if estimating_residual_lower_bound
+									(map
+										(call !ComputeFeatureDiff)
+										(remove all_features_map (indices removed_features_map))
+									)
+								)
+						))
+
 						;return the computed value for this one feature as a list
 						(if target_residual_feature
 							(values removed_features_map)
 
-							;else output list of: residual value for each removed feature and null for each feature used as a context
-							(unzip removed_features_map features)
+							;output a list of pairs of [ with diff ] : if feature was used in contexts 'with' is (true)
+							;and (false) if it was removed from contexts, and 'diff' is the computed diff
+							(if estimating_residual_lower_bound
+								(map
+									(lambda [
+										(contains_index with_features_map (current_value 1) )
+										(if (contains_index with_features_map (current_value 1) )
+											(get with_features_map (current_value 1))
+											(get removed_features_map (current_value 1))
+										)
+									])
+									features
+								)
+
+								;else output list of: residual value for each removed feature and null for each feature used as a context
+								(unzip removed_features_map features)
+							)
 						)
 					))
 					case_ids
@@ -813,7 +872,12 @@
 									(lambda (size
 										(if leave_nulls_in_results
 											;need to have nulls removed for this part and they weren't if leave_nulls_in_results was true
-											(filter (current_value))
+											;(current_value) is a list of pairs of [with diff], this checks that the diff isn't null
+											(if estimating_residual_lower_bound
+												(filter (lambda (last (current_value))) (current_value) )
+												(filter (current_value))
+											)
+											;else this is already a filtered list of values
 											(current_value)
 										)
 									))
@@ -834,14 +898,14 @@
 									;for each (current_index) feature, need to find 50 - (current_value) cases to have enough values for those features
 									(values (map
 										(lambda
-											(contained_entities (append
+											(contained_entities
 												(query_not_equals (current_index) (null))
 
 												(if valid_weight_feature
 													(query_sample (- min_value_count (current_value)) weight_feature (rand))
 													(query_sample (- min_value_count (current_value)) (null) (rand))
 												)
-											))
+											)
 										)
 										num_valid_values_per_feature_map
 									))
@@ -886,7 +950,7 @@
 							feature_weights
 								(if (= (null) (get hyperparam_map "featureMdaMap"))
 									(get hyperparam_map "featureWeights")
-									(get hyperparam_map ["featureMdaMap" (current_value 2)])
+									(get hyperparam_map "featureMdaMap")
 								)
 							needed_features (append context_features (get_value (current_value 1)) (if !tsTimeFeature [".series_index"] []) )
 						)
@@ -943,13 +1007,17 @@
 									)
 
 									(if !tsTimeFeature
-										(assign (assoc
-											react_context_features
-												(call !FilterContextsBySeriesIndex (assoc
-													all_context_features react_context_features
-													series_index (get case_values_map ".series_index")
-												))
-										))
+										(let
+											(assoc original_react_context_features (replace react_context_features))
+
+											(assign (assoc
+												react_context_features
+													(call !FilterContextsBySeriesIndex (assoc
+														all_context_features react_context_features
+														series_index (get case_values_map ".series_index")
+													))
+											))
+										)
 									)
 
 									;set the filter query if has_time_series_filter already checked that time feature is in context features
@@ -974,7 +1042,7 @@
 
 									(declare (assoc
 										candidate_cases_lists
-											(compute_on_contained_entities (append
+											(compute_on_contained_entities
 												(if focal_case
 													(query_not_in_entity_list (list case_id focal_case))
 													(query_not_in_entity_list (list case_id))
@@ -992,11 +1060,12 @@
 													(replace k_parameter)
 													(replace react_context_features)
 													(replace (unzip case_values_map react_context_features))
+													(replace p_parameter)
 													(replace feature_weights)
 													(replace !queryDistanceTypeMap)
 													query_feature_attributes_map
 													(replace feature_deviations)
-													(replace p_parameter)
+													(replace feature) ;weight selection
 													(replace dt_parameter)
 													(if valid_weight_feature (replace weight_feature) (null))
 													(replace tie_break_random_seed)
@@ -1004,7 +1073,7 @@
 													(replace !numericalPrecision)
 													(replace feature)
 												)
-											))
+											)
 										case_feature_value (get case_values_map feature)
 									))
 
@@ -1196,8 +1265,12 @@
 									)
 							)
 
-							;output the tuple
-							[diff ordinal_diff]
+							;output only diff if computing mda for feature weights during analyze
+							;otherwise output the tuple for residual aggregation flows
+							(if computing_mda
+								diff
+								[diff ordinal_diff]
+							)
 						)
 
 						;else output it as-is
@@ -1339,7 +1412,7 @@
 
 								(declare (assoc
 									candidate_cases_lists
-										(compute_on_contained_entities (append
+										(compute_on_contained_entities
 											(if focal_case
 												(query_not_in_entity_list (list case_id focal_case))
 												(query_not_in_entity_list (list case_id))
@@ -1349,11 +1422,12 @@
 												(replace (get hyperparam_map "k"))
 												(replace react_context_features)
 												(replace (unzip case_values_map react_context_features))
+												(replace (get hyperparam_map "p"))
 												(replace (get hyperparam_map "featureWeights"))
 												(replace !queryDistanceTypeMap)
 												(replace (get hyperparam_map "featureDomainAttributes"))
 												(replace (get hyperparam_map "featureDeviations"))
-												(replace (get hyperparam_map "p"))
+												(null)
 												(replace (get hyperparam_map "dt"))
 												(if valid_weight_feature (replace weight_feature) (null))
 												(replace tie_break_random_seed)
@@ -1361,7 +1435,7 @@
 												(replace !numericalPrecision)
 												(replace feature)
 											)
-										))
+										)
 								))
 
 								(assign (assoc
@@ -1416,7 +1490,7 @@
 				(zip
 					features_with_nulls
 					(map
-						(lambda (/ (apply "+" (current_value)) (size (current_value)) ) )
+						(lambda (generalized_mean (current_value)) )
 						feature_residuals_lists
 					)
 				)

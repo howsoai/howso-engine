@@ -8,7 +8,7 @@
 	; use_case_weights: optional flag default true. if false, case weights will not be used during the react
 	; weight_feature: optional, default '.case_weight'. name of feature whose values to use as case weights
 	; output_most_influential: optional, boolean, default false. when false outputs influential cases' entropy,
-	;	when true will output a pair of [ entropy, most influential case values ]
+	;	when true will output a tuple of [ entropy, most influential case id, distance to most influential case ]
 	#!ComputeInfluenceWeightEntropy
 	(declare
 		(assoc
@@ -18,70 +18,72 @@
 			use_case_weights (true)
 			weight_feature !autoAblationWeightFeature
 			output_most_influential (false)
-
-			;internal only
-			react_kwargs (assoc)
 		)
 
 		(if (not use_case_weights)
 			(assign (assoc weight_feature ".none"))
 		)
 
-		(assign (assoc
-			react_kwargs
-				(assoc
-					context_features features
-					use_case_weights use_case_weights
-					weight_feature weight_feature
-					details (assoc influential_cases (true) influential_cases_raw_weights (true))
-					skip_encoding (true)
-					skip_decoding (true)
+		(declare (assoc
+			local_cases_pairs
+				(compute_on_contained_entities
+					(if case_id (query_not_in_entity_list [case_id]) [])
+					(query_nearest_generalized_distance
+						closest_k
+						features
+						(if case_id (retrieve_from_entity case_id features) feature_values)
+						p_parameter
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(null)
+						dt_parameter
+						(if use_case_weights weight_feature)
+						(rand)
+						(null) ;radius
+						!numericalPrecision
+						;output as ordered pair
+						(true)
+					)
 				)
 		))
 
-		(if
-			;if context_values are not null, we are reacting to a new case
-			(!= feature_values (null))
-			(accum "react_kwargs" (assoc context_values feature_values) )
-			;elif case_id is not null, we are reacting to an existing case
-			(!= case_id (null))
-			(accum "react_kwargs" (assoc
-				case_indices (retrieve_from_entity case_id (list ".session" ".session_training_index") )
-				preserve_feature_values features
-				leave_case_out (true)
-			))
-		)
+		;if feature_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
+		;and a case is identical if its probability is >=1 or influence is .infinity
+		(if (!= feature_values (null))
+			(if (= .infinity (first (last local_cases_pairs)) )
+				(conclude [ .infinity (null) ])
 
-		(declare (assoc
-			influential_cases (get (call !ReactDiscriminative react_kwargs) "influential_cases")
-		))
-
-		(if
-			;if feature_values are not null, we are reacting to a new case. We ablate duplicate identical cases.
-			(!= feature_values (null))
-			(if (= feature_values (unzip (first influential_cases) features))
+				(and
+					(>= (first (last local_cases_pairs)) 1)
+					(= "surprisal_to_prob" dt_parameter)
+					(if use_case_weights
+						(=
+							(first (last local_cases_pairs))
+							(retrieve_from_entity (first (first local_cases_pairs)) weight_feature )
+						)
+						(true)
+					)
+				)
 				(conclude [ .infinity (null) ])
 			)
 		)
 
-		;compute the entropy of the influence weights as retrieved by react
-		(declare (assoc
-			influence_weight_entropy
-				(entropy (map
-					(lambda (get (current_value) ".influence_weight") )
-					influential_cases
-				))
-		))
+		(declare (assoc influence_weight_entropy (entropy (normalize (last local_cases_pairs))) ))
 
+		;outputs the case id of the most influential and distance to it, else output just the entropy value
 		(if output_most_influential
-			[ influence_weight_entropy (first influential_cases) ]
+			[ influence_weight_entropy (first (first local_cases_pairs)) (first (last local_cases_pairs)) ]
 			influence_weight_entropy
 		)
 	)
 
-	;used to compute and store the influence weight entropies for all cases contained in the Trainee in #Analyze
+	;used to compute and store the influence weight entropies (IWE) for all cases contained in the Trainee in #Analyze
 	; features: list of features to use when determining influential cases.
 	; label_name: optional name of the feature to store influence weight entropies in.
+	; compute_all: optional, boolean. if set to true will compute IWE for all cases.
+	;	default is false, which samples up to !autoAblationInfluenceWeightEntropySampleSize (default of 2000) cases
 	#!ComputeAndStoreInfluenceWeightEntropies
 	(let
 		(assoc
@@ -95,12 +97,44 @@
 							weight_feature weight_feature
 						))
 					)
-					(zip (call !AllCases))
+					(zip
+						;datasets that are < !autoAblationInfluenceWeightEntropySampleSize + 2% in size can compute IWE for all cases
+						(if (or
+								compute_all
+								(<
+									(call !GetNumTrainingCases)
+									(* 1.02 !autoAblationInfluenceWeightEntropySampleSize)
+								)
+							)
+							(call !AllCases)
+
+							;else compute on a random sample of !autoAblationInfluenceWeightEntropySampleSize cases
+							(call !AllCases (assoc
+								num !autoAblationInfluenceWeightEntropySampleSize
+								rand_seed (rand)
+							))
+						)
+					)
 				)
 		)
 
 		(call !StoreCaseValues (assoc
-			case_values_map influence_weight_entropy_map
+			case_values_map
+				(if (or
+						compute_all
+						(<
+							(call !GetNumTrainingCases)
+							(* 1.02 !autoAblationInfluenceWeightEntropySampleSize)
+						)
+					)
+					influence_weight_entropy_map
+
+					;explicitly store null in all the other cases by appending the computed entropy map to a zipped assoc of all case ids
+					(append
+						(zip (call !AllCases))
+						influence_weight_entropy_map
+					)
+				)
 			label_name (or label_name !internalLabelInfluenceWeightEntropy)
 		))
 
@@ -429,22 +463,41 @@
 			))
 		)
 
-		;Also ensure that we have influence weight entropies and that they are as up-to-date
-		; as possible.
+		(declare  (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					context_features features
+					weight_feature distribute_weight_feature
+				))
+		))
+		(declare (assoc
+			closest_k (get hyperparam_map "k")
+			p_parameter (get hyperparam_map "p")
+			dt_parameter (get hyperparam_map "dt")
+			feature_weights (get hyperparam_map "featureWeights")
+			feature_deviations (get hyperparam_map "featureDeviations")
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+		))
+
+		;Also ensure that we have all influence weight entropies and that they are up-to-date
 		(call !ComputeAndStoreInfluenceWeightEntropies (assoc
 			features features
 			weight_feature distribute_weight_feature
 			use_case_weights (true)
+			compute_all (true)
 		))
 
 		(if thresholds_enabled
 			(assign (assoc
 				prev_prediction_stats_map
-					(get (call !CalculateFeatureResiduals (assoc
-						weight_feature distribute_weight_feature
-						use_case_weights (true)
-						compute_all_statistics (true)
-					)) "prediction_stats")
+					(get
+						(call !CalculateFeatureResiduals (assoc
+							weight_feature distribute_weight_feature
+							use_case_weights (true)
+							compute_all_statistics (true)
+						))
+						"prediction_stats"
+					)
 			))
 		)
 
@@ -470,6 +523,18 @@
 					))
 			))
 
+			(if !tsTimeFeature
+				;do not remove first (.series_index == 0) or last (.series_progress == 1) cases for any series
+				(assign (assoc
+					cases
+						(contained_entities
+							(query_in_entity_list cases)
+							(query_not_equals ".series_progress" 1)
+							(query_not_equals ".series_index" 0)
+						)
+				))
+			)
+
 			;if there are no cases which satisfy the criteria, then break.
 			(if (not (size cases)) (conclude))
 
@@ -487,11 +552,14 @@
 					(assoc
 						batch_threshold_info (null)
 						new_prediction_stats_map
-							(get (call !CalculateFeatureResiduals (assoc
-								weight_feature distribute_weight_feature
-								use_case_weights (true)
-								compute_all_statistics (true)
-							)) "prediction_stats")
+							(get
+								(call !CalculateFeatureResiduals (assoc
+									weight_feature distribute_weight_feature
+									use_case_weights (true)
+									compute_all_statistics (true)
+								))
+								"prediction_stats"
+							)
 					)
 					(assign (assoc
 						batch_threshold_info
@@ -546,7 +614,7 @@
 		; is called when there exists one or more cases with defined influence weight entropies.
 		(if
 			(call !HasInfluenceWeightEntropies)
-			(compute_on_contained_entities (list
+			(compute_on_contained_entities
 				(query_exists !internalLabelInfluenceWeightEntropy)
 				(query_not_equals !internalLabelInfluenceWeightEntropy 0)
 				(query_quantile
@@ -554,7 +622,7 @@
 					influence_weight_entropy_threshold
 					weight_feature
 				)
-			))
+			)
 			.infinity
 		)
 	)
@@ -600,7 +668,7 @@
 		)
 
 		(declare (assoc
-			influentials_entropy_pair
+			influentials_entropy_tuple
 				(call !ComputeInfluenceWeightEntropy (assoc
 					features features
 					feature_values feature_values
@@ -611,40 +679,53 @@
 		(+
 			(or
 				;case should be kept because influentials are not evenly distributed (their entropy is low)
-				(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_pair))
+				(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_tuple))
 					(true)
 
 					;always ablate perfect matches/identical cases
-					(= .infinity (first influentials_entropy_pair))
+					(= .infinity (first influentials_entropy_tuple))
 					(false)
 
 					;else ablate? check distance to closest vs its distance to its K'th closest
 					(let
 						(assoc
-							dist_to_closest_case (/ 1 (get influentials_entropy_pair [1 ".raw_influence_weight"]))
-							react_kwargs
-								(assoc
-								 	use_case_weights use_case_weights
-									weight_feature weight_feature
-									details (assoc influential_cases (true) influential_cases_raw_weights (true))
-									context_features features
-									case_indices (unzip (last influentials_entropy_pair) [".session" ".session_training_index"] )
-									preserve_feature_values features
-									leave_case_out (true)
-									skip_encoding (true)
+							neighbor_cases_pairs
+								(compute_on_contained_entities
+									(query_not_in_entity_list [(get influentials_entropy_tuple 1)])
+									(query_nearest_generalized_distance
+										closest_k
+										features
+										(retrieve_from_entity (get influentials_entropy_tuple 1) features)
+										p_parameter
+										feature_weights
+										!queryDistanceTypeMap
+										query_feature_attributes_map
+										feature_deviations
+										(null)
+										dt_parameter
+										weight_feature
+										(rand)
+										(null) ;radius
+										!numericalPrecision
+										;output as ordered pair
+										(true)
+									)
 								)
 						)
 
+						;in non-surprisal space, the values coming out of the query are inverse distance, inverting them back converts them back to distances to the cases
+						;in surprisal space, the values coming out of the query are probabilities, inverted probabilities are monotonic to surprisals (distances)
+						;thus the comparison below works as intended
 						(declare (assoc
-							neighbor_influential_cases (get (call !ReactDiscriminative react_kwargs) "influential_cases")
+							dist_to_closest_neighbor (/ 1 (last influentials_entropy_tuple))
+							neighbor_dist_to_its_farthest_case (/ 1 (last (last neighbor_cases_pairs)) )
 						))
 
-						(declare (assoc
-							neighbor_dist_to_farthest_case (/ 1 (get (last neighbor_influential_cases) ".raw_influence_weight"))
-						))
-
-						;keep case if its distance to closest existing case is relatively large
-						(> dist_to_closest_case neighbor_dist_to_farthest_case)
+						;keep this training case if the 'distance' to its closest existing case is relatively large
+						(>
+							dist_to_closest_neighbor
+							neighbor_dist_to_its_farthest_case
+						)
 					)
 				)
 
@@ -902,10 +983,8 @@
 	; cached influence weight entropies.
 	(if
 		(size (contained_entities
-			[
-				(query_exists !internalLabelInfluenceWeightEntropy)
-				(query_not_equals !internalLabelInfluenceWeightEntropy (null))
-			]
+			(query_exists !internalLabelInfluenceWeightEntropy)
+			(query_not_equals !internalLabelInfluenceWeightEntropy (null))
 		))
 		(true)
 		(false)

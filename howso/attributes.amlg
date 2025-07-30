@@ -15,7 +15,7 @@
 			;		'min': number or date string, the minimum value to be output
 			;		'max': number or date string, the maximum value to be output
 			;		'allowed': list of explicitly allowed values to be output. Example: ["low", "medium", "high"]
-			;		'allow_null': flag, allow nulls to be output, per their distribution in the data. Defaults to true
+			;		'allow_null': flag, allow nulls to be output, per their distribution in the data. Defaults to true (false for time feature)
 			;		'constraint': code, whose logic has to evaluate to true for value to be considered valid.
 			;			Same format as 'derived_feature_code. Example: "(> #f1 0 #f2 0)"
 			;       'observed_min': number, string, or date string, the minimum value observed in the data
@@ -30,6 +30,9 @@
 			;						ISO8601 format of "%H:%M%S".
 			;
 			;	'locale': string, the date time format locale. If unspecified, uses platform default locale. Example: "en_US"
+			;
+			;	'default_time_zone': string, the default time zone used for datetimes if a time zone is not specified
+			;					explicitly specified in the date_time_format.  Defaults to 'UTC' when unspecified.
 			;
 			;	'significant_digits': integer, round to the specified significant digits, default is no rounding
 			;
@@ -581,6 +584,7 @@
 			!sharedDeviationsNonPrimaryFeatures (get shared_deviations_map "shared_deviations_non_primary_features")
 
 		))
+		(call !UpdateDefinedFeatures)
 
 		(call !SetOrdinalFeatures (assoc ordinal_features ordinals))
 		(call !SetNominalFeatures (assoc nominal_features nominals))
@@ -745,42 +749,20 @@
 								cycle_length (get !cyclicFeaturesMap (current_index 1))
 								date_time_format (get !featureDateTimeMap (list (current_index 2) "date_time_format"))
 								locale (get !featureDateTimeMap (list (current_index 2) "locale"))
+								default_time_zone (get !featureDateTimeMap (list (current_index 2) "default_time_zone"))
 								observational_error (get !userSpecifiedFeatureErrorsMap (current_index 1))
 							)
 
 							;create an assoc of feature attributes
 							(append
-								(assoc "type" type)
-
-								(if (!= (null) decimal_places)
-									(assoc "decimal_places" decimal_places)
-									(assoc)
-								)
-
-								(if (!= (null) significant_digits)
-									(assoc "significant_digits" significant_digits )
-									(assoc)
-								)
-
-								(if (!= (null) cycle_length)
-									(assoc "cycle_length" cycle_length )
-									(assoc)
-								)
-
-								(if (!= (null) observational_error)
-									(assoc "observational_error" observational_error)
-									(assoc)
-								)
-
-								(if (!= (null) date_time_format)
-									(assoc "date_time_format" date_time_format )
-									(assoc)
-								)
-
-								(if (!= (null) locale)
-									(assoc "locale" locale )
-									(assoc)
-								)
+								{ "type" type }
+								(if (!= (null) decimal_places) { "decimal_places" decimal_places } {} )
+								(if (!= (null) significant_digits) { "significant_digits" significant_digits } {} )
+								(if (!= (null) cycle_length) { "cycle_length" cycle_length } {} )
+								(if (!= (null) observational_error) { "observational_error" observational_error } {} )
+								(if (!= (null) date_time_format) { "date_time_format" date_time_format } {} )
+								(if (!= (null) locale) { "locale" locale } {} )
+								(if (!= (null) default_time_zone) { "default_time_zone" default_time_zone } {} )
 							)
 						))
 						(zip !trainedFeatures)
@@ -821,10 +803,10 @@
 		(declare (assoc
 			feature_values
 				(indices
-					(compute_on_contained_entities (list
+					(compute_on_contained_entities
 						;if non-string nominal, pull as numeric count
-						(query_value_masses feature (null) (contains_index !numericNominalFeaturesMap feature))
-					))
+						(query_value_masses feature (null) (if (contains_index !numericNominalFeaturesMap feature) "number" "string") )
+					)
 				)
 			value_feature_nulls_are_dependent (get !featureAttributes (list value_feature "null_is_dependent"))
 		))
@@ -833,7 +815,7 @@
 		(if value_feature_nulls_are_dependent
 			;if this feature has any nulls, add (null) as a unique nominal feature value for which to compute boundaries
 			(if
-				(size (contained_entities [ (query_equals feature (null)) ] ))
+				(size (contained_entities (query_equals feature (null)) ))
 				(accum (assoc feature_values (list (null)) ))
 			)
 		)
@@ -893,7 +875,7 @@
 					;pull the case with the smallest value for the continuous feature given the constructed query_among with the nominal value combinations
 					;if there are no cases for such query_among(s), min_case will be null and we output (null) for the bounds pair
 					(assign (assoc
-						min_case (contained_entities (append query_among_statements (query_min value_feature 1)))
+						min_case (contained_entities query_among_statements (query_min value_feature 1))
 					))
 
 					;if there does exist a case with a minimum value, that means there must also be a max value, so we return the bounds pair for this
@@ -904,20 +886,20 @@
 							(and
 								value_feature_nulls_are_dependent
 								(size
-									(contained_entities (append query_among_statements (query_equals value_feature (null)) ))
+									(contained_entities query_among_statements (query_equals value_feature (null)) )
 								)
 							)
 							;output a tuple of [min, (null), max]
 							[
 								(retrieve_from_entity min_case value_feature)
 								(null)
-								(retrieve_from_entity (contained_entities (append query_among_statements (query_max value_feature 1))) value_feature)
+								(retrieve_from_entity (contained_entities query_among_statements (query_max value_feature 1)) value_feature)
 							]
 
 							;else output a tuple of [min, max]
 							[
 								(retrieve_from_entity min_case value_feature)
-								(retrieve_from_entity (contained_entities (append query_among_statements (query_max value_feature 1))) value_feature)
+								(retrieve_from_entity (contained_entities query_among_statements (query_max value_feature 1)) value_feature)
 							]
 						)
 
@@ -927,7 +909,7 @@
 						(and
 							value_feature_nulls_are_dependent
 							(size
-								(contained_entities (append query_among_statements (query_equals value_feature (null)) ))
+								(contained_entities query_among_statements (query_equals value_feature (null)) )
 							)
 						)
 						[ (null) ]

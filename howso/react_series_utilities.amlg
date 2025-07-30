@@ -225,10 +225,14 @@
 		(declare (assoc
 			;all the features used in the series
 			features (indices original_context_map)
-			;matrix of values, here each row is ordered in the same order as features
-			series_data (list)
+			;matrix of values needed to generate the current row, here each row is ordered in the same order as features
+			series_data []
+			;if continuing a series, this is the original series matrix of values, each row is ordered in the same order as features
+			existing_series_data []
+			;entire series matrix of values, each row is ordered in the same order as features
+			entire_series_data []
 			;data to store each new row
-			new_row (list)
+			new_row []
 			;flag set to true when series is done generating
 			done (false)
 			;assoc of of all features -> feature values for the current series case
@@ -249,6 +253,8 @@
 			react_output (null)
 			;0-based index of last row in series_data, start with -1 because it's accumulated at the start of the loop
 			last_series_index -1
+			;total number of rows generated for the series
+			num_generated_rows 0
 			first_generated_row (true)
 			;map of id feature -> value to replace at end of series generation
 			replacement_id_values_map (assoc)
@@ -321,7 +327,7 @@
 		(assign (assoc
 			max_series_length
 				(if has_series_context_values
-					(- (size series_context_values) 1)
+					(size series_context_values)
 
 					(= (null) max_series_length)
 					;default limit to series length generation to be the specified series limit - 1 to account for 0-based indices
@@ -368,8 +374,8 @@
 				)
 		))
 
-		;map of feature -> corresponding column index in series_data
 		(declare (assoc
+			;map of feature -> corresponding column index in series_data
 			feature_index_map (zip features (indices features))
 			original_context_values (unzip original_context_map features)
 			;if series_id_tracking="no" then IDs aren't in action_features, and thus replacement_id_values_map will be empty
@@ -383,6 +389,7 @@
 			original_derived_context_features derived_context_features
 			original_action_features action_features
 			previous_row_failed (false)
+			non_derived_post_process_features (null)
 			;find and store the largest referenced lag value among derived_context_features
 			largest_max_row_lag
 				;or with 0 to prevent null
@@ -479,7 +486,10 @@
 								start_time
 								(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
 								"number"
-								(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+								{
+									"locale" (get !featureDateTimeMap [ !tsTimeFeature "locale" ] )
+									"time_zone" (get !featureDateTimeMap [ !tsTimeFeature "default_time_zone" ] )
+								}
 								(null)
 							)
 					))
@@ -513,442 +523,433 @@
 		)
 
 		;loop until series stopping condition is met
-		(while (not done)
+		(assign (assoc
+			entire_series_data
+				(while (not done)
 
-			(assign (assoc
-				desired_conviction original_desired_conviction
-				do_uniqueness_check (true)
-				retries 0
-				previous_row_failed (false)
-			))
+					(assign (assoc
+						desired_conviction original_desired_conviction
+						do_uniqueness_check (true)
+						retries 0
+						previous_row_failed (false)
+						series_failed (false)
+					))
 
-			(if output_details
-				;reset the case details that are held in lists. (influential_cases, generate_attempts, etc.)
-				;these detail values are not overwritten through appends
-				(assign (assoc
-					case_detail_values_map
-						(map
-							(lambda
-								(if (= (list) (get_type (current_value)))
-									(list)
-
-									;generate_attempts is sum-ed into a digit, must be reset as a list
-									(= 0 (get_type (current_value)))
-									(list)
-
-									(current_value)
-								)
-							)
+					(if output_details
+						;reset the case details that are held in lists. (influential_cases, generate_attempts, etc.)
+						;these detail values are not overwritten through appends
+						(assign (assoc
 							case_detail_values_map
-						)
-				))
-			)
-
-			;if initial conditions were provided, use them as contexts for the first case
-			(if (and first_generated_row (> (size initial_features_map) 0))
-				(assign (assoc
-					use_initial_context_features (true)
-					;update initial map to be the stationary context overwritten by the provided initial values
-					initial_features_map
-						(append
-							(if has_series_context_values
-								(zip series_context_features (first series_context_values))
-								(assoc)
-							)
-							initial_features_map
-						)
-				))
-
-				;else not initial row
-				(assign (assoc use_initial_context_features (false) ))
-			)
-
-			;add each new row to series data with all initial context values
-			(assign (assoc
-				new_row
-					(if use_initial_context_features
-						(list
-							(unzip (append original_context_map initial_features_map) features)
-						)
-
-						;overwrite the values in the original_context_map with those from the current series_index in the provided series_context_values
-						has_series_context_values
-						(list
-							(unzip
-								(append
-									original_context_map
-									(zip series_context_features (get series_context_values (+ 1 last_series_index)) )
-								)
-								features
-							)
-						)
-
-						;else every row begins as the original context values
-						;make a copy of original_context_values, not a referenced copy
-						(apply "list" [original_context_values])
-					)
-			))
-			(accum (assoc last_series_index 1 ))
-
-			(if (= (current_index) 0)
-				(accum (assoc series_data new_row))
-
-				;else there is a previous_result, accumulate new_row to it
-				(if output_details
-					(let
-						;previous_result is a pair of [series_data, all_influential_cases]
-						(assoc accumulated_data (previous_result 1) )
-						(assign (assoc
-							series_data (append (get accumulated_data "series_data") new_row)
-						))
-						(if output_details
-							(assign (assoc
-								series_detail_values_map
-									(map
-										(lambda
-											(get accumulated_data (current_index))
-										)
-										series_detail_values_map
-									)
-							))
-						)
-					)
-
-					;else when not outputting details, previous_result is just the series_data itself
-					(assign (assoc series_data (append (previous_result 1) new_row) ))
-				)
-			)
-
-			(if (size original_derived_context_features)
-				(seq
-					;if largest max_row_lag is greater than last_series_index, that means at least one context feature
-					;cannot be derived because it references a row with a larger lag and hasn't been synthed yet
-					;so skip using all such features in derived contexts
-					(assign (assoc
-						derived_context_features
-							(if (> largest_max_row_lag last_series_index)
-								;only keep those derived context features whose max_row_lag is less than or equal to last_series_index
-								;e.g., if a feature has 10 lags, but it's synthesising row 3 (last_series_index=2), it will only keep lags 1 and 2
-								(filter
-									(lambda
-										(<= (get !featureAttributes (list (current_value 1) "max_row_lag")) last_series_index)
-									)
-									original_derived_context_features
-								)
-
-								;else keep original derived_context_features
-								original_derived_context_features
-							)
-						action_features original_action_features
-					))
-
-					(if use_initial_context_features
-						(call !DeriveOrGenerateFeatures (assoc
-							react_context_features (indices initial_features_map)
-							;for initial case, may need to filter out derived context features whose values are already provided
-							derived_features
-								(filter (lambda (not (contains_index initial_features_map (current_value)))) derived_context_features)
-						))
-
-						;else just provide context features and the full list of derived_context_features
-						(call !DeriveOrGenerateFeatures (assoc
-							react_context_features user_specified_context_features
-							derived_features derived_context_features
-						))
-					)
-				)
-			)
-
-			;pregenerate unique values for non series id features
-			(if has_unique_features
-				;generate a map of non-series id unique features -> unique value
-				(assign (assoc
-					pre_generated_uniques_map
-						(call !GenerateUniquesListMap (assoc
-							num_reacts 1
-							action_features action_features
-							context_features all_context_features
-							preserve_feature_values preserve_feature_values
-						))
-				))
-			)
-
-			(assign (assoc
-				current_case_map (zip features (last series_data))
-				react_context_features
-					(if (and use_initial_context_features (not continue_series))
-						(indices initial_features_map)
-						all_context_features
-					)
-			))
-
-			;if first case of series and using continue_series, start with computed series_progress
-			(if (and use_initial_context_features initial_existing_progress)
-				(assign (assoc current_case_map (set current_case_map ".series_progress" initial_existing_progress)))
-			)
-
-			;filter out action (rate and delta) features that are dependent on lags that were skipped due to referencing rows that have not been synthed yet
-			(if (> (size original_derived_context_features) (size derived_context_features))
-				(let
-					(assoc
-						derived_feature_dependent_on_skipped_feature_set
-							;get a list of all features that dependend on the skipped derived context features
-							;and convert it to a set for fast lookup
-							(zip (apply "append"
-								;iterate over all skipped features and pull the list of features that depend on each one
-								(map
-									(lambda (get !sourceToDerivedFeatureMap (current_value)))
-
-									;skipped derived features are those that were in the original list but are not in the current derived context features list
-									(filter
-										(lambda (not (contains_value derived_context_features (current_value))))
-										original_derived_context_features
-									)
-								)
-							))
-					)
-
-					;keep only those action features that do not depend on skipped context features
-					(assign (assoc
-						action_features
-							(filter
-								(lambda (not (contains_index derived_feature_dependent_on_skipped_feature_set (current_value) )))
-								original_action_features
-							)
-					))
-				)
-			)
-
-			;modify context features to not include any lag-dependent features whose lag
-			;amount is larger the current last_series_index
-			(if (< last_series_index largest_max_row_lag)
-				(assign (assoc
-					react_context_features
-						(filter
-							(lambda
-								(not (< last_series_index (get ts_feature_lag_amount_map (current_value))) )
-							)
-							react_context_features
-						)
-				))
-			)
-
-			;create a (unique if necessary) series case
-			(call !SynthAndDeriveSeriesCase)
-
-			(if track_progress
-				(accum (assoc
-					total_progress
-						;has_series_context_values is the number of series context values, progress the amount to match the number of provided contexts
-						(if has_series_context_values
-							(/ 1 has_series_context_values)
-
-							;else progress the synthed amount
-							(get current_case_map ".series_progress_delta")
-						)
-				))
-			)
-
-			;if this is the first row of the series, assign values for the replacement series ids here, now that the initial value is available
-			(if first_generated_row
-				(assign (assoc
-					replacement_id_values_map
-						(map
-							(lambda
-								;generate new unique value
-								(if output_new_series_ids
-									(call !GenerateInt64String)
-
-									;else grab the value from this first series row
-									(get current_case_map (current_index))
-								)
-							)
-							replacement_id_values_map
-						)
-					first_generated_row (false)
-				))
-			)
-
-			;Check every case to see if we've generated a terminator value
-			(if series_has_terminators
-				(let
-					(assoc
-						series_end_context_features (indices (filter (remove current_case_map ".series_progress")))
-					)
-
-					;predict .series_progress given the current case
-					(declare (assoc
-						series_progress
-							(first (get
-								(call !SingleReact (assoc
-									context_features series_end_context_features
-									context_values (unzip current_case_map series_end_context_features)
-									action_features (list ".series_progress")
-									;do not derive anything during this react
-									derived_action_features (list)
-									derived_context_features (list)
-									;no details
-									details (null)
-									ignore_case ignore_case
-									substitute_output substitute_output
-									input_is_substituted input_is_substituted
-									use_case_weights use_case_weights
-									weight_feature weight_feature
-									rand_seed rand_seed
-									leave_case_out leave_case_out
-									holdout_queries holdout_queries
-
-									desired_conviction desired_conviction
-									use_differential_privacy use_differential_privacy
-									new_case_threshold new_case_threshold
-									feature_bounds_map feature_bounds_map
-									generate_new_cases "no"
-								))
-								"action_values"
-							))
-					))
-
-					;series_progress >= 1 means we synthed a terminator value, end series immediately
-					(if (>= series_progress 1)
-						(assign (assoc total_progress 1))
-
-						;else if series must stop on a terminator but it should be ending,
-						;prevent it from ending just yet by lowering its total_progress to below 1
-						(and stop_on_terminator (>= total_progress 1))
-						(assign (assoc total_progress 0.9999999999999999))
-					)
-				)
-			)
-
-			;determine whether to stop generating the series
-			;if there's no series_stop_map or exceeded max_series_length, be done
-			(if (or
-					(>= total_progress 1)
-					(= 0 (size series_stop_map))
-					(>= last_series_index max_series_length)
-				)
-				(assign (assoc done (true)))
-
-				(map
-					(lambda (seq
-						(if (contains_index (current_value) "values")
-							(if (contains_value (get (current_value) "values") (get current_case_map (current_index)))
-								(assign (assoc done (true)))
-							)
-						)
-
-						(if (contains_index (current_value) "min")
-							(let
-								(assoc stop_value (get current_case_map (current_index 1)))
-
-								(if (contains_index !featureDateTimeMap (current_index))
-									;convert stop_value to epoch
-									(assign (assoc
-										stop_value
-											(format
-												stop_value
-												(get !featureDateTimeMap (list (current_index 2) "date_time_format"))
-												"number"
-												(assoc "locale" (get !featureDateTimeMap (list (current_index 3) "locale")))
-												(null)
-											)
-									))
-								)
-								(if (>= (get (current_value) "min") stop_value)
-									(assign (assoc done (true)))
-								)
-							)
-						)
-
-						(if (contains_index (current_value) "max")
-							(let
-								(assoc stop_value (get current_case_map (current_index 1)))
-
-								(if (contains_index !featureDateTimeMap (current_index))
-									;convert stop_value to epoch
-									(assign (assoc
-										stop_value
-											(format
-												stop_value
-												(get !featureDateTimeMap (list (current_index 2) "date_time_format"))
-												"number"
-												(assoc "locale" (get !featureDateTimeMap (list (current_index 3) "locale")))
-												(null)
-											)
-									))
-								)
-								(if (<= (get (current_value) "max") stop_value)
-									(assign (assoc done (true)))
-								)
-							)
-						)
-					))
-					series_stop_map
-				)
-			)
-
-			;return series_data so it's stored as previous_result for accumulation in the next iteration of the while loop
-			;and explanation details if requested
-			(if output_details
-				(seq
-					(if (contains_index case_detail_values_map "influential_cases")
-						(call !NormalizeReactSeriesInfluentialCases)
-					)
-
-					;retries holds the amount of times the case was retried. Add 1 to represent generate_attempts
-					(if (and (not previous_row_failed) (contains_index case_detail_values_map "generate_attempts"))
-						(assign (assoc
-								case_detail_values_map
-									(set
-										case_detail_values_map
-										"generate_attempts"
-										(+ retries 1)
-									)
-							))
-					)
-
-					;update series_detail_values_map on the last iteration so it can be output when single_react_series returns
-					(if done
-						(assign (assoc
-							series_detail_values_map
 								(map
 									(lambda
-										(if (size (get case_detail_values_map (current_index)))
-											(append (current_value) (list (get case_detail_values_map (current_index 1))) )
+										(if (= (list) (get_type (current_value)))
+											(list)
 
-											;generate_attempts should be a number, so size doesn't work
-											(= 0 (get_type (get case_detail_values_map (current_index))))
-											(append (current_value) (list (get case_detail_values_map (current_index 1))) )
+											;generate_attempts is sum-ed into a digit, must be reset as a list
+											(= 0 (get_type (current_value)))
+											(list)
 
-											;don't append if the case detail value is empty
 											(current_value)
 										)
 									)
-									series_detail_values_map
+									case_detail_values_map
 								)
 						))
 					)
 
-					;store accumulated data into previous_result as an assoc
-					(append
-						(assoc "series_data" series_data)
-						(map
-							(lambda
-								(append (current_value) (list (get case_detail_values_map (current_index 1))) )
+					;if initial conditions were provided, use them as contexts for the first case
+					(if (and first_generated_row (> (size initial_features_map) 0) (not include_start_time_case))
+						(assign (assoc
+							use_initial_context_features (true)
+							;update initial map to be the stationary context overwritten by the provided initial values
+							initial_features_map
+								(append
+									(if has_series_context_values
+										(zip series_context_features (first series_context_values))
+										(assoc)
+									)
+									initial_features_map
+								)
+						))
+
+						;else not initial row
+						(assign (assoc use_initial_context_features (false) ))
+					)
+
+					;add each new row to series data with all initial context values
+					(assign (assoc
+						new_row
+							(if (and use_initial_context_features (not include_start_time_case))
+								(list
+									(unzip (append original_context_map initial_features_map) features)
+								)
+
+								;overwrite the values in the original_context_map with those from the current series_index in the provided series_context_values
+								has_series_context_values
+								(list
+									(unzip
+										(append
+											original_context_map
+											(zip series_context_features (get series_context_values num_generated_rows) )
+										)
+										features
+									)
+								)
+
+								;else every row begins as the original context values
+								;make a copy of original_context_values, not a referenced copy
+								(apply "list" [original_context_values])
 							)
-							series_detail_values_map
+					))
+
+					(accum (assoc num_generated_rows 1 ))
+
+					;since series_data is kept to the max number of lags + current row, the last index of series_data will never exceed largest_max_row_lag
+					(if (< last_series_index largest_max_row_lag)
+						(accum (assoc last_series_index 1 ))
+					)
+
+					;add new row to series data while only keeping the last largest_max_row_lag rows
+					(assign (assoc
+						series_data
+							(if (= 0 last_series_index)
+								new_row
+								(append (tail series_data largest_max_row_lag) new_row)
+							)
+					))
+
+					(if (size original_derived_context_features)
+						(seq
+							;if largest max_row_lag is greater than last_series_index, that means at least one context feature
+							;cannot be derived because it references a row with a larger lag and hasn't been synthed yet
+							;so skip using all such features in derived contexts
+							(assign (assoc
+								derived_context_features
+									(if (> largest_max_row_lag last_series_index)
+										;only keep those derived context features whose max_row_lag is less than or equal to last_series_index
+										;e.g., if a feature has 10 lags, but it's synthesising row 3 (last_series_index=2), it will only keep lags 1 and 2
+										(filter
+											(lambda
+												(<= (get !featureAttributes (list (current_value 1) "max_row_lag")) last_series_index)
+											)
+											original_derived_context_features
+										)
+
+										;else keep original derived_context_features
+										original_derived_context_features
+									)
+								action_features original_action_features
+							))
+
+							(if use_initial_context_features
+								(call !DeriveOrGenerateFeatures (assoc
+									react_context_features (indices initial_features_map)
+									;for initial case, may need to filter out derived context features whose values are already provided
+									derived_features
+										(filter (lambda (not (contains_index initial_features_map (current_value)))) derived_context_features)
+								))
+
+								;else just provide context features and the full list of derived_context_features
+								(call !DeriveOrGenerateFeatures (assoc
+									react_context_features user_specified_context_features
+									derived_features derived_context_features
+								))
+							)
 						)
 					)
-				)
 
-				;else store into previous_result as just series_data
-				series_data
-			)
-		) ;while loop
+					;pregenerate unique values for non series id features
+					(if has_unique_features
+						;generate a map of non-series id unique features -> unique value
+						(assign (assoc
+							pre_generated_uniques_map
+								(call !GenerateUniquesListMap (assoc
+									num_reacts 1
+									action_features action_features
+									context_features all_context_features
+									preserve_feature_values preserve_feature_values
+								))
+						))
+					)
 
-		(if (get details "series_residuals")
-			(call !ComputeSeriesUncertainty)
-		)
+					(assign (assoc
+						current_case_map (zip features (last series_data))
+						react_context_features
+							(if (and use_initial_context_features (not continue_series))
+								(indices initial_features_map)
+								all_context_features
+							)
+					))
+
+					;if first case of series and using continue_series, start with computed series_progress
+					(if (and use_initial_context_features initial_existing_progress)
+						(assign (assoc current_case_map (set current_case_map ".series_progress" initial_existing_progress)))
+					)
+
+					;filter out action (rate and delta) features that are dependent on lags that were skipped due to referencing rows that have not been synthed yet
+					(if (> (size original_derived_context_features) (size derived_context_features))
+						(let
+							(assoc
+								derived_feature_dependent_on_skipped_feature_set
+									;get a list of all features that dependend on the skipped derived context features
+									;and convert it to a set for fast lookup
+									(zip (apply "append"
+										;iterate over all skipped features and pull the list of features that depend on each one
+										(map
+											(lambda (get !sourceToDerivedFeatureMap (current_value)))
+
+											;skipped derived features are those that were in the original list but are not in the current derived context features list
+											(filter
+												(lambda (not (contains_value derived_context_features (current_value))))
+												original_derived_context_features
+											)
+										)
+									))
+							)
+
+							;keep only those action features that do not depend on skipped context features
+							(assign (assoc
+								action_features
+									(filter
+										(lambda (not (contains_index derived_feature_dependent_on_skipped_feature_set (current_value) )))
+										original_action_features
+									)
+							))
+						)
+					)
+
+					;modify context features to not include any lag-dependent features whose lag
+					;amount is larger the current last_series_index
+					(if (< last_series_index largest_max_row_lag)
+						(assign (assoc
+							react_context_features
+								(filter
+									(lambda
+										(not (< last_series_index (get ts_feature_lag_amount_map (current_value))) )
+									)
+									react_context_features
+								)
+						))
+					)
+
+					;create a (unique if necessary) series case
+					(call !SynthAndDeriveSeriesCase)
+
+					(if track_progress
+						(accum (assoc
+							total_progress
+								;has_series_context_values is the number of series context values, progress the amount to match the number of provided contexts
+								(if has_series_context_values
+									(/ 1 has_series_context_values)
+
+									;else progress the synthed amount
+									(get current_case_map ".series_progress_delta")
+								)
+						))
+					)
+
+					;if this is the first row of the series, assign values for the replacement series ids here, now that the initial value is available
+					(if first_generated_row
+						(assign (assoc
+							replacement_id_values_map
+								(map
+									(lambda
+										;generate new unique value
+										(if output_new_series_ids
+											(call !GenerateInt64String)
+
+											;else grab the value from this first series row
+											(get current_case_map (current_index))
+										)
+									)
+									replacement_id_values_map
+								)
+							first_generated_row (false)
+						))
+					)
+
+					;Check every case to see if we've generated a terminator value
+					(if series_has_terminators
+						(let
+							(assoc
+								series_end_context_features (indices (filter (remove current_case_map ".series_progress")))
+							)
+
+							;predict .series_progress given the current case
+							(declare (assoc
+								series_progress
+									(first (get
+										(call !SingleReact (assoc
+											context_features series_end_context_features
+											context_values (unzip current_case_map series_end_context_features)
+											action_features (list ".series_progress")
+											;do not derive anything during this react
+											derived_action_features (list)
+											derived_context_features (list)
+											;no details
+											details (null)
+											ignore_case ignore_case
+											substitute_output substitute_output
+											input_is_substituted input_is_substituted
+											use_case_weights use_case_weights
+											weight_feature weight_feature
+											rand_seed rand_seed
+											leave_case_out leave_case_out
+											holdout_queries holdout_queries
+											desired_conviction desired_conviction
+											use_differential_privacy use_differential_privacy
+											new_case_threshold new_case_threshold
+											feature_bounds_map feature_bounds_map
+											generate_new_cases "no"
+										))
+										"action_values"
+									))
+							))
+
+							;series_progress >= 1 means we synthed a terminator value, end series immediately
+							(if (>= series_progress 1)
+								(assign (assoc total_progress 1))
+
+								;else if series must stop on a terminator but it should be ending,
+								;prevent it from ending just yet by lowering its total_progress to below 1
+								(and stop_on_terminator (>= total_progress 1))
+								(assign (assoc total_progress 0.9999999999999999))
+							)
+						)
+					)
+
+					;determine whether to stop generating the series
+					;if there's no series_stop_map or exceeded max_series_length, be done
+					(if (or
+							(>= total_progress 1)
+							(= 0 (size series_stop_map))
+							(>= num_generated_rows max_series_length)
+						)
+						(assign (assoc done (true)))
+
+						(map
+							(lambda (seq
+								(if (contains_index (current_value) "values")
+									(if (contains_value (get (current_value) "values") (get current_case_map (current_index)))
+										(assign (assoc done (true)))
+									)
+								)
+
+								(if (contains_index (current_value) "min")
+									(let
+										(assoc stop_value (get current_case_map (current_index 1)))
+
+										(if (contains_index !featureDateTimeMap (current_index))
+											;convert stop_value to epoch
+											(assign (assoc
+												stop_value
+													(format
+														stop_value
+														(get !featureDateTimeMap (list (current_index 2) "date_time_format"))
+														"number"
+														{
+															"locale" (get !featureDateTimeMap [ (current_index 3) "locale" ] )
+															"time_zone" (get !featureDateTimeMap [ (current_index 3) "default_time_zone" ] )
+														}
+														(null)
+													)
+											))
+										)
+										(if (>= (get (current_value) "min") stop_value)
+											(assign (assoc done (true)))
+										)
+									)
+								)
+
+								(if (contains_index (current_value) "max")
+									(let
+										(assoc stop_value (get current_case_map (current_index 1)))
+
+										(if (contains_index !featureDateTimeMap (current_index))
+											;convert stop_value to epoch
+											(assign (assoc
+												stop_value
+													(format
+														stop_value
+														(get !featureDateTimeMap (list (current_index 2) "date_time_format"))
+														"number"
+														{
+															"locale" (get !featureDateTimeMap [ (current_index 3) "locale" ] )
+															"time_zone" (get !featureDateTimeMap [ (current_index 3) "default_time_zone" ] )
+														}
+														(null)
+													)
+											))
+										)
+										(if (<= (get (current_value) "max") stop_value)
+											(assign (assoc done (true)))
+										)
+									)
+								)
+							))
+							series_stop_map
+						)
+					)
+
+					;return series_data so it's stored as previous_result for accumulation in the next iteration of the while loop
+					;and explanation details if requested
+					(if output_details
+						(seq
+							(if (contains_index case_detail_values_map "influential_cases")
+								(call !NormalizeReactSeriesInfluentialCases)
+							)
+
+							;retries holds the amount of times the case was retried. Add 1 to represent generate_attempts
+							(if (and (not previous_row_failed) (contains_index case_detail_values_map "generate_attempts"))
+								(assign (assoc
+									case_detail_values_map
+										(set
+											case_detail_values_map
+											"generate_attempts"
+											(+ retries 1)
+										)
+								))
+							)
+
+							(append
+								(if (= 0 (current_index)) [] (previous_result) )
+								;if row failed (i.e., failed to derive values), don't append anything
+								(if previous_row_failed
+									[]
+
+									;store accumulated data into previous_result as an assoc
+									[
+										(append
+											(assoc "series_data" (last series_data))
+											case_detail_values_map
+										)
+									]
+								)
+							)
+						)
+
+						;else store into previous_result as just the last row of series_data
+						(append
+							(if (= 0 (current_index))
+								[]
+
+								;if the series failed (due to uniqueness), the previous result's stored data
+								;must be cleared.
+								series_failed
+								[]
+
+								(previous_result)
+							)
+							;if row or series failed (i.e., derivation or uniqueness failed), don't append anything
+							(if (or previous_row_failed series_failed)
+								[]
+
+								[(last series_data)]
+							)
+						)
+					)
+				) ;while loop
+		))
 
 		;grab the list of column indices corresponding to all the output_features
 		(declare (assoc
@@ -964,10 +965,63 @@
 				)
 		))
 
+		;if output_details, entire_series_data is a list of assocs, one assoc per row
+		(if output_details
+			(seq
+				;reduce all the detail assocs into one assoc where each key is a list of items corresponding to each row
+				;eg:
+				; {
+				;	'categorical_action_probabilties' [ {'a' 0.4 'b' 0.5}  {'a' 0.2 'b' 0.8} ]
+				;	'generate_attempts' [ 1 2 ]
+				;}
+				(assign (assoc
+					series_detail_values_map
+						(reduce
+							(lambda
+								(map
+									(lambda
+										(append
+											(if (= 1 (current_index 1))
+												;if first item is a list or assoc, wrap in a list to accumulate as an individual item
+												(if (size (first (current_value)))
+													[(first (current_value 1))]
+													;else just accumulate number values
+													(first (current_value))
+												)
+												;else just accumulate number values
+												(first (current_value))
+											)
+
+											;if item is a list or assoc, wrap in a list to accumulate as an individual item
+											(if (size (last (current_value)))
+												[(last (current_value 1))]
+												;else just accumulate number values
+												(last (current_value))
+											)
+										)
+									)
+									;accumulate all the details and not the series_data itself
+									(remove (previous_result) "series_data")
+									(remove (current_value) "series_data")
+								)
+							)
+							entire_series_data
+						)
+				))
+
+				;grab each row of series_data and store into entire_series_data
+				(assign (assoc entire_series_data (map (lambda (get (current_value) "series_data")) entire_series_data) ))
+			)
+		)
+
+		(if (get details "series_residuals")
+			(call !ComputeSeriesUncertainty)
+		)
+
 		;if need to update/replace id values, for each id, update all the rows and set updated value for each id feature
 		(if (size replacement_id_values_map)
 			(assign (assoc
-				series_data
+				entire_series_data
 					(map
 						(lambda
 							(unzip
@@ -978,7 +1032,7 @@
 								features
 							)
 						)
-						series_data
+						entire_series_data
 					)
 			))
 
@@ -999,10 +1053,10 @@
 									;else pick a random value for this id feature from the dataset by randomly sampling a case
 									(retrieve_from_entity
 										(first
-											(compute_on_contained_entities (list
-												(query_not_equals (current_value 1) (null))
+											(compute_on_contained_entities
+												(query_not_equals (current_value) (null))
 												(query_sample 1 (if valid_weight_feature weight_feature) (rand))
-											))
+											)
 										)
 										(current_value)
 									)
@@ -1023,12 +1077,12 @@
 					tail_series_id_indices (list)
 				)
 
-				;append non tracked ids at the end of each row in series_data
+				;append non tracked ids at the end of each row in entire_series_data
 				(assign (assoc
-					series_data
+					entire_series_data
 						(map
 							(lambda (append (current_value) non_tracked_series_ids))
-							series_data
+							entire_series_data
 						)
 					;list of indices corresponding to the series_ids that were appended above to the row of feature values
 					;e.g., if there were 2 ids appended to o list of 10 values, this creates: (list 10 11)
@@ -1075,7 +1129,7 @@
 											(lambda (+
 												;if one of the assocs has a key that the other does not, ensure the values
 												;do not sum up to a nan by OR-ing each value to convert any nulls to 0s
-												(or (first (current_value))  )
+												(or (first (current_value)) )
 												(or (last (current_value)) )
 											))
 											(first (current_value))
@@ -1133,11 +1187,7 @@
 							;iterate over all the series data and return only the columns corresponding to action_features
 							(map
 								(lambda (unzip (current_value) action_feature_indices))
-								;if there were existing series rows, do not include them in the output
-								(if num_existing_series_rows
-									(tail series_data (- num_existing_series_rows))
-									series_data
-								)
+								entire_series_data
 							)
 						;ensure features are output in the payload
 						"action_features" output_features
@@ -1190,7 +1240,7 @@
 			)
 		)
 
-		;if user has provided series data to continue, populate series_data with the provided values
+		;if user has provided series data to continue, populate existing_series_data with the provided values
 		(if (size series_context_values)
 			(let
 				(assoc
@@ -1200,9 +1250,9 @@
 							features
 						)
 				)
-				;set series_data matrix to match features
+				;set existing_series_data matrix to match features
 				(assign (assoc
-					series_data
+					existing_series_data
 						(map
 							(lambda (unzip (current_value) feature_order))
 							series_context_values
@@ -1217,29 +1267,23 @@
 							(unzip
 								ts_feature_lag_amount_map
 								;keep only those features with values from the last row
-								(indices (filter (zip features (last series_data))) )
+								(indices (filter (zip features (last existing_series_data))) )
 							)
 						)
 				))
 				;prepend nulls if user hasn't provided enough previous rows to account for necessary lags
-				(if (> necessary_total_rows (size series_data))
+				(if (> necessary_total_rows (size existing_series_data))
 					(assign (assoc
-						series_data
+						existing_series_data
 							(append
 								(map
 									(lambda (range (lambda (null)) 1 (size features) 1) )
-									(range 1 (- necessary_total_rows (size series_data)))
+									(range 1 (- necessary_total_rows (size existing_series_data)))
 								)
-								series_data
+								existing_series_data
 							)
 					))
 				)
-
-				(assign (assoc
-					;update last_series_index to the index of the last row in the series
-					last_series_index (- (size series_data) 1)
-					num_existing_series_rows (size series_data)
-				))
 			)
 
 			;else user has not specified untrained data, must select the data of a trained series using series_id_values
@@ -1253,7 +1297,8 @@
 						(call !RetrieveTrainedSeriesData (assoc
 							id_values_map id_values_map
 							num_cases_needed largest_max_row_lag
-							exclusive_upper_time_bound
+							exclusive (not include_start_time_case)
+							upper_time_bound
 								;if an initial time value is provided, limit existing series cases to those before the specified initial time
 								(if (contains_index initial_features_map !tsTimeFeature)
 									(if (contains_index !featureDateTimeMap !tsTimeFeature)
@@ -1271,15 +1316,28 @@
 				(if (= (size existing_series_cases) 0)
 					(accum (assoc
 						warnings
-							(associate (concat
-								"There is no series trained with the set of IDs:\n"
-								(apply "concat" (values (map (lambda (concat (current_index) ": " (current_value) "\n")) id_values_map)))
-							))
+							(if (not (size
+									(contained_entities (map
+										(lambda (query_equals (current_value) (get id_values_map (current_value))))
+										(indices id_values_map)
+									))
+								))
+								;There are no cases from this series in the model
+								(associate (concat
+									"There is no series trained with the set of IDs:\n"
+									(apply "concat" (values (map (lambda (concat (current_index) ": " (current_value) "\n")) id_values_map)))
+								))
+
+								(associate (concat
+									"There are no trained timesteps before the given initial time value with the set of IDs:\n"
+									(apply "concat" (values (map (lambda (concat (current_index) ": " (current_value) "\n")) id_values_map)))
+								))
+							)
 					))
 				)
 
 				;if there is more than one existing series case, we'll need to sort them by the time feature to ensure ascending order
-				(if (> largest_max_row_lag 1)
+				(if (> (size existing_series_cases) 1)
 					(assign (assoc
 						existing_series_cases
 							(sort
@@ -1289,9 +1347,9 @@
 					))
 				)
 
-				;set initial series_data to all the feature values from existing series cases
+				;set initial existing_series_data to all the feature values from existing series cases
 				(assign (assoc
-					series_data
+					existing_series_data
 						(map
 							(lambda
 								(call !ConvertToOutput (assoc
@@ -1301,18 +1359,24 @@
 							)
 							existing_series_cases
 						)
-					;update last_series_index to the index of the last row in the series
-					last_series_index (- (size existing_series_cases) 1)
-					num_existing_series_rows (size existing_series_cases)
 				))
-
 			)
 		)
 
+		(assign (assoc
+			num_generated_rows (size existing_series_data)
+			num_existing_series_rows (size existing_series_data)
+		))
+
 		;increase the max_series_length by the amount of pre-pended data so the series ends
 		;after the correct maximum amount of rows is generated
-		(if (size series_data)
-			(accum (assoc max_series_length (size series_data) ))
+		(if num_existing_series_rows
+			(seq
+				(accum (assoc max_series_length num_existing_series_rows))
+				;set series_data to just the necessary rows
+				(assign (assoc series_data (tail existing_series_data largest_max_row_lag) ))
+				(assign (assoc last_series_index (- (size series_data) 1) ))
+			)
 		)
 
 		;if end condition is not specified, generate progress based on where series is continuing from
@@ -1332,7 +1396,7 @@
 								(append
 									;derived action features that are not the time feature
 									(filter (lambda (!= !tsTimeFeature (current_value))) derived_action_features)
-									;non-time-deltas that are populated based on last series index
+									;non-time-deltas that have enough existing rows to be derived properly
 									(filter
 										(lambda (and
 											(!= time_delta_feature_name (current_value))
@@ -1340,25 +1404,25 @@
 												;the "root" lag/delta features are in "delta_features" as well
 												;but have no ts_order defined
 												(not (contains_index (get !featureAttributes (current_value)) "ts_order"))
-												(<= (get ts_feature_lag_amount_map (current_value)) last_series_index)
+												(< (get ts_feature_lag_amount_map (current_value)) num_existing_series_rows)
 											)
 											(contains_value features (current_value))
 										))
 										(get !tsFeaturesMap "delta_features")
 									)
-									;non-time-lags that are populated based on last series index
+									;non-time-lags that have enough existing rows to be derived properly
 									(filter
 										(lambda (and
 											(!= time_lag_feature_name (current_value))
-											(<= (get ts_feature_lag_amount_map (current_value)) last_series_index)
+											(< (get ts_feature_lag_amount_map (current_value)) num_existing_series_rows)
 											(contains_value features (current_value))
 										))
 										(get !tsFeaturesMap "lag_features")
 									)
-									;rates that are populated based on last series index
+									;rates that have enough existing rows to be derived properly
 									(filter
 										(lambda (and
-											(<= (get ts_feature_lag_amount_map (current_value)) last_series_index)
+											(< (get ts_feature_lag_amount_map (current_value)) num_existing_series_rows)
 											(contains_value features (current_value))
 										))
 										(get !tsFeaturesMap "rate_features")
@@ -1414,25 +1478,26 @@
 	#!RetrieveTrainedSeriesData
 	;params:
 	;  id_values_map: assoc of series id feature name to id value
-	;  exclusive_upper_time_bound: an upper bound time value that all retrieved cases must be before chronologically
+	;  upper_time_bound: an upper bound time value that all retrieved cases must be before chronologically
+	;  exclusive: boolean, if true then the time bound will be exclusive, otherwise inclusive
 	;  num_cases_needed: the number of cases to retrieve
-	(contained_entities (append
+	(contained_entities
 		(map
 			(lambda (query_equals (current_value) (get id_values_map (current_value))))
 			(indices id_values_map)
 		)
 		;if a lower bound for time is provided, limit existing series cases to those before the specified initial time
-		(if exclusive_upper_time_bound
-			(list
+		(if upper_time_bound
+			(append
+				[(query_less_or_equal_to !tsTimeFeature upper_time_bound)]
 				;using both query_less_or_equal_to and query_not_equals is same effect as 'query less than'
-				(query_less_or_equal_to !tsTimeFeature exclusive_upper_time_bound)
-				(query_not_equals  !tsTimeFeature exclusive_upper_time_bound)
+				(if exclusive (query_not_equals  !tsTimeFeature upper_time_bound) [] )
 			)
 			(list)
 		)
 		;select the necessary count of previous cases to reference lags
 		(query_max !tsTimeFeature num_cases_needed)
-	))
+	)
 
 
 	;Helper method for ReactSeries that synthesises action_features and derives derived_action_features to create a series case
@@ -1576,30 +1641,59 @@
 		;overwrite the values for the action features in the current case map now that they have values
 		(accum (assoc current_case_map (zip action_features (get react_output "action_values")) ))
 
-		(if (size (keep feature_post_process_code_map action_features))
-			;if any of the action features have a custom post_process, update their values using them
-			(accum (assoc
-				current_case_map
-					(map
-						(lambda
-							(get_value
-								(call_sandboxed (current_value) (assoc
-									series_data
-										;need to use series_data with the updated feature value
-										(append
-											(trunc series_data)
-											[(unzip current_case_map features)]
-										)
-									series_row_index last_series_index
-									feature_index_map feature_index_map
-									!featureDateTimeMap !featureDateTimeMap
-									!ConvertDateToEpoch !ConvertDateToEpoch
-								) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
-							)
+		;there may be features than need post processing
+		(if (size feature_post_process_code_map)
+			(let
+				(assoc
+					non_derived_action_features
+						;keep only those action_features that have not been derived
+						(filter
+							(lambda (not (contains_value derived_action_features (current_value))) )
+							action_features
 						)
-						(keep feature_post_process_code_map action_features)
-					)
-			))
+				)
+
+				;get the list of non derived features that can be post processed here because the features they need
+				;for post processing already have values and do not need to be derived yet
+				;e.g., if a feature's post processing needs the ".value_lag_1" feature, it can be post processed here
+				;but not if it needs "value" because "value" needs to be derived below.
+				(assign (assoc
+					non_derived_post_process_features
+						(indices (filter
+							(lambda
+								;keep only features whose needed features do not need to be derived below
+								(= 0 (size (remove (current_value) non_derived_action_features)))
+							)
+							post_process_needed_features_map
+						))
+				))
+
+				(if (size (keep feature_post_process_code_map non_derived_post_process_features))
+					;if any of the action features have a custom post_process, update their values using them
+					(accum (assoc
+						current_case_map
+							(map
+								(lambda
+									(get_value
+										(call_sandboxed (current_value) (assoc
+											series_data
+												;need to use series_data with the updated feature value
+												(append
+													(trunc series_data)
+													[(unzip current_case_map features)]
+												)
+											series_row_index last_series_index
+											feature_index_map feature_index_map
+											!featureDateTimeMap !featureDateTimeMap
+											!ConvertDateToEpoch !ConvertDateToEpoch
+										) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+									)
+								)
+								(keep feature_post_process_code_map non_derived_post_process_features)
+							)
+					))
+				)
+			)
 		)
 
 		;overwrite the last row in series data with the values from the updated current case
@@ -1649,6 +1743,53 @@
 						case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
 						done (true)
 					))
+
+					;else derivation succeeded, post process the derived action features here if needed
+					(size feature_post_process_code_map)
+					(let
+						(assoc
+							derived_post_process_features
+								;keep all the remaining features that can be post processed now that action features are derived
+								(filter
+									(lambda (not (contains_value non_derived_post_process_features (current_value))))
+									action_features
+								)
+
+						)
+
+						;post process any remaining features that need these avalailable derived features
+						(if (size (keep feature_post_process_code_map derived_post_process_features))
+							(let
+								(assoc
+									post_processed_map
+										(map
+											(lambda
+												(get_value
+													(call_sandboxed (current_value) (assoc
+														series_data series_data
+														series_row_index last_series_index
+														feature_index_map feature_index_map
+														!featureDateTimeMap !featureDateTimeMap
+														!ConvertDateToEpoch !ConvertDateToEpoch
+													) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+												)
+											)
+											(keep feature_post_process_code_map derived_post_process_features)
+										)
+								)
+								(assign (assoc
+									series_data
+										(append
+											(trunc series_data)
+											[(unzip
+												(append (zip features (last series_data)) post_processed_map)
+												features
+											)]
+										)
+								))
+							)
+						)
+					)
 				)
 			)
 		)
@@ -1717,9 +1858,11 @@
 												(if num_existing_series_rows
 													(assign (assoc
 														total_progress initial_existing_progress
-														series_data (trunc series_data num_existing_series_rows)
+														series_data (tail existing_series_data largest_max_row_lag)
 														last_series_index (- num_existing_series_rows 1)
+														num_generated_rows num_existing_series_rows
 														first_generated_row (true)
+														series_failed (true)
 														current_case_map (assoc)
 														;reset case detail values
 														case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
@@ -1729,7 +1872,9 @@
 														total_progress 0
 														series_data (list)
 														last_series_index -1
+														num_generated_rows 0
 														first_generated_row (true)
+														series_failed (true)
 														current_case_map (assoc)
 														;reset case detail values
 														case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
@@ -1758,11 +1903,7 @@
 	#!ComputeSeriesUncertainty
 	(let
 		(assoc
-			synthesized_timesteps
-				(if num_existing_series_rows
-					(tail series_data (- num_existing_series_rows))
-					series_data
-				)
+			synthesized_timesteps entire_series_data
 			time_feature_index (get feature_index_map !tsTimeFeature)
 			output_feature_index_map (zip output_features (indices output_features))
 		)
@@ -1779,7 +1920,10 @@
 						end_time
 						(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
 						"number"
-						(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+						{
+							"locale" (get !featureDateTimeMap [ !tsTimeFeature "locale" ] )
+							"time_zone" (get !featureDateTimeMap [ !tsTimeFeature "default_time_zone" ] )
+						}
 						(null)
 					)
 			))
@@ -1832,7 +1976,10 @@
 												(get (current_value) (current_index 1))
 												(get !featureDateTimeMap (list (current_value 2) "date_time_format"))
 												"number"
-												(assoc "locale" (get !featureDateTimeMap (list (current_value 2) "locale")))
+												{
+													"locale" (get !featureDateTimeMap [ (current_value 2) "locale" ] )
+													"time_zone" (get !featureDateTimeMap [ (current_value 2) "default_time_zone" ] )
+												}
 												(null)
 											)
 										)
@@ -1870,7 +2017,10 @@
 													(get (current_value 1) time_feature_index)
 													(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
 													"number"
-													(assoc "locale" (get !featureDateTimeMap (list !tsTimeFeature "locale")))
+													{
+														"locale" (get !featureDateTimeMap [ !tsTimeFeature "locale" ] )
+														"time_zone" (get !featureDateTimeMap [ !tsTimeFeature "default_time_zone" ] )
+													}
 													(null)
 												)
 
@@ -1886,7 +2036,7 @@
 												vals
 													(map
 														(lambda
-															(call !InterpolateSeriesValues (assoc
+															(call !InterpolateSeriesValuesContinuous (assoc
 																time_values (get (current_value 1) forecast_time_index)
 																feature_values (get (current_value 1) (get output_feature_index_map (current_index 3)))
 																pre_domain_value (first (get (current_value 1) (get output_feature_index_map (current_index 3))))

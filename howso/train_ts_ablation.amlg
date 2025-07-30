@@ -521,7 +521,7 @@
 				(map
 					(lambda
 						(if (= (null) (current_value))
-							(null) ;ablated case
+							(map (null) features_indices) ;ablated case
 							(unzip (current_value) features_indices)
 						)
 					)
@@ -565,17 +565,35 @@
 		(if (size trained_series_case_ids)
 			(seq
 				;there were existing cases, update their progress values
-				(map
-					(lambda
-						(assign_to_entities
-							(get trained_series_case_ids (current_index))
+				(if read_only_mode
+					(accum (assoc
+						ts_case_edits_map
 							(zip
-								progress_features
-								(get derived_progress_values_lists (current_value))
+								trained_series_case_ids
+								(map
+									(lambda
+										(zip
+											progress_features
+											(get derived_progress_values_lists (current_value))
+										)
+									)
+									trained_case_indices
+								)
+							)
+					))
+
+					(map
+						(lambda
+							(assign_to_entities
+								(get trained_series_case_ids (current_index))
+								(zip
+									progress_features
+									(get derived_progress_values_lists (current_value))
+								)
 							)
 						)
+						trained_case_indices
 					)
-					trained_case_indices
 				)
 				;filter out the already trained cases so we only train the new ones
 				(assign (assoc
@@ -629,31 +647,65 @@
 
 	;every derived feature must be immediately fed back into data because it may be needed by the next derived feature
 	#!DeriveCustomFeaturesForData
-	(map
-		(lambda (let
-			(assoc feature (current_value 1))
-			(declare (assoc
-				derived_custom_values
+	(let
+		(assoc
+			;compute the maximum order of rate or deltas needed, since higher orders depend on lower ones and need to be derived sequentially
+			;e.g., 1st order for a rate feature needs to be derived before the 2nd order rate feature, etc.
+			max_order
+				(apply "max"
+					(map (lambda (get !featureAttributes [(current_value 1) "ts_order"])) derived_features)
+				)
+			time_feature_delta (concat "." !tsTimeFeature "_delta_1")
+		)
+
+		;first explicitly derive time feature delta
+		(assign (assoc
+			data
+				(map
+					(lambda
+						(append (first (current_value)) (last (current_value)))
+					)
+					data
 					(call !AddDerivedCodeFeature (assoc
-						feature feature
+						feature time_feature_delta
 						features features
 						series_data data
 					))
-			))
-
-			(assign (assoc
-				features (append features feature)
-				data
-					(map
-						(lambda
-							(append (first (current_value)) (last (current_value)))
-						)
-						data
-						derived_custom_values
-					)
-			))
+				)
 		))
-		derived_features
+		(assign (assoc
+			features (append features time_feature_delta)
+			derived_features (filter (lambda (!= time_feature_delta (current_value))) derived_features)
+		))
+
+		(range
+			(lambda (let
+				(assoc
+					;keep only those features matching this order (current_index 2) value
+					derived_order_features
+						(filter
+							(lambda (= (current_index 2) (get !featureAttributes [(current_value 1) "ts_order"])))
+							derived_features
+						)
+				)
+				(assign (assoc
+					data
+						(map
+							(lambda
+								(append (first (current_value)) (last (current_value)) )
+							)
+							data
+							(call !AddDerivedIndependentCodeFeatures (assoc
+								derived_features derived_order_features
+								features features
+								series_data data
+							))
+						)
+				))
+				(accum (assoc features derived_order_features))
+			))
+			1 max_order 1
+		)
 	)
 
 

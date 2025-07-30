@@ -13,24 +13,25 @@
 		)
 		(if (!= (null) num)
 			(if (!= (null) rand_seed)
-				(contained_entities (append
+				(contained_entities
 					(query_exists !internalLabelSession)
 					query_conditions
 					(query_select num start_offset rand_seed)
-				))
+				)
 
-				(contained_entities (list
+				(contained_entities
 					(query_exists !internalLabelSession)
+					query_conditions
 					(query_select num start_offset )
-				))
+				)
 			)
 
 
 			;else return all
-			(contained_entities (append
+			(contained_entities
 				(query_exists !internalLabelSession)
 				query_conditions
-			))
+			)
 		)
 	)
 
@@ -49,19 +50,19 @@
 			query_conditions (list)
 		)
 		(if (!= (null) num)
-			(contained_entities (append
+			(contained_entities
 				(query_exists !internalLabelSession)
 				query_conditions
 				(query_sample num case_weight_feature
 					(if (!= (null) rand_seed) rand_seed (rand)))
-			))
+			)
 
 			;else return samples with replacement on all cases
-			(contained_entities (append
+			(contained_entities
 				(query_exists !internalLabelSession)
 				query_conditions
 				(query_sample (call !GetNumTrainingCases) case_weight_feature (rand))
-			))
+			)
 		)
 	)
 
@@ -144,18 +145,19 @@
 					(declare (assoc
 						similar_cases_map
 							#!GoalFeatureSamplingQuery
-							(compute_on_contained_entities (append
+							(compute_on_contained_entities
 								(query_exists !internalLabelSession)
 								custom_extra_filtering_queries
 								(query_nearest_generalized_distance
 									(get hyperparam_map "k")
 									context_features
 									context_values
+									(get hyperparam_map "p")
 									feature_weights
 									!queryDistanceTypeMap
 									(get hyperparam_map "featureAttributes")
 									(get hyperparam_map "featureDeviations")
-									(get hyperparam_map "p")
+									(null)
 									dt_parameter
 									(if valid_weight_feature weight_feature (null))
 									;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -163,7 +165,7 @@
 									(null) ;radius
 									!numericalPrecision
 								)
-							))
+							)
 					))
 
 					(assign (assoc
@@ -210,7 +212,7 @@
 
 	;returns the total number of training cases
 	#!GetNumTrainingCases
-	(size (contained_entities [ (query_exists !internalLabelSession) ] ))
+	(size (contained_entities (query_exists !internalLabelSession) ))
 
 	;parameters: session and session_index
 	#!GetCaseGivenReplaySession
@@ -261,6 +263,10 @@
 			;{ref "Precision"}
 			;string, default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
 			precision "exact"
+			;{ref "SortByCriteria"}
+			;list of maps defining sorting criteria in order of precedence. Each map should specify the feature name under the "feature" key and
+			;"asc"/"desc" under the "order" key.
+			sort_by (null)
 			;{type "boolean"}
 			;if true, will return the audit data of which features for each row were imputed (auto-filled)
 			indicate_imputed (false)
@@ -268,6 +274,8 @@
 			;flag, when true only returns an assoc of case ids and no features
 			output_ids (false)
 		)
+		(call !ValidateParameters)
+		(call !ValidateCondition)
 
 		(if indicate_imputed
 			(accum (assoc features !internalLabelImputed))
@@ -322,7 +330,13 @@
 							condition condition
 							condition_session condition_session_value
 							precision precision
-							num_cases num_cases
+							num_cases
+								;if there is a more complex sorting critera, all condition-matching cases must be selected then sorted below.
+								(if (> (size sort_by) 1)
+									(null)
+									num_cases
+								)
+							sort_by sort_by
 						))
 					)
 
@@ -332,12 +346,74 @@
 							(lambda (retrieve_from_entity (current_value) ".replay_steps"))
 							(call !GetSessionIds)
 						)
-
 					)
 				)
 			has_rounded_features !hasRoundedFeatures
 			has_datetime_features !hasDateTimeFeatures
 		))
+
+		(if (size sort_by)
+			(let
+				(assoc
+					sorting_features (map (lambda (get (current_value) "feature")) sort_by)
+				)
+
+				(assign (assoc
+					cases
+						(sort
+							(lambda
+								(let
+									(assoc
+										case_1_values (retrieve_from_entity (current_value 1) sorting_features)
+										case_2_values (retrieve_from_entity (current_value 2) sorting_features)
+									)
+
+									(apply "or"
+										(map
+											(lambda
+												(if (= "asc" (get (current_value) "order"))
+													(if (~ 0 (get case_1_values (current_index)))
+														(-
+															(get case_1_values (current_index))
+															(get case_2_values (current_index))
+														)
+
+														(>
+															(get case_1_values (current_index))
+															(get case_2_values (current_index))
+														)
+													)
+
+													;otherwise desc
+													(if (~ 0 (get case_1_values (current_index)))
+														(-
+															(get case_2_values (current_index))
+															(get case_1_values (current_index))
+														)
+
+														(>
+															(get case_2_values (current_index))
+															(get case_1_values (current_index))
+														)
+													)
+												)
+											)
+											sort_by
+										)
+									)
+								)
+							)
+							cases
+						)
+				))
+
+				(if num_cases
+					(assign (assoc
+						cases (trunc cases num_cases)
+					))
+				)
+			)
+		)
 
 		(if output_ids
 			(conclude (call !Return (assoc payload (assoc cases cases))))
@@ -404,10 +480,10 @@
 	#!GetCaseId
 	(first
 		;return the one entity that was trained in this session at this session_training_index
-		(contained_entities (list
+		(contained_entities
 			(query_equals !internalLabelSession session)
 			(query_equals !internalLabelSessionTrainingIndex session_training_index)
-		))
+		)
 	)
 
 	;return the list of case ids given a list of session and session training index tuples
@@ -459,6 +535,7 @@
 	;		If null there will be no limit.
 	;	If 'condition_filter_query' is not specified:
 	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact".
+	; sort_by: optional, list of criteria to sort the cases by. Only used here if singular.
 	#!GetCasesByCondition
 	(declare
 		(assoc
@@ -467,6 +544,7 @@
 			condition_session (null)
 			precision "exact"
 			num_cases (null)
+			sort_by (null)
 		)
 
 		(if (!= (null) condition_session)
@@ -483,6 +561,7 @@
 								condition_session condition_session
 								precision precision
 								num_cases num_cases
+								sort_by_criteria (if (= 1 (size sort_by)) (first sort_by))
 							))
 					))
 				)
@@ -509,6 +588,7 @@
 	;	n values = must match any of these values exactly
 	; precision: flag, default is "exact". Whether to query for 'exact' matches; if set to 'similar' will query for similar values intead of 'exact'
 	; num_cases: optional, default is null. The number of "similar" cases to get if 'precision' is "similar" or no limit if precision is "exact".
+	; sort_by_criteria: optional. The assoc defining how to sort cases, only used if num_cases is specified.
 	#!GetQueryByCondition
 	(declare
 		(assoc
@@ -516,6 +596,7 @@
 			condition_session (null)
 			precision "exact"
 			num_cases (null)
+			sort_by_criteria (null)
 		)
 
 		;set num_cases appropriately if null
@@ -624,6 +705,15 @@
 					))
 					(indices condition)
 				)
+				(if (and sort_by_criteria num_cases)
+					(if (= "asc" (get sort_by_criteria "order"))
+						(query_min (get sort_by_criteria "feature") num_cases (true))
+
+						(= "desc" (get sort_by_criteria "order"))
+						(query_max (get sort_by_criteria "feature") num_cases (true))
+					)
+					[]
+				)
 			)
 
 			;else do a fuzzy query
@@ -683,11 +773,12 @@
 							num_cases
 							equals_features
 							equals_features_values
+							(get hyperparam_map "p")
 							(get hyperparam_map "featureWeights")
 							!queryDistanceTypeMap
 							(get hyperparam_map "featureDomainAttributes")
 							(get hyperparam_map "featureDeviations")
-							(get hyperparam_map "p")
+							(null)
 							(get hyperparam_map "dt")
 							(null) ;weight
 							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -700,6 +791,15 @@
 						)
 
 						(list)
+					)
+					(if (and sort_by_criteria num_cases)
+						(if (= "asc" (get sort_by_criteria "order"))
+							(query_min (get sort_by_criteria "feature") num_cases (true))
+
+							(= "desc" (get sort_by_criteria "order"))
+							(query_max (get sort_by_criteria "feature") num_cases (true))
+						)
+						[]
 					)
 				)
 			)
@@ -746,16 +846,16 @@
 			case_ids
 				(if (!= (null) sort_feature)
 					(if (> num 0)
-						(contained_entities (list
+						(contained_entities
 							(query_exists !internalLabelSession)
 							(query_max sort_feature num)
-						))
+						)
 
 						(< num 0)
-						(contained_entities (list
+						(contained_entities
 							(query_exists !internalLabelSession)
 							(query_min sort_feature (- num))
-						))
+						)
 
 						(null)
 					)
@@ -839,7 +939,7 @@
 					(lambda (let
 						(assoc feature (current_index 1))
 						(declare (assoc
-							num_nulls (size (contained_entities [ (query_equals feature (null)) ] ))
+							num_nulls (size (contained_entities (query_equals feature (null)) ))
 						))
 
 						;there are only one or zero non-null values, skip computing for this feature
@@ -852,13 +952,13 @@
 								(assoc
 									;assoc of case id -> assoc feature -> value
 									not_null_cases_map
-										(compute_on_contained_entities (list
+										(compute_on_contained_entities
 											(query_not_equals feature (null))
 											;randomly select 2 different cases that don't have nulls
 											(query_select 2 (null) (rand))
 											;output an assoc of feature -> value for every case
 											(query_exists feature)
-										))
+										)
 								)
 
 								;continuous features must have at least two different values to compute r^2
@@ -874,11 +974,11 @@
 													;select a non-null case with a different value
 													different_case
 														(first
-															(contained_entities (list
+															(contained_entities
 																(query_not_equals feature (null))
 																(query_not_equals feature (get unique_values (list 0 feature)) )
 																(query_sample 1)
-															))
+															)
 														)
 												)
 

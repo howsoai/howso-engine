@@ -1,0 +1,119 @@
+;real-data concurrency tests for scale.amlg
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_scale_ablation.amlg"))
+
+    ; The thing this is trying to simulate is, in Platform, concurrent calls to split training with auto-ablation on.
+    ; In this sequence it's possible for one replica to call compute_train_payload while the primary replica is
+    ; (maybe automatically) doing reduce_data, and so some of the referenced cases won't exist.
+    ;
+    ; This does depend on some specific behavior of ablation which will be called out.
+    ;
+    ; The data set is y=x^2.
+
+    (null
+        #!CreateSquareCases
+        (map
+            (lambda
+                (list
+                    (current_value 1)
+                    (* (current_value 1) (current_value 1))
+                )
+            )
+            xs
+        )
+    )
+
+    (print "set_feature_attributes\n")
+    (call_entity "howso" "set_feature_attributes" (assoc
+        feature_attributes (assoc
+            "x" (assoc "type" "continuous")
+            "y" (assoc "type" "continuous")
+        )
+    ))
+
+    (print "set_auto_ablation_params\n")
+    (call_entity "howso" "set_auto_ablation_params" (assoc
+        auto_ablation_enabled (true)
+        min_num_cases 100
+        max_num_cases 200
+    ))
+
+    (print "train\n")
+    (call_entity "howso" "train" (assoc
+        cases (call !CreateSquareCases (assoc xs (range 0 999)))
+        features (list "x" "y")
+        session "unit_test"
+    ))
+
+    (print "analyze\n")
+    (call_entity "howso" "analyze" (assoc))
+
+    (print "reduce_data\n")
+    (call_entity "howso" "reduce_data" (assoc))
+
+    ; At this point, ablation has gotten rid of all of the cases between x=0 and x=300!
+    ; (There's no specific requirement that ablation does so, but it matters for this test.)
+
+    (declare (assoc
+        first_pass_cases (call_entity "howso" "get_cases" (assoc features (list "x")))
+    ))
+    (print "get_cases succeeded: ")
+    (call assert_same (assoc
+        obs (first first_pass_cases)
+        exp 1
+    ))
+    (print "no cases between x=0 and x=300: ")
+    (call assert_true (assoc
+        obs (apply "and"
+                (map
+                    (lambda (or (= (first (current_value)) 0) (> (first (current_value)) 300)))
+                    (get first_pass_cases (list 1 "payload" "cases"))
+                )
+        )
+    ))
+
+    ; Let's train some more cases with small numbers.
+
+    (print "train\n")
+    (call_entity "howso" "train" (assoc
+        cases (call !CreateSquareCases (assoc xs (range 0 99)))
+        features (list "x" "y")
+        session "unit_test"
+    ))
+
+    ; Now let's set up training a specific number of small-valued cases.
+    ; Remember that anything near here was dropped in the first reduce_data call, but we've loaded in some
+    ; duplicate cases.
+
+    (declare (assoc
+        train_payload (call_entity "howso" "compute_train_payload" (assoc
+            cases (call !CreateSquareCases (assoc xs (range 45 55)))
+            features (list "x" "y")
+            session "unit_test"
+        ))
+    ))
+    (print "compute_train_payload succeeded: ")
+    (call assert_same (assoc
+        obs (first train_payload)
+        exp 1
+    ))
+
+    ; With that payload in hand, let's reduce_data again.
+
+    (print "reduce_data\n")
+    (call_entity "howso" "reduce_data" (assoc))
+
+    ; This will again drop a lot of the small-valued cases, so we're going to fail committing the payload.
+
+    (print "process_train_payload failed: ")
+    (call assert_same (assoc
+        obs (call_entity "howso" "process_train_payload" (get train_payload (list 1 "payload")))
+        exp (list 0 (assoc
+            "detail" "Missing related training case"
+            "code" "conflict"
+        ))
+    ))
+
+    (call exit_if_failures (assoc msg unit_test_name))
+)

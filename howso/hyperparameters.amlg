@@ -96,26 +96,17 @@
 				(append
 					;if clearing weights, set them to null
 					(if (= (false) use_weights)
-						;if there are inactive features, we have to reset active features to 1s and inactives to 0s
-						(if (size !inactiveFeaturesMap)
-							(assoc "featureWeights"
-								(append
-									(zip
-										(indices (get baseline_hyperparameter_map "featureWeights"))
-										1
-									)
-									!inactiveFeaturesMap
-								)
-							)
-
-							;else null out the weights
-							(assoc "featureWeights" (null))
-						)
-
+						(assoc "featureWeights" (null))
 						(assoc)
 					)
 					(if feature_weights
-						(assoc "featureWeights" feature_weights)
+						(assoc
+							"featureWeights"
+								(if (size !inactiveFeaturesMap)
+									(append feature_weights !inactiveFeaturesMap)
+									feature_weights
+								)
+						)
 						(assoc)
 					)
 					(if use_deviations
@@ -307,7 +298,7 @@
 
 		;run through one pass using feature weights to see if they should be used
 		(assign (assoc
-			dataset_mae (call !ComputeResidualForParameters (assoc targetless (= targeted_model "targetless")))
+			dataset_mae (call !ComputeResidualForParameters)
 		))
 
 		;if previous pass did better than this pass, revert baseline_hyperparameter_map
@@ -438,11 +429,13 @@
 		)
 	)
 
-	;update hyperparameter map for newly added feature
+	;update hyperparameter map for newly added inactive feature
 	; hp_map: the hp map to be updated, should be either !defaultHyperparameters or !hyperparameterMetadataMap
 	#!UpdateHyperparametersWithNewFeature
 	(declare
 		(assoc hp_map (assoc) )
+
+		(declare (assoc num_cases (call !GetNumTrainingCases) ))
 
 		(rewrite
 			(lambda
@@ -454,21 +447,15 @@
 						)
 
 						(if (!= (null) feature_weights_map)
-							(assign (assoc feature_weights_map (append feature_weights_map (associate feature 1)) ))
-
-							;else no weights, assign all active features weight 1
-							(assign (assoc
-								feature_weights_map
-									(append
-										(zip (append !trainedFeatures feature) 1)
-										;prevent appending null to an assoc
-										(if !inactiveFeaturesMap !inactiveFeaturesMap (assoc))
-									)
-							))
+							(assign (assoc feature_weights_map (append feature_weights_map (associate feature 0)) ))
 						)
 
-						(if (!= (null) feature_deviations_map)
-							(assign (assoc feature_deviations_map (set feature_deviations_map feature min_deviation_value) ))
+						(if (size feature_deviations_map)
+							(assign (assoc
+								feature_deviations_map
+									;new feature deviation is smallest possible value (see !CacheFeatureMinGapAndResidual for details )
+									(set feature_deviations_map feature (/ 1 (+ 0.5 num_cases)) )
+							))
 						)
 
 						(append (current_value) (assoc
@@ -787,7 +774,7 @@
 		(assign_to_entities (assoc
 			!autoAnalyzeEnabled (false)
 			!autoAnalyzeThreshold 100
-			!autoAnalyzeGrowthFactorAmount 2.718281828459
+			!autoAnalyzeGrowthFactorAmount 7.3890561
 			!numericalPrecision (null)
 			!numericalPrecisionFastest (false)
 			!defaultNumSamples 100
@@ -819,8 +806,8 @@
 			analyze_threshold 100
 			;{type "number" exclusive_min 1.0}
 			;the factor by which to increase the analyze threshold every time the model grows to the current threshold size
-			;	default of using the universal scaling factor e
-			analyze_growth_factor 2.718281828459
+			;	default of using the universal scaling factor e^2
+			analyze_growth_factor 7.3890561
 			;{type "list" values "string"}
 			;the features to use as contexts in the analysis
 			context_features (null)
@@ -845,10 +832,15 @@
 			;	of deviations, when false will not use deviations. If unspecified, the better performing option will be selected.
 			use_deviations (null)
 			;{type "number" min 2}
-			;number of cases to use to approximate residuals
-			num_samples (null)
+			;number of cases to use to approximate deviations and residuals for both targetless and targeted flows.
+			;defaults to 1000 if unspecified.
+			num_deviation_samples (null)
 			;{type "number" min 2}
-			;number of cases to sample during analysis. only applies for k_folds = 1
+			;number of samples to use to compute feature probabilities, only applies to targetless flow.
+			;If unspecified will be dynamically set based on number features and data characteristics.
+			num_feature_probability_samples (null)
+			;{type "number" min 2}
+			;number of cases to sample used for grid search for the targeted flow. only applies for k_folds = 1. defaults to 1000.
 			num_analysis_samples (null)
 			;{type "number" min 2}
 			;number of samples to use for analysis. the rest will be randomly held-out and not included in calculations
@@ -933,12 +925,13 @@
 				bypass_calculate_feature_residuals
 				bypass_calculate_feature_weights
 				use_deviations
-				num_samples
+				num_deviation_samples
 				k_values
 				p_values
 				dt_values
 				targeted_model
 				num_analysis_samples
+				num_feature_probability_samples
 				analysis_sub_model_size
 				(!= ".case_weight" weight_feature)
 				use_case_weights
@@ -969,12 +962,13 @@
 							"bypass_calculate_feature_residuals" bypass_calculate_feature_residuals
 							"bypass_calculate_feature_weights" bypass_calculate_feature_weights
 							"use_deviations"  use_deviations
-							"num_samples" num_samples
+							"num_deviation_samples" num_deviation_samples
 							"k_values" k_values
 							"p_values" p_values
 							"dt_values" dt_values
 							"targeted_model" targeted_model
 							"num_analysis_samples" num_analysis_samples
+							"num_feature_probability_samples" num_feature_probability_samples
 							"analysis_sub_model_size" analysis_sub_model_size
 							"weight_feature" weight_feature
 							"use_case_weights" use_case_weights
@@ -1016,6 +1010,7 @@
 					residual_prediction_features !autoAblationResidualPredictionFeatures
 					conviction_upper_threshold !autoAblationConvictionUpperThreshold
 					conviction_lower_threshold !autoAblationConvictionLowerThreshold
+					influence_weight_entropy_sample_size !autoAblationInfluenceWeightEntropySampleSize
 				)
 		))
 	)
@@ -1033,12 +1028,12 @@
 			auto_ablation_weight_feature ".case_weight"
 			;{type "number"}
 			;stores the threshold for the minimum number of cases at which the model should auto-ablate.
-			;	default of 1000.
-			min_num_cases 1000
+			;	default of 10000.
+			min_num_cases 10000
 			;{type "number"}
 			;stores the threshold for the number of cases at which the model should automatically reduce data.
-			;	default of 500,000.
-			max_num_cases 500000
+			;	default of 200,000.
+			max_num_cases 200000
 			;{type "number"}
 			;the influence weight entropy quantile that a case must be beneath in order to be trained.
 			;	default of 1/e^2.
@@ -1047,6 +1042,10 @@
 			;the influence weight entropy quantile that a case must be beneath in order to not be removed.
 			;	default of 1-1/e.
 			reduce_data_influence_weight_entropy_threshold 0.632120559
+			;{type "number"}
+			;maximum number of cases to sample without replacement for computing the influence weight entropy threshold
+			; default of 2000
+			influence_weight_entropy_sample_size 2000
 			;{type "list" values "string"}
 			;list of features. for each of the features specified, will ablate a case if the prediction
 			;	matches exactly.
@@ -1106,6 +1105,7 @@
 			!autoAblationWeightFeature auto_ablation_weight_feature
 			!autoAblationMinNumCases min_num_cases
 			!autoAblationMaxNumCases max_num_cases
+			!autoAblationInfluenceWeightEntropySampleSize influence_weight_entropy_sample_size
 			!autoAblationInfluenceWeightEntropyThreshold auto_ablation_influence_weight_entropy_threshold
 			!reduceDataInfluenceWeightEntropyThreshold reduce_data_influence_weight_entropy_threshold
 			!autoAblationExactPredictionFeatures exact_prediction_features
@@ -1215,16 +1215,19 @@
 									)
 									(if (= 0 (size feature_classes))
 										(indices
-											(compute_on_contained_entities (list
+											(compute_on_contained_entities
 												(query_value_masses
 													current_feature
 													(if valid_weight_feature weight_feature)
-													(or
-														(not (contains_index !nominalsMap current_feature))
-														(contains_index !numericNominalFeaturesMap current_feature)
+													(if (or
+															(not (contains_index !nominalsMap current_feature))
+															(contains_index !numericNominalFeaturesMap current_feature)
+														)
+														"number"
+														"string"
 													)
 												)
-											))
+											)
 										)
 										feature_classes
 									)
@@ -1254,7 +1257,7 @@
 						(if (= 0 predicted_class_prob)
 							(/ (apply "+" avg_probs_same_or_larger_than_predicted) num_classes)
 
-							(/ (apply "+" avg_probs_same_or_larger_than_predicted) (size avg_probs_same_or_larger_than_predicted))
+							(generalized_mean avg_probs_same_or_larger_than_predicted)
 						)
 					))
 					confusion_matrix
@@ -1492,16 +1495,19 @@
 						(if (= 0 (size all_classes_map))
 							(assign (assoc
 								all_classes_map
-									(compute_on_contained_entities (list
+									(compute_on_contained_entities
 										(query_value_masses
 											feature
 											(if valid_weight_feature weight_feature)
-											(or
-												(not (contains_index !nominalsMap feature))
-												(contains_index !numericNominalFeaturesMap feature)
+											(if (or
+													(not (contains_index !nominalsMap feature))
+													(contains_index !numericNominalFeaturesMap feature)
+												)
+												"number"
+												"string"
 											)
 										)
-									))
+									)
 							))
 						)
 

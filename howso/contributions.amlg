@@ -62,6 +62,7 @@
 			;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
 			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
 			max_lag_index_value (null)
+			excluded_inactive_features_map {}
 		))
 		(if ts_feature_lag_amount_map
 			(assign (assoc max_lag_index_value (apply "max" (values ts_feature_lag_amount_map)) ))
@@ -104,6 +105,18 @@
 						))
 					)
 				)
+			)
+		)
+
+		;don't use inactive features for computing prediction contributions
+		(if (size !inactiveFeaturesMap)
+			(seq
+				(assign (assoc
+					excluded_inactive_features_map (keep !inactiveFeaturesMap context_features)
+				))
+				(assign (assoc
+					context_features (filter (lambda (not (contains_index excluded_inactive_features_map (current_value)))) context_features)
+				))
 			)
 		)
 
@@ -190,10 +203,10 @@
 				case_series_index_map
 					(map
 						(lambda (get (current_value) ".series_index"))
-						(compute_on_contained_entities (list
+						(compute_on_contained_entities
 							(query_in_entity_list case_ids)
 							(query_exists ".series_index")
-						))
+						)
 					)
 			))
 		)
@@ -202,6 +215,11 @@
 			(call !RunRobustContributions)
 
 			(call !RunFullContributions)
+		)
+
+		;put the inactive features back into output with 0s
+		(if (size excluded_inactive_features_map)
+			(accum (assoc feature_contributions_map excluded_inactive_features_map))
 		)
 
 		(declare (assoc directional_contributions_map (map (lambda (last (current_value))) feature_contributions_map) ))
@@ -460,12 +478,12 @@
 									;else average with - average without for this feature
 									(list
 										(abs (-
-											(/ (apply "+" feature_reactions_with) (size feature_reactions_with))
-											(/ (apply "+" feature_reactions_without) (size feature_reactions_without))
+											(generalized_mean feature_reactions_with)
+											(generalized_mean feature_reactions_without)
 										))
 										(-
-											(/ (apply "+" feature_reactions_with) (size feature_reactions_with))
-											(/ (apply "+" feature_reactions_without) (size feature_reactions_without))
+											(generalized_mean feature_reactions_with)
+											(generalized_mean feature_reactions_without)
 										)
 									)
 								)
@@ -506,14 +524,8 @@
 							))
 							(list
 								;for each feature, iterate over the list of feature deltas for each case, and average them out
-								(/
-									(apply "+" abs_avgs)
-									(size abs_avgs)
-								)
-								(/
-									(apply "+" avgs)
-									(size avgs)
-								)
+								(generalized_mean abs_avgs)
+								(generalized_mean avgs)
 							)
 						))
 						(or details_context_features all_context_features)
@@ -661,7 +673,8 @@
 					)
 
 					(list
-						(/ (apply "+" (map (lambda (first (current_value))) deltas)) (size deltas))
+						(generalized_mean (map (lambda (first (current_value))) deltas) )
+						;TODO: 17356, deal with averaging out differences to handle edit distance features
 						(/ (apply "+" (map (lambda (last (current_value))) deltas)) (size deltas))
 					)
 

@@ -7,17 +7,18 @@
 		(assoc
 			relevant_features (append context_features action_features)
 			regional_cases_map
-				(compute_on_contained_entities (append
+				(compute_on_contained_entities
 					filtering_queries
 					(query_nearest_generalized_distance
 						(max k_parameter !regionalMinSize)
 						context_features
 						context_values
+						p_parameter
 						feature_weights
 						!queryDistanceTypeMap
 						query_feature_attributes_map
 						feature_deviations
-						p_parameter
+						(null)
 						dt_parameter
 						(if valid_weight_feature weight_feature (null))
 						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -25,7 +26,7 @@
 						(null)
 						!numericalPrecision
 					)
-				))
+				)
 		)
 
 		(declare (assoc
@@ -92,17 +93,18 @@
 		(assoc
 			relevant_features (append context_features action_features)
 			regional_case_ids
-				(contained_entities (append
+				(contained_entities
 					filtering_queries
 					(query_nearest_generalized_distance
 						(max k_parameter !regionalMinSize)
 						context_features
 						context_values
+						p_parameter
 						feature_weights
 						!queryDistanceTypeMap
 						query_feature_attributes_map
 						feature_deviations
-						p_parameter
+						(null)
 						dt_parameter
 						(if valid_weight_feature weight_feature (null))
 						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -110,7 +112,7 @@
 						(null)
 						!numericalPrecision
 					)
-				))
+				)
 		)
 
 		(accum (assoc
@@ -197,7 +199,21 @@
 				(get details "feature_full_residual_convictions_for_case")
 			)
 			(seq
+				(declare (assoc predicted_case_values_map (assoc) ))
 				(call !CalculateCaseResiduals (assoc robust_residuals (false)))
+				(accum (assoc
+					output
+						(assoc
+							"predicted_values_for_case"
+								(zip
+									(indices predicted_case_values_map)
+									(call !ConvertToOutput (assoc
+										features (indices predicted_case_values_map)
+										feature_values (values predicted_case_values_map)
+									))
+								)
+						)
+				))
 				(if (get details "feature_full_residual_convictions_for_case")
 					(call !CalculateLocalCaseFeatureResidualConvictions)
 				)
@@ -314,6 +330,17 @@
 											))
 									)
 
+									(accum (assoc
+										predicted_case_values_map
+											(associate
+												action_feature
+												(if action_is_nominal
+													(get reaction ["action_values" 0])
+													(get reaction 0)
+												)
+											)
+									))
+
 									;if feature is nominal get the categorical action probability for expected value, if it's null then set it to 0
 									;else it's: 1 - probability
 									(if action_is_nominal
@@ -349,17 +376,18 @@
 					null_features
 						(indices (filter (lambda (= (null) (current_value))) case_residuals_map))
 					regional_cases
-						(contained_entities (append
+						(contained_entities
 							filtering_queries
 							(query_nearest_generalized_distance
 								(max k_parameter !regionalMinSize)
 								context_features
 								context_values
+								p_parameter
 								feature_weights
 								!queryDistanceTypeMap
 								query_feature_attributes_map
 								feature_deviations
-								p_parameter
+								(null)
 								dt_parameter
 								(if valid_weight_feature weight_feature (null))
 								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -367,7 +395,7 @@
 								(null)
 								!numericalPrecision
 							)
-						))
+						)
 					computing_case_feature_residual_convictions (get details "case_feature_residual_convictions")
 					null_residual_and_ratio_tuple_map (assoc)
 				)
@@ -477,6 +505,7 @@
 	(declare
 		(assoc
 			action_features_map (keep case_value_map action_features)
+			global_residuals_map (get hyperparam_map "featureResiduals")
 		)
 
 		;compute the local area residuals for each context feature by
@@ -496,17 +525,18 @@
 						)
 						(assign (assoc
 							regional_cases_map
-								(compute_on_contained_entities (append
+								(compute_on_contained_entities
 									filtering_queries
 									(query_nearest_generalized_distance
 										(replace (max k_parameter !regionalMinSize))
 										(replace local_context_features)
 										(replace (unzip case_value_map local_context_features))
+										(replace p_parameter)
 										(replace feature_weights)
 										(replace !queryDistanceTypeMap)
 										(replace query_feature_attributes_map)
 										(replace feature_deviations)
-										(replace p_parameter)
+										(null)
 										(replace dt_parameter)
 										(if valid_weight_feature (replace weight_feature) (null))
 										;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -514,7 +544,7 @@
 										(null)
 										(replace !numericalPrecision)
 									)
-								))
+								)
 						))
 						(get
 							(call !ExpandResidualValuesToUncertainty  (assoc
@@ -558,13 +588,31 @@
 						; So, E(I) / I = (MR / MR) / (OR / MR) = MR / OR
 						; In this way, we can directly divide the model (global or local) residual by the observed residual to get conviction
 						(if (= 0 (last (current_value)) )
-							(/ (first (current_value)) (get !cachedFeatureMinResidualMap (current_index)))
+							(/
+								(call !LK_metric_exp (assoc
+									difference (first (current_value 1))
+									deviation (or (get global_residuals_map (current_index 1)) 0)
+								))
+								(call !LK_metric_exp (assoc
+									difference (get !cachedFeatureMinResidualMap (current_index 1))
+									deviation (or (get global_residuals_map (current_index 1)) 0)
+								))
+							)
 
 							;prevent nan from divide by null, output null as-is when nulls are allowed
 							(= (null) (last (current_value)))
 							(null)
 
-							(/ (first (current_value)) (last (current_value)))
+							(/
+								(call !LK_metric_exp (assoc
+									difference (first (current_value 1))
+									deviation (or (get global_residuals_map (current_index 1)) 0)
+								))
+								(call !LK_metric_exp (assoc
+									difference (last (current_value 1))
+									deviation (or (get global_residuals_map (current_index 1)) 0)
+								))
+							)
 						)
 					)
 					local_residuals_map
@@ -597,5 +645,40 @@
 						(append local_convictions_map inactive_features_zeros_map)
 				)
 		))
+	)
+
+	;compute the LK Metric for a Laplace distribution given a difference and a deviation
+	;difference and deviation should be positive already (this method won't take the absolute value)
+	#!LK_metric_laplace
+	(+
+		difference
+		(/
+			(*
+				(exp
+					(/
+						(- difference)
+						deviation
+					)
+				)
+				(+
+					(* 3 deviation)
+					difference
+				)
+			)
+			2
+		)
+	)
+
+	;exponential distribution LK metric given a difference and a deviation
+	; diff + (2 * dev^2) / (diff + 2 * dev)
+	; source: http://lkmetric.patent.nazwa.pl/PROBABILITY_METRIC_doctoral_dissertation.pdf Appendix A.3 pg 135
+	; Derivation of PM for exponential distribution
+	#!LK_metric_exp
+	(+
+		difference
+		(/
+			(* 2 deviation deviation)
+			(+ difference deviation deviation)
+		)
 	)
 )

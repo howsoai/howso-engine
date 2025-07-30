@@ -218,6 +218,8 @@
 	; expand_confusion_matrices: flag, optional, default true. When use_shared_deviations is true, if there are confusion matrices for shared features, they will be copied over
 	;		for all non-primary shared features. When false, confusion matrices will not be copied and remain only for the primary features.
 	; features_to_derive: a list of features whose values should be derived rather than interpolated
+	; forecast_window_length: a length of time to evaluate forecasts over (in seconds when the time feature is a datetime).
+	;		When specified (only for full residuals/prediction_stats), computes forecasts and evaluates error at the end of the forecasts
 	; output_raw_mda: flag, optional, default false. When robust_residuals is "robust_mda" and this flag is true, will output raw MDA values in 'feature_mda_map'
 	; mda_action_feature: string, optional.  When robust_residuals is "robust_mda" and this is set, will output only this specified feature's MDA values
 	#!CalculateFeatureResiduals
@@ -248,6 +250,7 @@
 			use_shared_deviations (false)
 			expand_confusion_matrices (true)
 			features_to_derive (list)
+			forecast_window_length (null)
 
 			output_raw_mda (false)
 			mda_action_feature (null)
@@ -294,8 +297,11 @@
 			ts_feature_lag_amount_map (null)
 			max_lag_index_value (null)
 			feature_mda_map (null)
-			original_features (replace features)
 			features_for_derivation_map (assoc)
+
+			;map of inactive features that were excluded from computations but should be added back in for output
+			;with preset values of 0 or 1 as applicable depending on the metric, eg., residual=0, accuracy=1
+			excluded_inactive_features_map {}
 		))
 
 		(call !InitResiduals)
@@ -310,7 +316,12 @@
 			))
 
 			;else
-			(call !RunFullResiduals)
+			(if forecast_window_length
+				;do the forecasting evaluation
+				(call !RunForecastResiduals)
+
+				(call !RunFullResiduals)
+			)
 		)
 
 		;for computing the feature mda matrix, only robust residuals were needed, the rest of the flow below
@@ -320,7 +331,12 @@
 				(assoc
 					"feature_mda_map"
 						(call !ComputeRobustTargetlessMDA (assoc
-							features original_features
+							features
+								(if (size excluded_inactive_features_map)
+									(append features (indices excluded_inactive_features_map))
+
+									features
+								)
 							output_raw_mda output_raw_mda
 							mda_action_feature mda_action_feature
 						))
@@ -363,10 +379,8 @@
 							(lambda
 								(>=
 									(size (contained_entities
-										(append
-											(query_exists (current_index))
-											(query_equals (current_index) (null))
-										)
+										(query_exists (current_index))
+										(query_equals (current_index) (null))
 									))
 									2
 								)
@@ -410,7 +424,7 @@
 
 									;otherwise sample null feature value cases from the model using queries
 									(lambda
-										(contained_entities (append
+										(contained_entities
 											(query_exists (current_index))
 											(query_equals (current_index) (null))
 
@@ -419,12 +433,12 @@
 											(if (and !tsTimeFeature (contains_index ts_feature_lag_amount_map (current_index)))
 												(query_greater_or_equal_to ".series_index" (get ts_feature_lag_amount_map (current_index)) )
 
-												;else don't append anything
-												[]
+												;else don't constrain
+												(null)
 											)
 
 											(query_sample 200)
-										))
+										)
 									)
 								)
 								(zip features_with_nulls)
@@ -447,6 +461,11 @@
 			(assign (assoc
 				residuals_map (map (lambda (/ (current_value) 2)) residuals_map)
 			))
+		)
+
+		;put excluded inactive features back into residuals_map with 0s
+		(if (size excluded_inactive_features_map)
+			(accum (assoc residuals_map excluded_inactive_features_map ))
 		)
 
 		;for shared deviations, only one set of deviations are calculated for each group. At the end of the calculations,
@@ -553,11 +572,7 @@
 								(if (contains_index ordinal_features_map (get continuous_features (current_index)))
 									(if (size (current_value))
 										;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
-										(/
-											(apply "+" (map (lambda (get (current_value) 1)) (current_value)) )
-											;compute average by dividing by the number of values
-											(size (current_value))
-										)
+										(generalized_mean (map (lambda (get (current_value) 1)) (current_value)) )
 
 										;else if there were no values for this feature, return global feature residual
 										(get hyperparam_map (list "featureResiduals" (get continuous_features (current_index 1))))
@@ -580,11 +595,7 @@
 					(map
 						(lambda (if
 							(size (current_value))
-							(/
-								(apply "+" (map (lambda (first (current_value))) (current_value)) )
-								;compute average by dividing by the number of values
-								(size (current_value))
-							)
+							(generalized_mean (map (lambda (first (current_value))) (current_value)) )
 
 							;else if there were no values for this feature, return global feature residual
 							(get hyperparam_map (list "featureResiduals" (get continuous_features (current_index 1))))
@@ -600,11 +611,11 @@
 					(map
 						(lambda (if
 							(size (current_value))
-							(sqrt (/
-								(apply "+" (map (lambda (pow (first (current_value)) 2)) (current_value)) )
-								;compute average by dividing by the number of values
-								(size (current_value))
-							))
+							;generalized mean with p=2 computes root mean squared
+							(generalized_mean
+								(map (lambda (first (current_value)) ) (current_value))
+								2
+							)
 						))
 						(unzip feature_residuals_lists continuous_indices)
 					)
@@ -668,10 +679,7 @@
 								(assoc
 									mean_value
 										;average of all actual values
-										(/
-											(apply "+" (map (lambda (get (current_value) actual_offset)) (current_value 1)) )
-											(size (current_value 1))
-										)
+										(generalized_mean (map (lambda (get (current_value) actual_offset)) (current_value 1)) )
 									sum_res_squared
 										(apply "+" (map (lambda (pow (first (current_value)) 2)) (current_value 1)) )
 									sum_tot_squared 0
@@ -710,39 +718,35 @@
 						(lambda
 							(if (size (current_value))
 								(*
-									(/
-										;sum of the absolute percent errors
-										(apply "+"
-											(map
-												(lambda
-													(let
-														(assoc
-															smape_numerator
-																(abs (-
-																	(get (current_value 1) predicted_offset)
-																	(get (current_value 1) actual_offset)
-																))
-															smape_denominator
-																(/
-																	(+
-																		(abs (get (current_value 1) actual_offset))
-																		(abs (get (current_value 1) predicted_offset))
-																	)
-																	2
+									(generalized_mean
+										(map
+											(lambda
+												(let
+													(assoc
+														smape_numerator
+															(abs (-
+																(get (current_value 1) predicted_offset)
+																(get (current_value 1) actual_offset)
+															))
+														smape_denominator
+															(/
+																(+
+																	(abs (get (current_value 1) actual_offset))
+																	(abs (get (current_value 1) predicted_offset))
 																)
-														)
-														(if (= smape_denominator 0)
-															;if the denominator is 0, that means actual and predicted are both 0
-															; which should have a error of 0
-															0
-															(/ smape_numerator smape_denominator)
-														)
+																2
+															)
+													)
+													(if (= smape_denominator 0)
+														;if the denominator is 0, that means actual and predicted are both 0
+														; which should have a error of 0
+														0
+														(/ smape_numerator smape_denominator)
 													)
 												)
-												(current_value)
 											)
+											(current_value)
 										)
-										(size (current_value))
 									)
 									100
 								)
@@ -765,39 +769,35 @@
 											(get !cachedFeatureHalfMinGapMap (get numeric_continuous_features (current_index 1)))
 									)
 									(*
-										(/
-											;sum of the absolute percent errors
-											(apply "+"
-												(map
-													(lambda
-														(let
-															(assoc
-																adjusted_smape_numerator
-																	(abs (-
-																		(+ (get (current_value 1) predicted_offset) half_min_gap)
-																		(+ (get (current_value 1) actual_offset) half_min_gap)
-																	))
-																adjusted_smape_denominator
-																	(/
-																		(+
-																			(+ (abs (get (current_value 1) actual_offset)) half_min_gap)
-																			(+ (abs (get (current_value 1) predicted_offset)) half_min_gap)
-																		)
-																		2
+										(generalized_mean
+											(map
+												(lambda
+													(let
+														(assoc
+															adjusted_smape_numerator
+																(abs (-
+																	(+ (get (current_value 1) predicted_offset) half_min_gap)
+																	(+ (get (current_value 1) actual_offset) half_min_gap)
+																))
+															adjusted_smape_denominator
+																(/
+																	(+
+																		(+ (abs (get (current_value 1) actual_offset)) half_min_gap)
+																		(+ (abs (get (current_value 1) predicted_offset)) half_min_gap)
 																	)
-															)
-															(if (= adjusted_smape_denominator 0)
-																;if the denominator is 0, that means actual and predictd are both 0
-																; which should have a error of 0
-																0
-																(/ adjusted_smape_numerator adjusted_smape_denominator)
-															)
+																	2
+																)
+														)
+														(if (= adjusted_smape_denominator 0)
+															;if the denominator is 0, that means actual and predictd are both 0
+															; which should have a error of 0
+															0
+															(/ adjusted_smape_numerator adjusted_smape_denominator)
 														)
 													)
-													(current_value)
 												)
+												(current_value)
 											)
-											(size (current_value))
 										)
 										100
 									)
@@ -817,11 +817,7 @@
 					(map
 						(lambda (if
 							(size (current_value))
-							(/
-								(apply "+" (map (lambda (first (current_value))) (current_value)) )
-								;compute average by dividing by the number of values
-								(size (current_value))
-							)
+							(generalized_mean (map (lambda (first (current_value))) (current_value)) )
 
 							;else if there were no values for this feature, return global feature residual
 							(replace (get hyperparam_map (list "featureResiduals" (replace (get nominal_features (current_index 1))))))
@@ -1214,6 +1210,42 @@
 			)
 		)
 
+		(if (size excluded_inactive_features_map)
+			(seq
+				;put nominal inactive features back in
+				(if (size (keep excluded_inactive_features_map (indices !nominalsMap)))
+					(let
+						(assoc
+							nominal_inactives_map (map 1 (keep excluded_inactive_features_map (indices !nominalsMap)) )
+						)
+						(accum (assoc
+							accuracy_map nominal_inactives_map
+							precision_map nominal_inactives_map
+							recall_map nominal_inactives_map
+							mcc_map nominal_inactives_map
+						))
+					)
+				)
+
+				;put continuous inactive features back in
+				(if (size (remove excluded_inactive_features_map (indices !nominalsMap)))
+					(let
+						(assoc
+							continuous_inactives_1_map (map 1 (remove excluded_inactive_features_map (indices !nominalsMap)) )
+							continuous_inactives_0_map (remove excluded_inactive_features_map (indices !nominalsMap))
+						)
+						(accum (assoc
+							r2_map continuous_inactives_1_map
+							spearman_coeff_map continuous_inactives_1_map
+							rmse_map continuous_inactives_0_map
+							adjusted_smape_map continuous_inactives_0_map
+							smape_map continuous_inactives_0_map
+						))
+					)
+				)
+			)
+		)
+
 		(assoc
 			".robust" (and robust_residuals (!= "deviations" robust_residuals))
 			".hyperparam_path"
@@ -1267,18 +1299,10 @@
 									(if (contains_index ordinal_features_map (get features (current_index)))
 										;ordinal feature, (current_value) is a list of tuples [diff, ordinal_diff]
 										;create a list of diffs by pulling diff from each tuple
-										(/
-											(apply "+" (map (lambda (first (current_value))) (current_value)) )
-											;compute average by dividing by the number of values
-											(size (current_value))
-										)
+										(generalized_mean (map (lambda (first (current_value))) (current_value)) )
 
 										;else simply compute avg of all diffs
-										(/
-											(apply "+" (current_value))
-											;compute average by dividing by the number of values
-											(size (current_value))
-										)
+										(generalized_mean (current_value))
 									)
 
 									;else if there were no values for this feature, return global feature residual
@@ -1296,11 +1320,7 @@
 										(if (size (current_value))
 											;ordinal feature, (current_value) is a list of tuples [diff, ordinal_diff]
 											;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
-											(/
-												(apply "+" (map (lambda (last (current_value))) (current_value)) )
-												;compute average by dividing by the number of values
-												(size (current_value))
-											)
+											(generalized_mean (map (lambda (last (current_value))) (current_value)) )
 
 											;else if there were no values for this feature, return global feature residual
 											(get hyperparam_map (list "featureDeviations" (get features (current_index 1))))
@@ -1322,7 +1342,7 @@
 							(lambda (if
 								(size (current_value))
 								;compute average by dividing by the number of values
-								(/ (apply "+" (current_value)) (size (current_value)) )
+								(generalized_mean (current_value))
 
 								;else if there were no values for this feature, return global feature residual
 								;or simply null for inactive features
@@ -1426,6 +1446,295 @@
 			)
 		))
 		confusion_matrix_map
+	)
+
+	;run a series of forecasts from each case in case_ids and evaluate the error in predicting each feature
+	;at the end of the forecast of length specified by forecast_window_length
+	#!RunForecastResiduals
+	(seq
+		(declare (assoc
+			series_id_features (get !tsFeaturesMap "series_id_features")
+			;find and store the largest referenced lag value among derived_context_features
+			largest_max_row_lag
+				;or with 0 to prevent null
+				(or 0 (apply "max"
+					(values (map
+						(lambda (get (current_value ) "max_row_lag"))
+						!featureAttributes
+					))
+				))
+			all_features (values (append features context_features) (true))
+			action_features features
+		))
+
+		(declare (assoc
+			feature_index_map (zip all_features (indices all_features))
+			;parameters needed within ReactSeries
+			derived_context_features
+				(filter
+					(lambda (contains_value all_features (get !derivedFeaturesMap (current_value))))
+					(get !tsFeaturesMap "lag_features")
+				)
+			derived_action_features
+				(append
+					(filter
+						(lambda (contains_value all_features (get !derivedFeaturesMap (current_value))))
+						(get !tsFeaturesMap "derived_order_features")
+					)
+					(filter
+						(lambda (not (contains_index series_id_features_set (current_value))))
+						;list of original features (ones not starting with a '.') that have derived_feature_code should be derived for output
+						(filter
+							(lambda
+								(and
+									(!= "." (first (current_value)))
+									(get !featureAttributes (list (current_value 1) "derived_feature_code"))
+								)
+							)
+							all_features
+						)
+					)
+				)
+		))
+
+		;Another param needed in ReactSeries
+		(declare (assoc
+			series_action_features
+				(append
+					(filter
+						(lambda
+							(or
+								;categorical features are in the "delta_features" list...
+								(!= "continuous" (get !featureAttributes [(current_value 1) "type"]))
+								(contains_value derived_action_features (get !derivedFeaturesMap (current_value)))
+							)
+						)
+						(get !tsFeaturesMap "delta_features")
+					)
+					(filter
+						(lambda (contains_value derived_action_features (get !derivedFeaturesMap (current_value))))
+						(get !tsFeaturesMap "rate_features")
+					)
+				)
+		))
+
+		(assign (assoc
+			case_residuals_lists
+				||(map
+					(lambda
+						;For each case, forecast until the window-length is elapsed and interpolate both
+						;the forecast and the trained series to get find the error at the end of the window
+						(let
+							(assoc
+								case_id (current_value 1)
+								series_id_values (retrieve_from_entity (current_value 1) series_id_features)
+								case_time_value (retrieve_from_entity (current_value 1) !tsTimeFeature)
+							)
+
+							(declare (assoc
+								end_time (+ case_time_value forecast_window_length)
+							))
+
+							(declare (assoc
+								forecast_result
+									(call !ReactSeries (assoc
+										continue_series (true)
+										leave_series_out (true)
+										track_progress (false)
+										desired_conviction (null)
+										details (assoc categorical_action_probabilities (true))
+										output_features all_features
+										series_stop_map (associate !tsTimeFeature {"max" end_time} )
+										action_features series_action_features
+										series_id_features series_id_features
+										series_id_values series_id_values
+										include_start_time_case (true)
+
+										initial_features [!tsTimeFeature]
+										initial_values
+											(if (contains_index !featureDateTimeMap !tsTimeFeature)
+												[(format
+													case_time_value
+													"number"
+													(get !featureDateTimeMap (list !tsTimeFeature "date_time_format"))
+													(null)
+													{
+														"locale" (get !featureDateTimeMap [ !tsTimeFeature "locale" ] )
+														"time_zone" (get !featureDateTimeMap [ !tsTimeFeature "default_time_zone" ] )
+													}
+												)]
+
+												[case_time_value]
+											)
+									))
+								trained_series_cases
+									(values (map
+										(lambda (unzip (current_value) all_features))
+										(compute_on_contained_entities
+											(map
+												(lambda (query_equals (get series_id_features (current_index)) (current_value)))
+												series_id_values
+											)
+											(query_greater_or_equal_to !tsTimeFeature case_time_value)
+											(map (lambda (query_exists (current_value))) all_features)
+										)
+									))
+							))
+							;convert the forecast cases back to encoded values to compare to trained cases
+							(declare (assoc
+								forecast_cases
+									(map
+										(lambda
+											(call !ConvertFromInput (assoc
+												features all_features
+												feature_values (current_value 1)
+											))
+										)
+										(get forecast_result ["payload" "action_values"])
+									)
+							))
+							(declare (assoc
+								forecast_time_values
+									(map
+										(lambda (get (current_value) (get feature_index_map !tsTimeFeature)) )
+										forecast_cases
+									)
+							))
+
+							(assign (assoc
+								trained_series_cases
+									(sort
+										(lambda (>
+											(get (current_value) (get feature_index_map !tsTimeFeature))
+											(get (current_value 1) (get feature_index_map !tsTimeFeature))
+										))
+										trained_series_cases
+									)
+							))
+							;Deliberately pull out the time column as it will be needed for each feature
+							(declare (assoc
+								trained_time_values
+									(map
+										(lambda (get (current_value) (get feature_index_map !tsTimeFeature)) )
+										trained_series_cases
+									)
+							))
+
+							(map
+								(lambda
+									;for each feature, interpolate both the forecast and trained series at the end time
+									;and compute the tuple needed for downstream calculations
+									(let
+										(assoc
+											feat_to_diff (current_value 1)
+											feat_index (get feature_index_map (current_value 1))
+										)
+
+										(if (= "continuous" (get !featureAttributes [feat_to_diff "type"]))
+											(call !ComputeDiffTuple (assoc
+												interpolated_value
+													;interpolated value for forecast
+													(call !InterpolateSeriesValuesContinuous (assoc
+														time_values forecast_time_values
+														feature_values
+															(map
+																(lambda (get (current_value) feat_index))
+																forecast_cases
+															)
+														time end_time
+
+														;hopefully don't need these
+														pre_domain_value (get forecast_cases [0 feat_index])
+														post_domain_value (get forecast_cases [-1 feat_index])
+													))
+												case_feature_value
+													;interpolated value for trained data
+													(call !InterpolateSeriesValuesContinuous (assoc
+														time_values trained_time_values
+														feature_values
+															(map
+																(lambda (get (current_value) feat_index))
+																trained_series_cases
+															)
+														time end_time
+
+														;these definitely should not be needed
+														pre_domain_value (null)
+														post_domain_value (null)
+													))
+
+											))
+
+											(= "nominal" (get !featureAttributes [feat_to_diff "type"]))
+											(call !ComputeDiffTuple (assoc
+												feature_is_nominal (true)
+												feature feat_to_diff
+												interpolated_value
+													;interpolated value for forecast
+													(call !InterpolateSeriesValuesNominal (assoc
+														time_values forecast_time_values
+														feature_values
+															(map
+																(lambda (get (current_value) feat_index))
+																forecast_cases
+															)
+														time end_time
+
+														;hopefully don't need these
+														pre_domain_value (get forecast_cases [0 feat_index])
+														post_domain_value (get forecast_cases [-1 feat_index])
+													))
+												case_feature_value
+													;interpolated value for trained data
+													(call !InterpolateSeriesValuesNominal (assoc
+														time_values trained_time_values
+														feature_values
+															(map
+																(lambda (get (current_value) feat_index))
+																trained_series_cases
+															)
+														time end_time
+
+														;these definitely should not be needed
+														pre_domain_value (null)
+														post_domain_value (null)
+													))
+												candidate_cases_lists [[1]]
+												categorical_action_probabilities_map
+													(associate
+														feat_to_diff
+															(call !InterpolateSeriesCAPs (assoc
+																time_values forecast_time_values
+																caps_values
+																	(map
+																		(lambda (get (current_value) feat_to_diff))
+																		(get forecast_result ["payload" "categorical_action_probabilities"])
+																	)
+																time end_time
+
+																pre_domain_value (get forecast_result ["payload" "categorical_action_probabilities" 0 feat_to_diff])
+																post_domain_value (get forecast_result ["payload" "categorical_action_probabilities" -1 feat_to_diffs])
+															))
+													)
+											))
+
+											;otherwise null, not supported for edit-distance/other types
+											(null)
+										)
+
+									)
+								)
+								features
+							)
+						)
+					)
+					case_ids
+				)
+		))
+
+		(assign (assoc
+			feature_residuals_lists (call !TransposeResidualLists)
+		))
 	)
 
 )

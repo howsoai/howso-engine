@@ -355,6 +355,7 @@
 		)
 
 		;set values if there were cases that were trained on
+		#!UpdateSessionAndFeaturesAfterTrain
 		(if (> (size new_case_ids ) 0)
 			(let
 				(assoc
@@ -393,7 +394,7 @@
 									(lambda (assoc "type" "continuous" "bounds" (assoc "allow_null" (true)) ))
 									new_features
 								)
-							!queryDistanceTypeMap (map (lambda "continuous_numeric") new_features)
+							!queryDistanceTypeMap (map (lambda "continuous_number") new_features)
 						))
 						(assign_to_entities (assoc
 							!trainedFeatures (sort (values (append !trainedFeatures (indices !featureAttributes)) (true)) )
@@ -402,6 +403,7 @@
 									context_features (values (append !trainedFeatures (indices !featureAttributes)) (true))
 								))
 						))
+						(call !UpdateDefinedFeatures)
 					)
 				)
 
@@ -462,6 +464,7 @@
 		)
 
 		(if !hasDependentFeatures
+			#!UpdateDependentFeaturesMaps
 			(let
 				(assoc
 					dependents_boundary_map (assoc)
@@ -813,15 +816,38 @@
 
 					features
 				)
+			weight_feature
+				(if !autoAblationEnabled
+					!autoAblationWeightFeature
+
+					(or !continuousRebalanceFeatures !nominalRebalanceFeatures)
+					".case_weight"
+				)
 		)
 
-		(if rebalance_weights
+		(if (and (not read_only_mode) rebalance_weights)
 			(declare (assoc
 				rebalance_case_weights (null)
 				total_mass (replace !cachedTotalMass)
 				total_rebalance_mass (replace !cachedRebalanceTotalMass)
 			))
 		)
+
+		(declare  (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					context_features features
+					weight_feature weight_feature
+				))
+		))
+		(declare (assoc
+			closest_k (get hyperparam_map "k")
+			p_parameter (get hyperparam_map "p")
+			dt_parameter (get hyperparam_map "dt")
+			feature_weights (get hyperparam_map "featureWeights")
+			feature_deviations (get hyperparam_map "featureDeviations")
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+		))
 
 		;split by batches of cases until next analyze
 		(while (< input_case_index (size cases))
@@ -893,6 +919,7 @@
 				batch_data_mass
 			)
 			(assign (assoc
+				;this gets case data when read_only_mode is set, otherwise case_ids
 				output_case_ids
 					(call !AblateCases (assoc
 						cases (unzip cases (range input_case_index (+ input_case_index batch_size -1)) )
@@ -946,7 +973,7 @@
 			output_case_ids
 		)
 
-		(if rebalance_weights
+		(if (and (not read_only_mode) rebalance_weights)
 			(assign_to_entities (assoc
 			 	!cachedTotalMass total_mass
 				!cachedRebalanceTotalMass total_rebalance_mass
@@ -1059,6 +1086,8 @@
 					train_features
 				)
 		))
+		;assign this to an outer variable that in a scope that must handle the derived case data returned here
+		(if read_only_mode (assign (assoc derived_case_features ablate_train_features)) )
 
 		(if rebalance_weights
 			(assign (assoc
@@ -1104,6 +1133,22 @@
 							(accum (assoc feature_values (get computed_features_data_map ["computed_values" (current_index 2)]) ))
 						)
 
+						;if in compute_train_payload, just return the feature values that would be trained
+						(if read_only_mode
+							(conclude
+								(if rebalance_weights
+									;store rebalance weight and probability mass of 1
+									(append feature_values [ rebalance_case_weight 1 ])
+
+									;if auto ablate is enabled, populate the weight feature for this case
+									!autoAblationEnabled
+									(append feature_values 1)
+
+									feature_values
+								)
+							)
+						)
+
 						;create the case and output case id
 						(call !CreateCase (assoc
 							features ablate_train_features
@@ -1132,7 +1177,7 @@
 
 		;if there are ablated cases to accumulate influence weights to, do it here
 		;also increase !dataMassChangeSinceLastAnalyze by the ablated cases and recompute influence weights entropy
-		(if (and accumulate_weight_feature (< (size indices_to_train) (size cases)) )
+		(if (and (not read_only_mode) accumulate_weight_feature (< (size indices_to_train) (size cases)) )
 			(call !AccumulateCaseInfluenceWeights (assoc
 				features features
 				accumulate_weight_feature accumulate_weight_feature
@@ -1163,15 +1208,6 @@
 				)
 
 				(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze mass_to_accumulate))
-
-				;recompute influence weights entropy only after we've analyzed.
-				(if (size !hyperparameterMetadataMap)
-					(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-						features features
-						weight_feature accumulate_weight_feature
-						use_case_weights (true)
-					))
-				)
 			)
 		)
 

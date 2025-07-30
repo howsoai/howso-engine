@@ -6,7 +6,7 @@
 	#!ConvergeResiduals
 	(declare
 		(assoc
-			num_samples 100
+			num_samples num_deviation_samples
 			num_iterations 3
 			use_deviations (false)
 
@@ -16,12 +16,8 @@
 		)
 
 		(declare (assoc
-			features
-				(if (= targeted_model "targetless")
-					context_features
+			features (values (append context_features action_features) (true))
 
-					(values (append context_features action_features) (true))
-				)
 			;pair of: residuals_map and ordinal_residuals_map
 			residuals_map (list)
 		))
@@ -50,7 +46,8 @@
 										(= (- num_iterations 1) iteration)
 										(max num_samples 1000)
 
-										num_samples
+										;use less samples for initial runs simply to establish some reasonable values
+										(/ num_samples 4)
 									)
 								custom_hyperparam_map baseline_hyperparameter_map
 								;must compute confusion matrix to use sparse deviation matrix
@@ -74,15 +71,8 @@
 
 			(accum (assoc iteration 1))
 
-			(if (and
-					use_dynamic_deviations
-					;should store if needed for deviations or IRW feature weights
-					(or
-						use_deviations
-						(= targeted_model "targetless")
-					)
-					!useDynamicDeviationsDuringAnalyze
-				)
+			;should store if needed for deviations or IRW feature weights
+			(if (and use_dynamic_deviations  use_deviations  !useDynamicDeviationsDuringAnalyze)
 				; store feature residuals for a collection of cases at end, if it wasn't part of iterative process
 				(call !StoreResidualSubTrainee (assoc custom_hyperparam_map baseline_hyperparameter_map) )
 			)
@@ -231,10 +221,10 @@
 
 		(declare (assoc
 			sample_cases
-				(contained_entities [
+				(contained_entities
 					(query_exists !internalLabelSession)
-						(query_sample 1000 (if use_case_weights weight_feature))
-				])
+					(query_sample 1000 (if use_case_weights weight_feature))
+				)
 		))
 
 		;take a sample of 1000 cases and get the average number of non_null values for features in each shared deviation group
@@ -299,7 +289,6 @@
 	(declare
 		(assoc
 			num_iterations 4
-			num_samples_mda 10000
 
 			;local method variables, not parameters
 			iteration 0
@@ -311,12 +300,7 @@
 		(call !UpdateHyperparameters (assoc use_deviations (true) ))
 
 		(declare (assoc
-			features
-				(if (= targeted_model "targetless")
-					context_features
-
-					(values (append context_features action_features) (true))
-				)
+			features context_features
 			residuals_map (list)
 			computing_mda (false)
 		))
@@ -324,12 +308,11 @@
 		;possibly increase the number of samples if nominals are present
 		(if (and !tsTimeFeature (size !sharedDeviationsMap))
 			(assign (assoc
-				num_samples_mda
+				num_feature_probability_samples
 					(max
-						num_samples_mda
-						(call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature (/ num_samples_mda 4)))
+						num_feature_probability_samples
+						(call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature (/ num_feature_probability_samples 4)))
 					)
-				residual_num_samples (call !ComputeRequiredNumSamplesForSharedDeviationsWithTS (assoc desired_samples_per_feature residual_num_samples))
 			))
 		)
 
@@ -337,6 +320,7 @@
 		(if (= (null) initial_residual_values_map)
 			(assign (assoc
 				initial_residual_values_map
+					#!ComputeInitialResiduals
 					(map
 						(lambda
 							;for nominals, random chance of getting a prediction wrong is: 1 - 1/num_classes
@@ -375,20 +359,20 @@
 												)
 
 												;else normal continuous feature, compute max gap
-												(compute_on_contained_entities (list
-													(query_max_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
-												))
+												(compute_on_contained_entities
+													(query_max_difference (current_index 1) (get !cyclicFeaturesMap (current_index 1)) )
+												)
 											)
 										min_gap
 											(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
 												0
 
-												(compute_on_contained_entities (list
-													(query_min_difference (current_index 2) (get !cyclicFeaturesMap (current_index 2)) )
-												))
+												(compute_on_contained_entities
+													(query_min_difference (current_index 1) (get !cyclicFeaturesMap (current_index 1)) )
+												)
 											)
-										num_buckets (size (compute_on_contained_entities [(query_value_masses (current_index 2) )]))
-										num_values (size (compute_on_contained_entities [(query_not_equals (current_index 2) (null))]))
+										num_buckets (size (compute_on_contained_entities (query_value_masses (current_index 1) )))
+										num_values (size (compute_on_contained_entities (query_not_equals (current_index 1) (null))))
 									)
 
 									;infinity means there was no gap, and nan means all values are null and can't compute gap
@@ -449,8 +433,11 @@
 									robust_residuals (if computing_mda "robust_mda" "deviations")
 									num_samples
 										(if computing_mda
-											num_samples_mda
-											residual_num_samples
+											num_feature_probability_samples
+
+											;the deviations query uses all features "superfull", there's no need to sample more
+											;than a default amount of 1000
+											num_deviation_samples
 										)
 									custom_hyperparam_map baseline_hyperparameter_map
 									;must compute confusion matrix to use sparse deviation matrix, but not when computing mda
@@ -476,19 +463,6 @@
 					ordinal_feature_deviations (get residuals_map "ordinal_residual_map")
 					null_deviations (get residuals_map "null_uncertainty_map")
 					use_deviations (true)
-					feature_weights
-						(if (size !inactiveFeaturesMap)
-							(map
-								(lambda
-									;ensure that inactive features always maintain a feature weight of 0
-									(if (contains_index !inactiveFeaturesMap (current_index))
-										0
-										1
-									)
-								)
-								(get residuals_map "residual_map")
-							)
-						)
 				))
 			)
 
@@ -558,17 +532,18 @@
 				;store the assoc of case_id -> weight (smaller distance contribution -> less weight)
 				(assign (assoc
 					case_weights_map
-						(compute_on_contained_entities (list
+						(compute_on_contained_entities
 							||(query_entity_distance_contributions
 								closest_k
 								continuous_rebalance_features
 								;all cases
 								(null)
+								p_value
 								feature_weights
 								!queryDistanceTypeMap
 								query_feature_attributes_map
 								feature_deviations
-								p_value
+								(null)
 								dt_value
 								(if !autoAblationEnabled !internalLabelProbabilityMass (null))
 								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -576,7 +551,7 @@
 								(null) ;radius
 								!numericalPrecision
 							)
-						))
+						)
 				))
 
 				(if !autoAblationEnabled
@@ -600,7 +575,7 @@
 									)
 								)
 								case_weights_map
-								(compute_on_contained_entities [ (query_exists !internalLabelProbabilityMass) ])
+								(compute_on_contained_entities (query_exists !internalLabelProbabilityMass) )
 							)
 					))
 				)
@@ -621,17 +596,20 @@
 									(lambda (/ 1 (current_value)) )
 
 									;grab the count of each class
-									(compute_on_contained_entities (list
+									(compute_on_contained_entities
 										(query_value_masses
 											feature
 											(if !autoAblationEnabled !internalLabelProbabilityMass (null))
 											;as numeric value
-											(or
-												(not (contains_index !nominalsMap feature))
-												(contains_index !numericNominalFeaturesMap feature)
+											(if (or
+													(not (contains_index !nominalsMap feature))
+													(contains_index !numericNominalFeaturesMap feature)
+												)
+												"number"
+												"string"
 											)
 										)
-									))
+									)
 								)
 							))
 							(zip nominal_rebalance_features)
@@ -684,7 +662,7 @@
 		(declare (assoc
 			total_mass
 				(if !autoAblationEnabled
-					(compute_on_contained_entities [ (query_exists !internalLabelProbabilityMass) (query_sum !internalLabelProbabilityMass )])
+					(compute_on_contained_entities (query_exists !internalLabelProbabilityMass) (query_sum !internalLabelProbabilityMass ))
 					;else number of cases
 					(call !GetNumTrainingCases)
 				)
@@ -702,7 +680,7 @@
 							)
 						)
 						case_weights_map
-						(compute_on_contained_entities [ (query_exists !internalLabelProbabilityMass) ])
+						(compute_on_contained_entities (query_exists !internalLabelProbabilityMass) )
 					)
 			))
 		)
@@ -750,12 +728,7 @@
 			;store the average weight as the unknown
 			!cachedRebalanceUnknownValueWeightMap
 				(map
-					(lambda
-						(/
-							(apply "+" (values (current_value)) )
-							(size (current_value))
-						)
-					)
+					(lambda (generalized_mean (current_value)) )
 					feature_value_weight_map
 				)
 		))
