@@ -602,6 +602,165 @@
 		)
 	)
 
+	#!RunWeightedRobustResiduals
+	(seq
+
+		;keep a copy of all originally specified features
+		(assign (assoc
+			case_features
+				(values (append context_features features (if !tsTimeFeature [".series_index"] [])) (true))
+		))
+
+		;Ensure enough cases
+		; (if (< (size case_ids) 1000)
+		; 	(assign (assoc
+		; 		case_ids (rand case_ids 1000)
+		; 	))
+		; )
+
+		;if computing for one target_residual_feature, remove it from features so it's never in the context
+		(if target_residual_feature
+			(assign (assoc
+				context_features (filter (lambda (!= (current_value) target_residual_feature)) context_features)
+			))
+		)
+
+		;create a map of feature -> flag, set to true if the feature has any null values
+		;that way there's no need to explicitly filter nulls out when querying for a feature that no nulls
+		;or if it's inactive
+		(declare (assoc
+			feature_may_have_nulls_map
+				(map
+					(lambda (and
+						(!= (false) (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) )
+						(not (contains_index !inactiveFeaturesMap (current_index)) )
+					))
+					(zip
+						(if target_residual_feature
+							(list target_residual_feature)
+							features
+						)
+					)
+				)
+			;create a backup of context_features for time series flows
+			original_context_features (if !tsTimeFeature (replace context_features))
+			num_features (- (size context_features) 1)
+		))
+
+		(declare (assoc
+			enabled_num_features_probability_map
+				#!ComputeNumEnabledFeaturesProbabilitiesMap
+				;map of num_enabled_features -> probability
+				(map
+					(lambda
+						(call !BinomialDistribution (assoc
+							k (current_index 1)
+							n num_features
+							p 0.5
+						))
+					)
+					(zip (range 0 (- num_features 1)))
+				)
+			all_features_map (zip features)
+			feature_deviations
+				(if custom_residuals_map
+					custom_residuals_map
+					(get hyperparam_map "featureDeviations")
+				)
+		))
+
+
+		(assign (assoc
+			feature_residuals_lists
+				||(map
+					(lambda (let
+						(assoc
+							target_feature (current_value 1)
+							original_context_features (remove features (current_index 1) )
+						)
+
+						(declare (assoc
+							context_features original_context_features
+							num_features (size original_context_features)
+							case_residuals_lists []
+						))
+
+						;1000 random reacts without target_feature
+						(map
+							(call !RobustResidualsLambda)
+							case_ids
+						)
+					))
+					features
+				)
+		))
+
+		(zip
+			features
+				(map
+					(lambda	(let
+						(assoc
+							target_feature (current_value 1)
+							target_feature_index (current_index 1)
+						)
+
+						(declare (assoc
+							;transpose list so it has 'F' rows and 'cases' columns, thus each row corresponds to all the residuals for that feature
+							residuals_by_feature_matrix
+								(map
+									(lambda (let
+										(assoc feature_index (current_index 1))
+										(map
+											(lambda (get (current_value) feature_index) )
+											(get feature_residuals_lists target_feature_index)
+										)
+									))
+									features
+								)
+						))
+
+						(zip
+							features
+							(map
+								(lambda (let
+									(assoc
+										feature (current_value 1)
+										feature_index (current_index 1)
+									)
+									(if (= feature_index target_feature_index) (conclude 0) )
+
+									(declare (assoc
+										;feature was used in query, its residual is null
+										case_indices_with_feature
+											(filter
+												(lambda (= (null) (get residuals_by_feature_matrix [feature_index (current_value 1)])) )
+												(indices (get residuals_by_feature_matrix feature_index))
+											)
+										;feature was predicted, has residual value
+										case_indices_without_feature
+											(filter
+												(lambda (!= (null) (get residuals_by_feature_matrix [feature_index (current_value 1)])) )
+												(indices (get residuals_by_feature_matrix feature_index))
+											)
+									))
+
+									(max
+										(-
+											(generalized_mean (unzip (get residuals_by_feature_matrix target_feature_index) case_indices_without_feature) )
+											(generalized_mean (unzip (get residuals_by_feature_matrix target_feature_index) case_indices_with_feature) )
+										)
+										(get !cachedFeatureMinResidualMap target_feature)
+									)
+								))
+								features
+							)
+						)
+					))
+					features
+				)
+		)
+	)
+
 	;helper method for CalculateFeatureResiduals to calculate robust residuals
 	#!RunRobustResiduals
 	(seq
@@ -686,6 +845,7 @@
 		(assign (assoc
 			case_residuals_lists
 				||(map
+					#!RobustResidualsLambda
 					(lambda (let
 						(assoc
 							case_id (current_value 1)
@@ -774,11 +934,16 @@
 											(replace react_context_features)
 											(replace (unzip case_values_map react_context_features))
 											(replace p_parameter)
-											(replace feature_weights)
+											(replace
+												(if target_feature
+													(get hyperparam_map "featureMdaMap")
+													feature_weights
+												)
+											)
 											(replace !queryDistanceTypeMap)
 											(replace query_feature_attributes_map)
 											(replace feature_deviations)
-											(null)
+											target_feature
 											(replace dt_parameter)
 											(if valid_weight_feature (replace weight_feature) (null))
 											(replace tie_break_random_seed)
