@@ -371,54 +371,75 @@
 					;if computing full residuals, either the case had a null value or the predicted value was null
 					null_features
 						(indices (filter (lambda (= (null) (current_value))) case_residuals_map))
-					regional_cases
-						(contained_entities
-							filtering_queries
-							(query_nearest_generalized_distance
-								(max k_parameter !regionalMinSize)
-								context_features
-								context_values
-								p_parameter
-								feature_weights
-								!queryDistanceTypeMap
-								query_feature_attributes_map
-								feature_deviations
-								(null)
-								dt_parameter
-								(if valid_weight_feature weight_feature (null))
-								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-								"fixed rand seed"
-								(null)
-								!numericalPrecision
-							)
-						)
-					computing_case_feature_residual_convictions (get details "case_feature_residual_convictions")
-					null_residual_and_ratio_tuple_map (assoc)
 				)
 
 				;iterate over all the null features and populate a map of feature -> [ residual value, local_non_null_ratio, global_non_null_ratio ]
-				(assign (assoc
+				(declare (assoc
 					null_case_residuals_map
 						(map
 							(lambda (let
 								(assoc
 									null_feature (current_index 1)
+									filtered_context_features (indices (remove context_map (current_index 1)))
 									null_feature_value (get case_value_map (current_index 1))
-									num_local_cases (size regional_cases)
+									num_local_cases (size regional_cases_influence_map)
 									;list of all non null values for this null_feature in this regional model
 									non_null_local_values (list)
 								)
+
+								(declare (assoc
+									influential_cases_map
+										(normalize (compute_on_contained_entities
+											filtering_queries
+											(query_nearest_generalized_distance
+												k_parameter
+												filtered_context_features
+												(unzip context_map filtered_context_features)
+												p_parameter
+												feature_weights
+												!queryDistanceTypeMap
+												query_feature_attributes_map
+												feature_deviations
+												null_feature
+												dt_parameter
+												(if valid_weight_feature weight_feature (null))
+												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+												"fixed rand seed"
+												(null)
+												!numericalPrecision
+											)
+										))
+								))
+
 								;pull all values for this feature and filter out nulls
 								(assign (assoc
 									non_null_local_values
 										(filter (map
 											(lambda (retrieve_from_entity (current_value) null_feature))
-											regional_cases
+											(indices influential_cases_map)
 										))
 								))
 
 								(declare (assoc
-									local_non_null_fraction (/ (size non_null_local_values) num_local_cases)
+									local_non_null_influence
+										(if (size non_null_local_values)
+											(apply "+" (values
+												(filter
+													(lambda
+														(!= (null) (retrieve_from_entity (current_index) null_feature))
+													)
+													influential_cases_map
+												)
+											))
+
+											;this number may be used as a divisor, so special fallback here
+											; 1 / (2 * max_k)
+											(/
+												1
+												(if (~ 0 k_paraameter) k_parameter (get k_parameter 2) )
+												2
+											)
+										)
 								))
 
 								(if (= (null) null_feature_value)
@@ -439,13 +460,13 @@
 											(if (<= num_unique_local_values 1)
 												(*
 													(get !featureNullRatiosMap (list null_feature "null_residual"))
-													local_non_null_fraction
+													local_non_null_influence
 												)
 
 												;else there are enough local values to compute local null residual
 												(*
 													(- local_feature_max local_feature_min)
-													local_non_null_fraction
+													local_non_null_influence
 												)
 											)
 										)
@@ -456,7 +477,7 @@
 										;if nominal, output the percentage of the local data that is null
 										;(This shouldn't really be reached bc (null) will have a CAP that is used for the residual
 										;in the above code)
-										(- 1 local_non_null_fraction)
+										(- 1 local_non_null_influence)
 
 										;else continuous
 										(let
@@ -470,13 +491,13 @@
 											(if (<= num_unique_local_values 1)
 												(/
 													(get !featureNullRatiosMap (list null_feature "null_residual"))
-													local_non_null_fraction
+													local_non_null_influence
 												)
 
 												;else there are enough local values to compute local null residual
 												(/
 													(- local_feature_max local_feature_min)
-													local_non_null_fraction
+													local_non_null_influence
 												)
 											)
 										)
