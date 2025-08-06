@@ -239,7 +239,7 @@
 							)
 
 							;if the case value is null, but nulls aren't allowed, return null as residual so it can be computed below
-							(if (and (= (null) expected_case_value) (not allow_nulls))
+							(if (= (null) expected_case_value)
 								(null)
 
 								(seq
@@ -307,222 +307,210 @@
 								action_is_nominal (contains_index !nominalsMap (current_value 1))
 							)
 
-							;if the case value is null, but nulls aren't allowed, return null as residual so it can be computed below
-							(if (and (= (null) expected_case_value) (not allow_nulls) )
-								(null)
+							(let
+								(assoc
+									reaction
+										(call !ReactDiscriminative (assoc
+											return_action_values_only (true)
+											context_features filtered_context_features
+											context_values (unzip context_map filtered_context_features)
+											action_features (list action_feature)
+											ignore_case ignore_case
+											allow_nulls (true)
+											;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
+											skip_encoding 1
+											;bypass decoding since computing distances to each reaction uses encoded numeric values
+											skip_decoding 1
+											force_targetless force_targetless
+											substitute_output (false)
+											details (if action_is_nominal (assoc "categorical_action_probabilities" (true)))
+										))
+								)
 
-								(let
-									(assoc
-										reaction
-											(call !ReactDiscriminative (assoc
-												return_action_values_only (true)
-												context_features filtered_context_features
-												context_values (unzip context_map filtered_context_features)
-												action_features (list action_feature)
-												ignore_case ignore_case
-												;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
-												skip_encoding 1
-												;bypass decoding since computing distances to each reaction uses encoded numeric values
-												skip_decoding 1
-												force_targetless force_targetless
-												substitute_output (false)
-												details (if action_is_nominal (assoc "categorical_action_probabilities" (true)))
-											))
-									)
-
-									(accum (assoc
-										predicted_case_values_map
-											(associate
-												action_feature
-												(if action_is_nominal
-													(get reaction ["action_values" 0])
-													(get reaction 0)
-												)
+								(accum (assoc
+									predicted_case_values_map
+										(associate
+											action_feature
+											(if action_is_nominal
+												(get reaction ["action_values" 0])
+												(get reaction 0)
 											)
-									))
+										)
+								))
 
-									;if feature is nominal get the categorical action probability for expected value, if it's null then set it to 0
-									;else it's: 1 - probability
-									(if action_is_nominal
-										(let
-											(assoc
-												predicted_probability
-													(or (get reaction (list "categorical_action_probabilities" action_feature expected_case_value)) 0)
-											)
-
-											(- 1 predicted_probability)
+								;if feature is nominal get the categorical action probability for expected value, if it's null then set it to 0
+								;else it's: 1 - probability
+								(if action_is_nominal
+									(let
+										(assoc
+											predicted_probability
+												(or (get reaction (list "categorical_action_probabilities" action_feature expected_case_value)) 0)
 										)
 
-										;else this is a continuous feature, return the absolute difference between the expected and the actual
-										(abs (- expected_case_value (get reaction 0)))
+										(- 1 predicted_probability)
 									)
+
+									;else this is a continuous feature, return the absolute difference between the expected and the actual
+									(abs (- expected_case_value (get reaction 0)))
 								)
 							)
 						))
 						action_features
 					)
 				)
-			local_null_feature_convictions (assoc)
 		)
 		(assign (assoc
 			case_residuals_map (zip action_features case_residuals)
-			local_null_conviction_ratios_map (null)
 		))
 		;replace case residual nulls with computed values if nulls aren't allowed
-		(if (and (contains_value case_residuals (null)) (not allow_nulls) )
+		(if (contains_value case_residuals (null))
 			(let
 				(assoc
 					;leave only features with null values
+					;if computing robust residuals, all null_features are features for which the case had a null value
+					;if computing full residuals, either the case had a null value or the predicted value was null
 					null_features
 						(indices (filter (lambda (= (null) (current_value))) case_residuals_map))
-					regional_cases
-						(contained_entities
-							filtering_queries
-							(query_nearest_generalized_distance
-								(max k_parameter !regionalMinSize)
-								context_features
-								context_values
-								p_parameter
-								feature_weights
-								!queryDistanceTypeMap
-								query_feature_attributes_map
-								feature_deviations
-								(null)
-								dt_parameter
-								(if valid_weight_feature weight_feature (null))
-								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-								"fixed rand seed"
-								(null)
-								!numericalPrecision
-							)
-						)
-					computing_case_feature_residual_convictions (get details "case_feature_residual_convictions")
-					null_residual_and_ratio_tuple_map (assoc)
 				)
 
 				;iterate over all the null features and populate a map of feature -> [ residual value, local_non_null_ratio, global_non_null_ratio ]
-				(assign (assoc
-					null_residual_and_ratio_tuple_map
+				(declare (assoc
+					null_case_residuals_map
 						(map
 							(lambda (let
 								(assoc
 									null_feature (current_index 1)
-									num_local_cases (size regional_cases)
+									filtered_context_features (indices (remove context_map (current_index 1)))
+									null_feature_value (get case_value_map (current_index 1))
+									num_local_cases (size regional_cases_influence_map)
 									;list of all non null values for this null_feature in this regional model
 									non_null_local_values (list)
 								)
+
+								(declare (assoc
+									influential_cases_map
+										(normalize (compute_on_contained_entities
+											filtering_queries
+											(query_nearest_generalized_distance
+												k_parameter
+												filtered_context_features
+												(unzip context_map filtered_context_features)
+												p_parameter
+												feature_weights
+												!queryDistanceTypeMap
+												query_feature_attributes_map
+												feature_deviations
+												null_feature
+												dt_parameter
+												(if valid_weight_feature weight_feature (null))
+												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+												"fixed rand seed"
+												(null)
+												!numericalPrecision
+											)
+										))
+								))
+
 								;pull all values for this feature and filter out nulls
 								(assign (assoc
 									non_null_local_values
 										(filter (map
 											(lambda (retrieve_from_entity (current_value) null_feature))
-											regional_cases
+											(indices influential_cases_map)
 										))
 								))
 
-								;if all cases in local model have nulls for this feature as well, and we will be computing local
-								;feature residual convictions, set that conviction to be 1 for this case
-								(if (and
-										computing_case_feature_residual_convictions
-										(= 0 (size non_null_local_values))
-									)
-									(accum (assoc local_null_feature_convictions (associate null_feature 1)))
-								)
-
-								(if (not robust_residuals)
-									;this prediction flow from full residuals gets skipped for null features
-									(let
-										(assoc
-											filtered_context_features (indices (remove context_map null_feature))
-										)
-										(declare (assoc
-											reaction
-												(call !ReactDiscriminative (assoc
-													return_action_values_only (true)
-													context_features filtered_context_features
-													context_values (unzip context_map filtered_context_features)
-													action_features (list null_feature)
-													ignore_case ignore_case
-													allow_nulls (true)
-													;bypass encoding since stored case values are all encoded and we're reacting to raw retrieved values
-													skip_encoding 1
-													;bypass decoding since computing distances to each reaction uses encoded numeric values
-													skip_decoding 1
-													force_targetless force_targetless
-													substitute_output (false)
-												))
-										))
-
-										(accum (assoc
-											predicted_case_values_map
-												(associate
-													null_feature
-													(if (contains_index !nominalsMap null_feature)
-														(get reaction ["action_values" 0])
-														(get reaction 0)
+								(declare (assoc
+									local_non_null_influence
+										(if (size non_null_local_values)
+											(apply "+" (values
+												(filter
+													(lambda
+														(!= (null) (retrieve_from_entity (current_index) null_feature))
 													)
+													influential_cases_map
 												)
-										))
+											))
+
+											;this number may be used as a divisor, so special fallback here
+											; 1 / (2 * max_k)
+											(/
+												1
+												(if (~ 0 k_paraameter) k_parameter (get k_parameter 2) )
+												2
+											)
+										)
+								))
+
+								(if (= (null) null_feature_value)
+									;case value is null
+									(if (contains_index !nominalsMap null_feature)
+										;if nominal, output the percentage of the local data that is not null
+										local_non_null_fraction
+
+										;else continuous
+										(let
+											(assoc
+												local_feature_min (apply "min" non_null_local_values)
+												local_feature_max (apply "max" non_null_local_values)
+												num_unique_local_values (size (values non_null_local_values (true) ))
+											)
+
+											;if entire local model is null or only has 1 non-null value, use the global null residual
+											(if (<= num_unique_local_values 1)
+												(*
+													(get !featureNullRatiosMap (list null_feature "null_residual"))
+													local_non_null_influence
+												)
+
+												;else there are enough local values to compute local null residual
+												(*
+													(- local_feature_max local_feature_min)
+													local_non_null_influence
+												)
+											)
+										)
+									)
+
+									;else feature value is not null, but was predicted as null
+									(if (contains_index !nominalsMap null_feature)
+										;if nominal, output the percentage of the local data that is null
+										;(This shouldn't really be reached bc (null) will have a CAP that is used for the residual
+										;in the above code)
+										(- 1 local_non_null_influence)
+
+										;else continuous
+										(let
+											(assoc
+												local_feature_min (apply "min" non_null_local_values)
+												local_feature_max (apply "max" non_null_local_values)
+												num_unique_local_values (size (values non_null_local_values (true) ))
+											)
+
+											;if entire local model is null or only has 1 non-null value, use the global null residual
+											(if (<= num_unique_local_values 1)
+												(/
+													(get !featureNullRatiosMap (list null_feature "null_residual"))
+													local_non_null_influence
+												)
+
+												;else there are enough local values to compute local null residual
+												(/
+													(- local_feature_max local_feature_min)
+													local_non_null_influence
+												)
+											)
+										)
 									)
 								)
 
-								;if nominal, output residual of 1 and the appropriate ratio
-								(if (contains_index !nominalsMap null_feature)
-									(list
-										1
-										;output global ratio if there are no local values
-										(if (= 0 (size non_null_local_values))
-											(get !featureNullRatiosMap (list null_feature "non_null_ratio"))
-
-											(/ num_local_cases (size non_null_local_values))
-										)
-										(get !featureNullRatiosMap (list null_feature "non_null_ratio"))
-									)
-
-									;else continuous
-									(let
-										(assoc
-											local_feature_min (apply "min" non_null_local_values)
-											local_feature_max (apply "max" non_null_local_values)
-											num_unique_local_values (size (values non_null_local_values (true) ))
-										)
-
-										;if entire local model is null or only has 1 non-null value, use the global null residual
-										(if (<= num_unique_local_values 1)
-											(list
-												(get !featureNullRatiosMap (list null_feature "null_residual"))
-												(get !featureNullRatiosMap (list null_feature "non_null_ratio"))
-												(get !featureNullRatiosMap (list null_feature "non_null_ratio"))
-											)
-
-											;else there are enough local values to compute local null residual
-											(list
-												(- local_feature_max local_feature_min)
-												(/ num_local_cases (size non_null_local_values))
-												(get !featureNullRatiosMap (list null_feature "non_null_ratio"))
-											)
-										)
-									)
-								)
 							))
 							(zip null_features)
 						)
 				))
 
 				(accum (assoc
-					case_residuals_map
-						(map
-							(lambda (first (current_value)))
-							null_residual_and_ratio_tuple_map
-						)
-				))
-
-				(assign (assoc
-					local_null_conviction_ratios_map
-						(map
-							(lambda (get (current_value) 1))
-							null_residual_and_ratio_tuple_map
-						)
+					case_residuals_map null_case_residuals_map
 				))
 			)
 		)
@@ -605,11 +593,6 @@
 				)
 		))
 
-		;if there were pre-computed null feature convictions, overwrite them here
-		(if (size local_null_feature_convictions)
-			(accum (assoc local_residuals_map local_null_feature_convictions))
-		)
-
 		(assign (assoc
 			local_convictions_map
 				(map
@@ -657,29 +640,11 @@
 				)
 		))
 
-		; convictions are multiplied by the null_conviction_ratios, which are (num_cases / num_not_null_cases)
-		; this can be thought of as dividing the surprisal of the observed feature value by the proportion of
-		; non-null values for the given feature
-		; so, as the amount of null_values in the model increases, the observed surprisal of a null decreases
-		(if local_null_conviction_ratios_map
-			(assign (assoc
-				local_convictions_map
-					(map
-						(lambda
-							;current_value is a list of [conviction, ratio], if ratio is null use 1 instead
-							(* (first (current_value)) (or (last (current_value)) 1))
-						)
-						local_convictions_map
-						local_null_conviction_ratios_map
-					)
-			))
-		)
-
 		(accum (assoc
 			output
 				(assoc
 					"feature_full_residual_convictions_for_case"
-						(append local_convictions_map inactive_features_zeros_map)
+						(append local_convictions_map (map 1 inactive_features_zeros_map))
 				)
 		))
 	)
