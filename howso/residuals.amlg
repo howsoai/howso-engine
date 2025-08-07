@@ -460,6 +460,7 @@
 
 		;if 'case_id' are not specified, use a random 'num_samples' sampling of cases from the whole model
 		(if (= 0 (size case_ids))
+			#!SelectCaseIdsForResiduals
 			(assign (assoc
 				case_ids
 					;sample from the model
@@ -1673,4 +1674,139 @@
 				)
 		))
 	)
+
+
+
+	#!AutoConvergeRobustResiduals
+	(seq
+
+		(call !RunRobustResiduals (assoc leave_nulls_in_results (true) ))
+
+		(declare (assoc
+			previous_residuals_map
+				(zip
+					features
+					(map
+						(lambda (if
+							(size (filter (current_value)))
+							[ (generalized_mean (filter (current_value 1))) (size (filter (current_value 1))) ]
+
+							;else if there were no values for this feature, return global feature residual
+							;or simply null for inactive features
+							(if (contains_index !inactiveFeaturesMap (get features (current_index)))
+								(null)
+								(get hyperparam_map (list "featureResiduals" (get features (current_index 1))))
+							)
+						))
+						feature_residuals_lists
+					)
+				)
+			first_residuals_lists feature_residuals_lists
+			done (false)
+		))
+
+		(assign (assoc
+			feature_residuals_lists
+				(while (not done)
+					(call !SelectCaseIdsForResiduals)
+					(call !RunRobustResiduals (assoc leave_nulls_in_results (true) ))
+
+					;updated residuals with previous and new values
+					(assign (assoc
+						residuals_map
+							(map
+								(lambda (let
+									(assoc
+										prev_res (first (first (current_value 1)))
+										prev_count (last (first (current_value 1)))
+										new_res (first (last (current_value 1)))
+										new_count (last (last (current_value 1)))
+
+									)
+
+									[
+										;updated mean with the new residual values
+										(/
+											(+
+												(* prev_res prev_count)
+												(* new_res new_count)
+											)
+											(+ prev_count new_count)
+										)
+
+										;new total count
+										(+ prev_count new_count)
+									]
+								))
+
+								previous_residuals_map
+								;newly computed residuals
+								(zip
+									features
+									(map
+										(lambda (if
+											(size (filter (current_value)))
+											[ (generalized_mean (filter (current_value 1))) (size (filter (current_value 1))) ]
+
+											;else if there were no values for this feature, return global feature residual
+											;or simply null for inactive features
+											(if (contains_index !inactiveFeaturesMap (get features (current_index)))
+												(null)
+												(get hyperparam_map (list "featureResiduals" (get features (current_index 1))))
+											)
+										))
+										feature_residuals_lists
+									)
+								)
+							)
+					))
+
+					;compute deltas for each feature: new running avg vs previous running avg
+					(assign (assoc
+						deltas_map
+							(map
+								(lambda (abs
+										(- (first (first (current_value ))) (first (last (current_value))))
+								))
+								previous_residuals_map
+								residuals_map
+							)
+					))
+
+					;at 5000 cases per batch, stop if values converged or after 150k reacts
+					(if (or
+							(>= (current_index) 29)
+							(=
+								0
+								(size (filter
+									;keep those where the delta is > 5%
+									(lambda
+										(>
+											(/ (current_value) (first (get residuals_map (current_index))) )
+											0.02
+										)
+									)
+									deltas_map
+								))
+							)
+						)
+						(assign (assoc done (true) ))
+
+						(assign (assoc previous_residuals_map residuals_map))
+					)
+
+					(map
+						(lambda (append (first (current_value)) (last (current_value)) ))
+
+						(if (= 0 (current_index))
+							first_residuals_lists
+							(previous_result)
+						)
+						feature_residuals_lists
+					)
+				)
+		))
+
+	)
+
 )
