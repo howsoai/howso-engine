@@ -495,7 +495,7 @@
 		(assoc
 			context_features (list)
 			context_values (list)
-			use_regional_residuals (true)
+			use_differential_privacy (false)
 			hyperparam_map (assoc)
 		)
 
@@ -520,16 +520,18 @@
 		(declare (assoc
 			local_k
 				(if (~ 0 (get hyperparam_map "k"))
-					(if use_regional_residuals
-						(max (get hyperparam_map "k")  30)
-						;else get max of e*k and 30, needed to approximate with max gaps
+					(if use_differential_privacy
+						;get max of e*k and 30, needed to approximate with max gaps
 						(max (* 2.718281828459045 (get hyperparam_map "k")) 30)
+						;else use max of k or 30
+						(max (get hyperparam_map "k")  30)
 					)
 
-					(if use_regional_residuals
-						(get hyperparam_map ["k"])
-						;else get max of e*k and 30, needed to approximate with max gaps
+					(if use_differential_privacy
+						;get max of e*k and 30, needed to approximate with max gaps
 						(max (* 2.718281828459045 (get hyperparam_map ["k" 1])) 30)
+						;else use standard k parameter
+						(get hyperparam_map ["k"])
 					)
 				)
 		))
@@ -571,8 +573,44 @@
 				)
 		))
 
-		(if use_regional_residuals
-			;update the the min/max for all the dependent context features from the computed local mean absolute deviation (MAD)
+		(if use_differential_privacy
+			;approximate residual for each dependent context feature using max gaps
+			(let
+				(assoc regional_case_ids (first cases_tuple))
+				(declare (assoc local_case_ids (trunc (first cases_tuple) local_k) ))
+
+				(map
+					(lambda (let
+						(assoc feature (current_index 1) )
+						(declare (assoc
+							feature_residual
+								(max
+									(get !cachedFeatureHalfMinGapMap feature)
+
+									(min
+										(compute_on_contained_entities (list
+											(query_in_entity_list local_case_ids)
+											(query_max_difference feature (get !cyclicFeaturesMap feature))
+										))
+
+										(compute_on_contained_entities (list
+											(query_in_entity_list regional_case_ids)
+											(query_max_difference feature (get !cyclicFeaturesMap feature))
+										))
+									)
+								)
+						))
+
+						(accum "dependent_features_map"
+							(list feature "min") (- (current_value) feature_residual)
+							(list feature "max") (+ (current_value) feature_residual)
+						)
+					))
+					dependent_continuous_features_map
+				)
+			)
+
+			;else update the the min/max for all the dependent context features from the computed local mean absolute deviation (MAD)
 			(map
 				(lambda (let
 					(assoc feature (current_index 1) )
@@ -616,42 +654,6 @@
 					)
 				))
 				dependent_continuous_features_map
-			)
-
-			;else approximate residual for each dependent context feature
-			(let
-				(assoc regional_case_ids (first cases_tuple))
-				(declare (assoc local_case_ids (trunc (first cases_tuple) local_k) ))
-
-				(map
-					(lambda (let
-						(assoc feature (current_index 1) )
-						(declare (assoc
-							feature_residual
-								(max
-									(get !cachedFeatureHalfMinGapMap feature)
-
-									(min
-										(compute_on_contained_entities
-											(query_in_entity_list local_case_ids)
-											(query_max_difference feature (get !cyclicFeaturesMap feature))
-										)
-
-										(compute_on_contained_entities
-											(query_in_entity_list regional_case_ids)
-											(query_max_difference feature (get !cyclicFeaturesMap feature))
-										)
-									)
-								)
-						))
-
-						(accum "dependent_features_map"
-							(list feature "min") (- (current_value) feature_residual)
-							(list feature "max") (+ (current_value) feature_residual)
-						)
-					))
-					dependent_continuous_features_map
-				)
 			)
 		)
 	)
