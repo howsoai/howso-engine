@@ -1680,6 +1680,17 @@
 	#!AutoConvergeRobustResiduals
 	(seq
 
+		;when computing robust accuracy contributions, all possible sampled case_ids will be provided
+		;make a copy here and set the index to iteratively grab more cases from this preselected list
+		(declare (assoc
+			preselected_case_ids (if (and output_raw_mda (size case_ids)) (replace case_ids))
+			first_case_index (if (and output_raw_mda (size case_ids)) 0)
+		))
+
+		(if (!= (null) first_case_index)
+			(assign (assoc case_ids (unzip preselected_case_ids (range first_case_index (- num_samples 1))) ))
+		)
+
 		(call !RunRobustResiduals (assoc leave_nulls_in_results (true) ))
 
 		(declare (assoc
@@ -1703,15 +1714,15 @@
 				)
 			first_residuals_lists feature_residuals_lists
 			done (false)
-		;;;	max_iterations (ceil (- (/ num_feature_probability_samples num_samples) 1))
 			total_samples num_samples
+			percent_threshold 0.01
 		))
 
 		(assign (assoc
 			feature_residuals_lists
 				(while (not done)
-					;increase the number sampled each iteration by 1000
-					(accum (assoc num_samples 1000))
+					;increase the number sampled each iteration by 10 * threshold percentage
+					(accum (assoc num_samples (ceil (* 10 percent_threshold num_samples)) ))
 					(accum (assoc total_samples num_samples))
 
 					;don't exceed the specified maximum of num_feature_probability_samples
@@ -1724,8 +1735,23 @@
 						)
 					)
 
-					(call !SelectCaseIdsForResiduals)
-(print " s: " num_samples " " )
+					;if cases were preselected, grab the next batch according to the index
+					(if (!= (null) first_case_index)
+						(seq
+							(assign (assoc first_case_index (- total_samples num_samples) ))
+							(assign (assoc
+								case_ids
+									(unzip
+										preselected_case_ids
+										(range first_case_index (- total_samples 1))
+									)
+							))
+						)
+
+						;else randomly select num_samples cases
+						(call !SelectCaseIdsForResiduals)
+					)
+(print " s: " num_samples " " first_case_index " | " )
 					(call !RunRobustResiduals (assoc leave_nulls_in_results (true) ))
 
 					;updated residuals with previous and new values
@@ -1792,7 +1818,6 @@
 
 					;stop if values converged or accumulated 'num_feature_probability_samples' reacts
 					(if (or
-							;;; (>= (current_index) max_iterations)
 							(>= total_samples num_feature_probability_samples)
 							(=
 								0
@@ -1801,7 +1826,7 @@
 									(lambda
 										(>
 											(/ (current_value) (first (get residuals_map (current_index))) )
-											0.01
+											percent_threshold
 										)
 									)
 									deltas_map
