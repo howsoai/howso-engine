@@ -951,4 +951,134 @@
 				stats
 			)
 		)
+
+
+	;outputs all unique values and the count of each value given the trained data and possible conditions
+	#get_value_counts
+	(declare
+		; returns {
+		; 	type "assoc"
+		; 	description "Object containing the response of get_value_counts"
+		; 	indices {
+		; 		"counts" {
+		; 			type "assoc"
+		; 			additional_indices {
+		; 				type "assoc"
+		; 				indices {
+		; 					"values" {type "list" values "list"}
+		; 					"remaining" {type "number"}
+		; 				}
+		; 			}
+		; 		}
+		; 	}
+		; }
+		(assoc
+			;{type "list" values "string" required (true) min_size 1}
+			;The features to compute and return value counts for.
+			features (null)
+			;{ref "Condition"}
+			;A map of conditions for each feature that is used to select cases for which the value counts
+			;will be computed and output.
+			condition (null)
+			;{ref "Precision"}
+			;default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
+			precision "exact"
+			;{type "number" min 0}
+			;The minimum number of cases must hold a value for that value to be returned.
+			minimum_count 0
+			;{type "string"}
+			;name of case weight feature
+			weight_feature (null)
+		)
+		(call !ValidateParameters)
+
+		(if (= (null) weight_feature)
+			(assign (assoc
+				weight_feature
+					(if !autoAblationEnabled
+						!autoAblationWeightFeature
+						".none"
+					)
+			))
+		)
+
+		(declare (assoc
+			condition_query_list
+				(if (size condition)
+					(call !GetQueryByCondition (assoc
+						condition condition
+						precision precision
+					))
+				)
+		))
+
+		(declare (assoc
+			output_map
+				(map
+					(lambda
+						(let
+							(assoc
+								feature (current_index 1)
+							)
+
+							(declare (assoc
+								value_counts_map
+									(compute_on_contained_entities
+										(query_exists !internalLabelSession)
+										condition_query_list
+										(query_value_masses feature weight_feature)
+									)
+							))
+
+							(if minimum_count
+								(seq
+									;if minimum defined, filter down the insignificant feature values to sum together and remove
+									;those values from the map of value counts to be returned
+									(declare (assoc
+										insignificant_value_counts_map
+											(filter
+												(lambda
+													(< (current_value) minimum_count)
+												)
+												value_counts_map
+											)
+									))
+									(assign (assoc
+										value_counts_map (remove value_counts_map (indices insignificant_value_counts_map))
+									))
+								)
+							)
+
+
+							(append
+								(assoc
+									"values"
+										(values (map
+											(lambda
+												[(current_index 1) (current_value 1)]
+											)
+											value_counts_map
+										))
+								)
+								(if minimum_count
+									(assoc
+										"remaining"
+											(if (size insignificant_value_counts_map)
+												(apply "+" (values insignificant_value_counts_map))
+												0
+											)
+									)
+									(assoc)
+								)
+							)
+						)
+					)
+					(zip features)
+				)
+		))
+
+		(call !Return (assoc
+			payload (assoc "counts" output_map)
+		))
+	)
 )
