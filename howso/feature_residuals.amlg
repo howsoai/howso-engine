@@ -222,6 +222,11 @@
 	;		When specified (only for full residuals/prediction_stats), computes forecasts and evaluates error at the end of the forecasts
 	; output_raw_mda: flag, optional, default false. When robust_residuals is "robust_mda" and this flag is true, will output raw MDA values in 'feature_mda_map'
 	; mda_action_feature: string, optional.  When robust_residuals is "robust_mda" and this is set, will output only this specified feature's MDA values
+	; convergence_threshold: number, percent threshold used to dynamically limit the number of samples used to determine robust_mda
+	; 			Defaults to 0.5, when set to 0 will use all num_feature_probability_samples or all case_ids
+	; convergence_samples_growth_rate: number, Rate of increasing the size of each subsequent sample used to dynamically limit the total number of samples used to determine
+	;			robust_mda. Defaults to 1.05, increasing by 5% until the delta between residuals is less than 'convergence_threshold'.
+	; convergence_min_size: number, the minimum size of the first batch of cases used when dynamically sampling robust residuals for robust_mda. Default of 5000
 	#!CalculateFeatureResiduals
 	(declare
 		(assoc
@@ -254,6 +259,9 @@
 
 			output_raw_mda (false)
 			mda_action_feature (null)
+			convergence_threshold 0.005
+			convergence_samples_growth_rate  1.05
+			convergence_min_size 5000
 		)
 
 		(declare (assoc
@@ -304,16 +312,51 @@
 			excluded_inactive_features_map {}
 		))
 
+
+		;if computing robust accuracy contributions from react_aggregate, num_samples will be null, overwrite num_samples
+		;with the number of specified case_ids that are passed in from react_aggregate
+		(if (and
+				(= "robust_mda" robust_residuals)
+				output_raw_mda
+				(= (null) num_samples)
+				(> convergence_threshold 0)
+			)
+			(assign (assoc
+				num_samples (size case_ids)
+				num_feature_probability_samples (size case_ids)
+			))
+		)
+
+		;when dynamic sampling for computing robust_mda, start with 'convergence_min_size'
+		;unless user explicitly specified `num_feature_probability_samples` <= convergence_min_size, in that case don't use dynamic sampling
+		(if (and
+				(= "robust_mda" robust_residuals)
+				(> num_samples convergence_min_size)
+				(= num_samples num_feature_probability_samples)
+				(> convergence_threshold 0)
+			)
+			;set the number of samples in the first of the dynamic batches to `convergence_min_size`
+			(assign (assoc num_samples convergence_min_size))
+		)
+
 		(call !InitResiduals)
 
 		(if (= "deviations" robust_residuals)
 			(call !ComputeDeviations)
 
-			;else robust residuals, and leave nulls in results during analyze flow so they can be used to compute feature mda later
+			;else robust residuals for mda/robut AC
+			(= "robust_mda" robust_residuals)
+			(if (and (> num_feature_probability_samples convergence_min_size) (> convergence_threshold 0))
+				(call !AutoConvergeRobustResiduals)
+
+				;else <= convergence_min_size samples requested, just run them all
+				;leave nulls in results during analyze flow so they can be used to compute feature mda later
+				(call !RunRobustResiduals (assoc leave_nulls_in_results (true) ))
+			)
+
+			;else just robust residuals
 			robust_residuals
-			(call !RunRobustResiduals (assoc
-				leave_nulls_in_results (= "robust_mda" robust_residuals)
-			))
+			(call !RunRobustResiduals (assoc leave_nulls_in_results (false)  ))
 
 			;else
 			(if forecast_window_length
