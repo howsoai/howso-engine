@@ -483,13 +483,25 @@
 
 			(= 0 (size !hyperparameterParamPaths))
 			(seq
-				(if (and (not !autoAnalyzeEnabled ) (>= (call !GetNumTrainingCases) 2))
+				(if (and
+						(not !autoAnalyzeEnabled )
+						(>= (call !GetNumTrainingCases) 2)
+						;don't need to add this warning if it already exists (this can cause lots of lock contention in an untrained Trainee)
+						(not (contains_index
+							warnings
+								(concat
+									"There are no cached hyperparameters in this trainee. "
+									"This operation was executed using a set of predefined default hyperparameters. "
+									"Please run `analyze` or enable auto-analysis with `set_auto_analyze_params`."
+								)
+						))
+					)
 					(accum (assoc
 						warnings
 							(associate (concat
 								"There are no cached hyperparameters in this trainee. "
 								"This operation was executed using a set of predefined default hyperparameters. "
-								"Please run analyze() with your desired parameters."
+								"Please run `analyze` or enable auto-analysis with `set_auto_analyze_params`."
 							))
 					))
 				)
@@ -876,6 +888,18 @@
 			;Enabling SDM will typically incur a small to moderate penalty on speed when using nominal features in inference in exchange for
 			;yielding higher quality inference. The magnitude of the changes are dependent on relationships among the data and the task at hand.
 			use_sdm (null)
+			;{type "number" min 0}
+			;Percent threshold used to dynamically limit the number of samples used to determine feature probabilities, defaults to 0.5%
+			;When set to 0 will use all num_feature_probability_samples
+			convergence_threshold (null)
+			;{type "number" min 1}
+			;Rate of increasing the size of each subsequent sample used to dynamically limit the total number of samples used to determine feature probabilities.
+			;defaults to a rate of 1.05, increasing by 5% until the delta between residuals is less than 'convergence_threshold'.
+			convergence_samples_growth_rate (null)
+			;{type "number" min 1}
+			;The minimum size of the first batch of cases used when dynamically sampling robust residuals used to determine feature probabilities
+			;	Default of 5000
+			convergence_min_size 5000
 		)
 		(call !ValidateParameters)
 
@@ -937,6 +961,9 @@
 				use_case_weights
 				rebalance_features
 				(!= (null) use_sdm)
+				convergence_threshold
+				convergence_samples_growth_rate
+				convergence_min_size
 			)
 			(seq
 				(if (= (null) targeted_model)
@@ -974,6 +1001,9 @@
 							"use_case_weights" use_case_weights
 							"rebalance_features" rebalance_features
 							"use_sdm" use_sdm
+							"convergence_threshold" convergence_threshold
+							"convergence_samples_growth_rate" convergence_samples_growth_rate
+							"convergence_min_size" convergence_min_size
 						))
 				))
 			)
@@ -1028,12 +1058,12 @@
 			auto_ablation_weight_feature ".case_weight"
 			;{type "number"}
 			;stores the threshold for the minimum number of cases at which the model should auto-ablate.
-			;	default of 1000.
-			min_num_cases 1000
+			;	default of 10000.
+			min_num_cases 10000
 			;{type "number"}
 			;stores the threshold for the number of cases at which the model should automatically reduce data.
-			;	default of 500,000.
-			max_num_cases 500000
+			;	default of 200,000.
+			max_num_cases 200000
 			;{type "number"}
 			;the influence weight entropy quantile that a case must be beneath in order to be trained.
 			;	default of 1/e^2.
@@ -1219,13 +1249,6 @@
 												(query_value_masses
 													current_feature
 													(if valid_weight_feature weight_feature)
-													(if (or
-															(not (contains_index !nominalsMap current_feature))
-															(contains_index !numericNominalFeaturesMap current_feature)
-														)
-														"number"
-														"string"
-													)
 												)
 											)
 										)
@@ -1257,7 +1280,7 @@
 						(if (= 0 predicted_class_prob)
 							(/ (apply "+" avg_probs_same_or_larger_than_predicted) num_classes)
 
-							(/ (apply "+" avg_probs_same_or_larger_than_predicted) (size avg_probs_same_or_larger_than_predicted))
+							(generalized_mean avg_probs_same_or_larger_than_predicted)
 						)
 					))
 					confusion_matrix
@@ -1499,13 +1522,6 @@
 										(query_value_masses
 											feature
 											(if valid_weight_feature weight_feature)
-											(if (or
-													(not (contains_index !nominalsMap feature))
-													(contains_index !numericNominalFeaturesMap feature)
-												)
-												"number"
-												"string"
-											)
 										)
 									)
 							))

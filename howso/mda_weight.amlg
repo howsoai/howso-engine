@@ -66,7 +66,10 @@
 
 				(if custom_residuals_map
 					(assign (assoc
-						hyperparam_map (set hyperparam_map "featureDeviations" custom_residuals_map)
+						hyperparam_map
+							(set hyperparam_map "featureDeviations"
+								(append (get hyperparam_map "featureDeviations") custom_residuals_map)
+							)
 					))
 				)
 			)
@@ -140,8 +143,6 @@
 											feature (get_value (current_index 1))
 											case_feature_value (get case_values_map (current_index 1))
 											feature_is_nominal (contains_index !nominalsMap (current_index 1))
-											interpolated_value 0
-											diff 0
 											output_categorical_action_probabilities (true)
 											categorical_action_probabilities_map (assoc)
 										)
@@ -154,29 +155,25 @@
 													(let
 														(assoc
 															query_context_features
-																(if per_feature_weights
-																	context_features
-
-																	;context features + feature being predicted
-																	(values
-																		(append
-																			(if (contains_index features_for_derivation_map feature)
-																				;if this feature should be derived, need to hold out the features that will be used to derive it
-																				(filter
-																					(lambda (or
-																						(not (contains_value (get features_for_derivation_map feature) (current_value)))
-																						(!= feature (get !derivedFeaturesMap (current_value)))
-																						(contains_value (get !tsFeaturesMap "lag_features") (current_value))
-																					))
-																					context_features
-																				)
-
+																;context features + feature being predicted
+																(values
+																	(append
+																		(if (contains_index features_for_derivation_map feature)
+																			;if this feature should be derived, need to hold out the features that will be used to derive it
+																			(filter
+																				(lambda (or
+																					(not (contains_value (get features_for_derivation_map feature) (current_value)))
+																					(!= feature (get !derivedFeaturesMap (current_value)))
+																					(contains_value (get !tsFeaturesMap "lag_features") (current_value))
+																				))
 																				context_features
 																			)
-																			feature
+
+																			context_features
 																		)
-																		(true)
+																		feature
 																	)
+																	(true)
 																)
 															feature_weights
 																(if per_feature_weights
@@ -256,7 +253,6 @@
 												)
 										))
 
-										;stores error into diff
 										(call !InterpolateAndComputeDiffToCase)
 
 									))
@@ -426,15 +422,9 @@
 								(if output_raw_mda
 									(-
 										;avg_without_residuals
-										(/
-											(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
-											(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
-										)
+										(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature) )
 										;average with residuals
-										(/
-											(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
-											(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
-										)
+										(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature) )
 									)
 
 									;cap the lower value for probability conversion
@@ -443,49 +433,24 @@
 										(if estimating_residual_lower_bound
 											(-
 												;avg_without_residuals
-												(/
-													(apply "+"
-														(filter (map
-															(lambda (last (current_value)))
-															(unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)
-														))
-													)
-													(size
-														(filter (map
-															(lambda (last (current_value)))
-															(unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)
-														))
-													)
-												)
+												(generalized_mean (map
+													(lambda (last (current_value)))
+													(unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)
+												))
+
 												;average with residuals
-												(/
-													(apply "+"
-														(filter (map
-															(lambda (last (current_value)))
-															(unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)
-														))
-													)
-													(size
-														(filter (map
-															(lambda (last (current_value)))
-															(unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)
-														))
-													)
-												)
+												(generalized_mean (map
+													(lambda (last (current_value)))
+													(unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)
+												))
 											)
 
 											;else the lists are residual values, can simply unzip the lists by their indices
 											(-
 												;avg_without_residuals
-												(/
-													(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
-													(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)) )
-												)
+												(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature) )
 												;average with residuals
-												(/
-													(apply "+" (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
-													(size (filter (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)) )
-												)
+												(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature) )
 											)
 										)
 										(get !cachedFeatureMinResidualMap mda_feature)
@@ -529,11 +494,6 @@
 			;baseline isn't specified, declare it on the stack here
 			baseline_hyperparameter_map hyperparam_map
 		))
-
-		;overwrite featureResiduals if custom ones are provided
-		(if custom_residuals_map
-			(set baseline_hyperparameter_map "featureResiduals" custom_residuals_map)
-		)
 
 		;iterate over an assoc of MDA maps per feature and convert to a normalized probability feature mda matrix
 		(zip
@@ -709,19 +669,20 @@
 			))
 
 			;Mean Absolute Deviation
-			(/ (apply "+" errors) (size errors))
+			(generalized_mean errors)
 		)
 	)
 
 	#!ComputeEstimatedResidualLowerBound
 	(seq
 
+		;compute robust mda using the feature itself in the predictions
 		(assign (assoc
 			residuals_map
 				(call !CalculateFeatureResiduals (assoc
 					features features
 					robust_residuals "robust_mda"
-					num_samples 10000
+					case_ids case_ids
 
 					estimating_residual_lower_bound (true)
 
@@ -733,45 +694,7 @@
 				))
 		))
 
-		(declare (assoc
-			estimated_residuals_map
-				(call !CalculateFeatureResiduals (assoc
-					features action_features
-					context_features context_features
-					robust_residuals "deviations"
-					num_samples 1000
-
-					estimating_residual_lower_bound (true)
-
-					custom_mda_map (get residuals_map "feature_mda_map")
-
-					compute_all_statistics (false)
-					confusion_matrix_min_count 0
-					use_shared_deviations (true)
-					;don't create copies of confusion matrices for non-primary shared deviation features
-					expand_confusion_matrices (false)
-				))
-		))
-
-		(assign (assoc
-			residuals_map
-				(call !CalculateFeatureResiduals (assoc
-					features features
-					robust_residuals "robust_mda"
-					num_samples 10000
-
-					estimating_residual_lower_bound (true)
-
-					custom_residuals_map (get estimated_residuals_map "residual_map")
-
-					compute_all_statistics (false)
-					confusion_matrix_min_count 0
-					use_shared_deviations (true)
-					;don't create copies of confusion matrices for non-primary shared deviation features
-					expand_confusion_matrices (false)
-				))
-		))
-
+		;recompute feature deviations using feature weights from the computed robust mda above
 		(declare (assoc
 			updated_estimated_residuals_map
 				(call !CalculateFeatureResiduals (assoc
@@ -781,8 +704,6 @@
 					num_samples 1000
 
 					estimating_residual_lower_bound (true)
-
-					custom_residuals_map (get estimated_residuals_map "residual_map")
 					custom_mda_map (get residuals_map "feature_mda_map")
 
 					compute_all_statistics (false)

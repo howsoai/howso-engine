@@ -263,6 +263,10 @@
 			;{ref "Precision"}
 			;string, default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
 			precision "exact"
+			;{ref "SortByCriteria"}
+			;list of maps defining sorting criteria in order of precedence. Each map should specify the feature name under the "feature" key and
+			;"asc"/"desc" under the "order" key.
+			sort_by (null)
 			;{type "boolean"}
 			;if true, will return the audit data of which features for each row were imputed (auto-filled)
 			indicate_imputed (false)
@@ -326,7 +330,13 @@
 							condition condition
 							condition_session condition_session_value
 							precision precision
-							num_cases num_cases
+							num_cases
+								;if there is a more complex sorting critera, all condition-matching cases must be selected then sorted below.
+								(if (> (size sort_by) 1)
+									(null)
+									num_cases
+								)
+							sort_by sort_by
 						))
 					)
 
@@ -336,12 +346,74 @@
 							(lambda (retrieve_from_entity (current_value) ".replay_steps"))
 							(call !GetSessionIds)
 						)
-
 					)
 				)
 			has_rounded_features !hasRoundedFeatures
 			has_datetime_features !hasDateTimeFeatures
 		))
+
+		(if (size sort_by)
+			(let
+				(assoc
+					sorting_features (map (lambda (get (current_value) "feature")) sort_by)
+				)
+
+				(assign (assoc
+					cases
+						(sort
+							(lambda
+								(let
+									(assoc
+										case_1_values (retrieve_from_entity (current_value 1) sorting_features)
+										case_2_values (retrieve_from_entity (current_value 2) sorting_features)
+									)
+
+									(apply "or"
+										(map
+											(lambda
+												(if (= "asc" (get (current_value) "order"))
+													(if (~ 0 (get case_1_values (current_index)))
+														(-
+															(get case_1_values (current_index))
+															(get case_2_values (current_index))
+														)
+
+														(>
+															(get case_1_values (current_index))
+															(get case_2_values (current_index))
+														)
+													)
+
+													;otherwise desc
+													(if (~ 0 (get case_1_values (current_index)))
+														(-
+															(get case_2_values (current_index))
+															(get case_1_values (current_index))
+														)
+
+														(>
+															(get case_2_values (current_index))
+															(get case_1_values (current_index))
+														)
+													)
+												)
+											)
+											sort_by
+										)
+									)
+								)
+							)
+							cases
+						)
+				))
+
+				(if num_cases
+					(assign (assoc
+						cases (trunc cases num_cases)
+					))
+				)
+			)
+		)
 
 		(if output_ids
 			(conclude (call !Return (assoc payload (assoc cases cases))))
@@ -463,6 +535,7 @@
 	;		If null there will be no limit.
 	;	If 'condition_filter_query' is not specified:
 	;		If null, will be set to k if precision is "similar" or no limit if precision is "exact".
+	; sort_by: optional, list of criteria to sort the cases by. Only used here if singular.
 	#!GetCasesByCondition
 	(declare
 		(assoc
@@ -471,6 +544,7 @@
 			condition_session (null)
 			precision "exact"
 			num_cases (null)
+			sort_by (null)
 		)
 
 		(if (!= (null) condition_session)
@@ -487,6 +561,7 @@
 								condition_session condition_session
 								precision precision
 								num_cases num_cases
+								sort_by_criteria (if (= 1 (size sort_by)) (first sort_by))
 							))
 					))
 				)
@@ -513,6 +588,7 @@
 	;	n values = must match any of these values exactly
 	; precision: flag, default is "exact". Whether to query for 'exact' matches; if set to 'similar' will query for similar values intead of 'exact'
 	; num_cases: optional, default is null. The number of "similar" cases to get if 'precision' is "similar" or no limit if precision is "exact".
+	; sort_by_criteria: optional. The assoc defining how to sort cases, only used if num_cases is specified.
 	#!GetQueryByCondition
 	(declare
 		(assoc
@@ -520,6 +596,7 @@
 			condition_session (null)
 			precision "exact"
 			num_cases (null)
+			sort_by_criteria (null)
 		)
 
 		;set num_cases appropriately if null
@@ -539,11 +616,6 @@
 				;precision = 'exact'
 				(assign (assoc num_cases 0))
 			)
-		)
-
-		;num_cases was set to value of dynamic K, use the minimal k value
-		(if (~ (list) num_cases)
-			(assign (assoc num_cases (get num_cases 1) ))
 		)
 
 		(if (size !encodingNeededFeaturesSet)
@@ -628,6 +700,15 @@
 					))
 					(indices condition)
 				)
+				(if (and sort_by_criteria num_cases)
+					(if (= "asc" (get sort_by_criteria "order"))
+						(query_min (get sort_by_criteria "feature") num_cases (true))
+
+						(= "desc" (get sort_by_criteria "order"))
+						(query_max (get sort_by_criteria "feature") num_cases (true))
+					)
+					[]
+				)
 			)
 
 			;else do a fuzzy query
@@ -705,6 +786,15 @@
 						)
 
 						(list)
+					)
+					(if (and sort_by_criteria num_cases)
+						(if (= "asc" (get sort_by_criteria "order"))
+							(query_min (get sort_by_criteria "feature") num_cases (true))
+
+							(= "desc" (get sort_by_criteria "order"))
+							(query_max (get sort_by_criteria "feature") num_cases (true))
+						)
+						[]
 					)
 				)
 			)

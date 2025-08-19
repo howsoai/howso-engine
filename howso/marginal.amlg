@@ -89,7 +89,7 @@
 									(query_exists !internalLabelSession)
 									(query_in_entity_list case_ids)
 								)
-								(query_value_masses feature query_weight_feature (if (contains_index !numericNominalFeaturesMap feature) "number" "string") )
+								(query_value_masses feature query_weight_feature)
 							)
 						feature_mode (null)
 						feature_null_count
@@ -122,14 +122,6 @@
 										(query_mode
 											feature
 											query_weight_feature
-											;store ordinal expected value as the mode of the ordinal feature
-											(if (or
-													(contains_index !numericNominalFeaturesMap feature)
-													(contains_index !ordinalFeaturesSet feature)
-												)
-												"number"
-												"string"
-											)
 										)
 									)
 							))
@@ -154,7 +146,7 @@
 												)
 											)
 									)
-									(assign (assoc mean_absolute_deviation (/ (apply "+" errors) (size errors)) ))
+									(assign (assoc mean_absolute_deviation (generalized_mean errors) ))
 								)
 							)
 
@@ -209,13 +201,6 @@
 								(query_mode
 									feature
 									query_weight_feature
-									(if (or
-											(contains_index !numericNominalFeaturesMap feature)
-											(contains_index !ordinalFeaturesSet feature)
-										)
-										"number"
-										"string"
-									)
 								)
 							)
 
@@ -288,7 +273,7 @@
 							(assoc
 								"expected_value" avg_feature_value
 								"avg_gap" (/ range (or num_cases (call !GetNumTrainingCases)) )
-								"mean_absolute_deviation" (/ (apply "+" errors) (size errors))
+								"mean_absolute_deviation" (generalized_mean errors)
 							)
 						)
 					)
@@ -303,7 +288,7 @@
 									(assoc
 										"expected_value" avg_feature_value
 										"avg_gap" (/ range (or num_cases (call !GetNumTrainingCases)) )
-										"mean_absolute_deviation" (/ (apply "+" errors) (size errors))
+										"mean_absolute_deviation" (generalized_mean errors)
 									)
 								)
 						))
@@ -386,15 +371,9 @@
 						)
 					)
 
-					(declare (assoc total_weight (apply "+" (values nominal_class_weight_map))))
-
 					;output the normalized counts of each class by converting them to probabilities
 					(assign (assoc
-						nominal_class_probabilities_map
-							(map
-								(lambda (/ (current_value) total_weight))
-								nominal_class_weight_map
-							)
+						nominal_class_probabilities_map (normalize nominal_class_weight_map)
 					))
 
 					;only cache probabilities for the global model, meaning no local/regional case_ids were specified
@@ -810,11 +789,6 @@
 								skew (null)
 								kurtosis (null)
 								entropy (null)
-								feature_is_numeric
-									(or
-										(not (contains_index !nominalsMap (current_index 1)))
-										(contains_index !numericNominalFeaturesMap (current_index 1))
-									)
 								feature_is_continuous (not (contains_index !nominalsMap (current_index 1)))
 							)
 
@@ -898,7 +872,8 @@
 								mode
 									(compute_on_contained_entities
 										filtering_queries
-										(query_mode feature weight_feature (if feature_is_numeric "number" "string"))
+										(query_not_equals feature (null))
+										(query_mode feature weight_feature)
 									)
 								count
 									(size
@@ -909,9 +884,12 @@
 									)
 								uniques
 									(size
-										(contained_entities
-											filtering_queries
-											(query_value_masses feature (null) (if feature_is_numeric "number" "string") )
+										(remove
+											(contained_entities
+												filtering_queries
+												(query_value_masses feature (null))
+											)
+											[(null)]
 										)
 									)
 							))
@@ -922,15 +900,16 @@
 										(let
 											(assoc
 												class_counts_map
-													(compute_on_contained_entities
-														filtering_queries
-														(query_value_masses feature weight_feature (if feature_is_numeric "number" "string") )
+													(remove
+														(compute_on_contained_entities
+															filtering_queries
+															(query_value_masses feature weight_feature)
+														)
+														[(null)]
 													)
-												total 0
 											)
-											(assign (assoc total (apply "+" (values class_counts_map)) ))
 											(entropy
-												(map (lambda (/ (current_value) total)) (values class_counts_map))
+												(normalize (values class_counts_map) )
 											)
 										)
 								))
@@ -972,4 +951,135 @@
 				stats
 			)
 		)
+
+
+	;outputs all unique values and the mass of each value given the trained data and possible conditions
+	;if a weight feature is specified or auto-ablation is enabled, then the probability masses are returned rather
+	;than frequency of cases with each value.
+	#get_value_masses
+	(declare
+		; returns {
+		; 	type "assoc"
+		; 	description "Object containing the response of get_value_masses"
+		; 	indices {
+		; 		"masses" {
+		; 			type "assoc"
+		;			description "A mapping of feature name to map defining the computed value masses."
+		; 			additional_indices {
+		; 				type "assoc"
+		; 				indices {
+		; 					"values" {type "list" values "list" description "A list of tuples containing a feature value and its mass."}
+		; 					"remaining" {type "number" description "The sum of masses of values with mass below the minumum count threshold."}
+		; 				}
+		; 			}
+		; 		}
+		; 	}
+		; }
+		(assoc
+			;{type "list" values "string" required (true) min_size 1}
+			;The features to compute and return value counts for.
+			features (null)
+			;{ref "Condition"}
+			;A map of conditions for each feature that is used to select cases for which the value counts
+			;will be computed and output.
+			condition (null)
+			;{ref "Precision"}
+			;default is 'exact', used only with 'condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
+			precision "exact"
+			;{type "number" min 0}
+			;The minimum mass required for a value to be returned. Any values with mass lesser than the
+			;specified minimum mass have their masses added together and returned under the "remaining" key for the feature.
+			minimum_mass_threshold 0
+			;{type "string"}
+			;name of case weight feature. When specified, the returned values represent the sum of the weights of all the cases that have
+			;each feature value, rather than the number of cases.
+			weight_feature (null)
+		)
+		(call !ValidateParameters)
+
+		(if (= (null) weight_feature)
+			(assign (assoc
+				weight_feature
+					(if !autoAblationEnabled
+						!autoAblationWeightFeature
+						".none"
+					)
+			))
+		)
+
+		(declare (assoc
+			condition_query_list
+				(if (size condition)
+					(call !GetQueryByCondition (assoc
+						condition condition
+						precision precision
+					))
+				)
+		))
+
+		(declare (assoc
+			output_map
+				(map
+					(lambda (let
+						(assoc feature (current_index 1))
+
+						(declare (assoc
+							value_mass_map
+								(compute_on_contained_entities
+									(query_exists !internalLabelSession)
+									condition_query_list
+									(query_value_masses feature weight_feature)
+								)
+						))
+
+						(if minimum_mass_threshold
+							(seq
+								;if minimum defined, filter down the insignificant feature values to sum together and remove
+								;those values from the map of value counts to be returned
+								(declare (assoc
+									insignificant_value_mass_map
+										(filter
+											(lambda (< (current_value) minimum_mass_threshold))
+											value_mass_map
+										)
+								))
+								(assign (assoc
+									value_mass_map (remove value_mass_map (indices insignificant_value_mass_map))
+								))
+							)
+						)
+
+
+						(append
+							(assoc
+								"values"
+									;The value and their masses are returned as 2-item lists
+									;of [feature_value, mass] rather than an assoc of value->mass
+									;because using an assoc would convert the feature values to strings
+									;when converted to JSON
+									(values (map
+										(lambda [(current_index 1) (current_value 1)] )
+										value_mass_map
+									))
+							)
+							(if minimum_mass_threshold
+								(assoc
+									"remaining"
+										(if (size insignificant_value_mass_map)
+											(apply "+" (values insignificant_value_mass_map))
+											0
+										)
+								)
+								(assoc)
+							)
+						)
+					))
+					(zip features)
+				)
+		))
+
+		(call !Return (assoc
+			payload (assoc "masses" output_map)
+		))
+	)
 )
