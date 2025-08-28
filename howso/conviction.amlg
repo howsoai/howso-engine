@@ -39,6 +39,10 @@
 			;flag, if set to true, will enable auto_analyze and analyze with these specified features computing their values.
 			;   Only applicable when reacting for the entire dataset,  when case_ids is null.
 			analyze (null)
+			;{type "boolean"}
+			;if true will forcibly overwrite previously stored values.  Default is false, will error out if trying to
+			;react_into_features for a feature that already exists.
+			overwrite (false)
 			;{ref "UseCaseWeights"}
 			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
 			;	case weights will be used if the trainee has them.
@@ -99,6 +103,44 @@
 				distance_contribution "distance_contribution"
 				only_similiarity_conviction (true)
 			))
+		)
+
+		;prevent this method from overwriting any previously stored values if 'overwrite' is not (true)
+		(if
+			(and
+				(not overwrite)
+				(or
+					familiarity_conviction_addition familiarity_conviction_removal distance_contribution
+					p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy
+				)
+			)
+			(let
+				(assoc
+					existing_features
+						;keep any feature names that are in !reactIntoFeaturesList
+						(filter
+							(lambda
+								(contains_value !reactIntoFeaturesList (current_value))
+							)
+							(filter [
+								familiarity_conviction_addition familiarity_conviction_removal distance_contribution
+								p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy
+							])
+						)
+				)
+				(if (size existing_features)
+					(conclude
+						(call !Return (assoc
+							errors
+								[(concat
+									"The following features already exist: "
+									(apply "concat" (trunc (weave existing_features ", ")))
+									", call react_into_features() with overwrite=True to overwrite the values for these features."
+								)]
+						))
+					)
+				)
+			)
 		)
 
 		(if (= (null) features)
@@ -273,6 +315,11 @@
 						(if (not (contains_value !reactIntoFeaturesList distance_contribution))
 							(accum_to_entities (assoc !reactIntoFeaturesList distance_contribution))
 						)
+
+						;store the distance_contribution feature under the key of all the features used to compute it
+						(accum_to_entities (assoc
+							!storedDistanceContributionsFeatureMap (associate (apply "concat" (sort features)) distance_contribution)
+						))
 					)
 				)
 
@@ -468,6 +515,7 @@
 										use_case_weights use_case_weights
 										weight_feature weight_feature
 										case_id (current_index 1)
+										distance_contribution_feature distance_contribution
 									))
 									"similarity_conviction"
 								)
@@ -566,6 +614,7 @@
 		(call react_into_features (assoc
 			features features
 			familiarity_conviction_addition (true)
+			overwrite (true)
 		))
 
 		(retrieve_from_entity case_id !storedCaseConvictionsFeatureAddition)
@@ -578,6 +627,8 @@
 	; feature_values: list of corresponding feature values
 	; filtering_queries: (optional) list of filtering queries (such as ignoring a specific case) during computation
 	; case_id: optional, id of case to compute similarity conviction for
+	; react_group: optional, default false. if true this is being called from react_group and should compute local dc map
+	; distance_contribution_feature: name of feature that holds stored distance contributions
 	#!SimilarityConviction
 	(declare
 		(assoc
@@ -587,6 +638,8 @@
 			use_case_weights (false)
 			weight_feature ".case_weight"
 			case_id (null)
+			react_group (false)
+			distance_contribution_feature "distance_contribution"
 		)
 
 		(declare (assoc
@@ -667,9 +720,15 @@
 				(if case_id
 					(zip local_cases (unzip case_to_dc_map local_cases))
 
-					;number of cases in datasets does not equal the number of cases with distance contributions,
-					;not all cases have distance_contribution, must calculate distance_contribution for nearest neighbors
-					(!= (size (contained_entities (query_exists "distance_contribution") )) (call !GetNumTrainingCases))
+					(or
+						;react_group specified filtering_queries to filter out group case ids
+						(and react_group (size filtering_queries))
+						;or number of cases in datasets does not equal the number of cases with distance contributions,
+						;if not all cases have distance_contribution, must calculate distance_contribution for nearest neighbors
+						(!= (size (contained_entities (query_exists distance_contribution_feature) )) (call !GetNumTrainingCases))
+						;or features don't match feature set that was used to store DCs
+						(not (contains_index !storedDistanceContributionsFeatureMap (apply "concat" (sort features))) )
+					)
 					(compute_on_contained_entities
 						filtering_queries
 						||(query_entity_distance_contributions
@@ -697,7 +756,7 @@
 						;outputs an assoc of {case id : { feature : value } }
 						(compute_on_contained_entities
 							(query_in_entity_list local_cases)
-							(query_exists "distance_contribution")
+							(query_exists distance_contribution_feature)
 						)
 					)
 				)

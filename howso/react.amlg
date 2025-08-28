@@ -295,10 +295,11 @@
 			;A mapping of conditions for features that will be used to constrain the queries used to find the most similar
 			;trained cases to the given contexts.
 			;assoc of feature->value(s).
-			;	  no value = must have feature
+			;	  no value or (null) = select cases where that feature is (null)/missing
 			;	- for continuous or numeric ordinal features:
 			;	  one value = must equal exactly the value or be close to it for fuzzy match
-			;	  values = inclusive between
+			;	  two values = inclusive between, supports (null) on either side for less than/greater than conditions
+			;	  [(null) (null)] = select all non-null cases
 			;	- for nominal or string ordinal features:
 			;	  n values = must match any of these values exactly
 			constraints (null)
@@ -316,7 +317,12 @@
 			;		  for non-nominals, if both are provided, only 'goal' is considered.
 			goal_features_map (assoc)
 			;{type "assoc" additional_indices "string"}
-			;A mapping of feature name to custom code strings that will be evaluated to update the value of the feature they are mapped from.
+			;A mapping of feature name to custom code strings that will be evaluated to update the value of the context feature they are mapped from after inference/derivation.
+			;Custom code will be able to access the pre-modification encoded values of all context features and resulting values should also be in the
+			;encoded format for the feature.
+			feature_pre_process_code_map (null)
+			;{type "assoc" additional_indices "string"}
+			;A mapping of feature name to custom code strings that will be evaluated to update the value of the feature they are mapped from after inference/derivation.
 			;In the time-series synthesis, these custom codes are executed just after the original feature value is derived or synthed, but before
 			;any other features would be derived or generated from the value. This means that the result of this custom code may be used as the
 			;context in the generation or derivation of other feature values within a single timestep. Custom code will be able to access the values
@@ -356,6 +362,9 @@
 			;{type "number"}
 			;total number of cases to generate for generative reacts.
 			num_cases_to_generate (null)
+			;{type "boolean"}
+			;flag, if true will return the context values used in the reaction alongside the action values.
+			return_context_values (false)
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
@@ -495,27 +504,8 @@
 		;check and update caches if necessary
 		(call !PreReactCacheChecks)
 
-		(if feature_post_process_code_map
-			(assign (assoc
-				feature_post_process_code_map
-					(map
-						(lambda
-							;parse it into code, requires passing case as a map of feature name to value
-							(call !ParseDerivedFeatureCode (assoc
-								code_string (current_value 1)
-								label_to_code
-									(lambda
-										(if (= (lambda label_value) 0)
-											;pull the feature value
-											(get case (lambda label_name))
-										)
-									)
-							))
-						)
-						feature_post_process_code_map
-					)
-			))
-		)
+		;parse pre/post process code maps if given
+		(call !InitializeFeatureProcessMapsStationary)
 
 		(declare (assoc
 			dbl_precision_epsilon
@@ -524,6 +514,17 @@
 						(get details "distance_ratio")
 					)
 					(call !ComputePrecisionEpsilon)
+				)
+			output_context_features
+				(if return_context_values
+					(values (append
+						context_features
+						(if (= (null) desired_conviction)
+							(filter (lambda (not (contains_value action_features (current_value)))) preserve_feature_values)
+
+							preserve_feature_values
+						)
+					) (true))
 				)
 		))
 
@@ -604,6 +605,7 @@
 							preserve_feature_values preserve_feature_values
 							new_case_threshold new_case_threshold
 							pre_generated_uniques_map pre_generated_uniques_map
+							feature_pre_process_code_map feature_pre_process_code_map
 							feature_post_process_code_map feature_post_process_code_map
 							dbl_precision_epsilon dbl_precision_epsilon
 						))
@@ -661,7 +663,15 @@
 		))
 
 		(call !Return (assoc
-			payload (append react_output_map (assoc "action_features" output_action_features))
+			payload
+				(append
+					react_output_map
+					(assoc "action_features" output_action_features)
+					(if return_context_values
+						(assoc "context_features" output_context_features)
+						(assoc)
+					)
+				)
 			warnings (if (size warnings) (indices warnings))
 		))
 	)
@@ -784,10 +794,11 @@
 			;A mapping of conditions for features that will be used to constrain the queries used to find the most similar
 			;trained cases to the given contexts.
 			;assoc of feature->value(s).
-			;	  no value = must have feature
+			;	  no value or (null) = select cases where that feature is (null)/missing
 			;	- for continuous or numeric ordinal features:
 			;	  one value = must equal exactly the value or be close to it for fuzzy match
-			;	  values = inclusive between
+			;	  two values = inclusive between, supports (null) on either side for less than/greater than conditions
+			;	  [(null) (null)] = select all non-null cases
 			;	- for nominal or string ordinal features:
 			;	  n values = must match any of these values exactly
 			constraints (null)
@@ -805,7 +816,12 @@
 			;		  for non-nominals, if both are provided, only 'goal' is considered.
 			goal_features_map (assoc)
 			;{type "assoc" additional_indices "string"}
-			;A mapping of feature name to custom code strings that will be evaluated to update the value of the feature they are mapped from.
+			;A mapping of feature name to custom code strings that will be evaluated to update the value of the context feature they are mapped from after inference/derivation.
+			;Custom code will be able to access the pre-modification encoded values of all context features and resulting values should also be in the
+			;encoded format for the feature.
+			feature_pre_process_code_map (null)
+			;{type "assoc" additional_indices "string"}
+			;A mapping of feature name to custom code strings that will be evaluated to update the value of the feature they are mapped from after inference/derivation.
 			;In the time-series synthesis, these custom codes are executed just after the original feature value is derived or synthed, but before
 			;any other features would be derived or generated from the value. This means that the result of this custom code may be used as the
 			;context in the generation or derivation of other feature values within a single timestep. Custom code will be able to access the values
@@ -831,6 +847,9 @@
 			; 		'most_similar': the closest distance of the most similar case
 			; 		null: the minimum local distance
 			new_case_threshold "min"
+			;{type "boolean"}
+			;flag, if true will return the context values used in the reaction alongside the action values.
+			return_context_values (false)
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
@@ -889,6 +908,9 @@
 		;check and update caches if necessary
 		(call !PreReactCacheChecks)
 
+		;parse pre/post process code maps if given
+		(call !InitializeFeatureProcessMapsStationary)
+
 		;assoc of feature -> unique value, pre-populated if there are unique features that need to be synthed
 		(declare (assoc
 			pre_generated_uniques_map
@@ -908,28 +930,6 @@
 				)
 		))
 
-		(if feature_post_process_code_map
-			(assign (assoc
-				feature_post_process_code_map
-					(map
-						(lambda
-							;parse it into code, requires passing case as a map of feature name to value
-							(call !ParseDerivedFeatureCode (assoc
-								code_string (current_value 1)
-								label_to_code
-									(lambda
-										(if (= (lambda label_value) 0)
-											;pull the feature value
-											(get case (lambda label_name))
-										)
-									)
-							))
-						)
-						feature_post_process_code_map
-					)
-			))
-		)
-
 		(declare (assoc
 			dbl_precision_epsilon
 				(if (or
@@ -937,6 +937,17 @@
 						(get details "distance_ratio")
 					)
 					(call !ComputePrecisionEpsilon (assoc generated_uniques_list_map pre_generated_uniques_map))
+				)
+			output_context_features
+				(if return_context_values
+					(values (append
+						context_features
+						(if (= (null) desired_conviction)
+							(filter (lambda (not (contains_value action_features (current_value)))) preserve_feature_values)
+
+							preserve_feature_values
+						)
+					) (true))
 				)
 		))
 
@@ -971,6 +982,7 @@
 					preserve_feature_values preserve_feature_values
 					new_case_threshold new_case_threshold
 					pre_generated_uniques_map pre_generated_uniques_map
+					feature_pre_process_code_map feature_pre_process_code_map
 					feature_post_process_code_map feature_post_process_code_map
 					dbl_precision_epsilon dbl_precision_epsilon
 				))
@@ -994,12 +1006,18 @@
 		(if (!= (null) react_response)
 			(accum (assoc
 				react_response
-					(assoc
-						"action_features"
-							(if (size derived_action_features)
-								(append action_features derived_action_features)
-								action_features
-							)
+					(append
+						(assoc
+							"action_features"
+								(if (size derived_action_features)
+									(append action_features derived_action_features)
+									action_features
+								)
+						)
+						(if return_context_values
+							(assoc "context_features" output_context_features)
+							(assoc)
+						)
 					)
 			))
 		)
@@ -1188,6 +1206,8 @@
 									substitute_output substitute_output
 									current_attempt 0
 									custom_extra_filtering_queries holdout_queries
+									feature_pre_process_code_map feature_pre_process_code_map
+									feature_post_process_code_map feature_post_process_code_map
 								))
 						))
 					)
@@ -1231,6 +1251,8 @@
 									substitute_output substitute_output
 									current_attempt (+ 1 (current_index 2))
 									custom_extra_filtering_queries holdout_queries
+									feature_pre_process_code_map feature_pre_process_code_map
+									feature_post_process_code_map feature_post_process_code_map
 								))
 						))
 
@@ -1381,6 +1403,8 @@
 							skip_decoding skip_decoding
 							skip_encoding skip_encoding
 							filtering_queries holdout_queries
+							feature_pre_process_code_map feature_pre_process_code_map
+							feature_post_process_code_map feature_post_process_code_map
 						))
 				)
 
@@ -1490,7 +1514,7 @@
 				(assoc context_map (zip context_features context_values) )
 				(if (not impute_react)
 					(if (contains_index context_map !tsTimeFeature)
-						(accum (assoc custom_extra_filtering_queries (call !ComputeTimeSeriesFilterQuery) ))
+						(accum (assoc custom_extra_filtering_queries (call !ComputeTimeSeriesFilterFutureCasesQuery) ))
 					)
 				)
 				(if leave_series_out
