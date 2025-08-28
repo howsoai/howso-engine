@@ -164,6 +164,7 @@
 			;get the min k if using dynamic k
 			k_parameter_value (if (~ 0 (get hyperparam_map "k")) (get hyperparam_map "k") (get hyperparam_map ["k" 1]) )
 			local_cases_tuple (null)
+			react_feature_deviations (null)
 		))
 
 		(if (get hyperparam_map "subtraineeName")
@@ -361,7 +362,10 @@
 			(assign (assoc selected_prediction_stats (null)))
 		)
 
-		(if (get details "feature_deviations")
+		(if (or
+				(get details "feature_deviations")
+				(get details "relevant_values")
+			)
 			(call !ComputeReactFeatureDeviations)
 		)
 
@@ -387,8 +391,15 @@
 			(accum (assoc output (assoc "observational_errors" !userSpecifiedFeatureErrorsMap)))
 		)
 
-		(if (get details "categorical_action_probabilities")
+		(if (or
+				(get details "categorical_action_probabilities")
+				(get details "relevant_values")
+			)
 			(call !ComputeCategoricalActionProbabilities)
+		)
+
+		(if (get details "relevant_values")
+			(call !ComputeRelevantValues)
 		)
 
 		(declare (assoc
@@ -866,5 +877,110 @@
 			(zip details)
 			["num_most_similar_cases" "num_most_similar_case_indices" "num_boundary_cases" "selected_prediction_stats" "features" "series_residuals_num_samples"]
 		)
+	)
+
+	#!ComputeRelevantValues
+	(declare
+		(assoc
+			closest_cases_map
+				(normalize (compute_on_contained_entities
+					filtering_queries
+					(query_nearest_generalized_distance
+						k_parameter
+						context_features
+						context_values
+						p_parameter
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(first action_features)
+						dt_parameter
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						!numericalPrecision
+					)
+				))
+		)
+
+
+		(accum (assoc
+			output
+				(assoc
+					"relevant_values"
+					(map
+						(lambda (let
+							(assoc
+								feature (current_index 1)
+								is_nominal (contains_index !nominalsMap (current_index 1))
+							)
+
+							(if is_nominal
+								;nominal flow
+								(declare
+									(assoc
+										candidate_case_weights (values closest_cases_map)
+										candidate_case_values (map (retrieve_from_entity (current_value) feature) (indices closest_cases_map))
+									)
+
+									(declare (assoc
+										categorical_action_probabilities_map
+											(zip
+												(lambda (+ (current_value 1) (current_value)))
+												candidate_case_values
+												candidate_case_weights
+											)
+									))
+
+									;sort each class by decreasing probability mass
+									(declare (assoc
+										sorted_classes
+											(sort
+												(lambda
+													(-
+														(get categorical_action_probabilities_map (current_value))
+														(get categorical_action_probabilities_map (current_value 1))
+													)
+												)
+												(indices categorical_action_probabilities_map)
+											)
+									))
+									(declare (assoc
+										sorted_probabilities (unzip categorical_action_probabilities_map sorted_classes)
+									))
+									(declare (assoc
+										cumulative_probabilities
+									))
+
+								)
+
+
+								;continuous flow
+								(declare
+									(assoc
+										local_mean_value
+											(generalized_mean
+												(map (retrieve_from_entity (current_value) feature) (indices closest_cases_map))
+												1
+												(values closest_cases_map)
+											)
+										feature_residual (get react_feature_deviations feature)
+									)
+
+								)
+							)
+
+
+						))
+						(if (~ [] (get details "relevant_values"))
+							(zip (get details "relevant_values"))
+
+							(zip context_features)
+						)
+					)
+				)
+		))
 	)
 )
