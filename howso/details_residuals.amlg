@@ -198,9 +198,10 @@
 				(get details "feature_full_residuals_for_case")
 				(get details "feature_full_residual_convictions_for_case")
 			)
-			(seq
-				(declare (assoc predicted_case_values_map (assoc) ))
-				(call !CalculateCaseResiduals (assoc robust_residuals (false)))
+			(let
+				(assoc
+					predicted_case_values_map (call !CalculateCaseResiduals (assoc robust_residuals (false)))
+				)
 				(accum (assoc
 					output
 						(assoc
@@ -221,20 +222,23 @@
 		)
 	)
 
+	;Helper method to compute residuals for specified action_features on the case itself.
+	;For full residuals flows outputs the assoc of feature -> predicted value
 	#!CalculateCaseResiduals
-	(declare
-		(assoc
-			case_residuals
+	(seq
+		(assign (assoc
+			;create an assoc of action feature -> value by iterating over an assoc of action features so that it can be used later
+			;to either output individual case residuals or to use these computed values in the ratio computation for residual conviction
+			case_residuals_map
 				(if robust_residuals
 					;for each feature, do 30 reacts with randomly selected contexts
 					(map
 						(lambda (let
 							(assoc
-								expected_case_value (get case_value_map (current_value 1))
-								action_feature (current_value 1)
-								action_is_nominal (contains_index !nominalsMap (current_value 1))
-								action_feature (current_value 1)
-								contexts_only_map (remove context_map (current_value 1))
+								expected_case_value (get case_value_map (current_index 1))
+								action_feature (current_index 1)
+								action_is_nominal (contains_index !nominalsMap (current_index 1))
+								contexts_only_map (remove context_map (current_index 1))
 								robust_predictions (list)
 							)
 
@@ -294,17 +298,18 @@
 								)
 							)
 						))
-						action_features
+						;iterate over an assoc of action_features
+						(zip action_features)
 					)
 
 					;else standard computation, do leave-one-out for each feature and predict it once
 					(map
 						(lambda (let
 							(assoc
-								filtered_context_features (indices (remove context_map (current_value 1)))
-								expected_case_value (get case_value_map (current_value 1))
-								action_feature (current_value 1)
-								action_is_nominal (contains_index !nominalsMap (current_value 1))
+								filtered_context_features (indices (remove context_map (current_index 1)))
+								expected_case_value (get case_value_map (current_index 1))
+								action_feature (current_index 1)
+								action_is_nominal (contains_index !nominalsMap (current_index 1))
 							)
 
 							(let
@@ -327,43 +332,61 @@
 										))
 								)
 
-								(accum (assoc
-									predicted_case_values_map
-										(associate
-											action_feature
-											(if action_is_nominal
-												(get reaction ["action_values" 0])
-												(get reaction 0)
-											)
-										)
-								))
-
-								;if feature is nominal get the categorical action probability for expected value, if it's null then set it to 0
-								;else it's: 1 - probability
-								(if action_is_nominal
-									(let
-										(assoc
-											predicted_probability
-												(or (get reaction (list "categorical_action_probabilities" action_feature expected_case_value)) 0)
-										)
-
-										(- 1 predicted_probability)
+								;output pair of: [predicted value, residual] , will be separated outside the loop
+								[
+									(if action_is_nominal
+										(get reaction ["action_values" 0])
+										(get reaction 0)
 									)
 
-									;else this is a continuous feature, return the absolute difference between the expected and the actual
-									(abs (- expected_case_value (get reaction 0)))
-								)
+									;if feature is nominal get the categorical action probability for expected value, if it's null then set it to 0
+									;else it's: 1 - probability
+									(if action_is_nominal
+										(let
+											(assoc
+												predicted_probability
+													(or (get reaction (list "categorical_action_probabilities" action_feature expected_case_value)) 0)
+											)
+
+											(- 1 predicted_probability)
+										)
+
+										;else this is a continuous feature, return the absolute difference between the expected and the actual
+										(abs (- expected_case_value (get reaction 0)))
+									)
+								]
 							)
 						))
-						action_features
+						;output as an assoc of action feature -> values
+						(zip action_features)
 					)
 				)
-		)
-		(assign (assoc
-			case_residuals_map (zip action_features case_residuals)
 		))
+
+		(declare (assoc predicted_case_values_map (assoc) ))
+
+		;separate out predicted values and residuals into their individual maps
+		(if (not robust_residuals)
+			(seq
+				(assign (assoc
+					predicted_case_values_map
+						(map
+							(lambda (first (current_value)))
+							case_residuals_map
+						)
+				))
+				(assign (assoc
+					case_residuals_map
+						(map
+							(lambda (last (current_value)))
+							case_residuals_map
+						)
+				))
+			)
+		)
+
 		;replace case residual nulls with computed values if nulls aren't allowed
-		(if (contains_value case_residuals (null))
+		(if (contains_value case_residuals_map (null))
 			(let
 				(assoc
 					;leave only features with null values
@@ -520,6 +543,9 @@
 				)
 			))
 		)
+
+		;output predicted values
+		predicted_case_values_map
 	)
 
 	#!CalculateLocalCaseFeatureResidualConvictions
@@ -529,65 +555,6 @@
 			global_residuals_map (get hyperparam_map "featureResiduals")
 		)
 
-		;compute the local area residuals for each context feature by
-		;a) finding the corresponding local model using all context features without the specific residual feature
-		;b) computing the feature residual in that local model
-		(declare (assoc
-			local_residuals_map
-				(map
-					(lambda (let
-						(assoc
-							;the feature for which to compute the residual
-							residual_feature (current_index 1)
-							;context features without the residual feature
-							local_context_features (indices (remove context_map (current_index 1)))
-							residual_feature_map (assoc)
-							regional_cases_map (assoc)
-						)
-						(assign (assoc
-							regional_cases_map
-								(compute_on_contained_entities
-									filtering_queries
-									(query_nearest_generalized_distance
-										(replace k_parameter)
-										(replace local_context_features)
-										(replace (unzip case_value_map local_context_features))
-										(replace p_parameter)
-										(replace feature_weights)
-										(replace !queryDistanceTypeMap)
-										(replace query_feature_attributes_map)
-										(replace feature_deviations)
-										(null)
-										(replace dt_parameter)
-										(if valid_weight_feature (replace weight_feature) (null))
-										;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-										"fixed rand seed"
-										(null)
-										(replace !numericalPrecision)
-									)
-								)
-						))
-						(get
-							(call !ExpandResidualValuesToUncertainty  (assoc
-								feature_residuals_map
-									(call !CalculateFeatureResiduals (assoc
-										features (append local_context_features residual_feature)
-										target_residual_feature residual_feature
-										case_ids (indices regional_cases_map)
-										regional_data_only (true)
-										robust_residuals (false)
-										focal_case ignore_case
-										;use the same hyperparameters that were used to make the original prediction
-										custom_hyperparam_map hyperparam_map
-										compute_null_uncertainties (false)
-									))
-							))
-							["residual_map" residual_feature]
-						)
-					))
-					action_features_map
-				)
-		))
 
 		(assign (assoc
 			local_convictions_map
@@ -631,7 +598,58 @@
 							)
 						)
 					)
-					local_residuals_map
+					;compute the local area residuals for each context feature by
+					;a) finding the corresponding local data  using all context features without the specific residual feature
+					;b) computing the feature residual in that local data
+					(map
+						(lambda (let
+							(assoc
+								;the feature for which to compute the residual
+								residual_feature (current_index 1)
+								;context features without the residual feature
+								local_context_features (indices (remove context_map (current_index 1)))
+							)
+							(get
+								(call !ExpandResidualValuesToUncertainty  (assoc
+									feature_residuals_map
+										(call !CalculateFeatureResiduals (assoc
+											features (append local_context_features residual_feature)
+											target_residual_feature residual_feature
+											case_ids
+												;list of local cases
+												(indices (compute_on_contained_entities
+													filtering_queries
+													(query_nearest_generalized_distance
+														(replace k_parameter)
+														(replace local_context_features)
+														(replace (unzip case_value_map local_context_features))
+														(replace p_parameter)
+														(replace feature_weights)
+														(replace !queryDistanceTypeMap)
+														(replace query_feature_attributes_map)
+														(replace feature_deviations)
+														(null)
+														(replace dt_parameter)
+														(if valid_weight_feature (replace weight_feature) (null))
+														;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+														"fixed rand seed"
+														(null)
+														(replace !numericalPrecision)
+													)
+												))
+											regional_data_only (true)
+											robust_residuals (false)
+											focal_case ignore_case
+											;use the same hyperparameters that were used to make the original prediction
+											custom_hyperparam_map hyperparam_map
+											compute_null_uncertainties (false)
+										))
+								))
+								["residual_map" residual_feature]
+							)
+						))
+						action_features_map
+					)
 					case_residuals_map
 				)
 		))
