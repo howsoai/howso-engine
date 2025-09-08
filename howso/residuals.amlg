@@ -223,16 +223,16 @@
 												(map
 													(lambda
 														(compute_on_contained_entities
-															(query_value_masses (current_value) (null) (if (contains_index !numericNominalFeaturesMap  (current_value)) "number" "string") )
+															(query_value_masses (current_value) (null))
 														)
 													)
 													feature_grouping
 												)
 											)
 
-											(compute_on_contained_entities (list
-												(query_value_masses current_feature (null) (if (contains_index !numericNominalFeaturesMap current_feature) "number" "string") )
-											))
+											(compute_on_contained_entities
+												(query_value_masses current_feature (null))
+											)
 										)
 								))
 
@@ -304,6 +304,43 @@
 			)
 		)
 	)
+
+	;helper method to sample cases from the model, outputs a list of case ids
+	;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
+	#!SelectCaseIdsForResiduals
+	(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
+		(if robust_residuals
+			(call !SampleCases (assoc
+				num num_samples
+				rand_seed (rand)
+				case_weight_feature (if valid_weight_feature weight_feature)
+			))
+			;grab samples from the model
+			(call !AllCases (assoc num num_samples rand_seed (rand)))
+		)
+
+		(if robust_residuals
+			(if (= "deviations" robust_residuals)
+				;for local (superfull) deviations, if the dataset is tiny, use more samples than in dataset to compute SDM values
+				(call !SampleCases (assoc
+					num (min num_samples (* num_training_cases (pow 2 (size features))))
+					case_weight_feature (if valid_weight_feature weight_feature)
+				))
+
+				(call !SampleCases (assoc
+					num num_samples
+					case_weight_feature (if valid_weight_feature weight_feature)
+				))
+			)
+
+			;else just use all the case ids because the model size is <= num_samples or the model is small
+			(seq
+				(declare (assoc using_all_cases (true) ))
+				(call !AllCases)
+			)
+		)
+	)
+
 
 	;helper method for !CalculateFeatureResiduals to initialize variables and sample case_ids
 	#!InitResiduals
@@ -389,43 +426,7 @@
 
 		;if 'case_id' are not specified, use a random 'num_samples' sampling of cases from the whole model
 		(if (= 0 (size case_ids))
-			(assign (assoc
-				case_ids
-					;sample from the model
-					;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
-					(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
-						(if robust_residuals
-							(call !SampleCases (assoc
-								num num_samples
-								rand_seed (rand)
-								case_weight_feature (if valid_weight_feature weight_feature)
-							))
-							;grab samples from the model
-							(call !AllCases (assoc num num_samples rand_seed (rand)))
-						)
-
-						(if robust_residuals
-							(if (= "deviations" robust_residuals)
-								;for local (superfull) deviations, if the dataset is tiny, use more samples than in dataset to compute SDM values
-								(call !SampleCases (assoc
-									num (min num_samples (* num_training_cases (pow 2 (size features))))
-									case_weight_feature (if valid_weight_feature weight_feature)
-								))
-
-								(call !SampleCases (assoc
-									num num_samples
-									case_weight_feature (if valid_weight_feature weight_feature)
-								))
-							)
-
-							;else just use all the case ids because the model size is <= num_samples or the model is small
-							(seq
-								(declare (assoc using_all_cases (true) ))
-								(call !AllCases)
-							)
-						)
-					)
-			))
+			(assign (assoc case_ids (call !SelectCaseIdsForResiduals) ))
 		)
 
 		;ensure features with nulls have cases that have values for computation but only if the selected cases were not conditioned
@@ -622,6 +623,7 @@
 							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
 							time_series_filter_query (list)
 							feature_weights (get hyperparam_map "featureWeights")
+							context_features context_features
 						)
 
 						(if !tsTimeFeature
@@ -659,7 +661,7 @@
 									(zip (list target_residual_feature))
 
 									;filter the action features to be those that are not context features, feature/context_features params may overlap
-									(zip (filter (lambda (not (contains_value react_context_features (current_value)) )) features) )
+									(remove (zip features) react_context_features)
 								)
 						))
 
@@ -667,7 +669,7 @@
 							(let
 								(assoc context_map (keep case_values_map react_context_features) )
 								(if (contains_index context_map !tsTimeFeature)
-									(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterQuery) ))
+									(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterFutureCasesQuery) ))
 								)
 							)
 						)
@@ -699,20 +701,20 @@
 										)
 										time_series_filter_query
 										(query_nearest_generalized_distance
-											(replace k_parameter)
+											k_parameter
 											(replace react_context_features)
 											(replace (unzip case_values_map react_context_features))
-											(replace p_parameter)
-											(replace feature_weights)
-											(replace !queryDistanceTypeMap)
-											(replace query_feature_attributes_map)
-											(replace feature_deviations)
+											p_parameter
+											feature_weights
+											!queryDistanceTypeMap
+											query_feature_attributes_map
+											feature_deviations
 											(null)
-											(replace dt_parameter)
-											(if valid_weight_feature (replace weight_feature) (null))
-											(replace tie_break_random_seed)
+											dt_parameter
+											(if valid_weight_feature weight_feature(null))
+											tie_break_random_seed
 											(null) ;radius
-											(replace !numericalPrecision)
+											!numericalPrecision
 										)
 									)
 								)
@@ -728,8 +730,6 @@
 											feature (current_index 1)
 											case_feature_value (get case_values_map (current_index 1))
 											feature_is_nominal (contains_index !nominalsMap (current_index 1))
-											interpolated_value 0
-											diff 0
 											output_categorical_action_probabilities (true)
 											categorical_action_probabilities_map (assoc)
 											feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_index 1))
@@ -740,9 +740,9 @@
 											(assign (assoc feature_is_non_string_edit_distance (true)))
 										)
 
-										;create the feature-specific candidate_cases_lists tuple for interpolation
-										(declare (assoc
+										(call !InterpolateAndComputeDiffToCase (assoc
 											candidate_cases_lists
+												;create the feature-specific candidate_cases_lists tuple for interpolation
 												(if (!= (null) local_cases_map)
 													(if (get feature_may_have_nulls_map feature)
 														(let
@@ -779,8 +779,6 @@
 													)
 												)
 										))
-
-										(call !InterpolateAndComputeDiffToCase)
 									))
 									removed_features_map
 								)
@@ -1000,8 +998,6 @@
 										case_id (current_value 1)
 										case_values_map (zip needed_features (retrieve_from_entity (current_value 1) needed_features))
 
-										interpolated_value 0
-										diff 0
 										output_categorical_action_probabilities (true)
 										categorical_action_probabilities_map (assoc)
 									)
@@ -1024,7 +1020,7 @@
 									(if has_time_series_filter_query
 										(assign (assoc
 											time_series_filter_query
-												(call !ComputeTimeSeriesFilterQuery (assoc
+												(call !ComputeTimeSeriesFilterFutureCasesQuery (assoc
 													context_map (zip react_context_features (unzip case_values_map react_context_features))
 												))
 										))
@@ -1040,7 +1036,9 @@
 										))
 									)
 
-									(declare (assoc
+									(declare (assoc case_feature_value (get case_values_map feature) ))
+
+									(call !InterpolateAndComputeDiffToCase (assoc
 										candidate_cases_lists
 											(compute_on_contained_entities
 												(if focal_case
@@ -1057,27 +1055,24 @@
 												)
 												time_series_filter_query
 												(query_nearest_generalized_distance
-													(replace k_parameter)
-													(replace react_context_features)
+													k_parameter
+													react_context_features
 													(replace (unzip case_values_map react_context_features))
-													(replace p_parameter)
-													(replace feature_weights)
-													(replace !queryDistanceTypeMap)
+													p_parameter
+													feature_weights
+													!queryDistanceTypeMap
 													query_feature_attributes_map
-													(replace feature_deviations)
-													(replace feature) ;weight selection
-													(replace dt_parameter)
-													(if valid_weight_feature (replace weight_feature) (null))
-													(replace tie_break_random_seed)
+													feature_deviations
+													feature ;weight selection
+													dt_parameter
+													(if valid_weight_feature weight_feature (null))
+													tie_break_random_seed
 													(null) ;radius
-													(replace !numericalPrecision)
-													(replace feature)
+													!numericalPrecision
+													feature
 												)
 											)
-										case_feature_value (get case_values_map feature)
 									))
-
-									(call !InterpolateAndComputeDiffToCase)
 								))
 								case_ids
 							)
@@ -1157,8 +1152,8 @@
 		)
 
 		;else use standard interpolation and diff logic
-		(seq
-			(assign (assoc
+		(let
+			(assoc
 				interpolated_value
 					;no candidate cases means we use expected feature value
 					(if (= 0 (size (first candidate_cases_lists)))
@@ -1182,7 +1177,7 @@
 							output_influence_weights (false)
 						))
 					)
-			))
+			)
 
 			;small wrapper around ComputeFeatureMAEDiff, but possibly wrapped in extra information
 			;for other prediction stats
@@ -1212,8 +1207,8 @@
 
 				;else just output diff (Mean Absolute Error)
 				#!ComputeFeatureMAEDiff
-				(seq
-					(assign (assoc
+				(declare
+					(assoc
 						diff
 							(if feature_is_nominal
 								(- 1
@@ -1241,7 +1236,7 @@
 									(abs (- case_feature_value interpolated_value))
 								)
 							)
-					))
+					)
 
 					;output the residual. if it's (null), output null for non-nominals, and 1 (or case weight) for nominals
 					(if (= (null) diff)
@@ -1404,7 +1399,7 @@
 									)
 									(assign (assoc
 										time_series_filter_query
-											(call !ComputeTimeSeriesFilterQuery (assoc
+											(call !ComputeTimeSeriesFilterFutureCasesQuery (assoc
 												context_map (zip react_context_features (unzip case_values_map react_context_features))
 											))
 									))
@@ -1538,9 +1533,15 @@
 							]
 
 							(contains_index !cyclicFeaturesMap feature)
-							(list
-								(get !cyclicFeaturesMap feature)
-								(* (get !cyclicFeaturesMap feature) null_prediction_deviation)
+							(let
+								(assoc mad (call !ComputeFeatureMAD (assoc feature feature)) )
+								[
+									(get !cyclicFeaturesMap feature)
+									(*
+										(if mad mad (get !cyclicFeaturesMap feature))
+										null_prediction_deviation
+									)
+								]
 							)
 
 							;for continuous output a list of: max_uncertainty_delta, null_null_uncertainty_delta
@@ -1590,10 +1591,11 @@
 												)
 											)
 										)
+									mad (call !ComputeFeatureMAD (assoc feature feature))
 								)
 								;don't allow nulls, nan or 0 as the max_uncertainty, return null in those situations
 								(if max_uncertainty
-									(list max_uncertainty (* max_uncertainty null_prediction_deviation))
+									[ max_uncertainty (* mad null_prediction_deviation) ]
 								)
 							)
 						)
@@ -1602,4 +1604,189 @@
 				)
 		))
 	)
+
+	;Helper method that auto converges robust residuals to within the specified convergence_threshold
+	;Since all the robust feature residuals are needed after this method is called to compute accuracy contributions,
+	;this method accumulates all the robust residuals via ever-increasing batches instead of computing them all at once.
+	;Every batch is increased in size by 'convergence_samples_growth_rate', and accumulation is stopped when the new average
+	;residual for every feature has a percent delta less than 'convergence_threshold' relative to the running
+	;average residual value of the accumulated previous batches.
+	#!AutoConvergeRobustResiduals
+	(seq
+
+		;when computing robust accuracy contributions via react_aggregate, all possible sampled case_ids will be provided
+		;make a copy here and set the index to iteratively grab more cases from this preselected list
+		(declare (assoc
+			computing_ac_via_react_aggregate (and output_raw_mda (size case_ids))
+		))
+		(if computing_ac_via_react_aggregate
+			(declare (assoc preselected_case_ids (replace case_ids) ))
+		)
+
+		;run the first batch of robust residuals, stores them all into feature_residuals_lists
+		(call !RunRobustResiduals (assoc
+			leave_nulls_in_results (true)
+			case_ids
+				(if computing_ac_via_react_aggregate
+					(trunc preselected_case_ids num_samples)
+					case_ids
+				)
+		))
+
+		;compute the 'previous_residuals_map' by taking the average of all residuals for a feature
+		;and storing as an assoc of: feature -> [ avg_residual, count_of_residuals ]
+		(declare (assoc
+			previous_residuals_map
+				(zip
+					features
+					(map
+						(lambda
+							;compute the average robust residual for this feature and output as a pair of [ avg_residual, count_of_residuals ]
+							;if values are all nulls, this ensures the tuple is output as [0 0]
+							[
+								(+ (or (generalized_mean (current_value 1)) ))
+								(size (filter (current_value 1)))
+							]
+						)
+						feature_residuals_lists
+					)
+				)
+			first_residuals_lists feature_residuals_lists
+			done (false)
+			total_samples num_samples
+		))
+
+		;store all the accumulated residuals from the while loop into feature_residuals_lists to be used later to compute robust accuracy contributions
+		(assign (assoc
+			feature_residuals_lists
+				(while (not done)
+					;increase the number sampled each iteration by 'convergence_samples_growth_rate '
+					(assign (assoc num_samples (ceil (* convergence_samples_growth_rate  num_samples)) ))
+					(accum (assoc total_samples num_samples))
+
+					;don't exceed the specified maximum of num_feature_probability_samples
+					(if (> total_samples num_feature_probability_samples)
+						(seq
+							(assign (assoc
+								num_samples (- num_samples (- total_samples num_feature_probability_samples) )
+							))
+							(accum (assoc total_samples (- num_feature_probability_samples total_samples ) ))
+						)
+					)
+
+					(call !RunRobustResiduals (assoc
+						leave_nulls_in_results (true)
+						case_ids
+							;if cases were preselected in react_aggregate, grab the next batch according to the index
+							(if computing_ac_via_react_aggregate
+								(unzip
+									preselected_case_ids
+									(range (- total_samples num_samples) (- total_samples 1) )
+								)
+
+								;else randomly select num_samples cases
+								(call !SelectCaseIdsForResiduals)
+							)
+					))
+
+					;updated residuals map taking into account new values
+					(assign (assoc
+						residuals_map
+							(map
+								(lambda (let
+									(assoc
+										previous_avg_residual (first (first (current_value 1)))
+										prev_count (last (first (current_value 1)))
+										new_average_residual (first (last (current_value 1)))
+										new_count (last (last (current_value 1)))
+									)
+
+									;update the running average, by: multipliying the previous residual by the previous count,
+									;adding the product of the new residual and the new count, and dividing by the updated total count
+									;and store as a pair of [ avg_residual, count_of_residuals ]
+									[
+										;updated running mean with the new residual values
+										(/
+											(+
+												(* previous_avg_residual prev_count)
+												(* new_average_residual new_count)
+											)
+											(+ prev_count new_count)
+										)
+
+										;new total count
+										(+ prev_count new_count)
+									]
+								))
+
+								previous_residuals_map
+								;newly computed residuals
+								(zip
+									features
+									(map
+										(lambda
+											;compute the average robust residual for this feature and output as a pair of [ avg_residual, count_of_residuals ]
+											;if values are all nulls, this ensures the tuple is output as [0 0]
+											[
+												(+ (or (generalized_mean (current_value 1)) ))
+												(size (filter (current_value 1)))
+											]
+										)
+										feature_residuals_lists
+									)
+								)
+							)
+					))
+
+					;compute deltas for each feature: new running avg vs previous running avg
+					(assign (assoc
+						deltas_map
+							(map
+								(lambda (abs
+									(- (first (first (current_value ))) (first (last (current_value))))
+								))
+								previous_residuals_map
+								residuals_map
+							)
+					))
+
+					;stop if values converged or accumulated 'num_feature_probability_samples' reacts
+					(if (or
+							(>= total_samples num_feature_probability_samples)
+							(=
+								0
+								(size (filter
+									;keep those where the delta is > specified %
+									(lambda
+										(>
+											(/ (current_value) (first (get residuals_map (current_index))) )
+											convergence_threshold
+										)
+									)
+									deltas_map
+								))
+							)
+						)
+						;need to set loop to done to accumulate the last batch of residuals below insead of simply concluding out of the while loop
+						(assign (assoc done (true) ))
+
+						;else overwrite previous residuals
+						(assign (assoc previous_residuals_map residuals_map))
+					)
+
+					;accumulate all the residuals lists for all the features into one big list into (previous_result)
+					(map
+						(lambda (append (first (current_value)) (last (current_value)) ))
+
+						(if (= 0 (current_index))
+							first_residuals_lists
+							(previous_result)
+						)
+						feature_residuals_lists
+					)
+				)
+		))
+
+	)
+
 )
