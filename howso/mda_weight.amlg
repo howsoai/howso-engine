@@ -341,6 +341,156 @@
 		)
 	)
 
+	;helper method to compute MDA matrix given a list of features and the corresponding feature_residuals_lists
+	#!ComputeMDAMatrix
+	||(map
+		(lambda (let
+			(assoc
+				;feature whose mda is being measured
+				feature (current_value 1)
+				feature_index (+ (current_index 1) feature_index_offset)
+			)
+			(declare (assoc
+				;keep only indices of cases where feature was used in query and its residual is null
+				case_indices_with_feature
+					(if estimating_residual_lower_bound
+						(filter
+							(lambda (= (true) (get feature_residuals_lists [feature_index (current_value 1) 0])) )
+							;indices of all residual values for this feature
+							(indices (get feature_residuals_lists feature_index))
+						)
+
+						(filter
+							(lambda (= (null) (get feature_residuals_lists [feature_index (current_value 1)])) )
+							;indices of all residual values for this feature
+							(indices (get feature_residuals_lists feature_index))
+						)
+					)
+
+				;keep only indices of cases where feature was not used in query and has a residual value
+				case_indices_without_feature
+					(if estimating_residual_lower_bound
+						(filter
+							(lambda (= (false) (get feature_residuals_lists [feature_index (current_value 1) 0])) )
+							;indices of all residual values for this feature
+							(indices (get feature_residuals_lists feature_index))
+						)
+
+						(filter
+							(lambda (!= (null) (get feature_residuals_lists [feature_index (current_value 1)])) )
+							;indices of all residual values for this feature
+							(indices (get feature_residuals_lists feature_index))
+						)
+					)
+			))
+
+			(if (contains_index excluded_inactive_features_map feature) (conclude (range 0 1 (size features) 1)) )
+
+			(map
+				(lambda (let
+					(assoc
+						;feature being predicted
+						mda_feature (current_value 1)
+						mda_feature_index (current_index 1)
+					)
+					;a feature should not have mda computed for itself
+					(if (and (not estimating_residual_lower_bound) (= mda_feature feature)) (conclude 0) )
+
+					(if (and
+							;if measuring mda for a feature that is the parent of a derived feature, skip it
+							;because they are not used when that feature is predicted within time-series flow
+							;allowing the other feature's weights to not be suppressed (the parent feature's MDA will be large)
+							(contains_index !derivedFeaturesMap mda_feature)
+							(= feature (get !derivedFeaturesMap mda_feature))
+						)
+						(conclude 0)
+					)
+
+					;if a single mda_action_feature is specified, only compute mda for that specific feature, skipping all the rest
+					(if (and mda_action_feature (!= mda_feature mda_action_feature))
+						(conclude)
+					)
+
+					(if (contains_index excluded_inactive_features_map mda_feature) (conclude 0) )
+
+					;output delta of the (expectedly) larger residual computed without this feature - residual computed with this feature
+					(if output_raw_mda
+						(-
+							;avg_without_residuals
+							(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature) )
+							;average with residuals
+							(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature) )
+						)
+
+						;cap the lower value for probability conversion
+						(max
+							;if estimating lower bound residuals, must pull residual value from each pair
+							(if estimating_residual_lower_bound
+								(-
+									;avg_without_residuals
+									(generalized_mean (map
+										(lambda (last (current_value)))
+										(unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)
+									))
+
+									;average with residuals
+									(generalized_mean (map
+										(lambda (last (current_value)))
+										(unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)
+									))
+								)
+
+								;else the lists are residual values, can simply unzip the lists by their indices
+								(-
+									;avg_without_residuals
+									(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature) )
+									;average with residuals
+									(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature) )
+								)
+							)
+							(get !cachedFeatureMinResidualMap mda_feature)
+						)
+					)
+				))
+				features
+			)
+		))
+		row_features
+	)
+
+	;helper method to compute MDA matrix of batches of 100 features at a time to limit memory consumption during computation
+	#!ComputeMDAMatrixInBatches
+	(declare
+		(assoc
+			num_batches (ceil (/ (size features) 100))
+			start -100
+			end -1
+			last (- (size features) 1)
+		)
+
+		(while (< (current_index) num_batches)
+			(accum (assoc
+				start 100
+				end 100
+			))
+
+			(if (> end last)
+				(assign (assoc end last))
+			)
+
+			(append
+				(if (= 0 (current_index))
+					[]
+					(previous_result)
+				)
+				(call !ComputeMDAMatrix (assoc
+					row_features (unzip features (range start end))
+					features features
+					feature_index_offset start
+				))
+			)
+		)
+	)
 
 	#!ComputeRobustTargetlessMDA
 	(declare
@@ -350,119 +500,14 @@
 		;for the column feature computed with and without the row feature
 		(declare (assoc
 			mda_matrix
-				||(map
-					(lambda (let
-						(assoc
-							;feature whose mda is being measured
-							feature (current_value 1)
-
-							;keep only indices of cases where feature was used in query and its residual is null
-							case_indices_with_feature
-								(if estimating_residual_lower_bound
-									(filter
-										(lambda (= (true) (get feature_residuals_lists [(current_index 3) (current_value 1) 0])) )
-										;indices of all residual values for this feature
-										(indices (get feature_residuals_lists (current_index 1)))
-									)
-
-									(filter
-										(lambda (= (null) (get feature_residuals_lists [(current_index 3) (current_value 1)])) )
-										;indices of all residual values for this feature
-										(indices (get feature_residuals_lists (current_index 1)))
-									)
-								)
-
-							;keep only indices of cases where feature was not used in query and has a residual value
-							case_indices_without_feature
-								(if estimating_residual_lower_bound
-									(filter
-										(lambda (= (false) (get feature_residuals_lists [(current_index 3) (current_value 1) 0])) )
-										;indices of all residual values for this feature
-										(indices (get feature_residuals_lists (current_index 1)))
-									)
-
-									(filter
-										(lambda (!= (null) (get feature_residuals_lists [(current_index 3) (current_value 1)])) )
-										;indices of all residual values for this feature
-										(indices (get feature_residuals_lists (current_index 1)))
-									)
-								)
-						)
-
-						(if (contains_index excluded_inactive_features_map feature) (conclude (range 0 1 (size features) 1)) )
-
-						(map
-							(lambda (let
-								(assoc
-									;feature being predicted
-									mda_feature (current_value 1)
-									mda_feature_index (current_index 1)
-								)
-								;a feature should not have mda computed for itself
-								(if (and (not estimating_residual_lower_bound) (= mda_feature feature)) (conclude 0) )
-
-								(if (and
-										;if measuring mda for a feature that is the parent of a derived feature, skip it
-										;because they are not used when that feature is predicted within time-series flow
-										;allowing the other feature's weights to not be suppressed (the parent feature's MDA will be large)
-										(contains_index !derivedFeaturesMap mda_feature)
-										(= feature (get !derivedFeaturesMap mda_feature))
-									)
-									(conclude 0)
-								)
-
-								;if a single mda_action_feature is specified, only compute mda for that specific feature, skipping all the rest
-								(if (and mda_action_feature (!= mda_feature mda_action_feature))
-									(conclude)
-								)
-
-								(if (contains_index excluded_inactive_features_map mda_feature) (conclude 0) )
-
-								;output delta of the (expectedly) larger residual computed without this feature - residual computed with this feature
-								(if output_raw_mda
-									(-
-										;avg_without_residuals
-										(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature) )
-										;average with residuals
-										(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature) )
-									)
-
-									;cap the lower value for probability conversion
-									(max
-										;if estimating lower bound residuals, must pull residual value from each pair
-										(if estimating_residual_lower_bound
-											(-
-												;avg_without_residuals
-												(generalized_mean (map
-													(lambda (last (current_value)))
-													(unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature)
-												))
-
-												;average with residuals
-												(generalized_mean (map
-													(lambda (last (current_value)))
-													(unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature)
-												))
-											)
-
-											;else the lists are residual values, can simply unzip the lists by their indices
-											(-
-												;avg_without_residuals
-												(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_without_feature) )
-												;average with residuals
-												(generalized_mean (unzip (get feature_residuals_lists mda_feature_index) case_indices_with_feature) )
-											)
-										)
-										(get !cachedFeatureMinResidualMap mda_feature)
-									)
-								)
-							))
-							features
-						)
+				(if (<= (size features) 110)
+					(call !ComputeMDAMatrix (assoc
+						row_features features
+						features features
+						feature_index_offset 0
 					))
-					features
+					(call !ComputeMDAMatrixInBatches)
 				)
-			num_features_m_one (- (size features) 1)
 		))
 
 		(if output_raw_mda
