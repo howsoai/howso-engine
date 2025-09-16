@@ -34,6 +34,10 @@
 			;similarity condition for the entire dataset, then distance contribution will also be computed and stored
 			;if it is not already stored as feature. If overwite is true, then DC will be computed and overwritten.
 			similarity_conviction (null)
+			;{type ["boolean" "number"]}
+			;true or number, stores computed heldout distance contribution into "distance_contribution_holdout",
+			;if true uses K cases for holdout, if number uses the specified number cases
+			distance_contribution_holdout (null)
 			;{type ["boolean" "string"]}
 			;true or string, if true will use default value of "influence_weight_entropy"
 			influence_weight_entropy (null)
@@ -63,10 +67,17 @@
 		;if no parameters specified, do nothing
 		(if
 			(= (null)
-			   familiarity_conviction_addition familiarity_conviction_removal distance_contribution
+			   familiarity_conviction_addition familiarity_conviction_removal distance_contribution distance_contribution_holdout
 			   p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy
 			)
 			(conclude (call !Return))
+		)
+
+		(declare (assoc dc_holdout distance_contribution_holdout ))
+		(if (!= (null) distance_contribution_holdout)
+			(assign (assoc
+				distance_contribution_holdout "distance_contribution_holdout"
+			))
 		)
 
 		;if any of the compute options are true, overwrite with their corresponding default feature names
@@ -97,7 +108,7 @@
 			(and
 				(not overwrite)
 				(or
-					familiarity_conviction_addition familiarity_conviction_removal distance_contribution
+					familiarity_conviction_addition familiarity_conviction_removal distance_contribution distance_contribution_holdout
 					p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy
 				)
 			)
@@ -110,7 +121,7 @@
 								(contains_value !reactIntoFeaturesList (current_value))
 							)
 							(filter [
-								familiarity_conviction_addition familiarity_conviction_removal distance_contribution
+								familiarity_conviction_addition familiarity_conviction_removal distance_contribution distance_contribution_holdout
 								p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy
 							])
 						)
@@ -177,6 +188,7 @@
 						"distance_contribution" distance_contribution
 						"similarity_conviction" similarity_conviction
 						"influence_weight_entropy" influence_weight_entropy
+						"distance_contribution_holdout" distance_contribution_holdout
 					)
 				)
 		))
@@ -288,6 +300,76 @@
 		;meaning that the K must be at least 2 less than the model size
 		(if (and (~ 0 closest_k) (< dataset_size (+ closest_k 2)) )
 			(assign (assoc closest_k (- dataset_size 2)))
+		)
+
+		(if distance_contribution_holdout
+			(seq
+				(if (= (true) dc_holdout)
+					(assign (assoc dc_holdout closest_k))
+				)
+				(declare (assoc
+					case_to_dc_holdout_map
+						||(map
+							(lambda
+								(compute_on_contained_entities
+									;hold out the nearest dc_holdout cases when computing DC for this case
+									(query_not_in_entity_list
+										(contained_entities
+											(query_not_in_entity_list [(current_index 1)])
+											(query_nearest_generalized_distance
+												dc_holdout
+												features
+												(retrieve_from_entity (current_index) features)
+												p_parameter
+												feature_weights
+												!queryDistanceTypeMap
+												query_feature_attributes_map
+												feature_deviations
+												(null)
+												dt_parameter
+												(if valid_weight_feature weight_feature (null))
+												"fixed rand seed"
+												(null) ;radius
+												!numericalPrecision
+											)
+										)
+									)
+									(query_entity_distance_contributions
+										closest_k
+										features
+										[(current_index 1)] ;case_id
+										p_parameter
+										feature_weights
+										!queryDistanceTypeMap
+										query_feature_attributes_map
+										feature_deviations
+										(null)
+										(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
+										(if valid_weight_feature weight_feature (null))
+										;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+										"fixed rand seed"
+										(null) ;radius
+										!numericalPrecision
+									)
+								)
+							)
+							(zip (if case_ids case_ids (call !AllCases)) )
+						)
+				))
+
+				(call !StoreCaseValues (assoc
+					label_name distance_contribution_holdout
+					case_values
+						(map
+							(lambda (get (current_value) (current_index)))
+							case_to_dc_holdout_map
+						)
+				))
+
+				(if (not (contains_value !reactIntoFeaturesList distance_contribution_holdout))
+					(accum_to_entities (assoc !reactIntoFeaturesList distance_contribution_holdout))
+				)
+			)
 		)
 
 		;will need to compute distance_contributions if caching values even if distance_contribution were not explicitly requested
