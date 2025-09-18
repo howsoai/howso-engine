@@ -1,0 +1,393 @@
+(null
+
+	;helper method for the "relevant_values" detail of react.
+	; Returns a map of feature names to list of values that illustrate the range of values
+	; observed among the local data
+	#!ComputeReactRelevantValues
+	(declare
+		(assoc
+			closest_cases_map
+				(normalize (compute_on_contained_entities
+					filtering_queries
+					(query_nearest_generalized_distance
+						k_parameter
+						context_features
+						context_values
+						p_parameter
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(first action_features)
+						dt_parameter
+						(if valid_weight_feature weight_feature (null))
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						(null) ;radius
+						!numericalPrecision
+					)
+				))
+		)
+
+		(declare (assoc
+			closest_cases_context_values
+				(map
+					(lambda (retrieve_from_entity (current_value) context_features))
+					(indices closest_cases_map)
+				)
+		))
+		(assign (assoc
+			closest_cases_context_values_map
+				(zip
+					context_features
+					(map
+						(lambda
+							(map (lambda (get (current_value) (current_index 1))) closest_cases_context_values)
+						)
+						context_features
+					)
+				)
+		))
+
+
+		(accum (assoc
+			output
+				(assoc
+					"relevant_values"
+					(map
+						(lambda (let
+							(assoc
+								feature (current_index 1)
+								is_nominal (contains_index !nominalsMap (current_index 1))
+								ctx_feature_index (get context_feature_idx_map (current_index 1))
+							)
+
+							(if is_nominal
+								;nominal flow:
+								;	Get the CAPs for the reaction based on nearest cases and return the classes that make up 95% of the
+								;	probability mass among the local data
+								(declare
+									(assoc
+										candidate_case_weights (values closest_cases_map)
+										candidate_case_values (get closest_cases_context_values_map feature)
+									)
+
+									(declare (assoc
+										categorical_action_probabilities_map
+											(zip
+												(lambda (+ (current_value 1) (current_value)))
+												candidate_case_values
+												candidate_case_weights
+											)
+									))
+
+									;sort each class by decreasing probability mass
+									(declare (assoc
+										sorted_classes
+											(sort
+												(lambda
+													(-
+														(get categorical_action_probabilities_map (current_value))
+														(get categorical_action_probabilities_map (current_value 1))
+													)
+												)
+												(indices categorical_action_probabilities_map)
+											)
+									))
+									(declare (assoc
+										sorted_probabilities (unzip categorical_action_probabilities_map sorted_classes)
+									))
+									(declare (assoc
+										num_classes_to_return
+											(while
+												(or
+													;(trunc) with a 0 returns the full list, so special skip-logic is needed
+													(= (current_index) 0)
+													(<
+														(apply "+" (trunc sorted_probabilities (current_index)))
+														0.95
+													)
+												)
+												(null)
+
+												;once the cumulative sum is > 0.95, return the number of classes it took to get that sum
+												(+ (current_index) 1)
+											)
+									))
+
+									(call !ConvertToOutput (assoc
+										features (range feature 1 num_classes_to_return 1)
+										feature_values (trunc sorted_classes num_classes_to_return)
+									))
+								)
+
+
+								;else continuous flow
+								(declare
+									(assoc
+										local_mean_value
+											(generalized_mean
+												(get closest_cases_context_values_map feature)
+												1
+												(values closest_cases_map)
+											)
+										feature_deviation (get react_feature_deviations feature)
+									)
+
+									(call !ConvertToOutput (assoc
+										apply_bounds (true)
+										features (range feature 1 5 1)
+										feature_values
+											;value - 2*deviation, value - deviation, value, value + deviation, value + 2*deviation
+											(map
+												(lambda
+													(+
+														local_mean_value
+														(* (current_value) feature_deviation)
+													)
+												)
+												[-2 -1 0 1 2]
+											)
+									))
+								)
+							)
+
+
+						))
+						(if (~ [] (get details "relevant_values"))
+							(zip (get details "relevant_values"))
+
+							(zip context_features)
+						)
+					)
+				)
+		))
+	)
+
+	;helper method for the "relevant_values" detail of react_aggregate.
+	; Returns a map of feature names to list of values that illustrate the range of values
+	; observed among the cases sampled
+	;	features: the list of features to compute relevant values for
+	;	context_features: the list features used as contexts
+	#!CalculateAggregateRelevantValues
+	(declare
+		(assoc
+			case_ids []
+			context_features []
+			features []
+			use_case_weights (false)
+			weight_feature (null)
+			hyperparam_map (assoc)
+			context_condition_filter_query (list)
+		)
+
+		(if (= (size hyperparam_map 0))
+			(assign (assoc
+				hyperparam_map
+					(call !GetHyperparameters (assoc
+						context_features context_features
+						weight_feature (if use_case_weights weight_feature)
+					))
+			))
+		)
+
+		(declare (assoc
+			context_feature_idx_map (zip context_features (indices context_features))
+			cases_context_values
+				(map
+					(lambda (retrieve_from_entity (current_value) context_features))
+					case_ids
+				)
+		))
+
+		(map
+			(lambda (let
+				(assoc
+					feature (current_index 1)
+					is_nominal (contains_index !nominalsMap (current_index 1))
+					remaining_context_features (indices (remove (zip context_features) (current_index 1)))
+				)
+
+				(declare (assoc
+					remaining_context_indices (unzip context_feature_idx_map remaining_context_features)
+				))
+
+				(if is_nominal
+					(declare
+						;for each case, get the CAPs and average them at the end somehow
+						(assoc
+							aggregated_caps
+								;combine all the caps for each case
+								(normalize (reduce
+									(lambda
+										(map
+											(lambda
+												(+
+													(or (first (current_value)) 0)
+													(or (last (current_value)) 0)
+												)
+											)
+											(previous_result)
+											(current_value)
+										)
+									)
+									;for each case, get its local CAPs for feature
+									(map
+										(lambda
+											(let
+												(assoc
+													local_cases_tuple
+														(compute_on_contained_entities
+															context_condition_filter_query
+															(query_not_in_entity_list [(current_value 2)])
+															(query_nearest_generalized_distance
+																(get hyperparam_map "k")
+																remaining_context_features
+																(unzip (get cases_context_values (current_index 1)) remaining_context_indices)
+																(get hyperparam_map "p")
+																(get hyperparam_map "featureWeights")
+																!queryDistanceTypeMap
+																(get hyperparam_map "featureDomainAttributes")
+																(get hyperparam_map "featureDeviations")
+																feature
+																(get hyperparam_map "dt")
+																(if use_case_weights weight_feature (null))
+																;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+																"fixed rand seed"
+																(null) ;radius
+																!numericalPrecision
+																feature
+															)
+														)
+												)
+
+												(zip
+													(lambda (+ (current_value 1) (current_value)))
+													;the feature values
+													(last local_cases_tuple)
+													;the case influence weights
+													(normalize (get local_cases_tuple 1))
+												)
+											)
+										)
+										case_ids
+									)
+								))
+						)
+
+						;sort each class by decreasing probability mass
+						(declare (assoc
+							sorted_classes
+								(sort
+									(lambda
+										(-
+											(get aggregated_caps (current_value))
+											(get aggregated_caps (current_value 1))
+										)
+									)
+									(indices aggregated_caps)
+								)
+						))
+						(declare (assoc
+							sorted_probabilities (unzip aggregated_caps sorted_classes)
+						))
+						(declare (assoc
+							num_classes_to_return
+								(while
+									(or
+										;(trunc) with a 0 returns the full list, so special skip-logic is needed
+										(= (current_index) 0)
+										(<
+											(apply "+" (trunc sorted_probabilities (current_index)))
+											0.95
+										)
+									)
+									(null)
+
+									;once the cumulative sum is > 0.95, return the number of classes it took to get that sum
+									(+ (current_index) 1)
+								)
+						))
+
+						(call !ConvertToOutput (assoc
+							features (range feature 1 num_classes_to_return 1)
+							feature_values (trunc sorted_classes num_classes_to_return)
+						))
+					)
+
+					;else feature is continuous
+					(declare
+						;for each case, get the weighted mean of local data. Then return a list of values centered
+						;around the mean of the means, +/- the MAD of the list of means
+						(assoc
+							local_mean_values
+								(filter (map
+									(lambda
+										(let
+											(assoc
+												local_cases_tuple
+													(compute_on_contained_entities
+														context_condition_filter_query
+														(query_not_in_entity_list [(current_value 2)])
+														(query_nearest_generalized_distance
+															(get hyperparam_map "k")
+															remaining_context_features
+															(unzip (get cases_context_values (current_index 1)) remaining_context_indices)
+															(get hyperparam_map "p")
+															(get hyperparam_map "featureWeights")
+															!queryDistanceTypeMap
+															(get hyperparam_map "featureDomainAttributes")
+															(get hyperparam_map "featureDeviations")
+															feature
+															(get hyperparam_map "dt")
+															(if use_case_weights weight_feature (null))
+															;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+															"fixed rand seed"
+															(null) ;radius
+															!numericalPrecision
+															feature
+														)
+													)
+											)
+
+											(call !InterpolateActionValues (assoc
+												action_feature feature
+												candidate_case_ids (first local_cases_tuple)
+												candidate_case_weights (get local_cases_tuple 1)
+												candidate_case_values (last local_cases_tuple)
+												allow_nulls (false)
+											))
+										)
+									)
+									case_ids
+								))
+						)
+
+						(declare (assoc
+							mean_value (generalized_mean local_mean_values)
+							means_mad (call !ComputeMAD (assoc vals local_mean_values))
+						))
+
+						(call !ConvertToOutput (assoc
+							apply_bounds (true)
+							features (range feature 1 5 1)
+							feature_values
+								;value - 2*deviation, value - deviation, value, value + deviation, value + 2*deviation
+								(map
+									(lambda
+										(+
+											mean_value
+											(* (current_value) means_mad)
+										)
+									)
+									[-2 -1 0 1 2]
+								)
+						))
+					)
+				)
+			))
+			(zip features)
+		)
+	)
+
+)
