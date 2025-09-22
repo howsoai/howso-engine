@@ -1,0 +1,364 @@
+(null
+
+#cluster
+	(declare
+		(assoc
+			;{type "list" values "string"}
+			;list of features for which to calculate conviction, will default to trainee's default features if unspecified
+			features (null)
+			;{ref "UseCaseWeights"}
+			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
+			;	case weights will be used if the trainee has them.
+			use_case_weights (null)
+			;{type "string"}
+			;name of feature whose values to use as case weights
+			weight_feature ".case_weight"
+		)
+		(call !ValidateParameters)
+
+		;if user doesn't want to use case weights, change weight_feature to '.none'
+		(if (= (false) use_case_weights)
+			(assign (assoc weight_feature ".none"))
+		)
+
+		(if (= (null) features)
+			(assign (assoc features !trainedFeatures))
+		)
+
+		(declare (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					feature (null)
+					context_features features
+					weight_feature weight_feature
+				))
+		))
+
+		(call react_into_features (assoc
+			distance_contribution (true)
+			similarity_conviction (true)
+			overwrite (true)
+		))
+
+		(declare (assoc
+			case_to_sc_map
+				(map
+					(lambda (first (current_value)))
+					(compute_on_contained_entities (query_exists "similarity_conviction"))
+				)
+			case_to_dc_map
+				(map
+					(lambda (first (current_value)))
+					(compute_on_contained_entities (query_exists "distance_contribution"))
+				)
+			k_parameter (get hyperparam_map "k")
+			dt_parameter (get hyperparam_map "dt")
+			p_parameter (get hyperparam_map "p")
+			feature_deviations (get hyperparam_map "featureDeviations")
+			feature_weights
+				(if (= (null) (get hyperparam_map "featureMdaMap"))
+					(get hyperparam_map "featureWeights")
+					(get hyperparam_map "featureMdaMap")
+				)
+			weight_feature_param
+				(if (and use_case_weights (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight")))
+					weight_feature
+				)
+		))
+
+		(declare (assoc
+			case_ids_by_sc
+				;sort indices of map in DESCending order of values
+				(sort
+					(lambda (< (get case_to_sc_map (current_value)) (get case_to_sc_map (current_value 1))) )
+					(indices case_to_sc_map)
+				)
+
+			;map of: cluster id -> set of cases
+			cluster_map {}
+
+			;map of : case id -> cluster id
+			case_cluster_map {}
+			num_cases (size case_to_sc_map)
+			next_case_index 0
+		))
+
+		(declare (assoc
+			all_cases_neighbors_map
+				||(map
+					(lambda
+						(contained_entities
+							(query_not_in_entity_list [(current_index 1)])
+							(query_nearest_generalized_distance
+								k_parameter
+								features
+								(retrieve_from_entity (current_index) features)
+								p_parameter
+								feature_weights
+								!queryDistanceTypeMap
+								(get hyperparam_map "featureDomainAttributes")
+								feature_deviations
+								(first action_features) ;used to select the feature weights
+								dt_parameter
+								weight_feature_param
+								"tie_break_random_seed"
+								(null) ;radius
+								!numericalPrecision
+							)
+						)
+					)
+					case_to_sc_map
+				)
+			case_id (null)
+			cluster_id 1
+		))
+
+		(while (!= (null) next_case_index)
+			(assign (assoc
+				case_id (call !GetNextCaseToCluster)
+				cluster_cases (or (get cluster_map cluster_id) [])
+			))
+
+			(accum (assoc case_cluster_map (associate case_id cluster_id)  ))
+			(assign (assoc
+				cluster_map (set cluster_map cluster_id (append cluster_cases case_id) )
+			))
+
+			(call !RecursivelyLabelCluster (assoc
+				case_id case_id
+				cluster_id cluster_id
+			))
+
+			(accum (assoc cluster_id 1))
+		)
+
+
+		(declare (assoc
+			another_pass (true)
+			found_straggler (false)
+
+			;map of cluster id -> max dc
+			cluster_max_dc_map
+				(map
+					(lambda (apply "max" (unzip case_to_dc_map (current_value))) )
+					cluster_map
+				)
+		))
+
+		(while another_pass
+			(assign (assoc
+				another_pass (false)
+				found_straggler (false)
+			))
+			;for all remaining unclustered cases, add them to existing clusters if their neighbors are in a cluster
+			(map
+				(lambda (let
+					(assoc
+						neighbor_cluster_map
+							(filter (keep
+								case_cluster_map
+								(get all_cases_neighbors_map (current_value 1))
+							))
+					)
+
+					;all neighbors are unclustered, must do another pass
+					(if (= 0 (size neighbor_cluster_map))
+						(assign (assoc another_pass (true) ))
+					)
+
+					(declare (assoc
+						cluster_id
+							(if
+								(and
+									(size neighbor_cluster_map)
+									(= 1 (size (values neighbor_cluster_map (true))))
+								)
+								(first (values neighbor_cluster_map))
+							)
+
+					))
+					(if cluster_id
+						;if the DC of this case is less than 2x the largest DC of this cluster
+						;add this case that cluster as well
+						(if
+							(<
+								(get case_to_dc_map (current_value))
+								(* 2 (get cluster_max_dc_map cluster_id))
+							)
+							(let
+								(assoc case_id (current_value 1) )
+								(accum (assoc case_cluster_map (associate case_id cluster_id) ))
+								(assign (assoc
+									cluster_map (set cluster_map cluster_id (append (get cluster_map cluster_id) case_id) )
+								))
+								(assign (assoc
+									case_to_sc_map (remove case_to_sc_map case_id)
+									found_straggler (true)
+								))
+								;this case has a dc larger than the current max for the cluster, overwrite that max value
+								(if (> (get case_to_dc_map case_id) (get cluster_max_dc_map cluster_id))
+									(assign (assoc
+										cluster_max_dc_map (set cluster_max_dc_map cluster_id (get case_to_dc_map case_id))
+									))
+								)
+							)
+						)
+					)
+				))
+				;sort case ids by distance contribution in ASCending order
+				(sort
+					(lambda (> (get case_to_dc_map (current_value)) (get case_to_dc_map (current_value 1))) )
+					(indices case_to_sc_map)
+				)
+			)
+
+			(if (not found_straggler)
+				(conclude)
+			)
+		)
+
+		;add cluster id to all clustered cases
+		(map
+			(lambda (let
+				(assoc cluster_id (current_index 1))
+				(map
+					(lambda
+						(accum_entity_roots (current_value) (set_labels cluster_id [".cluster_id"]) )
+					)
+					(current_value)
+				)
+			))
+			cluster_map
+		)
+
+		;all the leftover non-clustered points are labeled as cluster -1
+		(map
+			(lambda
+				(accum_entity_roots (current_index) (set_labels -1 [".cluster_id"]) )
+			)
+			case_to_sc_map
+		)
+
+		(print
+			"cases clustered: " (size case_cluster_map) "\n"
+			"num clusters: " (size cluster_map) "\n"
+			"remaining: " case_to_sc_map (unzip case_to_dc_map (indices case_to_sc_map))
+		)
+
+		(call !Return (assoc
+			payload
+				(assoc
+					"num_clusters" (size cluster_map)
+					"num_cases_clustered" (size case_cluster_map)
+					"num_unclustered" (size case_to_sc_map)
+				)
+		))
+	)
+
+
+;output case_id of next case, remove case_id from case_to_sc_map
+#!GetNextCaseToCluster
+	(while (< (+ (current_index) next_case_index) num_cases)
+		(if (contains_index case_to_sc_map (get case_ids_by_sc (+ (current_index) next_case_index)))
+			(let
+				(assoc case_id (get case_ids_by_sc (+ (current_index 1) next_case_index)) )
+
+				(if (and
+						(< (get case_to_sc_map case_id) 1)
+						(> (get case_to_dc_map case_id) !averageCaseDistanceContribution)
+					)
+					(seq
+						;be done because these cases have LOW similarity conviction and a large DC
+						(assign (assoc next_case_index (null) ))
+						(conclude (conclude case_id))
+					)
+				)
+
+				(assign (assoc case_to_sc_map (remove case_to_sc_map case_id) ))
+				(assign (assoc next_case_index (+ 1 (current_index 1) next_case_index) ))
+				(conclude case_id)
+			)
+		)
+	)
+
+#!RecursivelyLabelCluster
+	(let
+		(assoc
+			neighbors
+				;leave cases that are not clustered or are in a different cluster
+				(filter
+					(lambda
+						(!= cluster_id (get case_cluster_map (current_value)))
+					)
+					(get all_cases_neighbors_map case_id)
+				)
+		)
+
+		;if a neighbor is already in a different cluster, relabel this cluster appropriately and move all the cases over to this cluster
+		(map
+			(lambda
+				(if (and
+						(!= (null) (get case_cluster_map (current_value)))
+						(!= cluster_id (get case_cluster_map (current_value)))
+					)
+					(let
+						(assoc eid (get case_cluster_map (current_value 1))  )
+
+						(assign (assoc
+							cluster_map (set cluster_map cluster_id (append (get cluster_map cluster_id) (get cluster_map eid)) )
+						))
+						(accum (assoc
+							case_cluster_map (zip (get cluster_map eid) cluster_id)
+						))
+						(assign (assoc cluster_map (remove cluster_map eid) ))
+					)
+				)
+			)
+			neighbors
+		)
+
+		;leave only unclustered neighbors
+		;TOOD: AND only whose DC < 1.25 * average_DC?
+		(assign (assoc
+			neighbors (filter (lambda (= (null) (get case_cluster_map (current_value)))) neighbors)
+		))
+		(if (size neighbors)
+			(seq
+				(assign (assoc
+					cluster_map (set cluster_map cluster_id (append (get cluster_map cluster_id) neighbors) )
+				))
+				(accum (assoc case_cluster_map (zip neighbors cluster_id) ))
+
+				;leave only neighbors with good sc values (sc >= 1) or dc < 1.25 of average
+				;TODO: adjust thresholds
+				(assign (assoc
+					neighbors
+						(filter
+							(lambda
+								(or
+									(>= (get case_to_sc_map (current_value)) 1)
+									(<= (get case_to_dc_map (current_value)) (* 1.25 !averageCaseDistanceContribution))
+								)
+							)
+							neighbors
+						)
+				))
+
+				(assign (assoc case_to_sc_map (remove case_to_sc_map neighbors) ))
+
+				(map
+					(lambda
+						;recursively label neighbors with good SC values
+						(call !RecursivelyLabelCluster (assoc
+							case_id (current_value 1)
+							cluster_id cluster_id
+						))
+					)
+					neighbors
+				)
+			)
+		)
+	)
+
+
+)
