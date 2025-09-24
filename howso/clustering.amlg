@@ -6,6 +6,12 @@
 			;{type "list" values "string"}
 			;list of features for which to calculate conviction, will default to trainee's default features if unspecified
 			features (null)
+			;{type "number" exclusive_min 0}
+			;number of extra cases to consider as local data for each case
+			extra_cases (null)
+			;{type "number" exclusive_min 0}
+			;similarity conviction threshold of cases considered for expansion of cluster
+			expansion_sc_threshold 0.9
 			;{ref "UseCaseWeights"}
 			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
 			;	case weights will be used if the trainee has them.
@@ -91,7 +97,7 @@
 						(compute_on_contained_entities
 							(query_not_in_entity_list [(current_index 1)])
 							(query_nearest_generalized_distance
-								k_parameter
+								(if extra_cases (append k_parameter extra_cases) k_parameter)
 								features
 								(retrieve_from_entity (current_index) features)
 								p_parameter
@@ -112,6 +118,7 @@
 				)
 			case_id (null)
 			cluster_id 1
+			border_cases []
 		))
 		(print "Cached distances to neighbors.\n")
 
@@ -249,9 +256,9 @@
 			case_to_sc_map
 		)
 
-		; (print
-		; 	cluster_map
-		; )
+		(print
+			cluster_map
+		)
 
 		(call !Return (assoc
 			payload
@@ -310,20 +317,25 @@
 				(if (and
 						(!= (null) (get case_cluster_map (current_value)))
 						(!= cluster_id (get case_cluster_map (current_value)))
-
+					)
+					(if
 						;this case is reciprocated as a neighbor of this other-cluster case
 						(contains_index (get all_cases_neighbors_map (current_value)) case_id)
-					)
-					(let
-						(assoc eid (get case_cluster_map (current_value 1))  )
+						(let
+							(assoc eid (get case_cluster_map (current_value 1))  )
 
-						(assign (assoc
-							cluster_map (set cluster_map cluster_id (append (get cluster_map cluster_id) (get cluster_map eid)) )
-						))
-						(accum (assoc
-							case_cluster_map (zip (get cluster_map eid) cluster_id)
-						))
-						(assign (assoc cluster_map (remove cluster_map eid) ))
+							(assign (assoc
+								cluster_map (set cluster_map cluster_id (append (get cluster_map cluster_id) (get cluster_map eid)) )
+							))
+							(accum (assoc
+								case_cluster_map (zip (get cluster_map eid) cluster_id)
+							))
+							(assign (assoc cluster_map (remove cluster_map eid) ))
+						)
+
+						(if (not (contains_value border_cases case_id) )
+							(accum (assoc border_cases case_id ))
+						)
 					)
 				)
 			)
@@ -336,16 +348,15 @@
 		))
 		(if (size neighbors)
 			(seq
-				;leave only neighbors with good sc values (sc >= 1) or dc < 1.25 of average
-				;TODO: adjust thresholds ?
+				;leave only neighbors with good sc and dc values
 				(assign (assoc
 					neighbors
 						(filter
 							(lambda
 								;;;^^^ tweak
 								(or
-									(>= (get case_to_sc_map (current_value)) .9)
-									(<= (get case_to_dc_map (current_value)) (* 1.25 !averageCaseDistanceContribution))
+									(>= (get case_to_sc_map (current_value)) expansion_sc_threshold)
+									(<= (get case_to_dc_map (current_value)) (* (/ 1 expansion_sc_threshold) !averageCaseDistanceContribution))
 								)
 							)
 							neighbors
@@ -385,7 +396,10 @@
 														;values (cluster ids)
 														(values other_neighbor_clusters_map)
 														;weights
-														(unzip (get all_cases_neighbors_map (current_value 1)) (indices other_neighbor_clusters_map))
+														(unzip
+															(get all_cases_neighbors_map (current_value 1))
+															(indices other_neighbor_clusters_map)
+														)
 													)
 												))
 										)
