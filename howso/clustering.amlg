@@ -88,7 +88,7 @@
 			all_cases_neighbors_map
 				||(map
 					(lambda
-						(contained_entities
+						(compute_on_contained_entities
 							(query_not_in_entity_list [(current_index 1)])
 							(query_nearest_generalized_distance
 								k_parameter
@@ -99,7 +99,7 @@
 								!queryDistanceTypeMap
 								(get hyperparam_map "featureDomainAttributes")
 								feature_deviations
-								(first action_features) ;used to select the feature weights
+								(null) ;
 								dt_parameter
 								weight_feature_param
 								"tie_break_random_seed"
@@ -120,6 +120,10 @@
 				case_id (call !GetNextCaseToCluster)
 				cluster_cases (or (get cluster_map cluster_id) [])
 			))
+
+			(if (= (null) next_case_index)
+				(conclude)
+			)
 
 			(accum (assoc case_cluster_map (associate case_id cluster_id)  ))
 			(assign (assoc
@@ -160,13 +164,9 @@
 				(lambda (let
 					(assoc
 						neighbor_cluster_map
-							; (filter (zip
-							; 	(get all_cases_neighbors_map (current_value 1))
-							; 	(unzip case_cluster_map (get all_cases_neighbors_map (current_value 1)) )
-							; ))
 							(filter (map
 								(lambda (get case_cluster_map (current_index)) )
-								(zip (get all_cases_neighbors_map (current_value 1)))
+								(get all_cases_neighbors_map (current_value 1))
 							))
 					)
 
@@ -192,7 +192,7 @@
 						(if
 							(<
 								(get case_to_dc_map (current_value))
-								(* 2 (get cluster_max_dc_map cluster_id))
+								(* 2 (get cluster_max_dc_map cluster_id)) ;;;^^^ tweak
 							)
 							(let
 								(assoc case_id (current_value 1) )
@@ -224,6 +224,9 @@
 			)
 		)
 
+
+		;done clustering, write clusters as new feature ".cluster_id" to all the cases
+
 		;add cluster id to all clustered cases
 		(map
 			(lambda (let
@@ -246,10 +249,13 @@
 			case_to_sc_map
 		)
 
+
+
 		(print
-			"cases clustered: " (size case_cluster_map) "\n"
-			"num clusters: " (size cluster_map) "\n"
-			"remaining: " case_to_sc_map (unzip case_to_dc_map (indices case_to_sc_map))
+			cluster_map
+		; 	"cases clustered: " (size case_cluster_map) "\n"
+		; 	"num clusters: " (size cluster_map) "\n"
+		; 	"remaining: " case_to_sc_map (unzip case_to_dc_map (indices case_to_sc_map))
 		)
 
 		(call !Return (assoc
@@ -269,8 +275,8 @@
 		(if (contains_index case_to_sc_map (get case_ids_by_sc (+ (current_index) next_case_index)))
 			(let
 				(assoc case_id (get case_ids_by_sc (+ (current_index 1) next_case_index)) )
-
-				(if (and
+				;;;^^^ tweak
+				(if (or
 						(< (get case_to_sc_map case_id) 1)
 						(> (get case_to_dc_map case_id) !averageCaseDistanceContribution)
 					)
@@ -299,7 +305,7 @@
 					(lambda
 						(!= cluster_id (get case_cluster_map (current_value)))
 					)
-					(get all_cases_neighbors_map case_id)
+					(indices (get all_cases_neighbors_map case_id))
 				)
 		)
 
@@ -309,6 +315,9 @@
 				(if (and
 						(!= (null) (get case_cluster_map (current_value)))
 						(!= cluster_id (get case_cluster_map (current_value)))
+
+						;this case is reciprocated as a neighbor of this other-cluster case
+						(contains_index (get all_cases_neighbors_map (current_value)) case_id)
 					)
 					(let
 						(assoc eid (get case_cluster_map (current_value 1))  )
@@ -327,7 +336,6 @@
 		)
 
 		;leave only unclustered neighbors
-		;TOOD: AND only whose DC < 1.25 * average_DC?
 		(assign (assoc
 			neighbors (filter (lambda (= (null) (get case_cluster_map (current_value)))) neighbors)
 		))
@@ -339,11 +347,78 @@
 					neighbors
 						(filter
 							(lambda
+								;;;^^^ tweak
 								(or
-									(>= (get case_to_sc_map (current_value)) 1)
+									(>= (get case_to_sc_map (current_value)) .9)
 									(<= (get case_to_dc_map (current_value)) (* 1.25 !averageCaseDistanceContribution))
 								)
 							)
+							neighbors
+						)
+				))
+
+				;check if most of the neighbor's neighbors are in a different cluster, if so it should be in that cluster instead?
+				(assign (assoc
+					neighbors
+						(filter
+							(lambda (let
+								(assoc
+									other_neighbor_clusters_map
+										(filter (map
+											(lambda (get case_cluster_map (current_index)))
+											(get all_cases_neighbors_map (current_value 1))
+										))
+								)
+								(declare (assoc unique_neighbor_clusters (values other_neighbor_clusters_map (true)) ))
+
+								;this neighbor's neighbors are in a different cluster
+								;interpolate based on influence weight to see which cluster this neighbor should be assigned to
+								(if (or
+										(> (size unique_neighbor_clusters) 1)
+										(and
+											(size unique_neighbor_clusters)
+											(!= cluster_id (first unique_neighbor_clusters))
+										)
+									)
+									(let
+										(assoc
+											neighbor_cluster_id
+												;interpolate cluster based on neighbor's influence weight
+												(first (index_max
+													(zip
+														(lambda (+ (current_value 1) (current_value)))
+														;values (cluster ids)
+														(values other_neighbor_clusters_map)
+														;weights
+														(unzip (get all_cases_neighbors_map (current_value 1)) (indices other_neighbor_clusters_map))
+													)
+												))
+										)
+
+										;this neighbor's neighbors are mostly from a different cluster, assign this neighbor to that cluster and filter it out
+										(if (!= cluster_id neighbor_cluster_id)
+											(seq
+												(assign (assoc
+													cluster_map (set cluster_map neighbor_cluster_id (append (get cluster_map neighbor_cluster_id) (current_value 1)) )
+													case_to_sc_map (remove case_to_sc_map (current_value 1))
+												))
+												(accum (assoc
+													case_cluster_map (associate (current_value 2) neighbor_cluster_id)
+												))
+
+												;filter this case out
+												(false)
+											)
+
+											;else keep this case
+											(true)
+										)
+									)
+
+									;else keep this case
+									(true)
+								)
+							))
 							neighbors
 						)
 				))
