@@ -185,6 +185,8 @@
 					(lambda (contains_index !untrainableFeatureCharacterSet (first (current_value))) )
 					features
 				))
+			affected_features (replace features)
+			re_derivation_series_case_ids (null)
 
 			;store the originally passed in values as-is for history tracking
 			unencoded_feature_values (get_value feature_values)
@@ -326,15 +328,73 @@
 			)
 		)
 
+		;check if time series dataset, if so, need to pull all cases from affected series so that their
+		;derived features can be-rederived below after cases are removed
+		(if (and (!= (null) !tsTimeFeature) (size !derivedFeaturesMap))
+			(let
+				(assoc series_id_features (get !tsFeaturesMap "series_id_features") )
+
+				;for each case pull the list of series id values for all the series id features
+				(declare (assoc
+					series_id_lists
+						(values (map
+							(lambda (retrieve_from_entity (current_value) series_id_features))
+							case_ids
+						) (true))
+				))
+
+				;for each series affected, get the cases so they can be re-derived
+				(declare (assoc
+					per_series_cases
+						(map
+							(lambda (let
+								(assoc
+									series_id_values (current_value 1)
+								)
+
+								(contained_entities
+									(values (map
+										(lambda
+											(query_equals (current_index) (current_value))
+										)
+										(zip series_id_features series_id_values)
+									))
+								)
+							))
+							series_id_lists
+						)
+				))
+
+				(assign (assoc
+					affected_features (values (append affected_features (get !tsFeaturesMap "ts_derived_features")) (true))
+				))
+
+				;collapse all lists of cases into one list of case ids
+				(assign (assoc
+					re_derivation_series_case_ids (apply "append" per_series_cases)
+				))
+			)
+		)
+
+		;if there are cases that need to have features re-derived, do it here
+		(if re_derivation_series_case_ids
+			(call !DeriveTrainFeatures (assoc
+				features !trainedFeatures
+				;keep and derive only those features that are not in the features list
+				derived_features (get !tsFeaturesMap "ts_derived_features")
+				case_ids re_derivation_series_case_ids
+			))
+		)
+
 		;accum data mass equal to (size case_ids) /* the % of features being edited.
 		(accum_to_entities (assoc
 			!dataMassChangeSinceLastAnalyze
-				(* (size case_ids) (/ (size features) (size !trainedFeatures) ))
+				(* (size case_ids) (/ (size affected_features) (size !trainedFeatures) ))
 			!dataMassChangeSinceLastDataReduction
-				(* (size case_ids) (/ (size features) (size !trainedFeatures) ))
+				(* (size case_ids) (/ (size affected_features) (size !trainedFeatures) ))
 		))
 
-		(call !UpdateHasNulls (assoc features features))
+		(call !UpdateHasNulls (assoc features affected_features))
 
 		;it's possible that the resulting case values activate or deactivate a feature
 		(call !UpdateInactiveFeatures (assoc editing_existing_cases (true) ))
