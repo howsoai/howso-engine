@@ -16,6 +16,12 @@
 		;returns {ref "ReactGroupResponse"}
 		(assoc
 			;{type "list" values "string"}
+			;list of feature names to predict the values of for each group
+			action_features (list)
+			;{ref "ReactGroupDetails"}
+			;An assoc declaring the details requested by the user
+			details (assoc)
+			;{type "list" values "string"}
 			;list of feature names
 			features (list)
 			;{type "list" values {type "list" values {type "list"} } min_size 1}
@@ -91,7 +97,9 @@
 				(map
 					(lambda
 						(call !SingleReactGroup (assoc
+							action_features action_features
 							features features
+							details details
 							new_cases (get new_cases (current_index 1))
 							condition (get conditions (current_index 1))
 							case_indices (get case_indices (current_index 1))
@@ -117,17 +125,23 @@
 
 		(call !Return (assoc
 			payload
-				(zip
-					react_group_keys
-					(map
-						(lambda (let
-							(assoc key (current_value 1))
-							(map
-								(lambda (get (current_value) key))
-								react_results
-							)
-						))
+				(append
+					(zip
 						react_group_keys
+						(map
+							(lambda (let
+								(assoc key (current_value 1))
+								(map
+									(lambda (get (current_value) key))
+									react_results
+								)
+							))
+							react_group_keys
+						)
+					)
+					(if (size action_features)
+						(assoc "action_features" action_features)
+						(assoc)
 					)
 				)
 			warnings (indices warnings)
@@ -139,6 +153,8 @@
 	;computes familiarity conviction of an avg case for each given hypothetical set of cases specified, returns a list of convictions, one per set
 	;parameters:
 	; features: list of feature names
+	; action_features: list of feature names to predict the values of for the group
+	; details: the requested details
 	; new_cases: a list of lists of values corresponding to sets of feature values, where the values are ordered corresponding to the features
 	; condition: a map specifying conditions that select a collection of trained cases
 	; case_indices: a list of tuples describing case indices
@@ -157,6 +173,8 @@
 	(declare
 		(assoc
 			features (list)
+			action_features (list)
+			details (assoc)
 			new_cases (list)
 			condition (assoc)
 			case_indices (list)
@@ -196,7 +214,14 @@
 
 		;if features aren't specified, assume all !trainedFeatures will need to have their mae calculated
 		(if (= 0 (size features))
-			(assign (assoc features !trainedFeatures))
+			(assign (assoc
+				features
+					(if (size action_features)
+						(filter (lambda (not (contains_value action_features (current_value)))) !trainedFeatures)
+						!trainedFeatures
+					)
+
+			))
 		)
 
 		;if features need to be encoded, overwrite the values in the new_cases list with the encoded values
@@ -229,6 +254,8 @@
 				))
 			valid_weight_feature (false)
 
+			action_values (null)
+			output_influential_cases (null)
 			combined_average_distance_contribution (null)
 			avg_new_cases_distance_contribution (null)
 			new_case_entropies_value (null)
@@ -339,8 +366,100 @@
 			(apply "destroy_entities" case_ids)
 		)
 
+		(if (size action_features)
+			(declare
+				(assoc
+					group_prediction
+						(call !PredictGroup (assoc
+							action_features action_features
+							context_features features
+							features features
+							cases
+								(if (size new_cases)
+									new_cases
+
+									(map
+										(lambda (retrieve_from_entity (current_value) features))
+										case_ids
+									)
+								)
+
+							desired_conviction (null)
+							leave_series_out (false)
+							holdout_queries (if (not new_cases_created) (query_not_in_entity_list case_ids))
+							details details
+							skip_encoding (not (size new_cases))
+							return_per_case_reactions (true)
+						))
+				)
+
+				(assign (assoc
+					action_values (get group_prediction "action_values")
+				))
+
+				(if (get details "influential_cases")
+					(let
+						(assoc
+							all_inf_cases
+								(apply
+									"append"
+									(get group_prediction ["per_case_reactions" "influential_cases"])
+								)
+						)
+
+						(declare (assoc
+							case_influence_map
+								;this is a map of case-index (tuple of session and training index) to total influence
+								(normalize (zip
+									(lambda (+ (current_value) (current_value 1)))
+									(map (lambda [(get (current_value 1) ".session") (get (current_value 1) ".session_training_index") ]) all_inf_cases)
+									(map (lambda (get (current_value) ".influence_weight")) all_inf_cases)
+								))
+						))
+
+						(assign (assoc
+							output_influential_cases
+								(map
+									(lambda
+										(append
+											(zip
+												(append features action_features)
+												(retrieve_from_entity
+													(call !GetCaseId (assoc
+														session (first (current_value 1))
+														session_training_index (last (current_value 1))
+													))
+													(append features action_features)
+												)
+											)
+											(associate
+												!internalLabelSession (first (current_value 1))
+												!internalLabelSessionTrainingIndex (last (current_value 1))
+												;need to wrap the case-index tuple in an extra list so that it is not interpreted
+												;as a walk path
+												".influence_weight" (get case_influence_map [(current_value 2)])
+											)
+
+										)
+									)
+									(indices case_influence_map)
+								)
+						))
+					)
+				)
+			)
+		)
+
 		;output only the requested keys
 		(append
+			(if (size action_features)
+				(assoc "action_values" action_values)
+				(assoc)
+			)
+			(if (get details "influential_cases")
+				(assoc "influential_cases" output_influential_cases)
+				(assoc)
+			)
 			(if familiarity_conviction_addition
 				(assoc "familiarity_conviction_addition" average_new_cases_conviction_addition)
 				(assoc)
@@ -641,6 +760,8 @@
 			desired_conviction (null)
 
 			goal_features_map (assoc)
+			holdout_queries (list)
+			leave_series_out (false)
 			;pass through to !SingleReact (appended to those needed for aggregation)
 			details (null)
 			;pass through to !SingleReact
@@ -698,10 +819,11 @@
 									context_features react_context_features
 									context_values (unzip case_context_map react_context_features)
 									action_features action_features
-									leave_series_out (true)
+									leave_series_out leave_series_out
 									skip_encoding skip_encoding
 									desired_conviction desired_conviction
 									goal_features_map goal_features_map
+									holdout_queries holdout_queries
 									return_entity_ids_only (true)
 									details
 										(append
