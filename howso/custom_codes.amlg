@@ -42,7 +42,7 @@
 			series_ordered_by_features
 				(if feature_attribute_map
 					(get feature_attribute_map "ordered_by_features")
-					[!tsTimeFeature]
+					[!tsTimeFeature !internalLabelSessionTrainingIndex]
 				)
 		))
 
@@ -206,6 +206,156 @@
 			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))
 		)
 	)
+
+	;helper method to derive the values for the synchronous counter feature for all trained cases/series
+	;parameters:
+	;  time_feature: the name of the time feature
+	;  time_feature_delta: the name of the time feature's delta
+	;  series_ordered_by_features: the ordered list of feature names to sort the series data by in increasing order
+	;  series_id_features: the ordered list of feature names to identify each unique series
+	#!CreateSynchronousCounterFeature
+	(declare
+		(assoc
+			time_feature (null)
+			time_feature_delta (null)
+			series_ordered_by_features (null)
+			series_id_features (null)
+		)
+
+		(declare (assoc
+			necessary_features (values (append series_ordered_by_features [time_feature time_feature_delta !sessionTrainingIndex]) (true))
+		))
+
+		(declare (assoc
+			necessary_feature_index_map (zip necessary_features (indices necessary_features))
+		))
+
+		;process each series individually
+		;pull all the values for the necessary_features, sort them, and then derive this feature based on the specified code
+		(map
+			(lambda (let
+				;(current_value) is in the format of (list (query_equals "series_feature_name" value) ... ) for all series_feature_name
+				(assoc series_case_ids (contained_entities (current_value 1)) )
+
+				;series_data is all the necessary_features's values along with the training index and case_id appended as the last two columns
+				;when the data is sorted, ties will be broken by the training index to assist with consistency
+				(declare (assoc
+					series_data
+						(map
+							(lambda
+								;append two features: session index and case_id
+								(append
+									;series_ordered_by_features should include the time feature and the sessionTrainingIndex
+									(retrieve_from_entity (current_value) necessary_features)
+									(current_value)
+								)
+							)
+							series_case_ids
+						)
+				))
+
+				;sort the series data according to the specified features if ordering has been provided
+				(if (size series_ordered_by_features)
+					(assign (assoc
+						series_data
+							(call !MultiSortList (assoc
+								data series_data
+								column_order_indices
+									(unzip necessary_feature_index_map series_ordered_by_features)
+							))
+					))
+				)
+
+				;store the case ids in the new sorted order of series_data
+				(assign (assoc
+					series_case_ids
+						(map
+							(lambda (last (current_value)))
+							series_data
+						)
+				))
+
+
+				(declare (assoc
+					synchronous_counter_values
+						(let
+							(assoc
+								prev_counter 0
+								time_delta_index (get necessary_feature_index_map time_feature_delta)
+							)
+
+							(map
+								(lambda
+									(if (> prev_counter 0)
+										;if prev counter is already greater than 0, just decrement
+										(seq
+											(accum (assoc prev_counter -1))
+											prev_counter
+										)
+
+										;otherwise the last time value must be "finished" and onto the next
+										;must count the number of values until time_delta is positive again
+
+										(seq
+											(assign (assoc
+												prev_counter
+													;if the next case is on the same time value, must count how many cases are also on it.
+													(if (=
+															(get series_data [(+ (current_index 2) 1) time_delta_index])
+															0
+														)
+														;in this while loop (current_index 1) is the index in series_data
+														;(current_index) is the (while) index. So (+ (current_index 1) (current_index) 1) is
+														;the index of series_data being checked
+														(while
+															;while the "next" time delta is still zero, continue
+															(=
+																(get series_data [(+ (current_index 3) (current_index 1) 1) time_delta_index])
+																0
+															)
+															(+ 1 (current_index))
+														)
+
+														;otherwise this is the only case on this time value
+														0
+													)
+
+											))
+											prev_counter
+										)
+
+									)
+								)
+								series_data
+							)
+						)
+				))
+
+				(map
+					(lambda (let
+						(assoc case_id (current_index 1) )
+						(if (contains_label case_id !tsSynchronousCounterFeature)
+							(assign_to_entities
+								case_id
+								(associate !tsSynchronousCounterFeature (current_value))
+							)
+							;else these labels don't exist yet, need to append them to the entity
+							(accum_entity_roots
+								case_id
+								(zip_labels [!tsSynchronousCounterFeature] [(current_value 1)])
+							)
+						)
+					))
+					(zip series_case_ids synchronous_counter_values)
+				)
+			))
+
+			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
+			(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+		)
+
+
+	) ;end !CreateSynchronousCounterFeature
 
 	;derives the feature value for the specified feature provided the data to derive from
 	;parameters:
