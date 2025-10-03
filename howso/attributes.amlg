@@ -17,7 +17,7 @@
 			;		'allowed': list of explicitly allowed values to be output. Example: ["low", "medium", "high"]
 			;		'allow_null': flag, allow nulls to be output, per their distribution in the data. Defaults to true (false for time feature)
 			;		'constraint': code, whose logic has to evaluate to true for value to be considered valid.
-			;			Same format as 'derived_feature_code. Example: "(> #f1 0 #f2 0)"
+			;			Same format as 'derived_feature_code'. Example: "(> (call value {feature \"f1\"}) (call value {feature \"f2\"}) )"
 			;       'observed_min': number, string, or date string, the minimum value observed in the data
 			;       'observed_max': number, string, or date string, the maximum value observed in the data
 			;
@@ -74,7 +74,7 @@
 			;
 			;	'auto_derive_on_train': assoc, defines how to create and derive all the values for this feature from
 			;							the trained dataset. For full list of specific 'auto_derive_on_train' feature
-			;							attributes refer the comments at the top of the derive.amlg module.
+			;							attributes refer the comments at the top of the derive_features.amlg module.
 			;
 			;	'derived_feature_code': string, code defining how the value for this feature could be derived if this feature
 			;							is specified as a "derived_context_feature" or a "derived_action_feature" during
@@ -83,13 +83,20 @@
 			;							Each row is comprised of all the combined context and action features. Referencing
 			;							data in these rows uses 0-based indexing, where the current row index is 0, the
 			;							previous row's is 1, etc. Specified code may do simple logic and numeric operations
-			;							on feature values referenced via feature name and row offset.
+			;							on feature values referenced via feature name and row offset. Format to get feature
+			;							value is: (call value {feature "feature_name" lag lag_value }) where lag and lag_value
+			;							are optional and only needed if lag > 0.
 			;							Examples:
-			;							"#x 1" - Use the value for feature 'x' from the previously processed row (offset of 1, one lag value).
-			;							"(- #y 0 #x 1)" - Feature 'y' value from current (offset 0) row minus feature 'x' value from previous (offset 1) row.
+			;							"(call value {feature \"x\" lag 1})" - Use value for feature 'x' from the previous row (offset of 1, one lag value).
+			;							"(- (call value {feature \"y\"})  (call value {feature \"x\" lag 1}) )" - Feature 'y' value from
+			;								current (offset 0) row minus feature 'x' value from previous (offset 1) row.
+			;
+			;							Note: Feature names must be explicitly specified as the 'feature' parameter and not as output from logic.
+			;							This example code will not work: "(call value {feature (call value {feature \"another\"}) })" because
+			;							the feature name is determined dynamically from the value of 'another' feature and not specified directly.
 			;
 			;	'post_process': string, custom Amalgam code that is called on resulting values of this feature during react operations.
-			;					Example: "(set_digits #x 0 3.1 (list 1 0) 2 3 (false))"
+			;					Same format as 'derived_feature_code'. Example: "(set_digits (call value {feature \"x\"})  3.1 [1 0] 2 3 (false))"
 			;
 			;	'non_sensitive': boolean, flag a categorical nominal feature as non-sensitive. It is recommended that
 			;					all nominal features be represented with either an 'int-id' subtype or another
@@ -280,6 +287,8 @@
 				(call !Return (assoc errors (list "Only one time feature may be specified.")))
 			)
 		)
+
+		(declare (assoc constraint_referenced_features_map (call !ComposeConstraintReferencedFeaturesMap) ))
 
 		(declare (assoc invalid_constraint_features (call !ComposeInvalidConstraintFeatures) ))
 
@@ -505,6 +514,44 @@
 							custom_derived_features_map
 						)
 				))
+
+				;add a list of all features referenced by the derived code into "code_features"
+				(assign (assoc
+					feature_attributes
+						(map
+							(lambda
+								(if (contains_index custom_derived_features_map (current_index))
+									(if (and
+											(contains_index (current_value) "auto_derive_on_train")
+											(contains_index (get (current_value) "auto_derive_on_train") "code")
+										)
+										(set
+											(current_value)
+											["auto_derive_on_train" "code_features"]
+											(call !FeaturesInCustomCode (assoc
+												code_string (get (current_value 1) ["auto_derive_on_train" "code"])
+											))
+										)
+
+										(contains_index (current_value) "derived_feature_code")
+										(set
+											(current_value)
+											"code_features"
+											(call !FeaturesInCustomCode (assoc
+												code_string (get (current_value 1) "derived_feature_code")
+											))
+										)
+
+										;else progress features have auto_derive_on_train but do not specify "code" and should be left as-is
+										(current_value)
+									)
+									(current_value)
+								)
+							)
+							feature_attributes
+						)
+				))
+
 				(assign (assoc
 					;filter features, leaving only those with custom derivations
 					custom_derived_features_map
@@ -633,13 +680,10 @@
 					train_derived_method
 						(call !ParseDerivedFeatureCode (assoc
 							code_string (get attributes (list "auto_derive_on_train" "code"))
-							label_to_code
+							value
 								(lambda
-									(if (and (>= (- series_row_index label_value) 0) (contains_index feat_index_map label_name))
-										;pull the feature value
-										(get series_data (list (- series_row_index label_value) (get feat_index_map label_name)) )
-
-										(null)
+									(if (and (>= (- series_row_index lag) 0) (contains_index feat_index_map feature))
+										(get series_data (list (- series_row_index lag) (get feat_index_map feature)) )
 									)
 								)
 						))
@@ -649,17 +693,10 @@
 			;if feature has custom specified derived code, compute and cache it
 			(if (contains_index attributes "derived_feature_code")
 				(let
-					(assoc
-						;create a map of label -> value for all the labels referenced in the code
-						parsed_code_string_labels_map (get_all_labels (parse (get attributes "derived_feature_code")))
-						raw_code_string (get attributes "derived_feature_code")
-					)
-
-					;grab the the largest value in the code to find the max lag
-					(declare (assoc max_row_lag (apply "max" (values parsed_code_string_labels_map))))
+					(assoc raw_code_string (get attributes "derived_feature_code") )
 
 					;add the max_row_lag attribute to this feature attribute
-					(assign "feature_attributes" (list feature "max_row_lag") max_row_lag)
+					(assign "feature_attributes" [ feature "max_row_lag" ] (call !MaxLagInCustomCode (assoc code_string raw_code_string)) )
 
 					;cache the parsed single and series react derived custom code methods for this feature
 					(assoc
@@ -668,41 +705,35 @@
 						"react"
 							(call !ParseDerivedFeatureCode (assoc
 								code_string raw_code_string
-								label_to_code
+								value
 									(lambda
 										;feature label offsets must all be 0 to derive valid values since we can only pull data from the
 										;one existing 'row' of data that is provided for computation. Any values other than 0 output a null.
-										(if (and (= label_value 0) (contains_index feature_values_map label_name))
-											(get feature_values_map label_name)
-											(null)
+										(if (and (= lag 0) (contains_index feature_values_map feature))
+											(get feature_values_map feature)
 										)
 									)
 							))
 						"series_react"
 							(call !ParseDerivedFeatureCode (assoc
 								code_string raw_code_string
-								label_to_code
+								value
 									(lambda
-										(if (and (>= (- series_row_index label_value) 0) (contains_index feature_index_map label_name))
+										(if (and (>= (- series_row_index lag) 0) (contains_index feature_index_map feature))
 											(let
 												(assoc
-													val
-														(get series_data (list (- series_row_index label_value) (get feature_index_map label_name)) )
+													val (get series_data [ (- series_row_index lag) (get feature_index_map feature) ] )
 												)
 
 												;encode datetime by converting string date time into seconds since epoch
-												(if (contains_index !featureDateTimeMap label_name)
+												(if (contains_index !featureDateTimeMap feature)
 													(if (!= (null) val)
-														(call !ConvertDateToEpoch (assoc date val feature label_name))
+														(call !ConvertDateToEpoch (assoc "date" val "feature" feature))
 													)
-
 													;not a datetime, return continuous value
 													val
 												)
 											)
-
-											;invalid input
-											(null)
 										)
 									)
 							))

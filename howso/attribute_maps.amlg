@@ -619,6 +619,11 @@
 						(assoc)
 					)
 				)
+				;cache the referenced features in the constraint
+				(if (contains_index bounds_map "constraint")
+					(assoc "constraint_features" (zip (get constraint_referenced_features_map feature)) )
+					(assoc)
+				)
 			)
 		))
 		boundaries_map
@@ -676,39 +681,26 @@
 						)
 
 						(= "custom" derive_type)
-						(let
-							(assoc
-								;create a map of label -> value for all the labels referenced in the code
-								parsed_code_string_labels_map (get_all_labels (parse (get attributes (list "auto_derive_on_train" "code"))))
-								raw_code_string (get attributes (list "auto_derive_on_train" "code"))
-							)
-							(declare (assoc
-								;parse code to determine which features are being sourced from
-								sourced_features (indices parsed_code_string_labels_map)
-							))
-
-							(map
-								(lambda
-									(let
-										(assoc
-											source_feature_name (current_value 1)
-											derived_features_list (get source_to_derived_feature_map (current_value 1))
-										)
-										(if (= (null) derived_features_list)
-											(assign (assoc derived_features_list (list)))
-										)
-										(accum (assoc
-											source_to_derived_feature_map (associate source_feature_name (replace (append derived_features_list feature)))
-										))
+						(map
+							(lambda
+								(let
+									(assoc
+										source_feature_name (current_value 1)
+										derived_features_list (get source_to_derived_feature_map (current_value 1))
 									)
+									(if (= (null) derived_features_list)
+										(assign (assoc derived_features_list (list)))
+									)
+									(accum (assoc
+										source_to_derived_feature_map (associate source_feature_name (replace (append derived_features_list feature)))
+									))
 								)
-								sourced_features
 							)
+							(call !FeaturesInCustomCode (assoc code_string (get attributes ["auto_derive_on_train" "code"]) ))
 						)
 					)
 				)
 			)
-
 		))
 		derived_features_map
 	)
@@ -906,12 +898,94 @@
 			)
 			(if constraint
 				;keep feature if it isn't referenced in the constraint
-				(not (contains_index
-					(get_all_labels (parse constraint))
-					feature
-				))
+				(not (contains_value (get constraint_referenced_features_map feature) feature))
 			)
 		))
 		(indices feature_attributes)
+	)
+
+	#!ComposeConstraintReferencedFeaturesMap
+	(filter (map
+		(lambda (let
+			(assoc
+				feature (current_index 1)
+				constraint (get (current_value 1) ["bounds" "constraint"])
+			)
+			(if constraint
+				(call !FeaturesInCustomCode (assoc code_string constraint))
+			)
+		))
+		feature_attributes
+	))
+
+	;output a list of all features referenced in custom code that uses (call value {feature <feature name>})
+	;to pull feature values by feature name and lag
+	;parameters:
+	; code_string: custom code string to parse and to determine all referenced features
+	#!FeaturesInCustomCode
+	(let
+		(assoc referenced_features [])
+		;recurse through the code and accumulate all feature names from any calls to value
+		(rewrite
+			(lambda
+				(if (= "call" (get_type_string (current_value)))
+					(if (= (lambda value) (first (current_value)))
+						(accum (assoc referenced_features (get (current_value 1) [1 "feature"]) ))
+						(current_value)
+					)
+					(current_value)
+				)
+			)
+			(parse code_string)
+		)
+		;output accumulated referenced features
+		(values referenced_features (true))
+	)
+
+	;output the maximum lag value referenced in custom code that uses (call value {feature <feature name> lag <lag value>})
+	;to pull feature values by feature name and lag
+	;parameters:
+	; code_string: custom code string to parse and to determine max lag value
+	#!MaxLagInCustomCode
+	(let
+		(assoc max_lag 0)
+		(rewrite
+			(lambda
+				(if (= "call" (get_type_string (current_value)))
+					(if (= (lambda value) (first (current_value)))
+						(if (> (get (current_value ) [1 "lag"]) max_lag)
+							(assign (assoc max_lag (get (current_value 1) [1 "lag"]) ))
+							(current_value)
+						)
+						(current_value)
+					)
+					(current_value)
+				)
+			)
+			(parse code_string)
+		)
+		max_lag
+	)
+
+	;returns list of all zero lag features specified in the code
+	;parameters:
+	; code_string: custom code string to parse to determine all features with zero lags
+	#!ZeroLagFeaturesInCustomCode
+	(let
+		(assoc zero_lag_features [])
+		(rewrite
+			(lambda
+				(if (and
+						(= "call" (get_type_string (current_value)))
+						(= (lambda value) (first (current_value)))
+						(= 0 (+ (or (get (current_value ) [1 "lag"]))) )
+					)
+					(accum (assoc zero_lag_features (get (current_value 1) [1 "feature"]) ))
+					(current_value)
+				)
+			)
+			(parse code_string)
+		)
+		(values zero_lag_features (true))
 	)
 )
