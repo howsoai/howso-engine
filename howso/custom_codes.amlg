@@ -20,9 +20,7 @@
 				(values
 					(apply "append" (map
 						(lambda
-							(indices (get_all_labels
-								(parse (get !featureAttributes [(current_value 1) "auto_derive_on_train" "code"]) )
-							))
+							(get !featureAttributes [(current_value 1) "auto_derive_on_train" "code_features"] )
 						)
 						derived_features
 					))
@@ -291,53 +289,53 @@
 		)
 	)
 
-	;constrains code to the specified list of allowed_opcodes
-	; then it finds any node that has a label and replaces it by a copy of label_to_code,
-	; replacing label_value with the value at the label and label_name with the label name
+	;rewrites the code in code_string by replacing all instances of (call value {feature <feature> lag <lag> }) with inlined
+	;code from the 'value' method, replacing all 'feature' with the actual feature and all 'lag' with the actual lag value
+	;e.g.:
+	;(call !ParseDerivedFeatureCode (assoc
+	;	code_string "(+ (call value {feature \"foo\" lag 2}) (call value {feature \"bar\"}) )"
+	;	value (lambda (if (> lag 0) (get my_map feature) -1))
+	;))
+	; outputs:
+	; (+ (if (> 2 0) (get my_map "foo") -1) (if (> 0 0) (get my_map "bar") -1))
+	;
+	;parameters:
+	; code_string: code to parse as a string
+	; value: method to inline and replace each instance of (call value ...) in the specified code
 	#!ParseDerivedFeatureCode
-	(declare
-		(assoc
-			code_string (null)
-			label_to_code (null)
-		)
+	(rewrite
+		(lambda
+			(if (= "call" (get_type_string (current_value)))
+				(if (= (lambda value) (first (current_value)))
+					;if this node is (call value {feature .. lag ...}), rewrite it
+					;by pulling out the actual feature and lag values and inlining the code from the 'value' method
+					(let
+						(assoc
+							feature (get (current_value 1) [1 "feature"])
+							lag (+ (or (get (current_value 1) [1 "lag"]) ) )
+						)
+						(rewrite
+							(lambda
+								;replace instance of 'feature' with actual string value, not a reference, by concatenating
+								(if (= (current_value) (lambda feature))
+									(concat feature)
 
-		(declare (assoc code (parse code_string)))
+									;replace instance of 'lag' with actual lag value, not a reference, by using get_value
+									(= (current_value) (lambda lag))
+									(get_value lag)
 
-		(rewrite
-			(lambda (let
-				(assoc
-					node (current_value 1)
-					label_name (first (get_labels (current_value 1)))
-				)
-
-				(if
-					;if not a label, just use
-					(not label_name)
-					node
-
-					;else need to rewrite label_to_code
-					(rewrite
-						(lambda (let
-							(assoc to_replace_node (current_value 1))
-							(if
-								;replaces instance of 'label_value' found in the passed in label_to_code with the actual node value (i.e., offset)
-								(= to_replace_node (lambda label_value))
-								(get_value node)
-
-								;replaces instance of 'label_name' found in the passed in label_to_code with the actual name of the label (i.e., feature)
-								(= to_replace_node (lambda label_name))
-								(concat label_name)
-
-								to_replace_node
+									(current_value)
+								)
 							)
-							;to_replace_node
-						))
-						label_to_code
+							value
+						)
 					)
+					(current_value)
 				)
-			))
-			code
+				(current_value)
+			)
 		)
+		(parse code_string)
 	)
 
 	;Derive feature values from the provided features and values using either each derived feature's custom code string or predefined operations and output a list of computed values.
@@ -522,13 +520,7 @@
 							;parse it into code, requires passing case as a map of feature name to value
 							(call !ParseDerivedFeatureCode (assoc
 								code_string (current_value 1)
-								label_to_code
-									(lambda
-										(if (= (lambda label_value) 0)
-											;pull the feature value
-											(get case (lambda label_name))
-										)
-									)
+								value (lambda (if (= lag 0) (get case feature) ) )
 							))
 						)
 						feature_pre_process_code_map
@@ -543,13 +535,7 @@
 							;parse it into code, requires passing case as a map of feature name to value
 							(call !ParseDerivedFeatureCode (assoc
 								code_string (current_value 1)
-								label_to_code
-									(lambda
-										(if (= (lambda label_value) 0)
-											;pull the feature value
-											(get case (lambda label_name))
-										)
-									)
+								value (lambda (if (= lag 0) (get case feature) ) )
 							))
 						)
 						feature_post_process_code_map
