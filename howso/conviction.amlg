@@ -528,6 +528,15 @@
 							)
 					))
 				)
+
+				;find and store the largest referenced lag value among derived_context_features
+				(declare (assoc
+					ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
+				))
+				(declare (assoc
+					largest_max_row_lag (or 0 (apply "max" (values ts_feature_lag_amount_map)))
+				))
+
 				(declare (assoc
 					similarity_convictions_map
 						||(map
@@ -540,6 +549,8 @@
 										weight_feature weight_feature
 										case_id (current_index 1)
 										distance_contribution_feature distance_contribution
+										largest_max_row_lag largest_max_row_lag
+										ts_feature_lag_amount_map ts_feature_lag_amount_map
 									))
 									"similarity_conviction"
 								)
@@ -653,6 +664,8 @@
 	; case_id: optional, id of case to compute similarity conviction for
 	; react_group: optional, default false. if true this is being called from react_group and should compute local dc map
 	; distance_contribution_feature: name of feature that holds stored distance contributions
+	; largest_max_row_lag: number, maximum lag specified for a time series dataset
+	; ts_feature_lag_amount_map: assoc of lag/rate/delta feature -> lag/order amount for time series flows
 	#!SimilarityConviction
 	(declare
 		(assoc
@@ -664,6 +677,8 @@
 			case_id (null)
 			react_group (false)
 			distance_contribution_feature "distance_contribution"
+			largest_max_row_lag 0
+			ts_feature_lag_amount_map (null)
 		)
 
 		(declare (assoc
@@ -786,9 +801,36 @@
 				)
 		))
 
+		;time series dataset, check if this case is one of initial cases in a series and has many nulls due to many lags
+		;if so, dampen the anomalousness of this case by multiplying the computed SC by: num_features / (num_features - num_affected_lag_features)
+		(declare (assoc
+			ts_initial_series_cases_scale
+				(if !tsTimeFeature
+					(let
+						(assoc case_series_index (retrieve_from_entity case_id ".series_index"))
+						;dampen the anomalousness
+						(if (< case_series_index largest_max_row_lag)
+							(/
+								(size features)
+								(-
+									(size features)
+									;affected lag features are those whose lag is larger than the current index
+									(size (filter
+										(lambda (> (current_value) case_series_index))
+										ts_feature_lag_amount_map
+									))
+								)
+							)
+							1
+						)
+					)
+					1
+				)
+		))
+
 		;output similarity conviction as ratio of expected (avg local cases) / calculated case distance contribution
 		(assoc
-			"similarity_conviction" (/ (generalized_mean local_distance_contributions_map) case_dc)
+			"similarity_conviction" (* (/ (generalized_mean local_distance_contributions_map) case_dc) ts_initial_series_cases_scale)
 			"distance_contribution" case_dc
 		)
 	)
