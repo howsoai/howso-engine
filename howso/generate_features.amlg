@@ -395,7 +395,7 @@
 			(= "rate_accumulation" derivation_type)
 			(seq
 				(assign (assoc
-					output_string (concat "(+ (call value {feature \"." feature "_lag_1\" }) (* (call value {feature \"." time_feature "_delta_1\" }) (call value {feature \"." feature "_rate_1\" }) )" )
+					output_string (concat "(if (> (call value {feature \"." time_feature "_delta_1\" }) 0) (+ (call value {feature \"." feature "_lag_1\" }) (* (call value {feature \"." time_feature "_delta_1\" }) (call value {feature \"." feature "_rate_1\" }) )" )
 				))
 				(if (> order 1)
 					(accum (assoc
@@ -410,7 +410,7 @@
 					))
 				)
 				(accum (assoc
-					output_string ")"
+					output_string (concat ") (+ (call value {feature \"." feature "_lag_1\"}) (call value {feature \"." feature "_delta_1\"})))")
 				))
 			)
 
@@ -523,44 +523,46 @@
 								num_orders (if (contains_index ts_attributes "order") (get ts_attributes "order") 1)
 							)
 
-							(if (= "delta" (get ts_attributes "type"))
-								(let
-									(assoc
-										delta_sub_feature_names
-											(range
-												(lambda (concat "." feature "_delta_" (current_index)) )
-												1 num_orders 1
-											)
-									)
-
-									(accum (assoc derived_feature_attributes (call !MakeDeltaFeatureAttributes) ))
-
-									;time feature deltas are ordered first, in descending order
-									(if (= feature time_feature)
-										(assign (assoc
-											delta_features (append (reverse delta_sub_feature_names) delta_features)
-											train_delta_features (append (reverse delta_sub_feature_names) train_delta_features)
-										))
-
-										(seq
-											(accum (assoc
-												train_delta_features delta_sub_feature_names
-												;append all feature names for orders that do not need to be derived, i.e., > derived_orders
-												delta_features (unzip delta_sub_feature_names (range derived_orders (- num_orders 1)))
-											))
-											;prepend features names for orders <= derived_orders to the front of the list in in descending order
-											(assign (assoc
-												derived_order_features
-													(append
-														(reverse (filter (lambda (< (current_index) derived_orders)) delta_sub_feature_names) )
-														derived_order_features
-													)
-											))
+							;always compute deltas, even for rate-type TS features
+							(let
+								(assoc
+									delta_sub_feature_names
+										(range
+											(lambda (concat "." feature "_delta_" (current_index)) )
+											1 num_orders 1
 										)
-									)
 								)
 
-								(= "rate" (get ts_attributes "type"))
+								(accum (assoc derived_feature_attributes (call !MakeDeltaFeatureAttributes) ))
+
+								;time feature deltas are ordered first, in descending order
+								(if (= feature time_feature)
+									(assign (assoc
+										delta_features (append (reverse delta_sub_feature_names) delta_features)
+										train_delta_features (append (reverse delta_sub_feature_names) train_delta_features)
+									))
+
+									(seq
+										(accum (assoc
+											train_delta_features delta_sub_feature_names
+											;append all feature names for orders that do not need to be derived, i.e., > derived_orders
+											delta_features (unzip delta_sub_feature_names (range derived_orders (- num_orders 1)))
+										))
+										;prepend features names for orders <= derived_orders to the front of the list in in descending order
+										(assign (assoc
+											derived_order_features
+												(append
+													(reverse (filter (lambda (< (current_index) derived_orders)) delta_sub_feature_names) )
+													derived_order_features
+												)
+										))
+									)
+								)
+							)
+
+
+							(if (= "rate" (get ts_attributes "type"))
+								;rates. Made for all continuous features except the time feature
 								(let
 									(assoc
 										rate_sub_feature_names
@@ -629,6 +631,23 @@
 						(assoc
 							"type" "continuous"
 							"bounds" (assoc "min" 0.0 "max" 1.0)
+						)
+					;counter for following cases with the same time value within the same series
+					".synchronous_counter"
+						(assoc
+							"type" "continuous"
+							;if previous case's counter is greater than 0 decrement, otherwise generate a new value
+							"bounds" (assoc "min" 0.0 "allow_null" (false))
+							"decimal_places" 0
+						)
+					".synchronous_counter_lag_1"
+						(assoc
+							"type" "continuous"
+							"bounds" (assoc "min" 0.0)
+							"decimal_places" 0
+							"derived_feature_code" "(call value {feature \".synchronous_counter\" lag 1})"
+							"ts_type" "lag"
+							"parent" ".synchronous_counter"
 						)
 				)
 		))
