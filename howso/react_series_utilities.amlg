@@ -424,6 +424,7 @@
 			;track progress length of series being generated if it's a stop condition in the series_stop_map
 			track_progress (contains_index series_stop_map ".series_progress")
 			total_progress 0
+			prev_sync_counter (null)
 			max_order (null)
 			modified_feature_bounds_map (assoc)
 			derived_context_features derived_context_features
@@ -577,6 +578,7 @@
 						retries 0
 						previous_row_failed (false)
 						series_failed (false)
+						prev_sync_counter (null)
 					))
 
 					(if output_details
@@ -728,6 +730,32 @@
 					;if first case of series and using continue_series, start with computed series_progress
 					(if (and use_initial_context_features initial_existing_progress)
 						(assign (assoc current_case_map (set current_case_map ".series_progress" initial_existing_progress)))
+					)
+
+					;SYNCHRONOUS COUNTER LOGIC
+					(if (> last_series_index 0)
+						(seq
+							(assign (assoc
+								prev_sync_counter
+									(get
+										(zip features (get series_data -2)) ;not the current case, but the previous case
+										!tsSynchronousCounterFeature
+									)
+							))
+
+							(if (> prev_sync_counter 0)
+								;if previously greater than zero, decrement and set this case to that value (add it to context as well)
+								;and set time delta to zero + remove from action
+								(accum (assoc
+									current_case_map
+										(associate
+											!tsSynchronousCounterFeature (- prev_sync_counter 1)
+											!tsTimeDeltaFeature 0
+										)
+									react_context_features [!tsTimeDeltaFeature !tsSynchronousCounterFeature]
+								))
+							)
+						)
 					)
 
 					;filter out action (rate and delta) features that are dependent on lags that were skipped due to referencing rows that have not been synthed yet
@@ -1724,6 +1752,30 @@
 					)
 				)
 		))
+
+		;more synchronous counter logic
+		;if prev_sync_counter is 0, then we need to make sure we generate a nonzero time-delta
+		(if (= prev_sync_counter 0)
+			(assign (assoc
+				modified_feature_bounds_map
+					(set
+						modified_feature_bounds_map
+						[!tsTimeDeltaFeature "min"]
+						(if (contains_index !featureDateTimeMap !tsTimeFeature)
+							(/ (get !featureDateTimeMap [!tsTimeFeature "min_nonzero_delta"]) 2)
+							(get
+								(first (compute_on_contained_entities
+									(query_not_equals !tsTimeDeltaFeature 0)
+									(query_min !tsTimeDeltaFeature)
+									(query_exists !tsTimeDeltaFeature)
+								))
+								!tsTimeDeltaFeature
+							)
+						)
+					)
+			))
+		)
+
 
 		(assign (assoc
 			react_output
