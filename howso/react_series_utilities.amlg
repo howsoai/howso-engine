@@ -315,6 +315,9 @@
 			original_desired_conviction desired_conviction
 			regenerate_series (= "always" generate_new_cases)
 			series_generate_attempts 0
+			has_stationary_features (size (get !tsFeaturesMap "stationary_features"))
+			;assoc of stationary feature -> value that needs to be backfilled to the whole series at the end
+			stationary_features_to_backfill_map {}
 		))
 
 		(declare (assoc
@@ -960,6 +963,40 @@
 						)
 					)
 
+					;backfill values if a stationary feature triggered a change
+					(if has_stationary_features
+						(map
+							(lambda (let
+								(assoc stationary_feature (current_value 1))
+								;backfill if the new stationary feature value does not match the previous one (from the second-to-last row of series_data)
+								(if (and
+										last_series_index
+										(!=
+											(get current_case_map stationary_feature)
+											(get series_data [-2 (get feature_index_map stationary_feature)])
+										)
+									)
+									(let
+										(assoc
+											new_value (get current_case_map stationary_feature)
+											feature_index (get feature_index_map stationary_feature)
+										)
+										(assign (assoc
+											series_data
+												(map
+													(lambda (set (current_value) feature_index new_value) )
+													series_data
+												)
+										))
+										;add value to backfill all cases in entire series at the end
+										(accum (assoc stationary_features_to_backfill_map (associate stationary_feature new_value) ))
+									)
+								)
+							))
+							(get !tsFeaturesMap "stationary_features")
+						)
+					)
+
 					;return series_data so it's stored as previous_result for accumulation in the next iteration of the while loop
 					;and explanation details if requested
 					(if output_details
@@ -1088,6 +1125,43 @@
 				;grab each row of series_data and store into entire_series_data
 				(assign (assoc entire_series_data (map (lambda (get (current_value) "series_data")) entire_series_data) ))
 			)
+		)
+
+		;backfill entire entire_series_data with the stationary feature value(s)
+		(if (size stationary_features_to_backfill_map)
+			(assign (assoc
+				entire_series_data
+					(if (= 1 (size stationary_features_to_backfill_map))
+						(let
+							(assoc
+								feature_index (get feature_index_map (first (indices stationary_features_to_backfill_map)))
+								stationary_value (first stationary_features_to_backfill_map)
+							)
+							(map
+								(lambda (set (current_value) feature_index (replace stationary_value)))
+								entire_series_data
+							)
+						)
+
+						;else multiple stationary features, need to weave the values for the set opcode to set them all at once
+						(let
+							(assoc
+								woven_indices_and_values
+									(weave
+										(unzip feature_index_map (indices stationary_features_to_backfill_map))
+										(values stationary_features_to_backfill_map)
+									)
+							)
+							(map
+								(lambda
+									;results in the format of: (set [series_data_row] idx1 value1 idx2 value2 ...)
+									(apply "set" (append [(current_value 1)] woven_indices_and_values))
+								)
+								entire_series_data
+							)
+						)
+					)
+			))
 		)
 
 		(if (get details "series_residuals")
