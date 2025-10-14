@@ -1,0 +1,245 @@
+(null
+	;react_series_aggregate runs a bunch of series generations
+	;{long_running (true) statistically_idempotent (true) read_only (true)}
+	#react_series_aggregate
+	(declare
+		;returns {type "assoc"}
+		(assoc
+			;{type "list" values "string"}
+			;list of series ID features used to uniquely select a trained series.
+			;	This list should contain all ID features, but the order can vary depending on the order of the
+			;	features values given in series_id_values.
+			series_id_features (list)
+			;{type "list" values {type "list" min_size 1 values "any"}}
+			;2d-list of values whose order corresponds to the list of features defined in series_id_features, used to identify trained series.
+			series_id_values (null)
+			;{type "assoc"}
+			;assoc of feature -> stop conditions:
+			;	for continuous features:  { feature:  { "min" : val,  "max": val } } - stops series when feature value exceeds max or is smaller than min
+			;	for nominal features:  { feature:  { "values" : ['val1', 'val2' ]} }  - stops series when feature value matches any of the values listed
+			;	specifying ".series_progress" with a value between 0 and 1.0 corresponding to percent completion e.g., { ".series_progress" : .95 } -
+			;		stops series when it progresses at or beyond 95%.
+			; one assoc is used per series.
+			series_stop_map (assoc)
+			;{type "string" enum ["fixed" "dynamic" "no"]}
+			;Controls how closely generated series should follow existing series (plural).
+			;	Choices are: "fixed", "dynamic" or "no". If "fixed", tracks the particular relevant series ID. If "dynamic", tracks the particular
+			;	relevant series ID, but is allowed to change the series ID that it tracks based on its current context. If "no", does not track any particular series ID.
+			series_id_tracking "fixed"
+			;series selection conditions
+			;{type "assoc"}
+			series_selection_condition (null)
+			;{type "list" values ["number" "string"]}
+			;time step values at which to begin synthesis for each series, applicable only for time series.
+			init_time_steps (null)
+			;{type "list" values ["number" "string"]}
+			;time step values at which to end synthesis for each series, applicable only for time series.
+			final_time_steps (null)
+			;{type "list" values "string"}
+			;list of feature names corresponding to values in each row of action_values
+			action_features (list)
+			;{type "list" values "string"}
+			;list of additional features to return with audit data from details
+			extra_features (null)
+			;{ref "UseCaseWeights"}
+			;flag, whether to use case weights or not. If unspecified will automatically select based on cached parameters
+			use_case_weights (null)
+			;{type "string"}
+			;name of the feature that stores case weights
+			weight_feature ".case_weight"
+			;{ref "DesiredConviction"}
+			;If null, will do a discriminative react. If specified, will do a generative react
+			;	For Generative React, value of desired avg conviction of generated cases, in the range of (0,infinity] with 1 as standard
+			;	larger values will increase the variance (or creativity) of the generated case from the existing model
+			;	smaller values will decrease the variance (or creativity) of the generated case from the existing model
+			desired_conviction (null)
+			;{type "number"}
+			;number of series to use in aggregation
+			num_samples 50
+			;{ref "ReactDetails"}
+			;see the description for the details parameter of #react
+			details (null)
+			;{type "boolean"}
+			;flag, if true order of generated feature values will match the order of features
+			ordered_by_specified_features (null)
+			;{type "boolean"}
+			;flag, if true will internally generate values for all trained features and derived features while generating a series.
+			;if false, will only generate values for the features specified as action features and the features necessary to derive them, reducing
+			;the expected runtime but possibly reducing accuracy.
+			use_all_features (true)
+			;{type "assoc" additional_indices {ref "FeatureBounds"}}
+			;assoc of :
+			;	{ feature : { "min": a, "max": b, "allow_null": false/true } }
+			;	to ensure that specified features' generated values stay in bounds
+			;	for nominal features instead of min/max it's a set of allowed values, ie:
+			;	{ feature: { "allowed" : [ "value1", "value2" ... ] }, "allow_null": false/true }
+			;	allow_null - default is true, if true nulls may be generated per their distribution in the data
+			feature_bounds_map (assoc)
+			;{ref "Condition"}
+			;A mapping of conditions for features that will be used to constrain the queries used to find the most similar
+			;trained cases to the given contexts.
+			;assoc of feature->value(s).
+			;	  no value or (null) = select cases where that feature is (null)/missing
+			;	- for continuous or numeric ordinal features:
+			;	  one value = must equal exactly the value or be close to it for fuzzy match
+			;	  two values = inclusive between, supports (null) on either side for less than/greater than conditions
+			;	  [(null) (null)] = select all non-null cases
+			;	- for nominal or string ordinal features:
+			;	  n values = must match any of these values exactly
+			constraints (null)
+			;{type "assoc" additional_indices {ref "GoalFeatures"}}
+			; assoc of :
+			;		{ feature : { "goal" : "min"/"max", "value" : value }}
+			;		A mapping of feature name to the goals for the feature, which will cause the react to achieve the goals as appropriate
+			;		for the context.  This is useful for conditioning responses when it is challenging or impossible to know appropriate
+			;		values ahead of time, such as maximizing the reward or minimizing cost for reinforcement learning, or conditioning a
+			;		forecast based on attempting to achieve some value.  Goal features will reevaluate the inference for the given context
+			;		optimizing for the specified goals. Valid keys in the map are:
+			;		"goal": "min" or "max", will make a prediction while minimizing or maximizing the value for the feature or
+			;		"value" : value, will make a prediction while approaching the specified value
+			;	note: nominal features only support 'value', 'goal' is ignored.
+			;		  for non-nominals, if both are provided, only 'goal' is considered.
+			goal_features_map (assoc)
+			;{type "assoc" additional_indices "string"}
+			;A mapping of feature name to custom code strings that will be evaluated to update the value of the feature they are mapped from after inference/derivation.
+			;In the time-series synthesis, these custom codes are executed just after the original feature value is derived or synthed, but before
+			;any other features would be derived or generated from the value. This means that the result of this custom code may be used as the
+			;context in the generation or derivation of other feature values within a single timestep. Custom code will be able to access feature
+			;values of the current time step as well as previously generated timesteps.
+			feature_post_process_code_map (null)
+		)
+
+		(assign (assoc
+			series_id_features
+				(if (size series_id_features)
+					series_id_features
+
+					(get !tsFeaturesMap "series_id_features")
+				)
+		))
+
+		(assign (assoc
+			series_id_values
+				(if (size series_id_values)
+					;sample from them with replacement
+					(unzip
+						series_id_values
+						(map
+							(lambda (floor (rand (size series_id_values))))
+							(range 1 num_samples)
+						)
+					)
+
+					;else: Randomly select from all series IDs with replacement
+					(let
+						(assoc
+							all_series_ids
+								(values
+									(map
+										(lambda (retrieve_from_entity (current_value) series_id_features))
+										;series_selection_condition can be (null)
+										(call !AllCases (assoc
+											query_conditions
+												(if series_selection_condition
+													(call !GetQueryByCondition (assoc
+														condition series_selection_condition
+													))
+												)
+										))
+									)
+									(true)
+								)
+						)
+
+						(unzip
+							all_series_ids
+							(map
+								(lambda (floor (rand (size all_series_ids))))
+								(range 1 num_samples)
+							)
+						)
+					)
+				)
+		))
+
+		(declare (assoc
+			needed_action_features
+				(append action_features series_id_features [!tsTimeFeature])
+		))
+
+		(declare (assoc
+			batch_react_series_response
+				(call react_series (assoc
+					series_id_features series_id_features
+					series_id_values series_id_values
+					series_stop_maps [series_stop_map]
+					series_id_tracking series_id_tracking
+					continue_series (true)
+
+					action_features needed_action_features
+					details (null)
+					use_case_weights use_case_weights
+					weight_feature weight_feature
+
+					desired_conviction desired_conviction
+					feature_bounds_map feature_bounds_map
+					goal_features_map goal_features_map
+					ordered_by_specified_features ordered_by_specified_features
+					output_new_series_ids (false)
+				))
+		))
+
+		(if (= (first batch_react_series_response) 0)
+			;an error was raised, just return error
+			(conclude batch_react_series_response)
+		)
+
+		(declare (assoc
+			series_response_feature_index_map
+				(zip
+					(get batch_react_series_response [1 "payload" "action_features"])
+					(indices (get batch_react_series_response [1 "payload" "action_features"]))
+				)
+		))
+		(declare (assoc
+			time_feature_index (get series_response_feature_index_map !tsTimeFeature)
+			time_feature_is_datetime (contains_index !featureDateTimeMap !tsTimeFeature)
+		))
+
+		(declare (assoc
+			min_time_val
+				(apply "min" (map
+					(lambda
+						(if time_feature_is_datetime
+							(first (call !ConvertFromInput (assoc
+								features [!tsTimeFeature]
+								feature_values [(get (current_value 2) [0 time_feature_index])]
+							)))
+
+							(get (current_value) [0 time_feature_index])
+						)
+					)
+					(get batch_react_series_response [1 "payload" "action_values"])
+				))
+			max_time_val
+				(apply "max" (map
+					(lambda
+						(if time_feature_is_datetime
+							(first (call !ConvertFromInput (assoc
+								features [!tsTimeFeature]
+								feature_values [(get (current_value 2) [-1 time_feature_index])]
+							)))
+
+							(get (current_value) [-1 time_feature_index])
+						)
+					)
+					(get batch_react_series_response [1 "payload" "action_values"])
+				))
+		))
+
+
+		(call !Return (assoc
+			payload (get batch_react_series_response [1 "payload"])
+		))
+	)
+)
