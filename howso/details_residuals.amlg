@@ -6,8 +6,8 @@
 	(declare
 		(assoc
 			relevant_features (append context_features action_features)
-			regional_cases_map
-				(compute_on_contained_entities
+			local_case_ids
+				(contained_entities
 					filtering_queries
 					(query_nearest_generalized_distance
 						k_parameter
@@ -27,6 +27,81 @@
 						!numericalPrecision
 					)
 				)
+			local_feature_case_id_map (null)
+		)
+
+		;since full residuals computes residual per-feature for all the cases in the local space, if all or most cases have only nulls
+		;for any feature, query for additional similar cases where the value is not null so that a local residual can be computed correctly
+		(if (not robust_residuals)
+			(let
+				(assoc
+					non_null_feature_cases_map
+						;create a map of feature -> list of cases with non-null values, for features where all/most cases were null
+						(filter (map
+							(lambda (let
+								(assoc feature (current_index 1))
+
+								;filter out nulls from local cases
+								(declare (assoc
+									local_not_null_cases (filter (lambda (retrieve_from_entity (current_value) feature)) local_case_ids)
+									num_cases_to_query
+										;if k is a number, use the smaller of 5 or the k, else grab the min_k from the k_parameter tuple
+										(if (~ 0 k_parameter) (min 5 k_parameter) (get k_parameter 1))
+								))
+
+								;if there are less than num_cases_to_query non-null values, need to find more local cases with non-nulls
+								(if (< (size local_not_null_cases) num_cases_to_query)
+									(append
+										local_not_null_cases
+										(contained_entities
+											filtering_queries
+											(if (size local_not_null_cases) (query_not_in_entity_list local_not_null_cases) [])
+											(query_not_equals feature (null))
+											(query_nearest_generalized_distance
+												;if there are some local cases with non-null values, don't need to query for that many
+												(- num_cases_to_query (size local_not_null_cases) )
+												context_features
+												context_values
+												p_parameter
+												feature_weights
+												!queryDistanceTypeMap
+												query_feature_attributes_map
+												feature_deviations
+												(null)
+												dt_parameter
+												(if valid_weight_feature weight_feature (null))
+												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+												"fixed rand seed"
+												(null)
+												!numericalPrecision
+											)
+										)
+									)
+								)
+							))
+
+							(remove (zip features) (indices !inactiveFeaturesMap))
+						))
+				)
+
+				;cases had to be added to the original local_case_ids to account for null values in the local space
+				(if (size non_null_feature_cases_map)
+					(assign (assoc
+						;create a map of feature -> case ids
+						local_feature_case_id_map
+							(map
+								(lambda
+									(if (contains_index non_null_feature_cases_map (current_index))
+										(get non_null_feature_cases_map (current_index))
+										;else keep the original case ids
+										local_case_ids
+									)
+								)
+								(remove (zip features) (indices !inactiveFeaturesMap))
+							)
+					))
+				)
+			)
 		)
 
 		(declare (assoc
@@ -38,7 +113,8 @@
 								;only the features from the details
 								context_features relevant_features
 								features (or details_features relevant_features)
-								case_ids (indices regional_cases_map)
+								case_ids local_case_ids
+								local_feature_case_id_map local_feature_case_id_map
 								regional_data_only (true)
 								robust_residuals robust_residuals
 								compute_all_statistics compute_all_statistics
@@ -92,7 +168,7 @@
 	(declare
 		(assoc
 			relevant_features (append context_features action_features)
-			regional_case_ids
+			local_case_ids
 				(contained_entities
 					filtering_queries
 					(query_nearest_generalized_distance
@@ -123,7 +199,7 @@
 							(call !CalculateFeatureResiduals (assoc
 								features (or details_features relevant_features)
 								context_features relevant_features
-								case_ids regional_case_ids
+								case_ids local_case_ids
 								regional_data_only (true)
 								robust_residuals "deviations"
 								;use the same hyperparameters that were used to make the original prediction
@@ -462,7 +538,7 @@
 											; 1 / (2 * max_k)
 											(/
 												1
-												(if (~ 0 k_paraameter) k_parameter (get k_parameter 2) )
+												(if (~ 0 k_parameter) k_parameter (get k_parameter 2) )
 												2
 											)
 										)
@@ -611,35 +687,75 @@
 								residual_feature (current_index 1)
 								;context features without the residual feature
 								local_context_features (indices (remove context_map (current_index 1)))
+								num_cases_to_query
+									;if k is a number, use the smaller of 5 or the k, else grab the min_k from the k_parameter tuple
+									(if (~ 0 k_parameter) (min 5 k_parameter) (get k_parameter 1))
 							)
+
+							(declare (assoc
+								local_cases_tuple
+									(compute_on_contained_entities
+										filtering_queries
+										(query_nearest_generalized_distance
+											(replace k_parameter)
+											(replace local_context_features)
+											(replace (unzip case_value_map local_context_features))
+											(replace p_parameter)
+											(replace feature_weights)
+											(replace !queryDistanceTypeMap)
+											(replace query_feature_attributes_map)
+											(replace feature_deviations)
+											(null)
+											(replace dt_parameter)
+											(if valid_weight_feature (replace weight_feature) (null))
+											;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+											"fixed rand seed"
+											(null)
+											(replace !numericalPrecision)
+											residual_feature
+										)
+									)
+							))
+
+							(declare (assoc
+								local_case_ids
+									;if there are less than num_cases_to_query cases in local space that are non-null,
+									;find num_cases_to_query cases with non-null values to be able to compute a residual value
+									(if (>= (size (filter (last local_cases_tuple))) num_cases_to_query)
+										(first local_cases_tuple)
+
+										(contained_entities
+											filtering_queries
+											(query_not_equals residual_feature (null))
+											(query_nearest_generalized_distance
+												num_cases_to_query
+												(replace local_context_features)
+												(replace (unzip case_value_map local_context_features))
+												(replace p_parameter)
+												(replace feature_weights)
+												(replace !queryDistanceTypeMap)
+												(replace query_feature_attributes_map)
+												(replace feature_deviations)
+												(null)
+												(replace dt_parameter)
+												(if valid_weight_feature (replace weight_feature) (null))
+												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+												"fixed rand seed"
+												(null)
+												(replace !numericalPrecision)
+												residual_feature
+											)
+										)
+									)
+							))
+
 							(get
 								(call !ExpandResidualValuesToUncertainty  (assoc
 									feature_residuals_map
 										(call !CalculateFeatureResiduals (assoc
 											features (append local_context_features residual_feature)
 											target_residual_feature residual_feature
-											case_ids
-												;list of local cases
-												(indices (compute_on_contained_entities
-													filtering_queries
-													(query_nearest_generalized_distance
-														(replace k_parameter)
-														(replace local_context_features)
-														(replace (unzip case_value_map local_context_features))
-														(replace p_parameter)
-														(replace feature_weights)
-														(replace !queryDistanceTypeMap)
-														(replace query_feature_attributes_map)
-														(replace feature_deviations)
-														(null)
-														(replace dt_parameter)
-														(if valid_weight_feature (replace weight_feature) (null))
-														;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-														"fixed rand seed"
-														(null)
-														(replace !numericalPrecision)
-													)
-												))
+											case_ids local_case_ids
 											regional_data_only (true)
 											robust_residuals (false)
 											focal_case ignore_case
