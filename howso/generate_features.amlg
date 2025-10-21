@@ -1,22 +1,21 @@
 ;Contains methods to generate features or feature values as defined by feature attributes.
 (null
 
-	;creates the built-in .series_progress, .series_progress_delta and .series_index features
+	;creates the built-in .series_index, .reverse_series_index and possibly the .time_to_horizon features
 	;
 	;parameters:
-	; feature: name of feature to add and populate
 	; series_id_features: list of feature names that specify the series id for which to derive this feature.
 	;		If more than one specified, a unique 'series id' is then the conjuction of the specified ids.
 	;		E.g., if 'sender' and 'reciever' are specified, a 'series id' is then each unique pair of sender-reciever.
 	; time_feature: name of series id's time feature which to use to determine the start or end flag
-	#!CreateSeriesProgressFeatures
+	#!CreateSeriesIndexFeatures
 	(declare
 		(assoc
-			feature ""
 			series_id_features (list)
 
 			;not parameters
 			series_time_feature !tsTimeFeature
+			is_universal !tsTimeFeatureUniversal
 		)
 
 		;list of assocs of cases for each series, where each assoc of cases is : case id -> time_feature -> value
@@ -37,10 +36,21 @@
 				)
 		))
 
+		(declare (assoc
+			max_time_value
+				(if is_universal
+					(get
+						(first (compute_on_contained_entities
+							(query_max !tsTimeFeature)
+							(query_exists !tsTimeFeature)
+						))
+						!tsTimeFeature
+					)
+				)
+		))
+
 		;iterate over the list of series groups
-		;for each series create an assoc of case id -> pair of progress % , delta_to_previous_time:
-		; a) sort by time feature
-		; b) compute each case's progress and delta
+		;for each series create an assoc of case id -> [ index,  reverse-index, time-to-horizon (if universal time)]:
 		(declare (assoc
 			series_cases_group_map
 				;convert list of assocs into a flat assoc
@@ -73,37 +83,27 @@
 							))
 
 							(declare (assoc sorted_time_values (unzip series_cases_map sorted_case_ids) ))
+							(declare (assoc time_to_horizon (- max_time_value (last sorted_time_values)) ))
 
-							(declare (assoc
-								range (- (last sorted_time_values) (first sorted_time_values))
-								previous_value (first sorted_time_values)
-								first_value (first sorted_time_values)
-								fixed_delta (/ 1 (- (size sorted_time_values) 1))
-							))
-
-							;create an assoc of case_id -> [ progress%, index, delta_to_previous ]
-							;where progress is: 0-based value / range
+							;create an assoc of case_id -> [ index,  reverse-index, time-to-horizon (if universal time feature) ]
 							(zip
 								sorted_case_ids
 								(map
-									(lambda (let
-										(assoc
-											progress (/ (- (current_value 1) first_value) range)
-											;delta is the % change,  don't allow 0, use the fixed delta instead
-											delta (or (/ (- (current_value 1) previous_value) range) fixed_delta)
-										)
-
-										;if the series is of length 1, set progress and delta to be 1 and prevent a divide by 0
-										(if (= 0 range)
-											(assign (assoc
-												progress 1
-												delta 1
-											))
-										)
-										(assign (assoc previous_value (current_value 1)))
+									(lambda
 										;output the tuple
-										[progress (current_index 1) delta]
-									))
+										(if is_universal
+											[
+												(current_index 1) ;index
+												(- (size sorted_case_ids) (current_index 1) 1) ;reverse index
+												time_to_horizon ;time-to-horizon
+											]
+
+											[
+												(current_index 1) ;index
+												(- (size sorted_case_ids) (current_index 1) 1) ;reverse index
+											]
+										)
+									)
 									sorted_time_values
 								)
 							)
@@ -113,28 +113,42 @@
 				)
 		))
 
-		;store the progress and delta value at the same time into each case
-		;by iterating over assoc of:case_id -> [ progress%, index, delta_to_previous ]
+		;store the indices all at once
+		;by iterating over assoc of:case_id -> [ index,  reverse-index, time-to-horizon ]
 		(map
 			(lambda
 				;see whether the entity has the label
-				(if (contains_label (current_index) feature)
+				(if (contains_label (current_index) ".series_index")
 					(assign_to_entities
 						(current_index)
-						(associate
-							feature (first (current_value 1))
-							".series_index" (get (current_value 1) 1)
-							(concat feature "_delta") (last (current_value 1))
+						(if is_universal
+							(associate
+								".series_index" (get (current_value 1) 0)
+								".reverse_series_index" (get (current_value 1) 1)
+								".time_to_horizon" (get (current_value 1) 2)
+							)
+
+							(associate
+								".series_index" (get (current_value 1) 0)
+								".reverse_series_index" (get (current_value 1) 1)
+							)
 						)
 					)
 
 					;else need to append the label to the entity
 					(accum_entity_roots
 						(current_index)
-						(list
-							(set_labels (first (current_value 1)) (list feature))
-							(set_labels (get (current_value 1) 1) (list ".series_index"))
-							(set_labels (last (current_value 1)) (list (concat feature "_delta")) )
+						(if is_universal
+							(list
+								(set_labels (get (current_value 1) 0) (list ".series_index"))
+								(set_labels (get (current_value 1) 1) (list ".reverse_series_index"))
+								(set_labels (get (current_value 1) 2) (list ".time_to_horizon"))
+							)
+
+							(list
+								(set_labels (get (current_value 1) 0) (list ".series_index"))
+								(set_labels (get (current_value 1) 1) (list ".reverse_series_index"))
+							)
 						)
 					)
 			))
@@ -623,28 +637,10 @@
 			!featureAttributes
 		)
 
-		;accumulate the progress and progress delta features into derived feature attributes
+		;accumulate the time-series built-in features into derived feature attributes
 		(accum (assoc
 			"derived_feature_attributes"
 				(assoc
-					;progress value for each case in a series, 0.0 for first case and 1.0 for last case
-					".series_progress"
-						(assoc
-							"type" "continuous"
-							"derived_feature_code" "(min 1 (+ (call value {feature \".series_progress\" lag 1}) (call value {feature \".series_progress_delta\" lag 1}) ))"
-							"auto_derive_on_train"
-								(assoc
-									"derive_type" "progress"
-									"series_id_features" id_features
-								)
-							"bounds" (assoc "min" 0.0)
-						)
-					;progress delta for the series, each case's .series_progress value was incremented by this amount
-					".series_progress_delta"
-						(assoc
-							"type" "continuous"
-							"bounds" (assoc "min" 0.0 "max" 1.0)
-						)
 					;counter for following cases with the same time value within the same series
 					".synchronous_counter"
 						(assoc
@@ -662,8 +658,35 @@
 							"ts_type" "lag"
 							"parent" ".synchronous_counter"
 						)
+					".series_index"
+						(assoc
+							"type" "continuous"
+							"decimal_places" 0
+							"derived_feature_code" "(+ 1 (call value {feature \".series_index\" lag 1}))"
+							"bounds" (assoc "min" 0.0 "allow_null" (false))
+						)
+					".reverse_series_index"
+						(assoc
+							"type" "continuous"
+							"decimal_places" 0
+							"bounds" (assoc "min" 0.0 "allow_null" (false))
+						)
 				)
 		))
+
+		(if !tsTimeFeatureUniversal
+			(accum (assoc
+				"derived_feature_attributes"
+					(assoc
+						".time_to_horizon"
+							(assoc
+								"type" "continuous"
+								"derived_feature_code" "(call value {feature \".time_to_horizon\" lag 1})"
+								"bounds" (assoc "min" 0.0 "allow_null" (false))
+							)
+					)
+			))
+		)
 
 		;update dataset feature attributes to include all the derived ones, don't process time series attributes since they are being provided
 		(call set_feature_attributes (assoc
@@ -671,31 +694,17 @@
 			create_ts_attributes (false)
 		))
 
-		;derived_features = ["".series_progress", ".series_progress_delta"] + lag_features + train_delta_features + train_rate_features
+		;derived_features = [".series_index", ".reverse_series_index"] + lag_features + train_delta_features + train_rate_features
 		(declare (assoc
 			ts_derived_features
 				(append
-					(list ".series_progress" ".series_progress_delta")
+					(list ".series_index" ".reverse_series_index")
 					(replace lag_features)
 					(replace train_delta_features)
 					(replace train_rate_features)
 					(replace stationary_features)
 				)
-			series_has_terminators (false)
-			stop_on_terminator (false)
 		))
-
-		(map
-			(lambda
-				(if (get feature_attributes (list (current_value 1) "time_series" "series_has_terminators"))
-					(assign (assoc
-						series_has_terminators (true)
-						stop_on_terminator (or stop_on_terminator (get feature_attributes (list (current_value 2) "time_series" "stop_on_terminator")))
-					))
-				)
-			)
-			id_features
-		)
 
 		;set dataset time series (lag, delta, rate, start, end, derived order) features for series react
 		;to be used for constructing react_series parameters
@@ -708,8 +717,6 @@
 					"derived_order_features" derived_order_features
 					"ts_derived_features" ts_derived_features
 					"series_id_features" id_features
-					"series_has_terminators" series_has_terminators
-					"stop_on_terminator" stop_on_terminator
 					"stationary_features" stationary_features
 				)
 		))
