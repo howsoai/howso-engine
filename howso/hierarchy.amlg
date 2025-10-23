@@ -753,14 +753,73 @@
 
 	;method to combine cases from all subtrainees into the root trainee and then deletes the subtrainees and removes them from the hierarchy
 	;{long_running (true) idempotent (true)}
-	;parameters:
-	; subtrainees: optional list of strings, ids of subtrainees to combine into the trainee. When unspecified combines all direct subtrainees.
 	#combine_with_subtrainees
 	(declare
-		(assoc subtrainees (null) )
+		(assoc
+		;{type ["list" "null"]}
+			subtrainees (null)
+		)
+
+		(call !ValidateParameters)
 
 		(if (= (null) subtrainees)
 			(assign (assoc subtrainees (contained_entities !traineeContainer)))
+		)
+
+		(declare (assoc
+			sessions (contained_entities (query_exists ".replay_steps"))
+			no_session_index_collisions (true)
+			collision_subtrainee (null)
+		))
+
+		;check for session-index collisions, error out if a subtrainee has an existing session name and index as this trainee
+		(map
+			(lambda (if no_session_index_collisions
+				(let
+					(assoc subtrainee [!traineeContainer (current_value 2)])
+					(map
+						(lambda (if no_session_index_collisions
+							(let
+								(assoc subtrainee_session (current_value 1))
+								(map
+									(lambda (if no_session_index_collisions
+										;there's a name collision between session names
+										(if (= subtrainee_session (current_value))
+											;no indices should be same, i.e., indices should not intersect, but if they do intersect, error out
+											(if (!=
+													0
+													(size (intersect
+														;subtrainee_session_indices
+														(indices (retrieve_from_entity (append subtrainee subtrainee_session) ".indices_map"))
+														;session_indices
+														(indices (retrieve_from_entity (current_value 1) ".indices_map"))
+													))
+												)
+												(assign (assoc
+													no_session_index_collisions (false)
+													collision_subtrainee (last subtrainee)
+												))
+											)
+										)
+									))
+									sessions
+								)
+							)
+						))
+						;all sessions in subtrainee
+						(contained_entities subtrainee (query_exists ".replay_steps"))
+					)
+				)
+			))
+			subtrainees
+		)
+
+		(if (not no_session_index_collisions)
+			(conclude
+				(call !Return (assoc
+					errors [(concat "Session-index collision with subtrainee: " collision_subtrainee)]
+				))
+			)
 		)
 
 		;clear all query caches
@@ -768,23 +827,56 @@
 
 		(map
 			(lambda (let
-				(assoc trainee [!traineeContainer (current_value 2)])
+				(assoc subtrainee [!traineeContainer (current_value 2)])
+				;move the cases over
 				(map
 					(lambda
 						;if target already has an entity with this exact id, move it into the target without maintaining original id
+						;this should happen rarely
 						(if (contains_entity (current_value))
-							(move_entities (append trainee (current_value)) )
+							(let
+								(assoc collision_case_id (current_value 1))
+								(declare (assoc
+									new_case_id (first (move_entities (append subtrainee collision_case_id) ) )
+									case_index (retrieve_from_entity collision_case_id !internalLabelSessionTrainingIndex)
+								))
+
+								;update session info
+								map over .replay_steps replace with new_case_id
+								set .indices_map case_index to new_case_id
+							)
+
 
 							;else move the entity to the target maintaining its id
-							(move_entities (append trainee (current_value)) (append target_trainee (current_value)))
+							(move_entities (append subtrainee (current_value)) (current_value))
 						)
 					)
-					;all cases in trainee
-					(contained_entities trainee (query_exists !internalLabelSession))
+					;all cases in subtrainee
+					(contained_entities subtrainee (query_exists !internalLabelSession))
 				)
 
-				;remove trainee and clear references
-				(call delete_subtrainee (assoc child_id (last trainee) ))
+				;move the sessions over
+				(map
+					(lambda
+						;if there's a session name collision, combine the values from the subtrainee session into this one
+						;there should be no index collisions since it would have errored out earlier if there were
+						(if (contains_entity (current_value))
+							(accum_to_entities (current_value) (assoc
+								".replay_steps" (retrieve_from_entity (append subtrainee (current_value 1)) ".replay_steps")
+								".indices_map" (retrieve_from_entity (append subtrainee (current_value 1)) ".indices_map")
+								".trained_instance_count" (retrieve_from_entity (append subtrainee (current_value 1)) ".trained_instance_count")
+							))
+
+							;else move session over as-is
+							(move_entities (append subtrainee (current_value)) (current_value))
+						)
+					)
+					;all sessions in subtrainee
+					(contained_entities subtrainee (query_exists ".replay_steps"))
+				)
+
+				;remove subtrainee and clear references
+				(call delete_subtrainee (assoc child_id (last subtrainee) ))
 			))
 			subtrainees
 		)
@@ -793,7 +885,6 @@
 
 		(call !Return)
 	)
-
 
 	;method to update the references for contained trainees
 	;{idempotent (true) protected (true)}
