@@ -1932,71 +1932,86 @@
 		(let
 			(assoc
 				series_end_context_map
-					(if forecasting_future
-						;if forecasting the future, filter out time/lags from the context and condition
-						;a time to horizon at the median.
-						(append
-							(remove
-								current_case_map
-								;the time feature and its lags
-								(append
-									[!tsTimeFeature]
-									(filter
-										(lambda (= "lag" (get !featureAttributes [(current_value 1) "ts_type"])) )
-										(get !sourceToDerivedFeatureMap !tsTimeFeature)
-									)
-								)
-							)
-							(if !tsTimeFeatureUniversal
-								;adding the .time_to_horizon feature to the context at its median reduces the influence
-								;of series that possibly terminated early due to lack of further data and also making
-								;predictions of whether to terminate more likely to utilize series that end before
-								;the horizon of the trained data (if any such series exist)
-								(assoc
-									".time_to_horizon"
-										(compute_on_contained_entities
-											(query_quantile ".time_to_horizon" 0.5)
-										)
-								)
-								(assoc)
+					(filter
+						;time-series triangle filtering (derived features that must be (null) by the series index should be filtered)
+						(lambda
+							(if (contains_index ts_feature_lag_amount_map (current_index))
+								(>= last_series_index (get ts_feature_lag_amount_map (current_index)))
+
+								(true)
 							)
 						)
+						(if forecasting_future
+							;if forecasting the future, filter out time/lags from the context and condition
+							;a time to horizon at the median.
+							(append
+								(remove
+									current_case_map
+									;the time feature and its lags
+									(append
+										[!tsTimeFeature]
+										(filter
+											(lambda (= "lag" (get !featureAttributes [(current_value 1) "ts_type"])) )
+											(get !sourceToDerivedFeatureMap !tsTimeFeature)
+										)
+									)
+								)
+								(if !tsTimeFeatureUniversal
+									;adding the .time_to_horizon feature to the context at its median reduces the influence
+									;of series that possibly terminated early due to lack of further data and also making
+									;predictions of whether to terminate more likely to utilize series that end before
+									;the horizon of the trained data (if any such series exist)
+									(assoc
+										".time_to_horizon"
+											(compute_on_contained_entities
+												(query_quantile ".time_to_horizon" 0.5)
+											)
+									)
+									(assoc)
+								)
+							)
 
-						current_case_map
+							current_case_map
+						)
 					)
 			)
 
-			;predict .reverse_series_index given the current case
+			;predict .reverse_series_index given the current case. If zero, then series should terminate
 			(declare (assoc
-				rev_index_prediction
-					(first (get
-						(call !SingleReact (assoc
-							context_features (indices series_end_context_map)
-							context_values (values series_end_context_map)
-							action_features (list ".reverse_series_index")
-							;do not derive anything during this react
-							derived_action_features (list)
-							derived_context_features (list)
-							;no details
-							details (null)
-							ignore_case ignore_case
-							substitute_output substitute_output
-							input_is_substituted input_is_substituted
-							use_case_weights use_case_weights
-							weight_feature weight_feature
-							rand_seed rand_seed
-							leave_case_out leave_case_out
-							holdout_queries holdout_queries
-							desired_conviction desired_conviction
-							use_differential_privacy use_differential_privacy
-							new_case_threshold new_case_threshold
-							feature_bounds_map feature_bounds_map
-							generate_new_cases "no"
-						))
-						"action_values"
+				rev_index_reaction
+					(call !SingleReact (assoc
+						context_features (indices series_end_context_map)
+						context_values (values series_end_context_map)
+						action_features (list ".reverse_series_index")
+						;do not derive anything during this react
+						derived_action_features (list)
+						derived_context_features (list)
+						;influential cases so that we can accumulate probability mass of series termination
+						details {influential_cases (true)}
+						ignore_case ignore_case
+						substitute_output substitute_output
+						input_is_substituted input_is_substituted
+						use_case_weights use_case_weights
+						weight_feature weight_feature
+						rand_seed rand_seed
+						leave_case_out leave_case_out
+						holdout_queries holdout_queries
+						desired_conviction desired_conviction
+						use_differential_privacy use_differential_privacy
+						new_case_threshold new_case_threshold
+						feature_bounds_map feature_bounds_map
+						generate_new_cases "no"
 					))
 			))
-			(if (< rev_index_prediction 1)
+			(declare (assoc
+				rev_index_value_influence_masses
+					(zip
+						(lambda (+ (current_value) (current_value 1)))
+						(map (lambda (get (current_value) ".reverse_series_index")) (get rev_index_reaction "influential_cases"))
+						(map (lambda (get (current_value) ".influence_weight")) (get rev_index_reaction "influential_cases"))
+					)
+			))
+			(if (and (contains_index rev_index_value_influence_masses 0) (>= (get rev_index_value_influence_masses 0) 0.5))
 				(assign (assoc done (true) ))
 			)
 		)
