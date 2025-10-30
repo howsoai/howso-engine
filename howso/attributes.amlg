@@ -807,12 +807,14 @@
 	; base_query_among_statements: the list of query_among's that should be appended to for each recursive call
 	; value_feature: name of the continuous feature for which we want to determine all the possible min/max bounds
 	; nominals: list of nominal features corresponding to the continuous value feature
+	;value_feature_nulls_are_dependent: flag, if true nulls are treated as valid dependent values
 	#!ComputeDependentBoundaries
 	(declare
 		(assoc
 			base_query_among_statements (list)
 			value_feature ""
 			nominals (list)
+			value_feature_nulls_are_dependent (false)
 
 			;not params
 			feature (null)
@@ -832,7 +834,6 @@
 						(query_value_masses feature (null))
 					)
 				)
-			value_feature_nulls_are_dependent (get !featureAttributes (list value_feature "null_is_dependent"))
 		))
 
 		;if the continuous feature's attribute is to treat null as dependent, add (null) as a valid value for this dependent nominal feature if it has nulls
@@ -867,6 +868,7 @@
 							))
 						nominals nominals
 						value_feature value_feature
+						value_feature_nulls_are_dependent value_feature_nulls_are_dependent
 					))
 				)
 				(zip feature_values)
@@ -948,45 +950,56 @@
 	; If there are two dependent nominal features with 4 values each, while there may be 16 unique combinations of values,
 	; realistically only 4 are probably valid, so this method filters out all the combinations that do not have a min,max boundary,
 	; leaving a list of lists of valid feature values.  Example: 'heartrate' and 'BPM' are valid, but 'heartrate' and 'mSv' is not.
+	; Example, given a nested_value_combinations_map like this:
+	;		bmi {
+	;			(null) [12 (null) 45]
+	;			bpm (null)
+	;			mSv (null)
+	;			ratio [10 30]
+	;		}
+	;		heartrate {
+	;			(null) (null)
+	;			bpm [50 180]
+	;			mSv (null)
+	;			ratio (null)
+	;		}
+	;		xray {
+	;			(null) (null)
+	;			bpm (null)
+	;			mSv [0.005 0.1]
+	;			ratio (null)
+	;		}
+	;
+	; this method outputs the only valid combinations:
+	; 	[
+	;		[ "bmi" (null)]
+	;		[ "bmi" "ratio"]
+	;		[ "heartrate" "bpm"]
+	;		[ "xray" "mSv"]
+	; 	]
 	;
 	;parameters:
 	;
 	; nested_value_combinations_map: nested assocs of feature value -> [min, max], eg: {'heartrate : {'bpm' : [ 25, 180] }}
 	; values_lists: list of nominal values to append each corresponding feature value. e.g, [ "heartrate", "bpm"]
-	; value_feature: name of feature for the value being accumulated, e.g, 'measure'
-	; remaining_dependent_nominals: list of remaining dependent features, in the order corresponding to the layers of
-	; 			remaining nested assocs in nested_value_combinatinons_map. e.g., ['measure', 'unit']
-	; null_is_dependent: boolean, default false. true if continuous_feature treats its nulls as dependent values
 	#!AccumulateDependentValuesCombinations
-	(values (map
-		(lambda (let
-			(assoc value (current_index 1) )
-
-			;numerify value if it's for a non-string nominal feature
-			(if (contains_index !numericNominalFeaturesMap value_feature)
-				(assign (assoc value (+ value) ))
-			)
-
-			;call !recursively to iterate down the nested assoc
-			(if (= "assoc" (get_type_string (current_value)))
-				(call !AccumulateDependentValuesCombinations (assoc
-					nested_value_combinations_map (current_value 1)
-					values_lists (append values_lists value)
-					value_feature (first remaining_dependent_nominals)
-					remaining_dependent_nominals (tail remaining_dependent_nominals)
-					null_is_dependent null_is_dependent
+	(filter (map
+		(lambda
+			(if (~ (assoc) (current_value))
+				(apply "append" (values
+					(call !AccumulateDependentValuesCombinations (assoc
+						nested_value_combinations_map (current_value 1)
+						values_lists (append values_lists (current_index 1))
+					))
 				))
-				;else return the accumulated list of nested keys for this iteration and append the full list to the global list
-				(seq
-					(if (!= (null) (current_value))
-						(accum (assoc dependent_values_combinations (list (append values_lists value))))
-					)
-					(append values_lists value)
-				)
+
+				(!= (null) (current_value))
+				[(append values_lists (current_index 1))]
 			)
-		))
+		)
 		nested_value_combinations_map
 	))
+
 
 	;set the list of ordinal features, or clears it if empty list is specified
 	;parameters:
