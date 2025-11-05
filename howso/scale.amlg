@@ -45,6 +45,10 @@
 			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
 			;This flag is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
 			skip_reduce_data (false)
+			;{type "number" min 0}
+			;if specified, then the training indices for this batch of cases will start at this value. This value must be greater than the last trained index of the session.
+			;This value is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
+			start_index (null)
 		)
 		(call !ValidateParameters)
 
@@ -284,6 +288,7 @@
 					"skip_reduce_data" given_skip_reduce_data
 					"new_total_mass" total_mass
 					"new_total_rebalance_mass" total_rebalance_mass
+					"start_index" start_index
 				}
 		))
 	)
@@ -322,6 +327,9 @@
 			;{type "boolean"}
 			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
 			skip_reduce_data (false)
+			;{type "number" exclusive_min 0}
+			;if specified, then the training indices for this batch of cases will start at this value. This value must be greater than the last trained index of the session.
+			start_index (null)
 			;{type "number"}
 			;The new value to update the Trainee's cached total mass to after the operation is completed.
 			new_total_mass (null)
@@ -401,6 +409,25 @@
 			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
 			total_instance_count (retrieve_from_entity session ".total_instance_count")
 			num_cases (call !GetNumTrainingCases)
+		))
+
+		;if a start_index is given, it should be greater than the next index that would be trained for this session (to prevent idx collisions)
+		(if (and
+				start_index
+				(< start_index (retrieve_from_entity session ".next_trained_index"))
+			)
+			(call !Return (assoc
+				errors ["The given value for `start_index` must be greater than the last trained index of the specified sesion."]
+			))
+		)
+
+		(declare (assoc
+			next_trained_index
+				(if start_index
+					start_index
+
+					(retrieve_from_entity session ".next_trained_index")
+				)
 		))
 
 		(if rebalance_weights
@@ -483,7 +510,7 @@
 									features features
 									feature_values (current_value 1)
 									session (get_value session)
-									session_training_index (+ total_instance_count (current_index 1))
+									session_training_index (+ next_trained_index (current_index 1))
 								))
 							)
 							cases
@@ -535,6 +562,12 @@
 					)
 				)
 			)
+		)
+
+		(if (or (size cases) (size weight_accumulation_maps))
+			(assign_to_entities session (assoc
+				".next_trained_index" (+ next_trained_index (size cases) (size weight_accumulation_maps))
+			))
 		)
 
 		(call !UpdateDependentFeaturesMaps)
