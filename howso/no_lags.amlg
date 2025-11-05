@@ -23,15 +23,23 @@
 				time_feature !tsTimeFeature
 			)
 
-			;use all the features including all the derived ones
-			(assign (assoc series_context_features !trainedFeatures ))
+			;use all the features including all the derived ones (but not lags, these wouldn't exist in theory)
+			(assign (assoc
+				series_context_features
+					(filter
+						(lambda
+							(!= "lag" (get !featureAttributes [(current_value 1) "ts_type"]))
+						)
+						!trainedFeatures
+					)
+			))
 
 			(assign (assoc
 				series_context_values
 					(call !DeriveUntrainedSeriesData (assoc
 						series_data series_context_values
 						series_data_features original_series_context_features
-						features_to_retrieve !trainedFeatures
+						features_to_retrieve series_context_features
 						input_is_substituted input_is_substituted
 					))
 			))
@@ -40,6 +48,7 @@
 		(declare (assoc
 			recents_bandwidth 3
 			iwe_threshold 0.4
+			series_id_features (get !tsFeaturesMap "series_id_features")
 		))
 
 		(declare (assoc
@@ -54,26 +63,103 @@
 					weight_feature weight_feature
 				))
 		))
-		(declare (assoc
-			closest_k (get hyperparam_map "k")
-			p_parameter (get hyperparam_map "p")
-			dt_parameter (get hyperparam_map "dt")
-			feature_weights (get hyperparam_map "featureWeights")
-			feature_deviations (get hyperparam_map "featureDeviations")
-			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
-		))
 
 		;Must find the collection of indices from non-recent cases to keep
 		(declare (assoc
-			other_timesteps_iwes
+			other_timestep_idxs_to_keep
+				(if !autoAblationMaxInfluenceWeightEntropy
+					(let
+						(assoc
+							closest_k (get hyperparam_map "k")
+							p_parameter (get hyperparam_map "p")
+							dt_parameter (get hyperparam_map "dt")
+							feature_weights (get hyperparam_map "featureWeights")
+							feature_deviations (get hyperparam_map "featureDeviations")
+							query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+							max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy
+						)
+
+						(declare (assoc
+							other_timesteps_iwes
+								(map
+									(lambda
+										(call !ComputeInfluenceWeightEntropy (assoc
+											features series_context_features
+											feature_values (current_value 1)
+										))
+									)
+									other_timesteps
+								)
+						))
+
+
+						(filter
+							(lambda
+								(<
+									(get other_timesteps_iwes (current_value))
+									max_influence_weight_entropy_to_keep
+								)
+							)
+							(indices other_timesteps_iwes)
+						)
+					)
+
+					;if not ablation, just use all the cases
+					(indices other_timesteps)
+				)
+		))
+
+		(declare (assoc
+			context_timesteps
+				(append
+					(unzip other_timesteps other_timestep_idxs_to_keep)
+					recent_timesteps
+				)
+		))
+
+		(declare (assoc
+			timesteps_influential_cases
 				(map
 					(lambda
-						(call !ComputeInfluenceWeightEntropy (assoc
-							features series_context_features
-							feature_values (get other_timesteps (current_value 1))
-						))
+						(get
+							(call !SingleReact (assoc
+								context_features series_context_features
+								context_values (current_value 1)
+								desired_conviction desired_conviction
+								details
+									{
+										"influential_cases" (true)
+										"influential_cases_raw_weights" (true)
+									}
+							))
+							"influential_cases"
+						)
 					)
-					(indices other_timesteps)
+					context_timesteps
+				)
+		))
+
+		(declare (assoc
+			;assoc of series-id-values -> influential cases from that series
+			series_influential_cases_map
+				(let
+					(assoc
+						all_influential_cases (apply "append" timesteps_influential_cases)
+					)
+
+					(zip
+						(lambda
+							(if (~ {} (current_value))
+								;the first time it is just an assoc, wrap in a list then append
+								(append [(current_value 1)] (current_value 1))
+
+								;otherwise probably already a list
+								(append (current_value) (current_value 1))
+							)
+						)
+						(map (lambda (unzip (current_value) series_id_features)) all_influential_cases)
+						all_influential_cases
+					)
 				)
 		))
 
