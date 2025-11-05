@@ -53,6 +53,11 @@
 
 		(if (and estimating_residual_lower_bound (size custom_mda_map))
 			(seq
+				(if measuring_missing_information
+					(declare (assoc
+						orig_hyperparam_map (replace hyperparam_map)
+					))
+				)
 				(assign (assoc
 					single_query_per_case (false)
 					;use feature weights for each feature being predicted
@@ -290,7 +295,136 @@
 												)
 										))
 
-										(call !InterpolateAndComputeDiffToCase)
+
+										(if measuring_missing_information
+											(let
+												(assoc
+													full_prediction_local_cases_map
+														(let
+															(assoc
+																full_query_context_features (indices (remove (zip context_features) [feature]))
+																feature_weights (get orig_hyperparam_map ["featureMdaMap" feature])
+															)
+
+															(declare (assoc
+																dependent_queries_list
+																	(if feature_is_dependent
+																		(call !ComputeDependentQueries (assoc
+																			context_features full_query_context_features
+																			context_values (unzip case_values_map full_query_context_features)
+																			action_feature feature
+																		))
+																	)
+															))
+
+															(compute_on_contained_entities
+																(if focal_case
+																	(query_not_in_entity_list (list case_id focal_case))
+																	(query_not_in_entity_list (list case_id))
+																)
+																time_series_filter_query
+																dependent_queries_list
+																(if (size context_condition_filter_query)
+																	context_condition_filter_query
+																	(list)
+																)
+																(query_nearest_generalized_distance
+																	k_parameter
+																	full_query_context_features
+																	(unzip case_values_map full_query_context_features)
+																	p_parameter
+																	feature_weights
+																	!queryDistanceTypeMap
+																	query_feature_attributes_map
+																	(get orig_hyperparam_map "featureDeviations")
+																	(null)
+																	dt_parameter
+																	(if valid_weight_feature weight_feature (null))
+																	tie_break_random_seed
+																	(null) ;radius
+																	!numericalPrecision
+																)
+															)
+														)
+												)
+
+												(if (contains_index !nominalsMap feature)
+													;if nominal, get CAPs for full and weighted-superfull predictions and
+													;measure KL divergence between two distributions
+													(declare
+														(assoc
+															full_caps_map
+																(normalize (zip
+																	(lambda (+ (current_value) (current_value 1)))
+																	(map (lambda (retrieve_from_entity (current_value) feature)) (indices full_prediction_local_cases_map))
+																	(values full_prediction_local_cases_map)
+																))
+															weighted_superfull_caps_map
+																(normalize (zip
+																	(lambda (+ (current_value) (current_value 1)))
+																	(last candidate_cases_lists)
+																	(get candidate_cases_lists 1)
+																))
+														)
+
+														(declare (assoc
+															all_represented_classes_min_prob_map
+																(zip
+																	(indices (append full_caps_map weighted_superfull_caps_map))
+																	0.0001 ;TODO: there should be a "correct" value here
+																)
+														))
+
+														;KL div from full CAPs to weighted-superfull CAPS
+														(entropy
+															(append all_represented_classes_min_prob_map full_caps_map)
+															(append all_represented_classes_min_prob_map weighted_superfull_caps_map)
+															-1
+															1
+														)
+													)
+
+													;if continuous, get the surprisal of the difference (LK-ed) between full
+													;prediction and weighted-superfull prediction
+													(declare
+														(assoc
+															full_predicted_value
+																(call !InterpolateActionValues (assoc
+																	action_feature feature
+																	candidate_case_ids (indices full_prediction_local_cases_map)
+																	candidate_case_weights (values full_prediction_local_cases_map)
+																	candidate_case_values
+																		;retrieve the feature to be interpolated from each case
+																		(map (lambda (retrieve_from_entity (current_value) feature)) (indices full_prediction_local_cases_map))
+																	allow_nulls (false)
+																))
+															weighted_superfull_predicted_value
+																(call !InterpolateActionValues (assoc
+																	action_feature feature
+																	candidate_case_ids (first candidate_cases_lists)
+																	candidate_case_weights (get candidate_cases_lists 1)
+																	candidate_case_values (last candidate_cases_lists)
+																	allow_nulls (false)
+																))
+															feature_deviation (get hyperparam_map ["featureResiduals" feature])
+														)
+
+														(/
+															(call !LK_metric_exp (assoc
+																difference (abs (- full_predicted_value weighted_superfull_predicted_value))
+																deviation feature_deviation
+															))
+															feature_deviation
+														)
+													)
+												)
+
+
+											)
+
+											;else just interpolate
+											(call !InterpolateAndComputeDiffToCase)
+										)
 
 									))
 									(zip features)
@@ -304,7 +438,6 @@
 						(rand case_ids num_test_cases (true))
 						case_ids
 					)
-
 				)
 		))
 
@@ -720,6 +853,7 @@
 					num_samples 1000
 
 					estimating_residual_lower_bound (true)
+					measuring_missing_information (true)
 					custom_mda_map (get residuals_map "feature_mda_map")
 
 					compute_all_statistics (false)
@@ -731,27 +865,9 @@
 			dbl_precision_epsilon (call !ComputePrecisionEpsilon)
 		))
 
-		;output the smallest computed residual
-		(map
-			(lambda (let
-				(assoc
-					smallest_residual
-						(min
-							(current_value 1)
-							;compare with originally computed residuals by doubling the half-sized ones that are stored in hyperparameters
-							(* 2 (get updated_estimated_residuals_map ["hyperparam_map" "featureResiduals" (current_index 2)]))
-						)
-				)
-
-				;if smallest_residual is 0, replace with cached min residual, otherwise output the computed value
-				(if (<= smallest_residual dbl_precision_epsilon)
-					(get !cachedFeatureMinResidualMap (current_index))
-					smallest_residual
-				)
-			))
-			;only for the specified action_features
-			(keep (get updated_estimated_residuals_map "residual_map") action_features)
-		)
+		;return the "residual_map" which is the average surprisal of the weighted-superfull prediction
+		;compared to the full prediction
+		(get updated_estimated_residuals_map "residual_map")
 	)
 
 )
