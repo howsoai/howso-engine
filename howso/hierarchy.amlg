@@ -751,6 +751,248 @@
 		(call !Return (assoc payload (assoc "count" (size cases_to_move)) ))
 	)
 
+	;method to combine cases from all subtrainees into the root trainee and then deletes the subtrainees and removes them from the hierarchy
+	;note: subtrainees must not have child trainees of their own.
+	;{long_running (true) protected (true) idempotent (true)}
+	#combine_with_subtrainees
+	(declare
+		;returns {ref "CombineSubtraineesResponse"}
+		(assoc
+			;{type "list"}
+			;optional list of subtrainee ids
+			child_ids (null)
+			;{type "boolean"}
+			;flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended
+			skip_auto_analyze (false)
+		)
+		(call !ValidateParameters)
+
+		;store each path (actual entity name) as child_ids
+		(assign (assoc
+			child_ids
+				(if (= (null) child_ids)
+					(contained_entities !traineeContainer))
+
+					(filter (unzip !containedTraineeIdToNameMap child_ids))
+				)
+		)
+
+		;any subtrainees that have subtrainees cannot be combined
+		(declare (assoc
+			bad_subtrainees
+				(filter
+					(lambda
+						(> (size (contained_entities [!traineeContainer (current_value 1) !traineeContainer])) 0)
+					)
+					child_ids
+				)
+		))
+		(if (size bad_subtrainees)
+			(conclude
+				(call !Return (assoc
+					errors [(concat "The following subtrainees have subtrainees and cannot be automatically combined: " bad_subtrainees)]
+					payload { "status" (null) }
+				))
+			)
+		)
+
+		(declare (assoc
+			sessions (contained_entities (query_exists ".replay_steps"))
+			no_session_index_collisions (true)
+			collision_subtrainee (null)
+			status_output (null)
+		))
+
+		;check for session-index collisions, error out if a subtrainee has an existing session name and index as this trainee
+		(map
+			(lambda (if no_session_index_collisions
+				(let
+					(assoc subtrainee [!traineeContainer (current_value 2)])
+					(map
+						(lambda (if no_session_index_collisions
+							(let
+								(assoc subtrainee_session (current_value 1))
+								(map
+									(lambda (if no_session_index_collisions
+										;there's a name collision between session names
+										(if (= subtrainee_session (current_value))
+											;no indices should be same, i.e., indices should not intersect, but if they do intersect, error out
+											(if (!=
+													0
+													(size (intersect
+														;subtrainee_session_indices
+														(indices (retrieve_from_entity (append subtrainee subtrainee_session) ".indices_map"))
+														;session_indices
+														(indices (retrieve_from_entity (current_value 1) ".indices_map"))
+													))
+												)
+												(assign (assoc
+													no_session_index_collisions (false)
+													collision_subtrainee (last subtrainee)
+												))
+											)
+										)
+									))
+									sessions
+								)
+							)
+						))
+						;all sessions in subtrainee
+						(contained_entities subtrainee (query_exists ".replay_steps"))
+					)
+				)
+			))
+			child_ids
+		)
+
+		(if (not no_session_index_collisions)
+			(conclude
+				(call !Return (assoc
+					errors [(concat "Session-index collision with subtrainee: " collision_subtrainee)]
+					payload { "status" status_output}
+				))
+			)
+		)
+
+		(declare (assoc
+			pre_combine_dataset_size
+				(if (or !autoAblationEnabled (!= 0 (size (contained_entities (query_exists ".case_weight")))))
+					(compute_on_contained_entities (query_sum (if !autoAblationEnabled !autoAblationWeightFeature ".case_weight")))
+					;else it's just the number of cases
+					(call !GetNumTrainingCases)
+				)
+		))
+
+		;clear all query caches
+		(reclaim_resources (null) (true) (true))
+
+		;if time series, ensure that whatever the smallest time interval or the largest series limit value is among the subtrainees,
+		;it persists by being stored into the main trainee
+		(if !tsTimeFeature
+			(map
+				(lambda  (let
+					(assoc subtrainee [!traineeContainer (current_value 2)])
+
+					;if subtrainee !tsMinTimeInterval is smaller than trainee's, overwrite trainee's value
+					(if (<
+							(call_entity subtrainee "debug_label" (assoc label "!tsMinTimeInterval"))
+							!tsMinTimeInterval
+						)
+						(assign_to_entities (assoc
+							!tsMinTimeInterval (call_entity subtrainee "debug_label" (assoc label "!tsMinTimeInterval"))
+						))
+					)
+
+					;if subtrainee !tsSeriesLimitLength is larger than trainee's, overwrite trainee's value
+					(if (>
+							(call_entity subtrainee "debug_label" (assoc label "!tsSeriesLimitLength"))
+							!tsSeriesLimitLength
+						)
+						(assign_to_entities (assoc
+							!tsSeriesLimitLength (call_entity subtrainee "debug_label" (assoc label "!tsSeriesLimitLength"))
+						))
+					)
+				))
+				child_ids
+			)
+		)
+
+		;iterate over each subtrainee,  move their cases and sessions over to trainee and remove the subtrainee
+		(map
+			(lambda (let
+				(assoc subtrainee [!traineeContainer (current_value 2)])
+				;move all cases over from subtrainee to trainee
+				(map
+					(lambda
+						;if trainee already has a case with this exact id, move it over but
+						;without maintaining that original id, note: this should happen very rarely
+						(if (contains_entity (current_value))
+							(let
+								(assoc collision_case_id (current_value 1))
+								(declare (assoc
+									case_session_index (retrieve_from_entity (append subtrainee collision_case_id) [!internalLabelSession !internalLabelSessionTrainingIndex])
+								))
+								(declare (assoc
+									new_case_id (first (move_entities (append subtrainee collision_case_id) ) )
+								))
+
+								(assign_to_entities (append subtrainee (first case_session_index)) (assoc
+									".replay_steps"
+										(map
+											(lambda
+												(if (= collision_case_id (current_value))
+													new_case_id
+													(current_value)
+												)
+											)
+											(retrieve_from_entity (append subtrainee (first case_session_index)) ".replay_steps")
+										)
+									".indices_map"
+										(set
+											(retrieve_from_entity (append subtrainee (first case_session_index)) ".indices_map")
+											(last case_session_index)
+											new_case_id
+										)
+								))
+							)
+
+							;else move the case to the trainee while maintaining its id
+							(move_entities (append subtrainee (current_value)) (current_value))
+						)
+					)
+					;all cases in subtrainee
+					(contained_entities subtrainee (query_exists !internalLabelSession))
+				)
+
+				;move all sessions over from subtrainee to trainee
+				(map
+					(lambda
+						;if there's a session name collision, combine the values from the subtrainee session into this one
+						;there should be no index collisions since it would have errored out earlier
+						(if (contains_entity (current_value))
+							(accum_to_entities (current_value) (assoc
+								".replay_steps" (retrieve_from_entity (append subtrainee (current_value 1)) ".replay_steps")
+								".indices_map" (retrieve_from_entity (append subtrainee (current_value 1)) ".indices_map")
+								".trained_instance_count" (retrieve_from_entity (append subtrainee (current_value 1)) ".trained_instance_count")
+								".total_instance_count" (retrieve_from_entity (append subtrainee (current_value 1)) ".total_instance_count")
+							))
+
+							;else move session over as-is
+							(move_entities (append subtrainee (current_value)) (current_value))
+						)
+					)
+					;all sessions in subtrainee
+					(contained_entities subtrainee (query_exists ".replay_steps"))
+				)
+
+				;remove subtrainee and clear references
+				(call delete_subtrainee (assoc path [(last subtrainee)] ))
+			))
+			child_ids
+		)
+
+		(declare (assoc
+			new_dataset_size
+				(if (or !autoAblationEnabled (!= 0 (size (contained_entities (query_exists ".case_weight")))) )
+					(compute_on_contained_entities (query_sum (if !autoAblationEnabled !autoAblationWeightFeature ".case_weight")))
+					;else it's just the number of cases
+					(call !GetNumTrainingCases)
+				)
+		))
+		(call !UpdateRegionalMinSize (assoc dataset_size (call !GetNumTrainingCases) ))
+		(call !ClearCachedDataProperties)
+		(if !inactiveFeaturesMap
+			(assign_to_entities (assoc !inactiveFeaturesNeedCaching (true) ))
+		)
+
+		(accum_to_entities (assoc !dataMassChangeSinceLastAnalyze (- new_dataset_size pre_combine_dataset_size) ))
+		(call !AutoAnalyzeIfNeeded)
+
+		(accum_to_entities (assoc !revision 1))
+
+		(call !Return (assoc payload { "status" status_output}))
+	)
+
 	;method to update the references for contained trainees
 	;{idempotent (true) protected (true)}
 	#set_hierarchy_relationships
@@ -881,10 +1123,59 @@
 				{
 					parent_id !parentId
 					path_to_id_map !containedTraineeNameToIdMap
-					id_to_path_map  !containedTraineeIdToNameMap
+					id_to_path_map !containedTraineeIdToNameMap
 					is_contained_map !childTraineeIsContainedMap
 				}
 		))
+	)
+
+	;method to manually add hierarchy references to an already loaded subtrainee.
+	;This assumes a subtrainee has already been loaded into the contained entity ".trainee_container" of this trainee.
+	;e.g., if this trainee entity id is "airplane" and a subtrainee of "right_engine" is being loaded,
+	;it should have been loaded into the entity path of: ["airplane" ".trainee_container" "right_engine"],
+	;( Warning: subtrainees must be loaded into the ".trainee_container" entity for proper functionality. )
+	;and then this method can be called on "airplane" with parameter: entity_path_id = "right_engine"
+	;
+	;{idempotent (true) protected (true) }
+	#add_hierarchy_relationship
+	(declare
+		(assoc
+			;{type "string"}
+			;optional id of trainee, if not provided will set it to the entity_path_id
+			id (null)
+			;{type "string"}
+			;optional subtrainee entity path id, the actual id under which the subtrainee is stored in the trainee
+			;if not specified, will set it to 'id'
+			entity_path_id (null)
+			;{type "boolean"}
+			;set to true if the subtrainee is already contained in this trainee, false means only the reference is added and the actual subtrainee is not contained
+			is_contained (true)
+		)
+		(call !ValidateParameters)
+
+		(if (and (= (null) id) (= (null) entity_path_id) )
+			(conclude
+				(call !Return (assoc errors ["Must specify either id or entity_path_id of subtrainee to add to hierarchy."]))
+			)
+		)
+
+		(if (= (null) id)
+			(assign (assoc id entity_path_id))
+
+			(= (null) entity_path_id)
+			(assign (assoc entity_path_id id))
+		)
+
+		(call_entity [!traineeContainer entity_path_id] "set_parent_id" (assoc parent_id !traineeId))
+
+		(accum_to_entities (assoc
+			!containedTraineeNameToIdMap (associate entity_path_id id)
+			!containedTraineeIdToNameMap (associate id entity_path_id)
+			!childTraineeIsContainedMap (associate entity_path_id is_contained)
+			revision 1
+		))
+
+		(call !Return)
 	)
 
 
