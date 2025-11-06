@@ -46,6 +46,9 @@
 			;{type "boolean"}
 			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
 			skip_reduce_data .false
+			;{type "number" min 0}
+			;if specified, then the training indices for this batch of cases will start at this value. This value must be greater than the last trained index of the session.
+			start_index (null)
 		)
 
 		(call !ValidateParameters)
@@ -76,6 +79,7 @@
 							##.trained_instance_count 0
 							;total count of cases observed (incl ablated, trained as weights, etc)
 							##.total_instance_count 0
+							##.next_trained_index 0
 							##.metadata (assoc)
 						)
 					)))
@@ -94,6 +98,27 @@
 			run_autoanalyze_check .false
 			;possible data mass of dataset if all the specified cases are trained
 			new_possible_data_mass 0
+		))
+
+		;if a start_index is given, it should be greater than the next index that would be trained for this session (to prevent idx collisions)
+		(if (and
+				start_index
+				(< start_index (retrieve_from_entity session ".next_trained_index"))
+			)
+			(conclude
+				(call !Return (assoc
+					errors ["The given value for `start_index` must be greater than the last trained index of the specified session."]
+				))
+			)
+		)
+
+		(declare (assoc
+			next_trained_index
+				(if start_index
+					start_index
+
+					(retrieve_from_entity session ".next_trained_index")
+				)
 		))
 
 		;parameter and data checks, returns on error
@@ -164,6 +189,9 @@
 				;capture these cases into the total observed count
 				(accum_to_entities session (assoc
 					".total_instance_count" (size cases)
+				))
+				(assign_to_entities session (assoc
+					".next_trained_index" (+ next_trained_index (size cases))
 				))
 
 				(if rebalance_weights
@@ -372,10 +400,11 @@
 					".trained_instance_count" (size new_case_ids)
 					".indices_map"
 						(zip
-							(range (- trained_instance_count (size new_case_ids)) (- trained_instance_count 1))
+							(range next_trained_index (+ next_trained_index (size new_case_ids) -1))
 							new_case_ids
 						)
 				))
+
 
 				;if any of the trained features are not defined in feature attributes, add them as continuous_numeric with default attributes
 				(if (size new_features)
@@ -480,25 +509,27 @@
 								(assoc
 									dependent_nominals (current_value 1)
 									continuous_feature (current_index 1)
-									dependents_combinations_map (assoc)
-									dependent_values_combinations (list)
-									null_is_dependent (get !featureAttributes [(current_index 2) "null_is_dependent"])
 								)
 
-								(assign (assoc
+								;creates a nested map of:  value -> (optional nested layers values) -> valid ranges, for each unique combination
+								(declare (assoc
 									dependents_combinations_map
 										(call !ComputeDependentBoundaries (assoc
 											nominals dependent_nominals
 											value_feature continuous_feature
+											value_feature_nulls_are_dependent (get !featureAttributes [continuous_feature "null_is_dependent"])
 										))
 								))
 
-								(call !AccumulateDependentValuesCombinations (assoc
-									nested_value_combinations_map dependents_combinations_map
-									values_lists (list)
-									value_feature (first dependent_nominals)
-									remaining_dependent_nominals (tail dependent_nominals)
-									null_is_dependent null_is_dependent
+								;creates a list of all unique valid nominal value combinations, e.g., [ ['heartrate' 'bpm'] ['xray' 'mSv'] ... ]
+								(declare (assoc
+									dependent_values_combinations
+										(apply "append" (values
+											(call !AccumulateDependentValuesCombinations (assoc
+												nested_value_combinations_map dependents_combinations_map
+												values_lists []
+											))
+										))
 								))
 
 								(accum (assoc
@@ -526,6 +557,9 @@
 		;capture these cases into the total observed count
 		(accum_to_entities session (assoc
 			".total_instance_count" (size cases)
+		))
+		(assign_to_entities session (assoc
+			".next_trained_index" (+ next_trained_index (size cases))
 		))
 
 		(accum_to_entities (assoc !revision 1))
@@ -775,7 +809,7 @@
 							(current_value 1)
 						)
 					session (get_value session)
-					session_training_index (+ total_instance_count (current_index 1))
+					session_training_index (+ next_trained_index (current_index 1))
 				))
 			)
 			cases
@@ -1175,8 +1209,8 @@
 							session (get_value session)
 							session_training_index
 								(if (size ts_ablated_indices_map)
-									(+ total_instance_count (get ts_ablated_indices_map (+ input_case_index (current_value 1))))
-									(+ session_training_index (current_value 1))
+									(+ next_trained_index (get ts_ablated_indices_map (+ input_case_index (current_value 1))))
+									(+ next_trained_index (current_value 1))
 								)
 						))
 					))
