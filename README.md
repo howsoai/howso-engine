@@ -54,13 +54,13 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
     (set_entity_permissions "howso" {std_out_and_std_err (true) load (true) store (true) })
 
     (call_entity "howso" "set_feature_attributes" (assoc
-        feature_attributes {"species" {assoc "type" "nominal"}}
+        feature_attributes {"species" {"type" "nominal"}}
     ))
 
     (call_entity "howso" "train" (assoc
         features ["sepal_length" "sepal_width" "petal_length" "petal_width" "species"]
         cases
-            (list
+            [
                 [6.4 2.8 5.6 2.2 "virginica"]
                 [5.0 2.3 3.3 1.0 "versicolor"]
                 [4.9 3.1 1.5 0.1 "setosa"]
@@ -68,7 +68,7 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
                 [6.9 3.1 5.4 2.1 "virginica"]
                 [5.1 3.3 1.7 0.5 "setosa"]
                 ;... as many cases as appropriate
-            )
+            ]
         session "iris_session"
     ))
 
