@@ -295,145 +295,7 @@
 												)
 										))
 
-
-										(if measuring_missing_information
-											(let
-												(assoc
-													full_prediction_local_cases_map
-														(let
-															(assoc
-																full_query_context_features (indices (remove (zip context_features) [feature]))
-																feature_weights (get orig_hyperparam_map ["featureMdaMap" feature])
-															)
-
-															(declare (assoc
-																dependent_queries_list
-																	(if feature_is_dependent
-																		(call !ComputeDependentQueries (assoc
-																			context_features full_query_context_features
-																			context_values (unzip case_values_map full_query_context_features)
-																			action_feature feature
-																		))
-																	)
-															))
-
-															(compute_on_contained_entities
-																(if focal_case
-																	(query_not_in_entity_list (list case_id focal_case))
-																	(query_not_in_entity_list (list case_id))
-																)
-																time_series_filter_query
-																dependent_queries_list
-																(if (size context_condition_filter_query)
-																	context_condition_filter_query
-																	(list)
-																)
-																(query_nearest_generalized_distance
-																	k_parameter
-																	full_query_context_features
-																	(unzip case_values_map full_query_context_features)
-																	p_parameter
-																	feature_weights
-																	!queryDistanceTypeMap
-																	query_feature_attributes_map
-																	(get orig_hyperparam_map "featureDeviations")
-																	(null)
-																	dt_parameter
-																	(if valid_weight_feature weight_feature (null))
-																	tie_break_random_seed
-																	(null) ;radius
-																	!numericalPrecision
-																)
-															)
-														)
-												)
-
-												(if (contains_index !nominalsMap feature)
-													;if nominal, get CAPs for full and weighted-superfull predictions and
-													;measure KL divergence between two distributions
-													(declare
-														(assoc
-															full_caps_map
-																(normalize (zip
-																	(lambda (+ (current_value) (current_value 1)))
-																	(map (lambda (retrieve_from_entity (current_value) feature)) (indices full_prediction_local_cases_map))
-																	(values full_prediction_local_cases_map)
-																))
-															weighted_superfull_caps_map
-																(normalize (zip
-																	(lambda (+ (current_value) (current_value 1)))
-																	(last candidate_cases_lists)
-																	(get candidate_cases_lists 1)
-																))
-														)
-
-														(declare (assoc
-															all_represented_classes_min_prob_map
-																(zip
-																	(indices (append full_caps_map weighted_superfull_caps_map))
-																	;both distributions need all classes represented, so assign all
-																	;of them the min residual in this map.
-																	;Then append both caps maps to this map so that both distributions have
-																	;all the classes, using the min value if necessary.
-																	(get !cachedFeatureMinResidualMap feature)
-																)
-														))
-
-														;KL div from full CAPs to weighted-superfull CAPS
-														(entropy
-															(normalize (append all_represented_classes_min_prob_map full_caps_map))
-															(normalize (append all_represented_classes_min_prob_map weighted_superfull_caps_map))
-															-1
-															1
-														)
-													)
-
-													;if continuous, get the surprisal of the difference (LK-ed) between full
-													;prediction and weighted-superfull prediction
-													(declare
-														(assoc
-															full_predicted_value
-																(call !InterpolateActionValues (assoc
-																	action_feature feature
-																	candidate_case_ids (indices full_prediction_local_cases_map)
-																	candidate_case_weights (values full_prediction_local_cases_map)
-																	candidate_case_values
-																		;retrieve the feature to be interpolated from each case
-																		(map (lambda (retrieve_from_entity (current_value) feature)) (indices full_prediction_local_cases_map))
-																	allow_nulls (false)
-																))
-															weighted_superfull_predicted_value
-																(call !InterpolateActionValues (assoc
-																	action_feature feature
-																	candidate_case_ids (first candidate_cases_lists)
-																	candidate_case_weights (get candidate_cases_lists 1)
-																	candidate_case_values (last candidate_cases_lists)
-																	allow_nulls (false)
-																))
-															feature_deviation (get orig_hyperparam_map ["featureResiduals" feature])
-														)
-
-														;surprisal of difference in predictions minus assumption
-														;surprisal of diff = LK_exp(diff, dev) / dev
-														; assumption = 1.0 nats in the case of LK_exp
-														(-
-															(/
-																(call !LK_metric_laplace (assoc
-																	difference (abs (- full_predicted_value weighted_superfull_predicted_value))
-																	deviation feature_deviation
-																))
-																feature_deviation
-															)
-															1.5
-														)
-													)
-												)
-											)
-
-											;else just interpolate
-											(call !InterpolateAndComputeDiffToCase)
-										)
-
+										(call !InterpolateAndComputeDiffToCase)
 									))
 									(zip features)
 								)
@@ -844,6 +706,7 @@
 					estimating_residual_lower_bound (true)
 
 					compute_all_statistics (false)
+					compute_null_uncertainties (false)
 					confusion_matrix_min_count 0
 					use_shared_deviations (true)
 					;don't create copies of confusion matrices for non-primary shared deviation features
@@ -861,10 +724,10 @@
 					num_samples 1000
 
 					estimating_residual_lower_bound (true)
-					measuring_missing_information (true)
 					custom_mda_map (get residuals_map "feature_mda_map")
 
 					compute_all_statistics (false)
+					compute_null_uncertainties (false)
 					confusion_matrix_min_count 0
 					use_shared_deviations (true)
 					;don't create copies of confusion matrices for non-primary shared deviation features
@@ -876,6 +739,458 @@
 		;return the "residual_map" which is the average surprisal of the weighted-superfull prediction
 		;compared to the full prediction
 		(get updated_estimated_residuals_map "residual_map")
+	)
+
+	;helper method for react_aggregate to compute the average missing information for the features
+	#!ComputeAverageMissingInformation
+	(declare
+		(assoc
+			action_features []
+			context_features []
+			case_ids []
+			features_to_derive []
+		)
+
+		;compute robust mda using the feature itself in the predictions
+		(assign (assoc
+			residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features features
+					robust_residuals "robust_mda"
+					case_ids case_ids
+
+					estimating_residual_lower_bound (true)
+
+					compute_all_statistics (false)
+					compute_null_uncertainties (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (true)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+		))
+
+		;recompute feature deviations using feature weights from the computed robust mda above
+		(declare (assoc
+			updated_estimated_residuals_map
+				(call !CalculateFeatureResiduals (assoc
+					features action_features
+					context_features context_features
+					robust_residuals "missing_information"
+					num_samples 1000
+
+					estimating_residual_lower_bound (true)
+					custom_mda_map (get residuals_map "feature_mda_map")
+
+					compute_all_statistics (false)
+					compute_null_uncertainties (false)
+					confusion_matrix_min_count 0
+					use_shared_deviations (false)
+					;don't create copies of confusion matrices for non-primary shared deviation features
+					expand_confusion_matrices (false)
+				))
+			dbl_precision_epsilon (call !ComputePrecisionEpsilon)
+		))
+
+		;return the "residual_map" which is the average surprisal of the weighted-superfull prediction
+		;compared to the full prediction
+		(get updated_estimated_residuals_map "residual_map")
+	)
+
+	;helper method for CalculateFeatureResiduals to calculate average missing information
+	#!RunMissingInformation
+	(seq
+		;keep a copy of all needed features
+		(assign (assoc case_features (values (append features context_features) (true)) ))
+
+		;if we only collected residuals for this one feature, set the residuals features list to have only target_residual_feature
+		(if target_residual_feature
+			(assign (assoc features (list target_residual_feature) ))
+		)
+
+		;create a map of feature -> flag, set to true if the feature has any null values
+		;that way there's no need to explicitly filter nulls out when querying for a feature that no nulls
+		(declare (assoc
+			feature_may_have_nulls_map
+				(map
+					(lambda (!= (false) (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) ) )
+					(zip
+						(if target_residual_feature
+							(list target_residual_feature)
+							features
+						)
+					)
+				)
+			series_id_features (if !tsTimeFeature (get !tsFeaturesMap "series_id_features") )
+			;this variable is used in the derivation logic branch of InterpolateAndComputeDiff
+			react_context_features context_features
+		))
+
+		;if all 'features' are also context features, then we can do one query per case,
+		;otherwise we must do multiple queries per case where the query to predict each
+		;feature includes all context features and the specific feature being predicted,
+		;excluding all other 'features' that are not contexts
+		(declare (assoc
+			per_feature_weights (true)
+			num_test_cases (size case_ids)
+			;list, length of case_ids, each item will be a list of residual values, one per feature
+			case_residuals_lists (list)
+		))
+
+		(declare (assoc
+			orig_hyperparam_map (replace hyperparam_map)
+		))
+
+		(assign (assoc
+			;limit the number of cases (reacts) per feature to a minimum of 50 cases per feature
+			num_test_cases
+				(min
+					num_test_cases
+					(max 50 (/ 10000 (size features)))
+				)
+			hyperparam_map (set hyperparam_map "featureMdaMap" custom_mda_map)
+		))
+
+		#!AccumulateMissingInformation
+		(assign (assoc
+			case_residuals_lists
+				||(map
+					(lambda (let
+						(assoc
+							;assoc of all features to their residual values
+							feature_residual_map (assoc)
+							case_id (current_value 1)
+							;map of feature -> value for all the case values
+							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+							time_series_filter_query (list)
+						)
+
+						(if !tsTimeFeature
+							(if (contains_index case_values_map !tsTimeFeature)
+								(assign (assoc
+									time_series_filter_query (call !ComputeTimeSeriesFilterFutureCasesQuery (assoc context_map case_values_map))
+								))
+							)
+						)
+
+						;create a map of feature -> missing information value for each case
+						(assign (assoc
+							feature_residual_map
+								(map
+									(lambda (let
+										(assoc
+											feature (get_value (current_index 1))
+											feature_is_dependent (contains_index !dependentFeatureMap (current_value 1))
+											case_feature_value (get case_values_map (current_index 1))
+											feature_is_nominal (contains_index !nominalsMap (current_index 1))
+											output_categorical_action_probabilities (true)
+											categorical_action_probabilities_map (assoc)
+										)
+
+										(declare (assoc
+											superfull_candidate_cases_lists
+												(let
+													(assoc
+														query_context_features
+															;context features + feature being predicted
+															(values
+																(append
+																	(if (contains_index features_for_derivation_map feature)
+																		;if this feature should be derived, need to hold out the features that will be used to derive it
+																		(filter
+																			(lambda (or
+																				(not (contains_value (get features_for_derivation_map feature) (current_value)))
+																				(!= feature (get !derivedFeaturesMap (current_value)))
+																				(contains_value (get !tsFeaturesMap "lag_features") (current_value))
+																			))
+																			context_features
+																		)
+
+																		context_features
+																	)
+																	feature
+																)
+																(true)
+															)
+														feature_weights (get hyperparam_map ["featureMdaMap" feature])
+													)
+
+													(declare (assoc
+														dependent_queries_list
+															(if feature_is_dependent
+																(call !ComputeDependentQueries (assoc
+																	context_features query_context_features
+																	context_values (unzip case_values_map query_context_features)
+																	action_feature feature
+																))
+															)
+													))
+
+													(compute_on_contained_entities
+														(if focal_case
+															(query_not_in_entity_list (list case_id focal_case))
+															(query_not_in_entity_list (list case_id))
+														)
+														time_series_filter_query
+														dependent_queries_list
+														(if (size context_condition_filter_query)
+															context_condition_filter_query
+															(list)
+														)
+														(query_nearest_generalized_distance
+															k_parameter
+															query_context_features
+															(unzip case_values_map query_context_features)
+															p_parameter
+															feature_weights
+															!queryDistanceTypeMap
+															query_feature_attributes_map
+															(get hyperparam_map "featureDeviations")
+															(null)
+															dt_parameter
+															(if valid_weight_feature weight_feature (null))
+															tie_break_random_seed
+															(null) ;radius
+															!numericalPrecision
+															feature
+														)
+													)
+												)
+										))
+
+										(declare (assoc
+											full_candidate_cases_lists
+												(let
+													(assoc
+														full_query_context_features
+															(indices (remove
+																(zip
+																	(if (contains_index features_for_derivation_map feature)
+																		;if this feature should be derived, need to hold out the features that will be used to derive it
+																		(filter
+																			(lambda (or
+																				(not (contains_value (get features_for_derivation_map feature) (current_value)))
+																				(!= feature (get !derivedFeaturesMap (current_value)))
+																				(contains_value (get !tsFeaturesMap "lag_features") (current_value))
+																			))
+																			context_features
+																		)
+
+																		context_features
+																	)
+																)
+																[feature]
+															))
+														feature_weights (get orig_hyperparam_map ["featureMdaMap" feature])
+													)
+
+													(declare (assoc
+														dependent_queries_list
+															(if feature_is_dependent
+																(call !ComputeDependentQueries (assoc
+																	context_features full_query_context_features
+																	context_values (unzip case_values_map full_query_context_features)
+																	action_feature feature
+																))
+															)
+													))
+
+													(compute_on_contained_entities
+														(if focal_case
+															(query_not_in_entity_list (list case_id focal_case))
+															(query_not_in_entity_list (list case_id))
+														)
+														time_series_filter_query
+														dependent_queries_list
+														(if (size context_condition_filter_query)
+															context_condition_filter_query
+															(list)
+														)
+														(query_nearest_generalized_distance
+															k_parameter
+															full_query_context_features
+															(unzip case_values_map full_query_context_features)
+															p_parameter
+															feature_weights
+															!queryDistanceTypeMap
+															query_feature_attributes_map
+															(get orig_hyperparam_map "featureDeviations")
+															(null)
+															dt_parameter
+															(if valid_weight_feature weight_feature (null))
+															tie_break_random_seed
+															(null) ;radius
+															!numericalPrecision
+															feature
+														)
+													)
+												)
+										))
+
+										(if (contains_index !nominalsMap feature)
+											;if nominal, get CAPs for full and weighted-superfull predictions and
+											;measure KL divergence between two distributions
+											(declare
+												(assoc
+													full_caps_map
+														(normalize (zip
+															(lambda (+ (current_value) (current_value 1)))
+															(last full_candidate_cases_lists)
+															(get full_candidate_cases_lists 1)
+														))
+													weighted_superfull_caps_map
+														(normalize (zip
+															(lambda (+ (current_value) (current_value 1)))
+															(last superfull_candidate_cases_lists)
+															(get superfull_candidate_cases_lists 1)
+														))
+												)
+
+												(declare (assoc
+													all_represented_classes_min_prob_map
+														(zip
+															(indices (append full_caps_map weighted_superfull_caps_map))
+															;both distributions need all classes represented, so assign all
+															;of them the min residual in this map.
+															;Then append both caps maps to this map so that both distributions have
+															;all the classes, using the min value if necessary.
+															(get !cachedFeatureMinResidualMap feature)
+														)
+												))
+
+												;KL div from full CAPs to weighted-superfull CAPS
+												(entropy
+													(normalize (append all_represented_classes_min_prob_map full_caps_map))
+													(normalize (append all_represented_classes_min_prob_map weighted_superfull_caps_map))
+													-1
+													1
+												)
+											)
+
+											;if continuous, get the surprisal of the difference (LK-ed) between full
+											;prediction and weighted-superfull prediction
+											(declare
+												(assoc
+													full_predicted_value
+														(call !InterpolateOrDerive (assoc
+															candidate_cases_lists full_candidate_cases_lists
+														))
+
+													superfull_predicted_value
+														(call !InterpolateOrDerive (assoc
+															candidate_cases_lists superfull_candidate_cases_lists
+														))
+													feature_deviation (get orig_hyperparam_map ["featureResiduals" feature])
+												)
+
+												;surprisal of difference in predictions minus assumption
+												;surprisal of diff = LK_exp(diff, dev) / dev
+												; assumption = 1.0 nats in the case of LK_exp
+												(-
+													(/
+														(call !LK_metric_laplace (assoc
+															difference
+																(generalized_distance
+																	[full_predicted_value]
+																	[superfull_predicted_value]
+																	1 ;p
+																	(null) ;weights
+																	!queryDistanceTypeMap ;distance_types
+																	query_feature_attributes_map ;attributes
+																	(null) ;deviations
+																	[feature]
+																)
+															deviation feature_deviation
+														))
+														feature_deviation
+													)
+													1.5
+												)
+											)
+										)
+									))
+									(zip features)
+								)
+						))
+
+						;return the computed values as a list
+						(unzip feature_residual_map features)
+					))
+					(if (and per_feature_weights (< num_test_cases (size case_ids)) )
+						(rand case_ids num_test_cases (true))
+						case_ids
+					)
+				)
+		))
+
+
+		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
+		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
+		(assign (assoc
+			feature_residuals_lists (call !TransposeResidualLists)
+			;need to have at least 2.5% (that's a value of 50 using default sample of 2000) non-null values for a feature
+			min_value_count (ceil (* 0.025 (size case_ids)))
+		))
+
+		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
+		;applicable only to global data
+		(if (and
+				(!= (true) regional_data_only)
+				(not strict_case_ids)
+			)
+			(let
+				(assoc
+					num_valid_values_per_feature_map
+						(filter
+							(lambda (< (current_value) min_value_count) )
+							(zip
+								features
+								(map (lambda (size (current_value))) feature_residuals_lists)
+							)
+						)
+				)
+
+				;some features did not have 50 values, accrue case_ids, then call the main method agan
+				(if (size num_valid_values_per_feature_map)
+					(let
+						;create the resampled case_ids list that contains cases with enough necessary non-null feature values
+						(assoc
+							case_ids_without_nulls
+								;append all the lists of cases ids for each feature into one list
+								(apply "append"
+									;for each (current_index) feature, need to find 50 - (current_value) cases to have enough values for those features
+									(values (map
+										(lambda
+											(contained_entities
+												(query_not_equals (current_index) (null))
+
+												(if valid_weight_feature
+													(query_sample (- min_value_count (current_value)) weight_feature (rand))
+													(query_sample (- min_value_count (current_value)) (null) (rand))
+												)
+											)
+										)
+										num_valid_values_per_feature_map
+									))
+								)
+						)
+
+						;re-compute residuals on these case_ids, store into case_residuals_lists
+						(call !AccumulateMissingInformation (assoc case_ids case_ids_without_nulls))
+
+						;transpose case_residuals_lists into a list the length of features and append the results into feature_residuals_lists
+						(assign (assoc
+							feature_residuals_lists
+								(map
+									(lambda (append (first (current_value)) (last (current_value))))
+									feature_residuals_lists
+									(call !TransposeResidualLists)
+								)
+						))
+					)
+				)
+			)
+		)
 	)
 
 )
