@@ -3,12 +3,12 @@
 	(declare
 		(assoc
 			action_feature (null)
-			focus_feature (null)
+			focus_features (null)
 			features []
 		)
 
 		(declare (assoc
-			context_features (filter (lambda (not (contains_value [action_feature focus_feature] (current_value)))) features)
+			context_features (filter (lambda (not (contains_value (append action_feature focus_features) (current_value)))) features)
 			case_features (values (append features (if !tsTimeFeature [".series_index"] [])) .true)
 		))
 
@@ -48,21 +48,19 @@
 
 
 		(declare (assoc
-			enabled_num_features_probability_map
-				#!ComputeNumEnabledFeaturesProbabilitiesMap
-				;map of num_enabled_features -> probability
-				(map
-					(lambda
-						(call !BinomialDistribution (assoc
-							k (current_index 1)
-							n num_features
-							p 0.5
-						))
+			enabled_num_features_probability_map (call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features num_features))
+			focus_features_probability_map
+				(if (> (size focus_features) 1)
+					(remove
+						(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size focus_features)))
+						0
 					)
-					(zip (range 0 (- num_features 1)))
 				)
 			all_features_map (zip features)
 			feature_deviations (get hyperparam_map "featureDeviations")
+
+			;will do 4 * ((2^num_focus_features) - 1) robust reacts with focus features and the same amount without
+			num_reacts_per_case ( * 4 (- (pow 2 (size focus_features)) 1))
 		))
 
 		(declare (assoc
@@ -77,6 +75,7 @@
 							feature_weights (get hyperparam_map "featureWeights")
 							context_features context_features
 						)
+						(declare (assoc case_feature_value (get case_values_map action_feature) ))
 
 						(if !tsTimeFeature
 							(assign (assoc
@@ -88,178 +87,221 @@
 							))
 						)
 
-						;filter out a random number of context features
+						;do a num_reacts_per_case of robust reacts without any of the focus features
 						(declare (assoc
-							react_context_features
-								(rand
-									context_features
-									;number of features to enable is probabilistically weighted
-									(if (and !tsTimeFeature (!= (size context_features) num_features))
-										(rand
-											(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
+							without_focus_feature_action_diffs
+								(range
+									(lambda (let
+										(assoc
+											;filter out a random number of context features
+											react_context_features
+												(rand
+													context_features
+													;number of features to enable is probabilistically weighted
+													(if (and !tsTimeFeature (!= (size context_features) num_features))
+														(rand
+															(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
+														)
+
+														(rand enabled_num_features_probability_map)
+													)
+													;unique random features (not with replacement)
+													.true
+												)
 										)
 
-										(rand enabled_num_features_probability_map)
-									)
-									;unique random features (not with replacement)
-									.true
-								)
-							case_feature_value (get case_values_map action_feature)
-						))
+										;assoc of all removed features to their residual values, filter the action features to be those that are not context features
+										(declare (assoc
+											removed_features_map (remove all_features_map react_context_features)
+										))
 
-						;assoc of all removed features to their residual values, filter the action features to be those that are not context features
-						(declare (assoc
-							removed_features_map (remove all_features_map react_context_features)
-						))
-
-						(if !tsTimeFeature
-							(let
-								(assoc context_map (keep case_values_map react_context_features) )
-								(if (contains_index context_map !tsTimeFeature)
-									(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterFutureCasesQuery) ))
-								)
-							)
-						)
-
-						;use dynamic deviations subtrainee if present
-						(if (get hyperparam_map "subtraineeName")
-							(call !UseDynamicDeviationsAndWeights (assoc
-								context_features react_context_features
-								context_values (unzip case_values_map react_context_features)
-								hyperparam_map hyperparam_map
-							))
-						)
-
-						(declare (assoc
-							dependent_queries_list
-								;if any of the features being predicted are dependent to any of the contexts, then
-								;append all the dependencies together for the query
-								(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
-									(apply "append" (map
-										(lambda
-											(call !ComputeDependentQueries (assoc
-												context_features react_context_features
-												context_values (unzip case_values_map react_context_features)
-												action_feature (current_value 1)
-											))
-										)
-										;just the features to be predicted that have dependencies defined
-										(indices (keep !dependentFeatureMap (indices removed_features_map)))
-									))
-								)
-						))
-
-						(declare (assoc
-							action_diff_without_focus_feature
-								(call !InterpolateAndComputeDiffToCase (assoc
-									candidate_cases_lists
-										(if (= 0 (size  react_context_features))
-											[[][][]]
-											(compute_on_contained_entities
-												(query_not_in_entity_list [(replace case_id)])
-												(if ignore_null_action_feature (query_not_equals action_feature (null)))
-												(if (size context_condition_filter_query) context_condition_filter_query)
-												dependent_queries_list
-												time_series_filter_query
-												(query_nearest_generalized_distance
-													k_parameter
-													(replace react_context_features)
-													(replace (unzip case_values_map react_context_features))
-													p_parameter
-													feature_weights
-													!queryDistanceTypeMap
-													query_feature_attributes_map
-													feature_deviations
-													(null)
-													dt_parameter
-													(if valid_weight_feature weight_feature(null))
-													tie_break_random_seed
-													(null) ;radius
-													!numericalPrecision
-													action_feature
+										(if !tsTimeFeature
+											(let
+												(assoc context_map (keep case_values_map react_context_features) )
+												(if (contains_index context_map !tsTimeFeature)
+													(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterFutureCasesQuery) ))
 												)
 											)
 										)
-								))
-						))
 
-						(assign (assoc
-							removed_features_map (remove removed_features_map focus_feature)
-							react_context_features (append react_context_features focus_feature)
-						))
-
-						(if !tsTimeFeature
-							(let
-								(assoc context_map (keep case_values_map react_context_features) )
-								(if (contains_index context_map !tsTimeFeature)
-									(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterFutureCasesQuery) ))
-								)
-							)
-						)
-
-						;use dynamic deviations subtrainee if present
-						(if (get hyperparam_map "subtraineeName")
-							(call !UseDynamicDeviationsAndWeights (assoc
-								context_features react_context_features
-								context_values (unzip case_values_map react_context_features)
-								hyperparam_map hyperparam_map
-							))
-						)
-
-						;if any of the features being predicted are dependent to any of the contexts, then
-						;append all the dependencies together for the query
-						(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
-							(assign (assoc
-								dependent_queries_list
-									(apply "append" (map
-										(lambda
-											(call !ComputeDependentQueries (assoc
+										;use dynamic deviations subtrainee if present
+										(if (get hyperparam_map "subtraineeName")
+											(call !UseDynamicDeviationsAndWeights (assoc
 												context_features react_context_features
 												context_values (unzip case_values_map react_context_features)
-												action_feature (current_value 1)
+												hyperparam_map hyperparam_map
 											))
 										)
-										;just the features to be predicted that have dependencies defined
-										(indices (keep !dependentFeatureMap (indices removed_features_map)))
-									))
-							))
-						)
 
-						(declare (assoc
-							action_diff_with_focus_feature
-								(call !InterpolateAndComputeDiffToCase (assoc
-									candidate_cases_lists
-										(compute_on_contained_entities
-											(query_not_in_entity_list [(replace case_id)])
-											(if ignore_null_action_feature (query_not_equals action_feature (null)))
-											(if (size context_condition_filter_query) context_condition_filter_query)
+										(declare (assoc
 											dependent_queries_list
-											time_series_filter_query
-											(query_nearest_generalized_distance
-												k_parameter
-												(replace react_context_features)
-												(replace (unzip case_values_map react_context_features))
-												p_parameter
-												feature_weights
-												!queryDistanceTypeMap
-												query_feature_attributes_map
-												feature_deviations
-												(null)
-												dt_parameter
-												(if valid_weight_feature weight_feature(null))
-												tie_break_random_seed
-												(null) ;radius
-												!numericalPrecision
-												action_feature
-											)
-										)
-								))
+												;if any of the features being predicted are dependent to any of the contexts, then
+												;append all the dependencies together for the query
+												(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
+													(apply "append" (map
+														(lambda
+															(call !ComputeDependentQueries (assoc
+																context_features react_context_features
+																context_values (unzip case_values_map react_context_features)
+																action_feature (current_value 1)
+															))
+														)
+														;just the features to be predicted that have dependencies defined
+														(indices (keep !dependentFeatureMap (indices removed_features_map)))
+													))
+												)
+										))
+
+
+										(call !InterpolateAndComputeDiffToCase (assoc
+											candidate_cases_lists
+												(if (= 0 (size  react_context_features))
+													[[][][]]
+													(compute_on_contained_entities
+														(query_not_in_entity_list [(replace case_id)])
+														(if ignore_null_action_feature (query_not_equals action_feature (null)))
+														(if (size context_condition_filter_query) context_condition_filter_query)
+														dependent_queries_list
+														time_series_filter_query
+														(query_nearest_generalized_distance
+															k_parameter
+															(replace react_context_features)
+															(replace (unzip case_values_map react_context_features))
+															p_parameter
+															feature_weights
+															!queryDistanceTypeMap
+															query_feature_attributes_map
+															feature_deviations
+															(null)
+															dt_parameter
+															(if valid_weight_feature weight_feature(null))
+															tie_break_random_seed
+															(null) ;radius
+															!numericalPrecision
+															action_feature
+														)
+													)
+												)
+										))
+									))
+									1 num_reacts_per_case 1
+								)
 						))
 
-						;output a pair of : [ AC for the focus feature, focus value ]
+						;do num_react_per_case robust reacts with the (robust set) of focust features
+						(declare (assoc
+							with_focus_feature_action_diffs
+								(range
+									(lambda (let
+										;filter out a random number of context features
+										(assoc
+											react_context_features
+												(rand
+													context_features
+													;number of features to enable is probabilistically weighted
+													(if (and !tsTimeFeature (!= (size context_features) num_features))
+														(rand
+															(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
+														)
+
+														(rand enabled_num_features_probability_map)
+													)
+													;unique random features (not with replacement)
+													.true
+												)
+										)
+
+										;append focus features
+										(accum (assoc
+											react_context_features
+												(if (size focus_features_probability_map)
+											  		(rand focus_features (rand focus_features_probability_map) .true)
+													focus_features
+												)
+										))
+
+										(declare (assoc
+											removed_features_map (remove all_features_map react_context_features)
+										))
+
+										(if !tsTimeFeature
+											(let
+												(assoc context_map (keep case_values_map react_context_features) )
+												(if (contains_index context_map !tsTimeFeature)
+													(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterFutureCasesQuery) ))
+												)
+											)
+										)
+
+										;use dynamic deviations subtrainee if present
+										(if (get hyperparam_map "subtraineeName")
+											(call !UseDynamicDeviationsAndWeights (assoc
+												context_features react_context_features
+												context_values (unzip case_values_map react_context_features)
+												hyperparam_map hyperparam_map
+											))
+										)
+
+										;if any of the features being predicted are dependent to any of the contexts, then
+										;append all the dependencies together for the query
+										(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
+											(assign (assoc
+												dependent_queries_list
+													(apply "append" (map
+														(lambda
+															(call !ComputeDependentQueries (assoc
+																context_features react_context_features
+																context_values (unzip case_values_map react_context_features)
+																action_feature (current_value 1)
+															))
+														)
+														;just the features to be predicted that have dependencies defined
+														(indices (keep !dependentFeatureMap (indices removed_features_map)))
+													))
+											))
+										)
+
+										(call !InterpolateAndComputeDiffToCase (assoc
+											candidate_cases_lists
+												(compute_on_contained_entities
+													(query_not_in_entity_list [(replace case_id)])
+													(if ignore_null_action_feature (query_not_equals action_feature (null)))
+													(if (size context_condition_filter_query) context_condition_filter_query)
+													dependent_queries_list
+													time_series_filter_query
+													(query_nearest_generalized_distance
+														k_parameter
+														(replace react_context_features)
+														(replace (unzip case_values_map react_context_features))
+														p_parameter
+														feature_weights
+														!queryDistanceTypeMap
+														query_feature_attributes_map
+														feature_deviations
+														(null)
+														dt_parameter
+														(if valid_weight_feature weight_feature(null))
+														tie_break_random_seed
+														(null) ;radius
+														!numericalPrecision
+														action_feature
+													)
+												)
+										))
+									))
+									1 num_reacts_per_case 1
+								)
+						))
+
+
+						;output a pair of : [ AC for the focus feature, focus values ]
 						[
-							(- action_diff_without_focus_feature action_diff_with_focus_feature)
-							(get case_values_map focus_feature)
+							(-
+								;store average of difference without focus features
+								(/ (apply "+" without_focus_feature_action_diffs) num_reacts_per_case)
+								(/ (apply "+" with_focus_feature_action_diffs) num_reacts_per_case)
+							)
+							(unzip case_values_map focus_features)
 						]
 					))
 					case_ids
@@ -278,8 +320,9 @@
 	#!ResponsibleContinuous
 	(seq
 
+		;sort is descending order
 		(declare (assoc
-			sorted_acs (sort (lambda (< (first (current_value)) (first (current_value 1))) ) case_acs)
+			sorted_values (sort (lambda (< (last (current_value)) (last (current_value 1))) ) case_acs)
 		))
 		(declare (assoc
 			num_unique_values (size (values (map (lambda (last (current_value))) sorted_acs) .true))
@@ -290,9 +333,6 @@
 		))
 
 		(declare (assoc
-			;if the number of unique values is less than 5% of total values, can present them as is
-			output_individual_values (< num_unique_values (* 0.05 total_num))
-
 			;num_buckets list of pairs, specifying the min and max percentage range for each bucket.
 			;e.g., if there were two buckets, this would output: [ [0 0.5] [0.5 1] ]
 			bucket_percent_range_pairs
@@ -303,7 +343,6 @@
 					])
 					1 num_buckets 1
 				)
-
 		))
 
 		(map
@@ -313,21 +352,20 @@
 					index_quantile_high (- (floor (* total_num (last (current_value 1)))) 1)
 				)
 				(declare (assoc
-					bucket_values
+					bucket_acs
 						(map
-							(lambda (last (current_value)))
-							(unzip sorted_acs (range index_quantile_low index_quantile_high))
+							(lambda (first (current_value)))
+							(unzip sorted_values (range index_quantile_low index_quantile_high))
 						)
 
 				))
 
-				;output bucket tuple of:  [ mean mode min max (optional list of individual values)]
+				;output bucket tuple of:  [ mean mode min max ]
 				[
-					(generalized_mean bucket_values)
-					(mode bucket_values)
-					(apply "min" bucket_values)
-					(apply "max" bucket_values)
-					(if output_individual_values (values bucket_values .true) [])
+					(generalized_mean bucket_acs)
+					(mode bucket_acs)
+					(apply "min" bucket_acs)
+					(apply "max" bucket_acs)
 				]
 			))
 			bucket_percent_range_pairs
