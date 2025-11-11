@@ -7,9 +7,9 @@
 </picture>
 </div>
 
-The Howso Engine&trade; is a natively and fully explainable ML engine, serving as an alternative to black box AI neural networks. Its core functionality gives users data exploration and machine learning capabilities through the creation and use of Trainees that help users store, explore, and analyze the relationships in their data, as well as make understandable, debuggable predictions. Howso leverages an instance-based learning approach with strong ties to the [k-nearest neighbors algorithm](https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm) and [information theory](https://en.wikipedia.org/wiki/Information_theory) to scale for real world applications.
+The Howso Engine&trade; is a natively and fully explainable ML engine, serving as an alternative to black box AI neural networks. Its core functionality gives users data exploration and machine learning capabilities through the creation and use of Trainees that help users store, explore, and analyze the relationships in their data, as well as make understandable, debuggable predictions. Howso leverages an instance-based learning approach with strong ties to the [k-nearest neighbors algorithm](https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm) and [information theory](https://en.wikipedia.org/wiki/Information_theory) to scale for real world applications.  See our extensive paper describing these techniques on [arXiv](https://arxiv.org/abs/2510.22809).
 
-At the core of Howso is the concept of a Trainee, a collection of data elements that comprise knowledge. In traditional ML, this is typically referred to as a model, but a Trainee is original training data coupled with metadata, parameters, details of feature attributes, with data lineage and provenance. Unlike traditional ML, Trainees are designed to be versatile so that after a single training instance (no re-training required!), they can:
+At the core of Howso is the concept of a Trainee, a collection of data elements that comprise knowledge. In traditional ML, this is typically referred to as a model, but a Trainee is original training data coupled with metadata, measured uncertainties and probabilities, details of feature attributes, with data lineage and provenance. Unlike traditional ML, Trainees are designed to be versatile so that after a single training instance (no re-training required!).  They can:
 
 - Perform **classification** on any target feature using any set of input features
 - Perform **regression** on any target feature using any set of input features
@@ -54,13 +54,13 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
     (set_entity_permissions "howso" {std_out_and_std_err (true) load (true) store (true) })
 
     (call_entity "howso" "set_feature_attributes" (assoc
-        feature_attributes {"species" {assoc "type" "nominal"}}
+        feature_attributes {"species" {"type" "nominal"}}
     ))
 
     (call_entity "howso" "train" (assoc
         features ["sepal_length" "sepal_width" "petal_length" "petal_width" "species"]
         cases
-            (list
+            [
                 [6.4 2.8 5.6 2.2 "virginica"]
                 [5.0 2.3 3.3 1.0 "versicolor"]
                 [4.9 3.1 1.5 0.1 "setosa"]
@@ -68,7 +68,7 @@ Basic usage of the Howso Engine in an Amalgam script looks like:
                 [6.9 3.1 5.4 2.1 "virginica"]
                 [5.1 3.3 1.7 0.5 "setosa"]
                 ;... as many cases as appropriate
-            )
+            ]
         session "iris_session"
     ))
 

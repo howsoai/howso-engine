@@ -10,11 +10,17 @@
 	;	"combined_model_average_distance_contribution" (list 4.05 3.9)
 	;	"distance_contributions" (list 4.5 3.2)
 	; )
-	;{long_running (true) statistically_idempotent (true)}
+	;{long_running .true statistically_idempotent .true}
 	#react_group
 	(declare
 		;returns {ref "ReactGroupResponse"}
 		(assoc
+			;{type "list" values "string"}
+			;list of feature names to predict the values of for each group
+			action_features (list)
+			;{ref "ReactGroupDetails"}
+			;An assoc declaring the details requested by the user.
+			details (assoc)
 			;{type "list" values "string"}
 			;list of feature names
 			features (list)
@@ -31,28 +37,28 @@
 			conditions (null)
 			;{type "boolean"}
 			;calculate and output familiarity conviction of adding the specified new_cases in the output assoc
-			familiarity_conviction_addition (true)
+			familiarity_conviction_addition .false
 			;{type "boolean"}
 			;calculate and output familiarity conviction of removing the specified new_cases in the output assoc
-			familiarity_conviction_removal (false)
+			familiarity_conviction_removal .false
 			;{type "boolean"}
 			;calculate and output the KL divergence of adding the specified new_cases in the output assoc
-			kl_divergence_addition (false)
+			kl_divergence_addition .false
 			;{type "boolean"}
 			;calculate and output the KL divergence of removing the specified new_cases in the output assoc
-			kl_divergence_removal (false)
+			kl_divergence_removal .false
 			;{type "boolean"}
 			;if true will output p value of addition
-			p_value_of_addition (false)
+			p_value_of_addition .false
 			;{type "boolean"}
 			;if true will output p value of removal
-			p_value_of_removal (false)
+			p_value_of_removal .false
 			;{type "boolean"}
 			;calculate and output the mean similarity conviction of cases in each group
-			similarity_conviction (false)
+			similarity_conviction .false
 			;{type "boolean"}
 			;calculate and output distance contribution ratios in the output assoc
-			distance_contributions (false)
+			distance_contributions .false
 			;{ref "UseCaseWeights"}
 			;flag, if set to true will scale influence weights by each case's weight_feature weight.
 			;   If a weight is missing, uses 1 as the weight. If unspecified, case weights will be used if the trainee has them.
@@ -83,6 +89,11 @@
 			)
 		)
 
+		;details do nothing if no action features are specified
+		(if (not (size action_features))
+			(assign (assoc details {}))
+		)
+
 		(declare (assoc warnings (assoc) ))
 
 		(declare (assoc
@@ -91,7 +102,9 @@
 				(map
 					(lambda
 						(call !SingleReactGroup (assoc
+							action_features action_features
 							features features
+							details details
 							new_cases (get new_cases (current_index 1))
 							condition (get conditions (current_index 1))
 							case_indices (get case_indices (current_index 1))
@@ -117,17 +130,23 @@
 
 		(call !Return (assoc
 			payload
-				(zip
-					react_group_keys
-					(map
-						(lambda (let
-							(assoc key (current_value 1))
-							(map
-								(lambda (get (current_value) key))
-								react_results
-							)
-						))
+				(append
+					(zip
 						react_group_keys
+						(map
+							(lambda (let
+								(assoc key (current_value 1))
+								(map
+									(lambda (get (current_value) key))
+									react_results
+								)
+							))
+							react_group_keys
+						)
+					)
+					(if (size action_features)
+						(assoc "action_features" action_features)
+						(assoc)
 					)
 				)
 			warnings (indices warnings)
@@ -139,6 +158,8 @@
 	;computes familiarity conviction of an avg case for each given hypothetical set of cases specified, returns a list of convictions, one per set
 	;parameters:
 	; features: list of feature names
+	; action_features: list of feature names to predict the values of for the group
+	; details: the requested details
 	; new_cases: a list of lists of values corresponding to sets of feature values, where the values are ordered corresponding to the features
 	; condition: a map specifying conditions that select a collection of trained cases
 	; case_indices: a list of tuples describing case indices
@@ -157,25 +178,27 @@
 	(declare
 		(assoc
 			features (list)
+			action_features (list)
+			details (assoc)
 			new_cases (list)
 			condition (assoc)
 			case_indices (list)
-			skip_encoding (false)
-			familiarity_conviction_addition (true)
-			familiarity_conviction_removal (false)
-			kl_divergence_addition (false)
-			kl_divergence_removal (false)
-			p_value_of_addition (false)
-			p_value_of_removal (false)
-			distance_contributions (false)
-			similarity_conviction (true)
+			skip_encoding .false
+			familiarity_conviction_addition .true
+			familiarity_conviction_removal .false
+			kl_divergence_addition .false
+			kl_divergence_removal .false
+			p_value_of_addition .false
+			p_value_of_removal .false
+			distance_contributions .false
+			similarity_conviction .true
 			use_case_weights (null)
 			weight_feature ".case_weight"
 		)
 
 		(declare (assoc dataset_size (call !GetNumTrainingCases)))
 
-		;if the model is too small, just return 0, otherwise compute conviction
+		;if the dataset is too small, just return 0, otherwise compute conviction
 		(if (<= dataset_size 2)
 			(conclude
 				(assoc
@@ -196,7 +219,14 @@
 
 		;if features aren't specified, assume all !trainedFeatures will need to have their mae calculated
 		(if (= 0 (size features))
-			(assign (assoc features !trainedFeatures))
+			(assign (assoc
+				features
+					(if (size action_features)
+						(filter (lambda (not (contains_value action_features (current_value)))) !trainedFeatures)
+						!trainedFeatures
+					)
+
+			))
 		)
 
 		;if features need to be encoded, overwrite the values in the new_cases list with the encoded values
@@ -216,7 +246,7 @@
 		)
 
 		;if user doesn't want to use case weights, change weight_feature to '.none'
-		(if (= (false) use_case_weights)
+		(if (= .false use_case_weights)
 			(assign (assoc weight_feature ".none"))
 		)
 
@@ -227,8 +257,12 @@
 					context_features features
 					weight_feature weight_feature
 				))
-			valid_weight_feature (false)
+			valid_weight_feature .false
 
+			action_values (null)
+			output_influential_cases (null)
+			output_caps_map (null)
+			feature_full_residuals_map (null)
 			combined_average_distance_contribution (null)
 			avg_new_cases_distance_contribution (null)
 			new_case_entropies_value (null)
@@ -257,9 +291,9 @@
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
 		))
 
-		;closest k must be at least 2 smaller than model size, i.e., a model of 5 needs a K of 3 or less:
+		;closest k must be at least 2 smaller than dataset size, i.e., a dataset of 5 needs a K of 3 or less:
 		;when knocking out a case during conviction calculations, each remaining case searches for K cases around itself
-		;meaning that the K must be at least 2 less than the model size
+		;meaning that the K must be at least 2 less than the dataset size
 		(if (and (< dataset_size (+ closest_k 2)) (~ 0 closest_k))
 			(assign (assoc closest_k (- dataset_size 2)))
 		)
@@ -339,8 +373,67 @@
 			(apply "destroy_entities" case_ids)
 		)
 
+		(if (size action_features)
+			(declare
+				(assoc
+					group_prediction
+						(call !PredictGroup (assoc
+							action_features action_features
+							context_features features
+							features features
+							cases
+								(if (size new_cases)
+									new_cases
+
+									(map
+										(lambda (retrieve_from_entity (current_value) features))
+										case_ids
+									)
+								)
+
+							desired_conviction (null)
+							leave_series_out .false
+							holdout_queries (if (not new_cases_created) (query_not_in_entity_list case_ids))
+							details details
+							skip_encoding (not (size new_cases))
+							return_per_case_reactions .true
+						))
+				)
+
+				(assign (assoc
+					action_values (get group_prediction "action_values")
+				))
+
+				(if (get details "influential_cases")
+					(assign (assoc output_influential_cases (get group_prediction "influential_cases") ))
+				)
+				(if (get details "categorical_action_probabilities")
+					(assign (assoc output_caps_map (get group_prediction "categorical_action_probabilities") ))
+				)
+				(if (get details "feature_full_residuals")
+					(assign (assoc feature_full_residuals_map (get group_prediction "feature_full_residuals") ))
+				)
+			)
+		)
+
 		;output only the requested keys
 		(append
+			(if (size action_features)
+				(assoc "action_values" action_values)
+				(assoc)
+			)
+			(if (get details "influential_cases")
+				(assoc "influential_cases" output_influential_cases)
+				(assoc)
+			)
+			(if (get details "categorical_action_probabilities")
+				(assoc "categorical_action_probabilities" output_caps_map)
+				(assoc)
+			)
+			(if (get details "feature_full_residuals")
+				(assoc "feature_full_residuals" feature_full_residuals_map)
+				(assoc)
+			)
 			(if familiarity_conviction_addition
 				(assoc "familiarity_conviction_addition" average_new_cases_conviction_addition)
 				(assoc)
@@ -380,7 +473,7 @@
 		)
 	)
 
-	;Helper method to compute and cache average case entropy of addition for the model
+	;Helper method to compute and cache average case entropy of addition for the dataset
 	#!CacheAverageCaseEntropyAddition
 	(let
 		(assoc
@@ -411,7 +504,7 @@
 		))
 	)
 
-	;Helper method to compute and cache average case entropy of removal for the model
+	;Helper method to compute and cache average case entropy of removal for the dataset
 	#!CacheAverageCaseEntropyRemoval
 	(let
 		(assoc
@@ -433,7 +526,7 @@
 						"fixed rand seed"
 						(null) ;radius
 						!numericalPrecision
-						(true) ;conviction_of_removal
+						.true ;conviction_of_removal
 					)
 				)
 		)
@@ -443,7 +536,7 @@
 		))
 	)
 
-	;Helper method to compute and cache average case distance contribution for the model
+	;Helper method to compute and cache average case distance contribution for the dataset
 	#!CacheAverageCaseDistanceContribution
 	(let
 		(assoc
@@ -474,7 +567,7 @@
 		))
 	)
 
-	;Helper method to compute model avg distance contribution and new cases' avg distance contribution
+	;Helper method to compute dataset avg distance contribution and new cases' avg distance contribution
 	#!ComputeNewCasesDistanceContributions
 	(let
 		(assoc
@@ -506,7 +599,7 @@
 		))
 	)
 
-	;Helper method to compute model avg new cases familiarity convction of addition and p value of addition
+	;Helper method to compute dataset avg new cases familiarity convction of addition and p value of addition
 	#!ComputeNewCasesFamiliarityConvictionAddition
 	(seq
 		;compute entropies of the new cases
@@ -551,7 +644,7 @@
 		))
 	)
 
-	;Helper method to compute model avg new cases familiarity convction of removal and p value of removal
+	;Helper method to compute dataset avg new cases familiarity convction of removal and p value of removal
 	#!ComputeNewCasesFamiliarityConvictionRemoval
 	(seq
 		;compute entropies of the new cases
@@ -574,7 +667,7 @@
 						"fixed rand seed"
 						(null) ;radius
 						!numericalPrecision
-						(true) ;conviction_of_removal
+						.true ;conviction_of_removal
 					)
 				)
 		))
@@ -611,7 +704,7 @@
 								use_case_weights use_case_weights
 								weight_feature weight_feature
 								filtering_queries [(query_not_in_entity_list case_ids)]
-								react_group (true)
+								react_group .true
 							))
 							"similarity_conviction"
 						)
@@ -641,12 +734,14 @@
 			desired_conviction (null)
 
 			goal_features_map (assoc)
+			holdout_queries (list)
+			leave_series_out .false
 			;pass through to !SingleReact (appended to those needed for aggregation)
 			details (null)
 			;pass through to !SingleReact
-			skip_encoding (false)
+			skip_encoding .false
 			;flag, if true will return per-row reactions
-			return_per_case_reactions (false)
+			return_per_case_reactions .false
 		)
 
 		(let
@@ -698,21 +793,21 @@
 									context_features react_context_features
 									context_values (unzip case_context_map react_context_features)
 									action_features action_features
-									leave_series_out (true)
+									leave_series_out leave_series_out
 									skip_encoding skip_encoding
 									desired_conviction desired_conviction
 									goal_features_map goal_features_map
-									return_entity_ids_only (true)
+									holdout_queries holdout_queries
+									return_entity_ids_only .true
 									details
 										(append
 											details
 											{
-												"feature_full_residuals" (true)
-												"feature_deviations" (true)
+												"influential_cases" .true
+												"influential_cases_raw_weights" .true
 												"most_similar_cases" (!= (null) desired_conviction) ;need to compute max gaps if generative
 												"num_most_similar_cases" 30 ;need max of k and 30, but k always < 30 in targetless
 												"features" action_features
-												"categorical_action_probabilities" (true)
 											}
 										)
 								))
@@ -738,6 +833,69 @@
 							(assoc)
 						)
 					)
+				categorical_action_probabilities_map (assoc)
+				output_categorical_action_probabilities (get details "categorical_action_probabilities")
+			))
+
+			(declare (assoc
+				group_influential_cases
+					(let
+						(assoc
+							all_inf_cases
+								(apply
+									"append"
+									(get output_map "influential_cases")
+								)
+						)
+
+						(declare (assoc
+							case_influence_map
+								;this is a map of case-index (tuple of session and training index) to total influence
+								(normalize (zip
+									(lambda (+ (current_value) (current_value 1)))
+									(map (lambda [(get (current_value 1) ".session") (get (current_value 1) ".session_training_index") ]) all_inf_cases)
+									(map (lambda (get (current_value) ".raw_influence_weight")) all_inf_cases)
+								))
+							case_values_map
+								;this is a map of case-index (tuple of session and training index) to map of features->value (including session/index)
+								(zip
+									(map (lambda [(get (current_value 1) ".session") (get (current_value 1) ".session_training_index") ]) all_inf_cases)
+									(map (lambda (remove (current_value) [".influence_weight" ".raw_influence_weight"])) all_inf_cases)
+								)
+
+						))
+
+						(map
+							(lambda
+								(append
+									(get case_values_map [(current_value 1)])
+									(associate
+										!internalLabelSession (first (current_value 1))
+										!internalLabelSessionTrainingIndex (last (current_value 1))
+										;need to wrap the case-index tuple in an extra list so that it is not interpreted
+										;as a walk path
+										".influence_weight" (get case_influence_map [(current_value 2)])
+									)
+
+								)
+							)
+							(indices case_influence_map)
+						)
+					)
+			))
+
+			(declare (assoc
+				group_inf_case_weights (map (lambda (get (current_value) ".influence_weight")) group_influential_cases)
+				group_inf_case_ids
+					(map
+						(lambda
+							(call !GetCaseId (assoc
+								session (get (current_value 1) ".session")
+								session_training_index (get (current_value) ".session_training_index")
+							))
+						)
+						group_influential_cases
+					)
 			))
 
 			;for each action_feature, "interpolate" the per row reactions to get a prediction for the series
@@ -751,174 +909,133 @@
 									action_index (current_index 1)
 								)
 
-								(declare (assoc
-									action_feature_row_residuals
-										(map
-											(lambda (get (current_value) action_feature))
-											(get output_map "feature_full_residuals")
-										)
-								))
+								(if (= (null) desired_conviction)
+									;simply interpolate using group's influential cases
+									(call !InterpolateActionValues (assoc
+										allow_nulls .true
+										action_feature action_feature
+										candidate_case_ids group_inf_case_ids
+										candidate_case_weights group_inf_case_weights
+										candidate_case_values
+											(map
+												(lambda
+													(get (current_value) action_feature)
+												)
+												group_influential_cases
+											)
+									))
 
-								(if (contains_index !nominalsMap action_feature)
-									;nominals flow: accumulate the categorical action probabilities computed in each row, but
-									;scale their values by the local probability of the correct prediction, which we can
-									;measure with 1 - the local residual for that feature. Then predict the class with the largest
-									;accumulated CAP
-									(let
-										(assoc
-											scaled_per_row_caps
-												(map
-													(lambda
+									;generative flow
+									(if (contains_index !nominalsMap action_feature)
+										(let
+											(assoc
+												caps_map
+													(normalize (zip
+														(lambda (+ (current_value) (current_value 1)))
+														;inf-case action values
 														(map
 															(lambda
-																;multiply each CAP by the probability of correct prediction (1-residual)
-																(*
-																	(current_value)
-																	(- 1 (get action_feature_row_residuals (current_index 1)))
-																)
+																(get (current_value) action_feature)
 															)
-															(get (current_value) action_feature)
+															group_influential_cases
 														)
-													)
-													(get output_map "categorical_action_probabilities")
-												)
+														group_inf_case_weights
+													))
+											)
+
+											(if output_categorical_action_probabilities
+												(accum (assoc categorical_action_probabilities_map (associate action_feature caps_map)))
+											)
+
+											(rand caps_map)
 										)
 
-										;add together the scaled CAPs for each row
-										(declare (assoc
-											aggregated_caps
-												(reduce
-													(lambda
-														(map
-															(lambda
-																(+
-																	(or (first (current_value)) 0)
-																	(or (last (current_value)) 0)
+										;edit_distance feats
+										(contains_index !editDistanceFeatureTypesMap action_feature)
+										(null)
+
+										;continuous feats
+										(and
+											(not (contains_index !categoricalFeaturesSet action_feature))
+											;interpolate continuous strings as categorical since we don't want to mix them
+											(!= "string" (get !editDistanceFeatureTypesMap action_feature))
+										)
+										(let
+											(assoc
+												discriminative_prediction
+													;simply interpolate using group's influential cases
+													(call !InterpolateActionValues (assoc
+														allow_nulls .true
+														action_feature action_feature
+														candidate_case_ids group_inf_case_ids
+														candidate_case_weights group_inf_case_weights
+														candidate_case_values
+															(map
+																(lambda
+																	(get (current_value) action_feature)
 																)
+																group_influential_cases
 															)
-															(previous_result)
-															(current_value)
-														)
-													)
-													scaled_per_row_caps
-												)
-										))
+													))
+											)
 
-										(if (!= (null) desired_conviction)
-											;sample from the classes according to the CAPs
-											(rand aggregated_caps)
+											(declare (assoc
+												generative_residual
+													(if use_differential_privacy
+														;aggregate max gap by taking max of each case's max gaps (min of regional and local gaps, but no larger than half min gap)
+														(apply "max"
+															(map
+																(lambda
+																	(max
+																		(get !cachedFeatureHalfMinGapMap action_feature)
 
-											(rand (index_max aggregated_caps))
-										)
-									)
+																		(min
+																			(compute_on_contained_entities
+																				(query_in_entity_list (trunc
+																					(current_value)
+																					(if (~ 0 (get hyperparam_map "k"))
+																						(get hyperparam_map "k")
+																						;else get the min value from dynamic k
+																						(get hyperparam_map ["k" 1])
+																					)
+																				))
+																				(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
+																			)
 
-									;edit_distance feats
-									(contains_index !editDistanceFeatureTypesMap action_feature)
-									(null)
-
-									;continuous feats
-									(and
-										(not (contains_index !categoricalFeaturesSet action_feature))
-										;interpolate continuous strings as categorical since we don't want to mix them
-										(!= "string" (get !editDistanceFeatureTypesMap action_feature))
-									)
-									(let
-										(assoc
-											raw_timestep_weights
-												(map
-													(lambda
-														(/
-															(get (first (current_value)) action_feature)
-															(get (last (current_value)) action_feature)
-														)
-													)
-													(get output_map "feature_deviations")
-													(get output_map "feature_full_residuals")
-												)
-											discriminative_prediction (null)
-										)
-										(assign (assoc
-											discriminative_prediction
-												;weighted average of the predictions at each timestep where the weight is
-												;the react deviation divided by the react full residual
-												(generalized_distance
-													;vec
-													(map
-														(lambda (get (current_value) action_index))
-														(get output_map "action_values")
-													)
-													;origin
-													(null)
-													1 ;p
-													(normalize raw_timestep_weights) ;weights
-												)
-										))
-
-										(if (!= (null) desired_conviction)
-											;if generative, need to either add noise according to aggregated RMR or aggregated max gap
-											(let
-												(assoc
-													generative_residual
-														(if use_differential_privacy
-															;aggregate max gap by taking max of each case's max gaps (min of regional and local gaps, but no larger than half min gap)
-															(apply "max"
-																(map
-																	(lambda
-																		(max
-																			(get !cachedFeatureHalfMinGapMap action_feature)
-
-																			(min
-																				(compute_on_contained_entities
-																					(query_in_entity_list (trunc
-																						(current_value)
-																						(if (~ 0 (get hyperparam_map "k"))
-																							(get hyperparam_map "k")
-																							;else get the min value from dynamic k
-																							(get hyperparam_map ["k" 1])
-																						)
-																					))
-																					(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
-																				)
-
-																				(compute_on_contained_entities
-																					(query_in_entity_list (current_value))
-																					(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
-																				)
+																			(compute_on_contained_entities
+																				(query_in_entity_list (current_value))
+																				(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
 																			)
 																		)
 																	)
-																	(get output_map "most_similar_cases")
 																)
-															)
-
-															;else aggregate each timesteps local residual with a weighted average
-															(generalized_distance
-																;vec
-																(map
-																	(lambda (get (current_value) action_feature))
-																	(get output_map "feature_full_residuals")
-																)
-																;origin
-																(null)
-																1 ;p
-																(normalize raw_timestep_weights) ;weights
+																(get output_map "most_similar_cases")
 															)
 														)
-												)
 
-												(call !GenerateFeatureValue (assoc
-													feature_is_nominal (false)
-													action_value discriminative_prediction
-													feature_residual generative_residual
-													desired_conviction desired_conviction
-													feature action_feature
-												))
-											)
+														;else aggregate each timesteps local residual with a weighted average
+														(generalized_distance
+															;vec
+															(map
+																(lambda (get (current_value) action_feature))
+																(get output_map "feature_full_residuals")
+															)
+															;origin
+															(null)
+															1 ;p
+															(normalize raw_timestep_weights) ;weights
+														)
+													)
+											))
 
-											;discriminative.
-											discriminative_prediction
+											(call !GenerateFeatureValue (assoc
+												feature_is_nominal .false
+												action_value discriminative_prediction
+												feature_residual generative_residual
+												desired_conviction desired_conviction
+												feature action_feature
+											))
 										)
-
 									)
 								)
 							)
@@ -927,8 +1044,40 @@
 					)
 			))
 
+			(if (get details "feature_full_residuals")
+				(declare (assoc
+					group_residuals_full
+						(map
+							(lambda
+								(generalized_mean
+									;get each cases full residual
+									(map
+										(lambda
+											(get (current_value) (current_index 1))
+										)
+										(get output_map "feature_full_residuals")
+									)
+								)
+							)
+							(zip action_features)
+						)
+				))
+			)
+
 			(append
 				{"action_values" action_values}
+				(if (get details "influential_cases")
+					{"influential_cases" group_influential_cases}
+					{}
+				)
+				(if (get details "feature_full_residuals")
+					{"feature_full_residuals" group_residuals_full}
+					{}
+				)
+				(if output_categorical_action_probabilities
+					{"categorical_action_probabilities" categorical_action_probabilities_map}
+					{}
+				)
 				(if return_per_case_reactions
 					{"per_case_reactions" output_map}
 					{}

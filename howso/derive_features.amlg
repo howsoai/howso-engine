@@ -12,25 +12,21 @@
 	;			dataset. Referencing data in rows uses 0-based indexing, where the current row index is 0, the previous row's is 1, etc.
 	;			Specified code may do simple logic and numeric operations on feature values referenced via feature name and row offset.
 	;			Examples:
-	;				"#x 1" - Use the value for feature 'x' from the previously processed row (offset of 1, one lag value).
-	;				"(- #y 0 #x 1)" - Feature 'y' value from current (offset 0) row  minus feature 'x' value from previous (offest 1) row.
-	;		'code': string, Code describing how feature could be derived. Example: "(- #y 0 #x 1)"
+	;				"(call value {feature "x" lag 1})" - Use the value for feature 'x' from the previously processed row (offset of 1, one lag value).
+	;				"(- (call value {feature "y" lag 0}) (call value {feature "x" lag 1}))" - Feature 'y' value from current (offset 0) row  minus feature 'x' value from previous (offest 1) row.
+	;		'code': string, Code describing how feature could be derived.
+	;				Same format as 'derived_feature_code' as defined in attributes. Example: "(- (call value {feature \"y\"})  (call value {feature \"x\" lag 1}) )"
 	;		'series_id_features' : (optional) list of feature name(s) of series for which to derive this feature. A series is the conjunction of all
 	;			the features specified by this attribute.
 	;		'ordered_by_features' : (optional) list of fature name(s) by which to order the series specified by "series_id_features". Series values
 	;			are order by the order of feature names specified by this attribute.
 	;
-	;
-	;		'derive_type' : "progress" -
-	;			This will create two continuous features of: .series_progress with values ranging from 0 to 1.0 for each case in the series
-	;			and '.series_progress_delta' which is the delta value of the progress for each case. Used to determine when to stop series synth.
-	;
 	;		'series_id_features' : list of feature name(s) of series for which to derive this feature. A series is the conjunction of all
 	;			the features specified by this attribute.
 	;
 
-	;At the end of train, derive features using the existing model, provided a list of features to derive. Creates and populates the specified
-	;features to the model.
+	;At the end of train, derive features using the existing dataset, provided a list of features to derive. Creates and populates the specified
+	;features to the dataset.
 	;
 	;parameters:
 	; features: list of features the dataset was trained with originally
@@ -67,13 +63,10 @@
 			derived_features (filter (lambda (not (contains_value lag_features (current_value)))) derived_features)
 		))
 
-		;create .series_progress, .series_progress_delta and .series_index features
-		(if (contains_value derived_features ".series_progress")
-			(call !CreateSeriesProgressFeatures (assoc
-				feature ".series_progress"
-				series_id_features (get !featureAttributes [".series_progress" "auto_derive_on_train" "series_id_features"])
-			))
-		)
+		;create series index features
+		(call !CreateSeriesIndexFeatures (assoc
+			series_id_features (get !tsFeaturesMap "series_id_features")
+		))
 
 		;derive time feature delta before any of the other derived features
 		(if (contains_value derived_features time_feature_delta)
@@ -82,6 +75,15 @@
 				derived_features [time_feature_delta]
 			))
 		)
+
+		;In datasets with no synchonous cases, this method will early-out and store
+		;zeros for all cases' synchronous counters (making it a inactive feature)
+		(call !CreateSynchronousCounterFeature (assoc
+			time_feature !tsTimeFeature
+			time_feature_delta time_feature_delta
+			series_ordered_by_features [!tsTimeFeature !internalLabelSessionTrainingIndex]
+			series_id_features (get !tsFeaturesMap "series_id_features")
+		))
 
 		;keep only features that have a custom derivation specified and aren't time_feature_delta which was derived above
 		(assign (assoc
@@ -110,8 +112,10 @@
 
 		;remove any non default features from derived features
 		(if (size non_default_order_derived_features)
-			derived_features
-				(filter (lambda (not (contains_value non_default_order_derived_features (current_value)))) derived_features)
+			(assign (assoc
+				derived_features
+					(filter (lambda (not (contains_value non_default_order_derived_features (current_value)))) derived_features)
+			))
 		)
 
 		;compute the maximum order of rate or deltas needed, since higher orders depend on lower ones and need to be derived sequentially
@@ -176,7 +180,7 @@
 		)
 
 		(if (= (null) derived_feature)
-			(conclude (false))
+			(conclude .false)
 		)
 		(declare (assoc derived_value_index (get feature_index_map derived_feature) ))
 		;pull the max row lag for this derived_feature
@@ -185,7 +189,7 @@
 		;if max value > last_series_index, this feature needs to be generated because it references a row offset
 		;that isn't in this series, return false because this value can't be derived
 		(if (> max_row_lag last_series_index)
-			(conclude (false))
+			(conclude .false)
 		)
 
 		(declare (assoc
@@ -201,7 +205,7 @@
 						feature_index_map feature_index_map
 						!featureDateTimeMap !featureDateTimeMap
 						!ConvertDateToEpoch !ConvertDateToEpoch
-					) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+					) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false)
 				)
 		))
 
@@ -228,7 +232,7 @@
 							feature_index_map feature_index_map
 							!featureDateTimeMap !featureDateTimeMap
 							!ConvertDateToEpoch !ConvertDateToEpoch
-						) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+						) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false)
 					)
 			))
 		)
@@ -241,7 +245,7 @@
 
 					(get !featureBoundsMap derived_feature)
 				)
-			valid_value (true)
+			valid_value .true
 			is_datetime (contains_index !featureDateTimeMap derived_feature)
 
 		))
@@ -250,8 +254,8 @@
 		(if (size bounds_map)
 			(seq
 				;invalid if generated a null and nulls are not allowed
-				(if (and (= (null) derived_feature_value) (= (get bounds_map "allow_null") (false)))
-					(conclude (assign (assoc valid_value (false))))
+				(if (and (= (null) derived_feature_value) (= (get bounds_map "allow_null") .false))
+					(conclude (assign (assoc valid_value .false)))
 
 					;else this is a nominal that has an allowed list, check if it's in the list
 					(contains_index bounds_map "allowed")
@@ -297,7 +301,7 @@
 
 					(if (get !featureAttributes (list derived_feature "time_series" "time_feature"))
 						;if time feature exceeds the feature boundary max, stop generating the series by setting valid_value to 0
-						;instead of (false), as long as other rows exist (this isn't the first row being generated)
+						;instead of .false, as long as other rows exist (this isn't the first row being generated)
 						(if (and (not valid_value) (> derived_feature_value boundary_max) (> (size series_data) 1))
 							(assign (assoc valid_value (null)))
 						)
@@ -362,7 +366,7 @@
 		))
 
 		;return true upon completion
-		(true)
+		.true
 	)
 
 	;helper method to derive all the lag features for all the series in one pass
@@ -382,7 +386,7 @@
 
 		(declare (assoc
 			series_id_features (get !tsFeaturesMap "series_id_features")
-			series_ordered_by_features [!tsTimeFeature]
+			series_ordered_by_features [!tsTimeFeature !internalLabelSessionTrainingIndex]
 		))
 		(declare (assoc
 			;list of features that are necessary to be able to derive the specified lag features, i.e., the original non-lagged features
@@ -392,15 +396,14 @@
 						series_ordered_by_features
 						(apply "append"
 							(map
-								(lambda (let
-									(assoc raw_code_string (get !featureAttributes (list (current_value 2) "auto_derive_on_train" "code")) )
-									(indices (get_all_labels (parse raw_code_string)))
-								))
+								(lambda
+									(get !featureAttributes [(current_value 1) "auto_derive_on_train" "code_features"])
+								)
 								lag_features
 							)
 						)
 					)
-					(true)
+					.true
 				)
 			ts_series_length_limit (retrieve_from_entity "!tsSeriesLimitLength")
 		))
@@ -492,7 +495,7 @@
 			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
 			(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
 		)
-		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
+		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the dataset with this new value
 		(if (> ts_series_length_limit !tsSeriesLimitLength)
 			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))
 		)

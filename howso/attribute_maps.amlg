@@ -223,6 +223,40 @@
 				)
 			full_dependents_map (assoc)
 		)
+
+		(if !tsTimeFeature
+			;if time series, give the rate of change features (rates/deltas) the same dependencies
+			;as the parent features
+			(accum (assoc
+				dependents_map
+					(apply "append" (map
+						(lambda
+							(if (contains_value !derivedFeaturesMap (current_value))
+								;get all rate of change features for this feature
+								(map
+									(lambda
+										(get dependents_map (current_value 1))
+									)
+									(zip (filter
+										(lambda
+											(= (current_value 1) (get !derivedFeaturesMap (current_value)))
+										)
+										(append
+											(get !tsFeaturesMap "rate_features")
+											(get !tsFeaturesMap "delta_features")
+										)
+									))
+								)
+
+								;else no derived features based on this feature
+								(assoc)
+							)
+						)
+						(indices dependents_map)
+					))
+			))
+		)
+
 		;copy the original dependents_map so that it can be populated if necessary below
 		(assign (assoc full_dependents_map (get_value dependents_map)))
 
@@ -257,7 +291,7 @@
 		full_dependents_map
 	)
 
-	;Creates shared deviations model attributes:
+	;Creates shared deviations dataset attributes:
 	; shared_deviations_key_map:  mapping of shared deviations where the keys are each feature within a group of shared deviations, and the values are their
 	; 	corresponding primary feature. For each group of shared deviations, they are stored under the first sorted feature in their group, a.k.a. the primary feature.
 	;   e.g., a group of features with shared devations is [A, B, C], creates an mapping of {A : A, B : A, C : A}
@@ -349,7 +383,7 @@
 		))
 
 		(declare (assoc
-			unique_sets (values combined_shared_sets (true))
+			unique_sets (values combined_shared_sets .true)
 		))
 
 		(declare (assoc
@@ -497,15 +531,15 @@
 		)
 	)
 
-	#!ComposeNonStringNominalsMap
+	#!ComposeNumericNominalsMap
 	;map-filter weave
 	(apply "assoc"
 		(weave
 			(lambda
-				;only allowed data_type values are number and boolean, all others are ignored
+				;only allowed data_type values is number, all others are ignored
 				(if (and
 						(= "nominal" (get (last (current_value)) "type"))
-						(contains_value (list "number" "boolean") (get (last (current_value)) "data_type") )
+						(= "number" (get (last (current_value)) "data_type"))
 					)
 					(list (replace (first (current_value 1))) (replace (get (last (current_value 1)) "data_type")))
 					;else don't output anything, map-filtering out any values that don't have data_type defined
@@ -578,7 +612,7 @@
 					(accum (assoc
 						bounds_map
 							(assoc
-								"has_epoch_bounds" (true)
+								"has_epoch_bounds" .true
 								"epoch_max_value"
 									(if (!= (null) boundary_max)
 										(if (!= "number" (get_type_string boundary_max))
@@ -615,9 +649,14 @@
 					(assoc "allow_null"  (replace allow_null_param))
 					;if the time feature, assume allow_null is false
 					(if (= feature time_series_feature)
-						(assoc "allow_null" (false))
+						(assoc "allow_null" .false)
 						(assoc)
 					)
+				)
+				;cache the referenced features in the constraint
+				(if (contains_index bounds_map "constraint")
+					(assoc "constraint_features" (zip (get constraint_referenced_features_map feature)) )
+					(assoc)
 				)
 			)
 		))
@@ -660,55 +699,27 @@
 
 					;append this derived feature name to the list of derived features for its matching source feature(s)
 					(if
-						(= "progress" derive_type)
-						(let
-							(assoc
-								source_feature_name (get attributes (list "auto_derive_on_train" "time_feature"))
-								derived_features_list
-									(get source_to_derived_feature_map (get attributes (list "auto_derive_on_train" "time_feature")))
-							)
-							(if (= (null) derived_features_list)
-								(assign (assoc derived_features_list (list)))
-							)
-							(accum (assoc
-								source_to_derived_feature_map (associate source_feature_name (replace (append derived_features_list feature)))
-							))
-						)
-
 						(= "custom" derive_type)
-						(let
-							(assoc
-								;create a map of label -> value for all the labels referenced in the code
-								parsed_code_string_labels_map (get_all_labels (parse (get attributes (list "auto_derive_on_train" "code"))))
-								raw_code_string (get attributes (list "auto_derive_on_train" "code"))
-							)
-							(declare (assoc
-								;parse code to determine which features are being sourced from
-								sourced_features (indices parsed_code_string_labels_map)
-							))
-
-							(map
-								(lambda
-									(let
-										(assoc
-											source_feature_name (current_value 1)
-											derived_features_list (get source_to_derived_feature_map (current_value 1))
-										)
-										(if (= (null) derived_features_list)
-											(assign (assoc derived_features_list (list)))
-										)
-										(accum (assoc
-											source_to_derived_feature_map (associate source_feature_name (replace (append derived_features_list feature)))
-										))
+						(map
+							(lambda
+								(let
+									(assoc
+										source_feature_name (current_value 1)
+										derived_features_list (get source_to_derived_feature_map (current_value 1))
 									)
+									(if (= (null) derived_features_list)
+										(assign (assoc derived_features_list (list)))
+									)
+									(accum (assoc
+										source_to_derived_feature_map (associate source_feature_name (replace (append derived_features_list feature)))
+									))
 								)
-								sourced_features
 							)
+							(call !FeaturesInCustomCode (assoc code_string (get attributes ["auto_derive_on_train" "code"]) ))
 						)
 					)
 				)
 			)
-
 		))
 		derived_features_map
 	)
@@ -841,7 +852,7 @@
 		(assign_to_entities (assoc
 			!ordinalFeaturesValuesMap ordinal_features_values_map
 			!ordinalFeaturesRangesMap ordinal_features_ranges_map
-			!staleOrdinalValuesCount (false)
+			!staleOrdinalValuesCount .false
 
 		))
 	)
@@ -850,10 +861,10 @@
 	;outputs the list of sorted_feature_values for this feature
 	;parameters:
 	; feature: name of feature for which to output sorted feature values
-	; store_values: flag, when true will update the model with the new values as well
+	; store_values: flag, when true will update the dataset with the new values as well
 	#!UpdateOrdinalFeaturesMapForFeature
 	(declare
-		(assoc store_values (false))
+		(assoc store_values .false)
 
 		;pull all the values for this feature, make the list unique by zipping it and then sort the indices to store as a sorted unique
 		;list of feature values
@@ -906,12 +917,94 @@
 			)
 			(if constraint
 				;keep feature if it isn't referenced in the constraint
-				(not (contains_index
-					(get_all_labels (parse constraint))
-					feature
-				))
+				(not (contains_value (get constraint_referenced_features_map feature) feature))
 			)
 		))
 		(indices feature_attributes)
+	)
+
+	#!ComposeConstraintReferencedFeaturesMap
+	(filter (map
+		(lambda (let
+			(assoc
+				feature (current_index 1)
+				constraint (get (current_value 1) ["bounds" "constraint"])
+			)
+			(if constraint
+				(call !FeaturesInCustomCode (assoc code_string constraint))
+			)
+		))
+		feature_attributes
+	))
+
+	;output a list of all features referenced in custom code that uses (call value {feature <feature name>})
+	;to pull feature values by feature name and lag
+	;parameters:
+	; code_string: custom code string to parse and to determine all referenced features
+	#!FeaturesInCustomCode
+	(let
+		(assoc referenced_features [])
+		;recurse through the code and accumulate all feature names from any calls to value
+		(rewrite
+			(lambda
+				(if (= "call" (get_type_string (current_value)))
+					(if (= (lambda value) (first (current_value)))
+						(accum (assoc referenced_features (get (current_value 1) [1 "feature"]) ))
+						(current_value)
+					)
+					(current_value)
+				)
+			)
+			(parse code_string)
+		)
+		;output accumulated referenced features
+		(values referenced_features .true)
+	)
+
+	;output the maximum lag value referenced in custom code that uses (call value {feature <feature name> lag <lag value>})
+	;to pull feature values by feature name and lag
+	;parameters:
+	; code_string: custom code string to parse and to determine max lag value
+	#!MaxLagInCustomCode
+	(let
+		(assoc max_lag 0)
+		(rewrite
+			(lambda
+				(if (= "call" (get_type_string (current_value)))
+					(if (= (lambda value) (first (current_value)))
+						(if (> (get (current_value ) [1 "lag"]) max_lag)
+							(assign (assoc max_lag (get (current_value 1) [1 "lag"]) ))
+							(current_value)
+						)
+						(current_value)
+					)
+					(current_value)
+				)
+			)
+			(parse code_string)
+		)
+		max_lag
+	)
+
+	;returns list of all zero lag features specified in the code
+	;parameters:
+	; code_string: custom code string to parse to determine all features with zero lags
+	#!ZeroLagFeaturesInCustomCode
+	(let
+		(assoc zero_lag_features [])
+		(rewrite
+			(lambda
+				(if (and
+						(= "call" (get_type_string (current_value)))
+						(= (lambda value) (first (current_value)))
+						(= 0 (+ (or (get (current_value ) [1 "lag"]))) )
+					)
+					(accum (assoc zero_lag_features (get (current_value 1) [1 "feature"]) ))
+					(current_value)
+				)
+			)
+			(parse code_string)
+		)
+		(values zero_lag_features .true)
 	)
 )

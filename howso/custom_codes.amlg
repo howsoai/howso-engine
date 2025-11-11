@@ -1,7 +1,7 @@
 ;Contains methods for working with custom derived feature codes.
 (null
 
-	;derive new features using a custom code string and store into model
+	;derive new features using a custom code string and store into dataset
 	;parameters:
 	; features: list of features the dataset was trained with originally
 	; derived_features : names of feature to create + derive
@@ -20,13 +20,11 @@
 				(values
 					(apply "append" (map
 						(lambda
-							(indices (get_all_labels
-								(parse (get !featureAttributes [(current_value 1) "auto_derive_on_train" "code"]) )
-							))
+							(get !featureAttributes [(current_value 1) "auto_derive_on_train" "code_features"] )
 						)
 						derived_features
 					))
-					(true)
+					.true
 				)
 			cycle_length (null)
 
@@ -42,7 +40,13 @@
 			series_ordered_by_features
 				(if feature_attribute_map
 					(get feature_attribute_map "ordered_by_features")
-					[!tsTimeFeature]
+					[!tsTimeFeature !internalLabelSessionTrainingIndex]
+				)
+			is_stationary_feature
+				(and
+					!tsTimeFeature
+					(= "custom" (get feature_attribute_map "derive_type"))
+					(= (null) (get feature_attribute_map "time_series"))
 				)
 		))
 
@@ -155,7 +159,26 @@
 							)
 						)
 					))
-					(zip series_case_ids series_data)
+					(zip
+						series_case_ids
+
+						;if this is a series stationary feature, set all values for this feature to the 'current' (last case) value
+						(if is_stationary_feature
+							 ;all values are same, store as-is
+							(if (apply "=" (apply "append" series_data))
+								series_data
+
+								;else set the entire series to the value of the 'current' case
+								(let
+									(assoc stationary_value (first (last series_data)))
+									(map (lambda [stationary_value]) series_data)
+								)
+							)
+
+							;else non series stationary data, store as-is
+							series_data
+						)
+					)
 				)
 			))
 
@@ -191,7 +214,7 @@
 					;else all features have some non-null values
 					(assign_to_entities (assoc
 						!inactiveFeaturesMap (null)
-						!inactiveFeaturesNeedCaching (false)
+						!inactiveFeaturesNeedCaching .false
 					))
 				)
 
@@ -201,11 +224,192 @@
 			)
 		)
 
-		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the model with this new value
+		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the dataset with this new value
 		(if (> ts_series_length_limit !tsSeriesLimitLength)
 			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))
 		)
 	)
+
+	;helper method to derive the values for the synchronous counter feature for all trained cases/series
+	;parameters:
+	;  time_feature: the name of the time feature
+	;  time_feature_delta: the name of the time feature's delta
+	;  series_ordered_by_features: the ordered list of feature names to sort the series data by in increasing order
+	;  series_id_features: the ordered list of feature names to identify each unique series
+	#!CreateSynchronousCounterFeature
+	(declare
+		(assoc
+			time_feature (null)
+			time_feature_delta (null)
+			series_ordered_by_features (null)
+			series_id_features (null)
+		)
+
+		(declare (assoc
+			sync_counter_lag_name (concat !tsSynchronousCounterFeature "_lag_1")
+			necessary_features (values (append series_ordered_by_features [time_feature time_feature_delta !internalLabelSessionTrainingIndex]) .true)
+		))
+
+		(declare (assoc
+			necessary_feature_index_map (zip necessary_features (indices necessary_features))
+		))
+
+		(declare (assoc
+			time_delta_index (get necessary_feature_index_map time_feature_delta)
+		))
+
+		;process each series individually
+		;pull all the values for the necessary_features, sort them, and then derive this feature based on the specified code
+		(map
+			(lambda (let
+				;(current_value) is in the format of (list (query_equals "series_feature_name" value) ... ) for all series_feature_name
+				(assoc series_case_ids (contained_entities (current_value 1)) )
+
+				;series_data is all the necessary_features's values along with the training index and case_id appended as the last two columns
+				;when the data is sorted, ties will be broken by the training index to assist with consistency
+				(declare (assoc
+					series_data
+						(map
+							(lambda
+								;append two features: session index and case_id
+								(append
+									;series_ordered_by_features should include the time feature and the sessionTrainingIndex
+									(retrieve_from_entity (current_value) necessary_features)
+									(current_value)
+								)
+							)
+							series_case_ids
+						)
+				))
+
+				;sort the series data according to the specified features if ordering has been provided
+				(if (size series_ordered_by_features)
+					(assign (assoc
+						series_data
+							(call !MultiSortList (assoc
+								data series_data
+								column_order_indices
+									(unzip necessary_feature_index_map series_ordered_by_features)
+							))
+					))
+				)
+
+				;store the case ids in the new sorted order of series_data
+				(assign (assoc
+					series_case_ids
+						(map
+							(lambda (last (current_value)))
+							series_data
+						)
+				))
+
+				(declare (assoc
+					has_synchronous_timesteps
+						(>
+							(size (contained_entities
+								(query_in_entity_list series_case_ids)
+								(query_equals time_feature_delta 0)
+							))
+							0
+						)
+				))
+
+				(declare (assoc
+					synchronous_counter_values
+						(if has_synchronous_timesteps
+							(let
+								(assoc
+									prev_counter 0
+								)
+
+								(map
+									(lambda
+										(if (> prev_counter 0)
+											;if prev counter is already greater than 0, just decrement
+											(seq
+												(accum (assoc prev_counter -1))
+												prev_counter
+											)
+
+											;otherwise the last time value must be "finished" and onto the next
+											;must count the number of values until time_delta is positive again
+											(if (!=
+													(get series_data [(+ (current_index 1) 1) time_delta_index])
+													0
+												)
+												;if the next value is on a different time value, can just return zero
+												0
+
+												;if the next case is on the same time value, must count how many cases are also on it.
+												(seq
+													(assign (assoc
+														prev_counter
+															;in this while loop (current_index 1) is the index in series_data
+															;(current_index) is the (while) index. So (+ (current_index 1) (current_index) 1) is
+															;the index of series_data being checked
+															(while
+																;while the "next" time delta is still zero, continue
+																(=
+																	(get series_data [(+ (current_index 3) (current_index 1) 1) time_delta_index])
+																	0
+																)
+																(+ 1 (current_index))
+															)
+
+													))
+													prev_counter
+												)
+											)
+										)
+									)
+									series_data
+								)
+							)
+
+							;otherwise all counter values should be zero
+							(map (lambda 0) series_case_ids)
+						)
+				))
+
+				(map
+					(lambda (let
+						(assoc
+							case_id (current_value 1)
+							sync_counter (get synchronous_counter_values (current_index 1))
+							sync_counter_lag
+								(if (> (current_index 1) 0)
+									(get synchronous_counter_values (- (current_index 1) 1))
+								)
+						)
+
+						(if (contains_label case_id !tsSynchronousCounterFeature)
+							(assign_to_entities
+								case_id
+								(associate
+									!tsSynchronousCounterFeature sync_counter
+									sync_counter_lag_name sync_counter_lag
+								)
+							)
+							;else these labels don't exist yet, need to append them to the entity
+							(accum_entity_roots
+								case_id
+								(zip_labels
+									[!tsSynchronousCounterFeature sync_counter_lag_name]
+									[sync_counter sync_counter_lag]
+								)
+							)
+						)
+					))
+					series_case_ids
+				)
+			))
+
+			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
+			(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+		)
+
+
+	) ;end !CreateSynchronousCounterFeature
 
 	;derives the feature value for the specified feature provided the data to derive from
 	;parameters:
@@ -238,7 +442,7 @@
 						series_data series_data
 						series_row_index series_row_index
 						feat_index_map feat_index_map
-					)  op_limit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+					)  op_limit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false)
 				)
 			))
 
@@ -282,7 +486,7 @@
 								;the index of the current row (outer map)
 								(current_index 2)
 							feat_index_map feat_index_map
-						)  op_limit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+						)  op_limit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false)
 					))
 					derived_features
 				)
@@ -291,53 +495,53 @@
 		)
 	)
 
-	;constrains code to the specified list of allowed_opcodes
-	; then it finds any node that has a label and replaces it by a copy of label_to_code,
-	; replacing label_value with the value at the label and label_name with the label name
+	;rewrites the code in code_string by replacing all instances of (call value {feature <feature> lag <lag> }) with inlined
+	;code from the 'value' method, replacing all 'feature' with the actual feature and all 'lag' with the actual lag value
+	;e.g.:
+	;(call !ParseDerivedFeatureCode (assoc
+	;	code_string "(+ (call value {feature \"foo\" lag 2}) (call value {feature \"bar\"}) )"
+	;	value (lambda (if (> lag 0) (get my_map feature) -1))
+	;))
+	; outputs:
+	; (+ (if (> 2 0) (get my_map "foo") -1) (if (> 0 0) (get my_map "bar") -1))
+	;
+	;parameters:
+	; code_string: code to parse as a string
+	; value: method to inline and replace each instance of (call value ...) in the specified code
 	#!ParseDerivedFeatureCode
-	(declare
-		(assoc
-			code_string (null)
-			label_to_code (null)
-		)
+	(rewrite
+		(lambda
+			(if (= "call" (get_type_string (current_value)))
+				(if (= (lambda value) (first (current_value)))
+					;if this node is (call value {feature .. lag ...}), rewrite it
+					;by pulling out the actual feature and lag values and inlining the code from the 'value' method
+					(let
+						(assoc
+							feature (get (current_value 1) [1 "feature"])
+							lag (+ (or (get (current_value 1) [1 "lag"]) ) )
+						)
+						(rewrite
+							(lambda
+								;replace instance of 'feature' with actual string value, not a reference, by concatenating
+								(if (= (current_value) (lambda feature))
+									(concat feature)
 
-		(declare (assoc code (parse code_string)))
+									;replace instance of 'lag' with actual lag value, not a reference, by using get_value
+									(= (current_value) (lambda lag))
+									(get_value lag)
 
-		(rewrite
-			(lambda (let
-				(assoc
-					node (current_value 1)
-					label_name (first (get_labels (current_value 1)))
-				)
-
-				(if
-					;if not a label, just use
-					(not label_name)
-					node
-
-					;else need to rewrite label_to_code
-					(rewrite
-						(lambda (let
-							(assoc to_replace_node (current_value 1))
-							(if
-								;replaces instance of 'label_value' found in the passed in label_to_code with the actual node value (i.e., offset)
-								(= to_replace_node (lambda label_value))
-								(get_value node)
-
-								;replaces instance of 'label_name' found in the passed in label_to_code with the actual name of the label (i.e., feature)
-								(= to_replace_node (lambda label_name))
-								(concat label_name)
-
-								to_replace_node
+									(current_value)
+								)
 							)
-							;to_replace_node
-						))
-						label_to_code
+							value
+						)
 					)
+					(current_value)
 				)
-			))
-			code
+				(current_value)
+			)
 		)
+		(parse code_string)
 	)
 
 	;Derive feature values from the provided features and values using either each derived feature's custom code string or predefined operations and output a list of computed values.
@@ -352,7 +556,7 @@
 			feature_values_map (assoc)
 
 			;not a parameter
-			has_derived_datetime_features (false)
+			has_derived_datetime_features .false
 			calculated_case_similarity_metrics (assoc)
 		)
 
@@ -449,7 +653,7 @@
 								(assign (assoc
 									output_value
 										(get_value
-											(call_sandboxed new_feature_transform_processed (assoc feature_values_map feature_values_map) op_limit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+											(call_sandboxed new_feature_transform_processed (assoc feature_values_map feature_values_map) op_limit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false)
 										)
 								))
 
@@ -460,7 +664,7 @@
 											(get_value
 												(call_sandboxed (get feature_post_process_code_map (current_value 1)) (assoc
 													case (append feature_values_map (associate (current_value 3) output_value) )
-												) !sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+												) !sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false)
 											)
 									))
 								)
@@ -522,13 +726,7 @@
 							;parse it into code, requires passing case as a map of feature name to value
 							(call !ParseDerivedFeatureCode (assoc
 								code_string (current_value 1)
-								label_to_code
-									(lambda
-										(if (= (lambda label_value) 0)
-											;pull the feature value
-											(get case (lambda label_name))
-										)
-									)
+								value (lambda (if (= lag 0) (get case feature) ) )
 							))
 						)
 						feature_pre_process_code_map
@@ -543,13 +741,7 @@
 							;parse it into code, requires passing case as a map of feature name to value
 							(call !ParseDerivedFeatureCode (assoc
 								code_string (current_value 1)
-								label_to_code
-									(lambda
-										(if (= (lambda label_value) 0)
-											;pull the feature value
-											(get case (lambda label_name))
-										)
-									)
+								value (lambda (if (= lag 0) (get case feature) ) )
 							))
 						)
 						feature_post_process_code_map

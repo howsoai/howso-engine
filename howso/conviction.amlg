@@ -1,18 +1,18 @@
 ;Contains methods for calculating conviction for cases.
 (null
 
-	;computes various data, such as familiarity convictions and distance contribution for each case in the model and stores them into specified features.
+	;computes various data, such as familiarity convictions and distance contribution for each case in the dataset and stores them into specified features.
 	; After this method is called, if "similarity_conviction" or "distance_contribution" are selected, then they may be used as `derived_context_features`
 	; in `react` under the same feature name specified in this method.
-	;{long_running (true)}
+	;{long_running .true}
 	#react_into_features
 	(declare
 		(assoc
 			;{type "list" values "string"}
-			;list of features for which to calculate conviction, will default to trainee's default features if unspecified
+			;list of features used to do all the computations, will default to trainee's default features if unspecified
 			features (null)
 			;{type "list" values {type "list" values ["string" "number"] min_size 2 max_size 2}}
-			;the list of case ids for the model to calculate conviction for
+			;the list of case ids for the dataset to calculate conviction for
 			case_ids (null)
 			;{type ["boolean" "string"]}
 			;true or string, if true will use default value of "familiarity_conviction_addition" for feature name
@@ -37,6 +37,18 @@
 			;{type ["boolean" "string"]}
 			;true or string, if true will use default value of "influence_weight_entropy"
 			influence_weight_entropy (null)
+			;{type ["boolean" "string"]}
+			;true or string, if true will use the default value of ".cluster_id" for feature name for clustering.
+			;will additionally compute and store distance contributions and similarity convictions while respecting the overwrite flag.
+			clustering (null)
+			;{type "number" exclusive_min 0}
+			;similarity conviction threshold of cases considered for expansion of a cluster, only cases with similarity conviction
+			;equal to or greater than this value will be considered to be clustered in the same cluster as their neighbors.
+			clustering_expansion_threshold 0.5
+			;{type "number" exclusive_min 0}
+			;The initially unclustered candidate cases' distance contribution needs to be less than this value times the
+			;max distance contribution from their nearest cluster to be included in that cluster.
+			clustering_inclusion_relative_threshold 1.5
 			;{type "boolean"}
 			;flag, if set to true, will enable auto_analyze and analyze with these specified features computing their values.
 			;   Only applicable when reacting for the entire dataset,  when case_ids is null.
@@ -44,7 +56,7 @@
 			;{type "boolean"}
 			;if true will forcibly recompute and overwrite previously stored values.  Default is false, will error out if trying to
 			;react_into_features for a feature that already exists.
-			overwrite (false)
+			overwrite .false
 			;{ref "UseCaseWeights"}
 			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
 			;	case weights will be used if the trainee has them.
@@ -56,7 +68,7 @@
 		(call !ValidateParameters)
 
 		(declare (assoc
-			valid_weight_feature (false)
+			valid_weight_feature .false
 			warnings (assoc)
 		))
 
@@ -64,41 +76,55 @@
 		(if
 			(= (null)
 			   familiarity_conviction_addition familiarity_conviction_removal distance_contribution
-			   p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy
+			   p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy clustering
 			)
 			(conclude (call !Return))
 		)
 
 		;if any of the compute options are true, overwrite with their corresponding default feature names
-		(if (= (true) familiarity_conviction_addition)
+		(if (= .true familiarity_conviction_addition)
 			(assign (assoc familiarity_conviction_addition "familiarity_conviction_addition"))
 		)
-		(if (= (true) familiarity_conviction_removal)
+		(if (= .true familiarity_conviction_removal)
 			(assign (assoc familiarity_conviction_removal "familiarity_conviction_removal"))
 		)
-		(if (= (true) p_value_of_addition)
+		(if (= .true p_value_of_addition)
 			(assign (assoc p_value_of_addition "p_value_of_addition"))
 		)
-		(if (= (true) p_value_of_removal)
+		(if (= .true p_value_of_removal)
 			(assign (assoc p_value_of_removal "p_value_of_removal"))
 		)
-		(if (= (true) distance_contribution)
+		(if (= .true distance_contribution)
 			(assign (assoc distance_contribution "distance_contribution"))
 		)
-		(if (= (true) similarity_conviction)
+		(if (= .true similarity_conviction)
 			(assign (assoc similarity_conviction "similarity_conviction"))
 		)
-		(if (= (true) influence_weight_entropy)
+		(if (= .true influence_weight_entropy)
 			(assign (assoc influence_weight_entropy "influence_weight_entropy"))
 		)
+		(if (= .true clustering)
+			(assign (assoc clustering ".cluster_id"))
+		)
 
-		;prevent this method from overwriting any previously stored values if 'overwrite' is not (true)
+		(if clustering
+			(seq
+				(if (not similarity_conviction)
+					(assign (assoc similarity_conviction "similarity_conviction"))
+				)
+				(if (not distance_contribution)
+					(assign (assoc distance_contribution "distance_contribution"))
+				)
+			)
+		)
+
+		;prevent this method from overwriting any previously stored values if 'overwrite' is not .true
 		(if
 			(and
 				(not overwrite)
 				(or
 					familiarity_conviction_addition familiarity_conviction_removal distance_contribution
-					p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy
+					p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy clustering
 				)
 			)
 			(let
@@ -111,7 +137,7 @@
 							)
 							(filter [
 								familiarity_conviction_addition familiarity_conviction_removal distance_contribution
-								p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy
+								p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy clustering
 							])
 						)
 				)
@@ -135,15 +161,15 @@
 		)
 
 		;flag set to true if similarity_conviction was requested without distance_contribution
-		(declare (assoc only_similiarity_conviction (false) ))
+		(declare (assoc only_similiarity_conviction .false ))
 		(if (and
 				(!= (null) similarity_conviction)
-				(or (= (null) distance_contribution) (= (false) distance_contribution))
+				(or (= (null) distance_contribution) (= .false distance_contribution))
 				(= (null) case_ids)
 			)
 			;if computing similarity_conviction for all cases, distance_contribution is needed for all cases
 			(if (and
-					(= (false) overwrite)
+					(= .false overwrite)
 					(contains_index !storedDistanceContributionsFeatureMap (apply "concat" (sort features)))
 				)
 				;declare the existing DC feature name to be used for SC computations
@@ -152,19 +178,19 @@
 				;DCs do not exist for this feature set already, it must be additionally computed
 				(assign (assoc
 					distance_contribution "distance_contribution"
-					only_similiarity_conviction (true)
+					only_similiarity_conviction .true
 				))
 			)
 		)
 
 
 		;if user doesn't want to use case weights, change weight_feature to '.none'
-		(if (= (false) use_case_weights)
+		(if (= .false use_case_weights)
 			(assign (assoc weight_feature ".none"))
 		)
 
 		(declare (assoc
-			cache_values (false)
+			cache_values .false
 			;create assoc of type of computation -> stored feature name
 			computed_map
 				(filter
@@ -201,6 +227,10 @@
 								(indices computed_map)
 							)
 						)
+						(if clustering
+							(associate clustering {"type" "nominal" "data_type" "number" })
+							{}
+						)
 					)
 			))
 		)
@@ -220,13 +250,13 @@
 								)
 							"computed_map"
 								(if only_similiarity_conviction
-									(set computed_map "distance_contribution" (false))
+									(set computed_map "distance_contribution" .false)
 									computed_map
 								)
 							"context_features" features
 							"weight_feature" (if use_case_weights weight_feature)
 						)
-					!autoAnalyzeEnabled (true)
+					!autoAnalyzeEnabled .true
 					!queryDistanceTypeMap (append !queryDistanceTypeMap (zip (values computed_map) "continuous_number") )
 				))
 
@@ -252,7 +282,7 @@
 
 		(declare (assoc
 			feature_weights (get hyperparam_map "featureWeights")
-			feature_deviations  (get hyperparam_map "featureDeviations")
+			feature_deviations (get hyperparam_map "featureDeviations")
 			closest_k (get hyperparam_map "k")
 			p_parameter (get hyperparam_map "p")
 			dt_parameter (get hyperparam_map "dt")
@@ -283,9 +313,9 @@
 			))
 		)
 
-		;if not using dynamic k, closest k must be at least 2 smaller than model size, i.e., a model of 5 needs a K of 3 or less:
+		;if not using dynamic k, closest k must be at least 2 smaller than dataset size, i.e., a dataset of 5 needs a K of 3 or less:
 		;when knocking out a case during conviction calculations, each remaining case searches for K cases around itself
-		;meaning that the K must be at least 2 less than the model size
+		;meaning that the K must be at least 2 less than the dataset size
 		(if (and (~ 0 closest_k) (< dataset_size (+ closest_k 2)) )
 			(assign (assoc closest_k (- dataset_size 2)))
 		)
@@ -334,7 +364,7 @@
 					)
 				)
 
-				;if computing for the whole model, update the calculated average distance contribution
+				;if computing for the whole dataset, update the calculated average distance contribution
 				(if (= (null) case_ids)
 					(assign_to_entities (assoc
 						!averageCaseDistanceContribution (generalized_mean case_to_dc_map)
@@ -464,7 +494,7 @@
 								"fixed rand seed"
 								(null) ;radius
 								!numericalPrecision
-								(true) ;conviction of removal
+								.true ;conviction of removal
 							)
 						)
 				)
@@ -573,7 +603,7 @@
 				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
 					features features
 					label_name influence_weight_entropy
-					compute_all (true)
+					compute_all .true
 				))
 
 				(if (not (contains_value !reactIntoFeaturesList influence_weight_entropy))
@@ -586,7 +616,7 @@
 		(if (and analyze (= (null) case_ids))
 			(if (!= (null) !savedAnalyzeParameterMap)
 				;prevent calling react_into_features during the analyze()
-				(call !Analyze (append !savedAnalyzeParameterMap (assoc "from_react_into_features" (true)) ))
+				(call !Analyze (append !savedAnalyzeParameterMap (assoc "from_react_into_features" .true) ))
 
 				(call !Analyze (assoc
 					targeted_model "targetless"
@@ -599,10 +629,39 @@
 					use_case_weights (or (and !autoAblationEnabled !autoAblationWeightFeature) use_case_weights)
 					k_folds 1
 					;prevent calling react_into_features during the analyze()
-					from_react_into_features (true)
+					from_react_into_features .true
 				))
 			)
 		)
+
+		(if clustering
+			(seq
+				(call !Clustering)
+				(if (not (contains_value !reactIntoFeaturesList clustering))
+					(accum_to_entities (assoc !reactIntoFeaturesList clustering))
+				)
+				(assign_to_entities (assoc
+					!clusteringParametersMap
+						(assoc
+							"feature" clustering
+							"distance_contribution_feature" distance_contribution
+							"similarity_conviction_feature" similarity_conviction
+							"clustering_inclusion_relative_threshold" clustering_inclusion_relative_threshold
+						)
+				))
+				(accum_to_entities (assoc
+					!nominalsMap (associate clustering)
+					!categoricalFeaturesSet (associate clustering)
+					!numericNominalFeaturesMap (associate clustering "number")
+				))
+				(call !CacheExpectedValuesAndProbabilities (assoc
+					features [clustering]
+					use_case_weights use_case_weights
+					weight_feature weight_feature
+				))
+			)
+		)
+
 		;update the known features to include these
 		(call !UpdateDefinedFeatures)
 		(accum_to_entities (assoc !revision 1))
@@ -611,7 +670,7 @@
 		(call !Return (assoc warnings (if (size warnings) (indices warnings)) ))
 	)
 
-	;Used by Impute to compute the familiarity conviction of addition for a given case in the model
+	;Used by Impute to compute the familiarity conviction of addition for a given case in the dataset
 	; features: list of features
 	; case_id : the entity id of the case we want conviction for
 	#!ComputeCaseAdditionFamiliarityConviction
@@ -621,7 +680,7 @@
 			case_id (null)
 		)
 
-		;if the model is too small, just return 0, otherwise compute conviction
+		;if the dataset is too small, just return 0, otherwise compute conviction
 		(if (<= (call !GetNumTrainingCases) 2)
 			(conclude 0)
 		)
@@ -637,8 +696,8 @@
 		;calculate and store them and then retrieve the value for this case
 		(call react_into_features (assoc
 			features features
-			familiarity_conviction_addition (true)
-			overwrite (true)
+			familiarity_conviction_addition .true
+			overwrite .true
 		))
 
 		(retrieve_from_entity case_id !storedCaseConvictionsFeatureAddition)
@@ -659,10 +718,10 @@
 			features (list)
 			feature_values (null)
 			filtering_queries (list)
-			use_case_weights (false)
+			use_case_weights .false
 			weight_feature ".case_weight"
 			case_id (null)
-			react_group (false)
+			react_group .false
 			distance_contribution_feature "distance_contribution"
 		)
 

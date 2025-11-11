@@ -5,7 +5,7 @@
 	#!PopulateFilteringQueriesForDetails
 	(if (!= (null) details)
 		(seq
-			;for details persist all the fitering queries to be able to query on the exact same local model
+			;for details persist all the fitering queries to be able to query on the exact same local data
 			(if (= (list) filtering_queries)
 				(assign (assoc
 					filtering_queries
@@ -289,6 +289,8 @@
 			action_feature (null)
 			context_features (list)
 			context_values (list)
+
+			dependent_features_map !dependentFeatureMap
 		)
 
 		(declare (assoc
@@ -316,14 +318,18 @@
 				;by creating a list of query_among for the nominal features whose bounds encompass the continuous context value
 				;e.g., given a continous value of 200, 'heartrate' or 'weight in lbs' could be selected as valid nominal values, but 'bmi' or 'age' would not be
 				(if (contains_index !nominalsMap action_feature)
-					(seq
-						(if (size !continuousToNominalDependenciesMap)
-							(map
-								(lambda
-									;if a continuous dependent feature is in the contexts, then check if any of its dependent nominals are also in the contexts
-									(if (contains_index dependent_context_map (current_index))
-										(seq
-											(accum (assoc continuous_context_features (current_index 1) ))
+					(if (size !continuousToNominalDependenciesMap)
+						(assign (assoc
+							continuous_context_features
+								(filter
+									(lambda (contains_index dependent_context_map (current_value)) )
+									(indices !continuousToNominalDependenciesMap)
+								)
+							output_queries
+								(apply "append"
+									;iterate over continuous dependent features in contexts
+									(values (map
+										(lambda
 											;if the continuous feature's corresponding dependent nominals are not in the contexts, create query_among filters
 											(if (= (size dependent_context_map) (size (remove dependent_context_map (current_value))))
 												(let
@@ -357,7 +363,7 @@
 																			(= (null) continuous_value)
 																			(= [(null)] bounds_pair)
 																		)
-																		(true)
+																		.true
 
 																		;else this nominal value must is only valid if it correspond sto a continuous value within the specified bounds
 																		(and
@@ -372,117 +378,129 @@
 
 													;it's possible the context value is outside all bounds, don't do among queries for privacy and exploratory reasons
 													(if (size dependent_combos_encompassing_value)
-														(accum (assoc
-															output_queries
-																;create a list of corresponding query_among queries in the format of:
-																; (query_among <!dependentFeature> (list <values that encompass the context value>))
-																(map
-																	(lambda (let
-																		(assoc f_index (current_index 1))
-																		(query_among
-																			(current_value)
-																			(map (lambda (get (current_value) f_index)) dependent_combos_encompassing_value)
-																		)
-																	))
-																	;list of nominal dependent features for this continuous one
-																	(get !continuousToNominalDependenciesMap continuous_feature)
+														;create a list of corresponding query_among queries in the format of:
+														; (query_among <!dependentFeature> (list <values that encompass the context value>))
+														(map
+															(lambda (let
+																(assoc f_index (current_index 1))
+																(query_among
+																	(current_value)
+																	(map (lambda (get (current_value) f_index)) dependent_combos_encompassing_value)
 																)
-														))
+															))
+															;list of nominal dependent features for this continuous one
+															(current_value)
+														)
 
 														;else this continuous value isn't encompassed by nominal combos, find the one closest case to this continuous value
 														;and use its nominal value for this action feature since it's the most "resonable"
 														(let
 															(assoc
-																reasonable_nominal_value_case
-																	(first
-																		(contained_entities
-																			(query_nearest_generalized_distance
-																				1 ; k = 1
-																				(list continuous_feature)
-																				(list continuous_value)
-																				1 ;p value isn't relevant because it's one context
-																				(null) ; weights don't matter because there's only one context
-																				(null) ; not a nominal
-																				(null) ; not cyclic since it's a multi-purpose continuous
-																				(null) ; deviations don't matter because it's one context
-																				(null) ;action_feature
-																				1 ;dt
-																				(null) ; weight feature doesn't matter
-																				(rand)
-																				(null) ; radius
-																				!numericalPrecision
-																			)
+																;similar reasonable nominal values
+																reasonable_values_tuple
+																	(compute_on_contained_entities
+																		(query_nearest_generalized_distance
+																			k_parameter
+																			(list continuous_feature)
+																			(list continuous_value)
+																			1 ;p value isn't relevant because it's one context
+																			(null) ; weights don't matter because there's only one context
+																			(null) ; not a nominal
+																			(null) ; not cyclic since it's a multi-purpose continuous
+																			(null) ; deviations don't matter because it's one context
+																			(null) ;action_feature
+																			1 ;dt
+																			(null) ; weight feature doesn't matter
+																			(rand)
+																			(null) ; radius
+																			!numericalPrecision
+																			action_feature
 																		)
 																	)
 															)
 
-															(accum (assoc
-																output_queries
-																	(list
-																		(query_among action_feature (list (retrieve_from_entity reasonable_nominal_value_case action_feature)))
+															[
+																(query_among action_feature
+																	;if the first two weights are equal, grab all the equal weighted values
+																	(if (= (get reasonable_values_tuple [1 0]) (get reasonable_values_tuple [1 1]))
+																		(let
+																			(assoc top_weight (get reasonable_values_tuple [1 0]))
+																			(indices (filter
+																				(lambda (= top_weight (current_value)) )
+																				;keep the higher weight for values collissions
+																				(zip (lambda (current_value 1)) (last reasonable_values_tuple) (get reasonable_values_tuple 1))
+																			))
+																		)
+
+																		;else grab the first value from the list of feature values
+																		[(first (last reasonable_values_tuple))]
 																	)
-															))
+																)
+															]
 														)
 													)
 												)
+												;else output empty list
+												[]
 											)
 										)
-									)
+										;if a continuous dependent feature is in the contexts, then check if any of its dependent nominals are also in the contexts
+										(keep !continuousToNominalDependenciesMap (indices dependent_context_map))
+									))
 								)
-								!continuousToNominalDependenciesMap
-							)
-						)
+						))
 					)
 				)
 
-				;generate one query_between (for continuous) or query_equals (for nominal) per dependent context feature
-				;e.g., if a nominal dependent context feature "measure" has a value of "heartrate" ,this will accumulate: (query_equals "measure" "heartrate") to the queries output
-				(accum (assoc
+
+				;output nominal and continous feature dependency queries
+				(append
 					output_queries
-						(map
-							(lambda (let
-								(assoc
-									context_feature (current_value 1)
-									context_value (get dependent_context_map (current_value 1))
-								)
-								(if (contains_index !nominalsMap context_feature)
-									(if
-										;explicitly filter by this value if it's not null or is null and has null_is_dependent set
-										(or
-											(!= (null) context_value)
-											(get !featureAttributes (list context_feature "null_is_dependent"))
-										)
-										(query_equals context_feature context_value)
 
-										;else the value is null and not marked as null_is_dependent, don't filter on this context feature
-										(query_between )
-									)
-
-									;else continuous value, get min+max range for it
-									(let
-										(assoc
-											min (get dependent_features_map (list context_feature "min"))
-											max (get dependent_features_map (list context_feature "max"))
-										)
-										;min and max are null only if the feature value is null, then don't filter on this feature
-										(if (= (null) min max)
-											(query_between )
-
-											(query_between context_feature min max)
-										)
-									)
-								)
-							))
-							;reorder the list of dependent_context_features such that all the nominals are first, then the continuous ones
-							;so that all the query_betweens are last, and thus if needbe, will be truncated first
-							(append
-								(filter (lambda (contains_index !nominalsMap (current_value))) dependent_context_features)
-								continuous_context_features
+					;generate one query_between (for continuous) or query_equals (for nominal) per dependent context feature
+					;e.g., if a nominal dependent context feature "measure" has a value of "heartrate" ,this will accumulate: (query_equals "measure" "heartrate") to the queries output
+					(map
+						(lambda (let
+							(assoc
+								context_feature (current_value 1)
+								context_value (get dependent_context_map (current_value 1))
 							)
-						)
-				))
+							(if (contains_index !nominalsMap context_feature)
+								(if
+									;explicitly filter by this value if it's not null or is null and has null_is_dependent set
+									(or
+										(!= (null) context_value)
+										(get !featureAttributes (list context_feature "null_is_dependent"))
+									)
+									(query_equals context_feature context_value)
 
-				output_queries
+									;else the value is null and not marked as null_is_dependent, don't filter on this context feature
+									[]
+								)
+
+								;else continuous value, get min+max range for it
+								(let
+									(assoc
+										min (get dependent_features_map (list context_feature "min"))
+										max (get dependent_features_map (list context_feature "max"))
+									)
+									;min and max are null only if the feature value is null, then don't filter on this feature
+									(if (= (null) min max)
+										[]
+
+										(query_between context_feature min max)
+									)
+								)
+							)
+						))
+						;reorder the list of dependent_context_features such that all the nominals are first, then the continuous ones
+						;so that all the query_betweens are last, and thus if needbe, will be truncated first
+						(append
+							(filter (lambda (contains_index !nominalsMap (current_value))) dependent_context_features)
+							continuous_context_features
+						)
+					)
+				)
 			)
 
 			;else return empty list
@@ -495,7 +513,7 @@
 		(assoc
 			context_features (list)
 			context_values (list)
-			use_differential_privacy (false)
+			use_differential_privacy .false
 			hyperparam_map (assoc)
 		)
 
@@ -561,7 +579,7 @@
 						(null) ;radius
 						!numericalPrecision
 						;output a tuple
-						(true)
+						.true
 					)
 				)
 			;if computing mean absolute deviations, and using dynamic k, scale the value up by the percent captured influential eighbors
@@ -772,13 +790,13 @@
 	#!UpdateCaseWeightParameters
 	(declare
 		(assoc
-			set_valid_weight_feature (true)
+			set_valid_weight_feature .true
 		)
 		(if (= (null) use_case_weights)
 			(if (or (= (get hyperparam_map "paramPath") [".default"]) (= (get hyperparam_map "paramPath") (null)))
 				;if default params, no case weights
 				(assign (assoc
-					use_case_weights (false)
+					use_case_weights .false
 					weight_feature ".none"
 				))
 
@@ -845,7 +863,7 @@
 									context_features context_features
 									context_values context_values
 									extra_features (map (lambda (concat "." (current_value) "_residual") ) continuous_context_features)
-									details {influential_cases (true)}
+									details {influential_cases .true}
 								))
 								[1 "payload" "influential_cases"]
 							)
@@ -933,7 +951,7 @@
 			(lambda
 				(if
 					(size (remove
-						(get_all_labels (parse (get !featureAttributes [(current_value 1) "derived_feature_code"])))
+						(zip (get !featureAttributes [(current_value 1) "code_features"]) )
 						available_features
 					))
 					(accum (assoc
@@ -944,7 +962,7 @@
 								(apply "concat" (trunc (weave
 									(map
 										(lambda (concat "\"" (current_value) "\""))
-										(indices (get_all_labels (parse (get !featureAttributes [(current_value 3) "derived_feature_code"]))))
+										(get !featureAttributes [(current_value 3) "code_features"])
 									)
 									"\, "
 								)))

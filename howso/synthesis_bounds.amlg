@@ -69,31 +69,62 @@
 		(list boundary_min boundary_max)
 	)
 
-	;Helper method for GenerateCase that sets feature_bounds_map by taking the model specified bounds and overwriting them with user passed-in ones as appropriate
+	;Helper method for GenerateCase that sets feature_bounds_map by taking the stored specified bounds and overwriting them with user passed-in ones as appropriate
 	#!PrepareFeatureBoundsMap
 	(seq
 		;if custom feature bounds map is specified and it has datetime features, ensure that epoch min/max will be calculated for these
 		;custom datetimes by setting those features' has_epoch_bounds flag to false
 		(if feature_bounds_map
-			(assign (assoc
-				feature_bounds_map
-					(map
-						(lambda
-							(if (contains_index !featureDateTimeMap (current_index))
-								(append
-									(current_value)
-									(assoc "has_epoch_bounds" (false))
-								)
+			(seq
+				(assign (assoc
+					feature_bounds_map
+						(map
+							(lambda
+								(if (contains_index !featureDateTimeMap (current_index))
+									(append
+										(current_value)
+										(assoc "has_epoch_bounds" .false)
+									)
 
-								(current_value)
+									(current_value)
+								)
 							)
+							feature_bounds_map
 						)
+				))
+
+				;create an assoc of feature -> custom specified constraint passed into this particular react
+				(declare (assoc
+					custom_constraints_map
+						(filter
+							(lambda (contains_index (current_value) "constraint"))
+							feature_bounds_map
+						)
+				))
+
+				;recompute the constraint_features for each custom constraint that was specified for this particular react
+				(if (size custom_constraints_map)
+					(assign (assoc
 						feature_bounds_map
-					)
-			))
+							(append
+								feature_bounds_map
+								(map
+									(lambda
+										(set
+											(current_value)
+											"constraint_features"
+											(zip (call !FeaturesInCustomCode (assoc code_string (get (current_value 1) "constraint"))) )
+										)
+									)
+									custom_constraints_map
+								)
+							)
+					))
+				)
+			)
 		)
 
-		;overwrite the model !featureBoundsMap with the passed in react-specific one
+		;overwrite the dataset !featureBoundsMap with the passed in react-specific one
 		(assign (assoc
 			feature_bounds_map
 				(if !hasStringOrdinals
@@ -124,7 +155,7 @@
 						(append !featureBoundsMap feature_bounds_map)
 					)
 
-					;else append the the passed params to the model parameters
+					;else append the the passed params to the dataset parameters
 					(append !featureBoundsMap feature_bounds_map)
 				)
 		))
@@ -163,11 +194,11 @@
 				))
 				(if (contains_index !nominalsMap feature)
 					(if (call !ConstrainNominalFeature)
-						(assign (assoc constraint_function_failed (true)))
+						(assign (assoc constraint_function_failed .true))
 					)
 
 					(if (call !LimitGeneratedValueToFeatureBounds)
-						(assign (assoc constraint_function_failed (true)))
+						(assign (assoc constraint_function_failed .true))
 					)
 				)
 
@@ -193,63 +224,42 @@
 	;Helper method for GenerateCase that may modify a generated nominal value to ensure it stays within its constraints
 	;If the generated value is not within its constraint, this method will attempt to modify that value up to 5 times by
 	;reselecting values from the available distribution
-	;returns (true) when new_feature_value may be outside constraints, otherwise returns (false)
+	;returns .true when new_feature_value may be outside constraints, otherwise returns .false
 	#!ConstrainNominalFeature
 	(let
 		(assoc
 			constraint (get feature_bounds_map (list feature "constraint"))
 		)
 		;only check constraint if all features referenced in the constraint have been generated
-		(if (!= 0 (size (remove (get_all_labels (parse constraint)) (append context_features feature))))
-			(conclude (false))
+		(if (!= 0 (size (remove (get feature_bounds_map [feature "constraint_features"]) (append context_features feature))) )
+			(conclude .false)
 		)
 		(declare (assoc
 			current_case_data_map (zip context_features context_values)
-			outside_constraint (false)
-			out_of_bounds (false)
+			outside_constraint .false
+			out_of_bounds .false
 			data_map (assoc)
 			retry_desired_conviction (/ desired_conviction 2)
-			parsed_code (null)
 			allow_null (get feature_bounds_map (list feature "allow_null"))
 		))
 
 		(while (< (current_index) 6)
 			;if it's a null and nulls are allowed, don't check constraint
 			(if (and allow_null (= (null) new_feature_value))
-				(conclude (conclude (false)))
+				(conclude (conclude .false))
 			)
 
-			(assign (assoc
-				data_map (append current_case_data_map (associate feature new_feature_value))
-				out_of_bounds (false)
-			))
-
-			(assign (assoc
-				parsed_code
-					(call !ParseDerivedFeatureCode (assoc
-						code_string constraint
-						label_to_code
-							(lambda
-								(if (and (= (lambda label_value) 0) (contains_index data_map (lambda label_name)))
-									;pull the feature value
-									(get data_map (lambda label_name))
-
-									;else feature hasn't been generated yet
-									(null)
-								)
-							)
-					))
-			))
+			(assign (assoc out_of_bounds .false ))
 
 			;considered out of bounds if constraint is not satisfied
 			(if
 				(not
-					(call_sandboxed parsed_code
-						(assoc data_map data_map)
-						(* (size context_features) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false)
-					)
+					(call_sandboxed (parse constraint) (assoc
+						data_map (append current_case_data_map (associate feature new_feature_value))
+						value (lambda (get data_map feature) )
+					)) (* (size context_features) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false
 				)
-				(assign (assoc out_of_bounds (true) ))
+				(assign (assoc out_of_bounds .true ))
 			)
 
 			(if out_of_bounds
@@ -259,17 +269,17 @@
 							new_feature_value
 								(call !GenerateFeatureValue (assoc
 									desired_conviction retry_desired_conviction
-									feature_is_nominal (true)
+									feature_is_nominal .true
 								))
 						))
 
 						;else attempted to be generated 5 times, on the 6th just stop
 						(assign (assoc
-							outside_constraint (true)
+							outside_constraint .true
 							new_feature_value
 								(call !GenerateFeatureValue (assoc
 									desired_conviction retry_desired_conviction
-									feature_is_nominal (true)
+									feature_is_nominal .true
 								))
 						))
 					)
@@ -289,7 +299,7 @@
 	;If the generated value is out of bounds, this method will attempt to modify that value up to 5 times by adding
 	;different amounts of noise based on desired_conviction until a valid value is achieved.
 	;If that fails, it'll randomly select a value within the range of feature bounds.
-	;returns (true) when new_feature_value may be outside constraints if the feature has a constraint defined, otherwise returns (false)
+	;returns .true when new_feature_value may be outside constraints if the feature has a constraint defined, otherwise returns .false
 	#!LimitGeneratedValueToFeatureBounds
 	(let
 		(assoc
@@ -301,7 +311,7 @@
 					is_datetime (and !hasDateTimeFeatures (contains_index !featureDateTimeMap feature))
 					cycle_length cycle_length
 				))
-			out_of_bounds (false)
+			out_of_bounds .false
 		)
 		(declare (assoc
 			boundary_min (first boundaries_tuple)
@@ -313,12 +323,12 @@
 
 		(declare (assoc
 			current_case_data_map (if constraint (zip context_features context_values))
-			outside_constraint (false)
+			outside_constraint .false
 		))
 
 		(if constraint
 			;only check constraint if all features referenced in the constraint have been generated
-			(if (!= 0 (size (remove (get_all_labels (parse constraint)) (append context_features feature))))
+			(if (!= 0 (size (remove (get feature_bounds_map [feature "constraint_features"]) (append context_features feature))))
 				(assign (assoc constraint (null) ))
 			)
 		)
@@ -356,60 +366,44 @@
 				(if constraint
 					;if it's a null and nulls are allowed, don't check constraint
 					(if (or (not allow_null) (!= (null) new_feature_value))
-						(let
-							(assoc
-								data_map (append current_case_data_map (associate feature new_feature_value))
-							)
-
-							(declare (assoc
-								parsed_code
-									(call !ParseDerivedFeatureCode (assoc
-										code_string constraint
-										label_to_code
-											(lambda
-												(if (and (= (lambda label_value) 0) (contains_index data_map (lambda label_name)))
-													;pull the feature value
-													(let
-														(assoc val (get data_map (lambda label_name)) )
-														;encode datetime by converting string date time into seconds since epoch
-														(if (contains_index !featureDateTimeMap label_name)
-															(if (!= (null) val)
-																(call !ConvertDateToEpoch (assoc date val feature label_name))
-															)
-															;else not a datetime, return continuous value
-															val
+						;considered out of bounds if constraint is not satisfied
+						(if
+							(not
+								(call_sandboxed (parse constraint) (assoc
+									data_map (append current_case_data_map (associate feature new_feature_value))
+									value
+										(lambda
+											(if (contains_index data_map feature)
+												(let
+													(assoc val (get data_map feature) )
+													;encode datetime by converting string date time into seconds since epoch
+													(if (contains_index !featureDateTimeMap feature)
+														(if (!= (null) val)
+															(call !ConvertDateToEpoch (assoc "date" val "feature" feature))
 														)
+														;else not a datetime, return continuous value
+														val
 													)
-
-													;else feature hasn't been generated yet
-													(null)
 												)
 											)
-									))
-							))
-
-							;considered out of bounds if constraint is not satisfied
-							(if
-								(not
-									(call_sandboxed parsed_code
-										(assoc data_map data_map)
-										(* (size context_features) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false)
-									)
-								)
-								(assign (assoc out_of_bounds (true) ))
+										)
+									!ConvertDateToEpoch !ConvertDateToEpoch
+									!featureDateTimeMap !featureDateTimeMap
+								)) (* (size context_features) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false
 							)
+							(assign (assoc out_of_bounds .true ))
 						)
 					)
 				)
 
-				(if (or out_of_bounds (and (= (null) new_feature_value) (= (false) allow_null)))
+				(if (or out_of_bounds (and (= (null) new_feature_value) (= .false allow_null)))
 					(seq
 						(if (< (current_index) 5)
 							(assign (assoc new_feature_value (call !GenerateFeatureValue (assoc desired_conviction retry_desired_conviction))))
 
 							;else attempted to be generated 5 times, on the 6th just choose a random value in the specified range
 							(assign (assoc
-								outside_constraint (if constraint (true) (false))
+								outside_constraint (if constraint .true .false)
 
 								new_feature_value
 									(if action_feature_is_dependent_and_continuous

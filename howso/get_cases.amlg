@@ -1,7 +1,7 @@
 ;Contains methods for retrieving cases.
 (null
 
-	;returns array of ids of all cases that exist in this trained model
+	;returns array of ids of all cases that exist in this trained dataset
 	;by finding all the entities that have a reference to replay sessions
 	#!AllCases
 	(declare
@@ -191,17 +191,17 @@
 	)
 
 	;returns the total number of training cases for trainee
-	;{read_only (true) idempotent (true)}
+	;{read_only .true idempotent .true}
 	#get_num_training_cases
 	(declare
 		;returns {
 		; 	type "assoc"
-		;	additional_indices (false)
+		;	additional_indices .false
 		; 	indices {
 		; 		"count" {
 		; 			type "number"
 		; 			description "The number of trained cases."
-		;			required (true)
+		;			required .true
 		; 		}
 		; 	}
 		; }
@@ -222,18 +222,18 @@
 	;all sessions. If a session is specified, only that session's cases will be output. Session and case order is not guaranteed,
 	;however, the features ".session" and ".session_training_index" may be requested to get the session id and session train order
 	;for each case respectively.
-	;{read_only (true) idempotent (true)}
+	;{read_only .true idempotent .true}
 	#get_cases
 	(declare
 		;returns {
 		; 	type "assoc"
-		;	additional_indices (false)
+		;	additional_indices .false
 		; 	indices
 		; 		{
-		; 			features {type "list" required (true) values "string" description "The list of features in the order of values of the sublists in 'cases'."}
+		; 			features {type "list" required .true values "string" description "The list of features in the order of values of the sublists in 'cases'."}
 		; 			cases {
 		; 				type "list"
-		;				required (true)
+		;				required .true
 		; 				values {type "list" values "any"}
 		;				description "A list of lists of case values in the order specified by 'features'."
 		; 			}
@@ -269,10 +269,10 @@
 			sort_by (null)
 			;{type "boolean"}
 			;if true, will return the audit data of which features for each row were imputed (auto-filled)
-			indicate_imputed (false)
+			indicate_imputed .false
 			;{type "boolean"}
 			;flag, when true only returns an assoc of case ids and no features
-			output_ids (false)
+			output_ids .false
 		)
 		(call !ValidateParameters)
 		(call !ValidateCondition)
@@ -529,6 +529,8 @@
 	;	[(null) (null)] = select all non-null cases
 	;	- for nominal or string ordinal features:
 	;	n values = must match any of these values exactly
+	; 	assoc of: { 'exclude' : value / list of values } = must not match any of these values exactly
+	; 	assoc of: { 'include' : value / list of values } = must match any of these values exactly
 	; precision: flag, default is "exact". Whether to query for 'exact' matches when using the 'condition' parameter; if set to 'similar' will query for similar values intead of 'exact'
 	;	If 'condition_filter_query' is provided, then this parameter is ignored.
 	; num_cases: optional, limit on the number of cases to get when using the 'condition' parameter. Works with or without 'condition_filter_query'. default is null.
@@ -688,12 +690,32 @@
 							(query_equals feature (null))
 
 							;else then feature value must equal
-							(contains_value (list "number" "string") (get_type_string cond_value))
+							(contains_value ["number" "string" "bool"] (get_type_string cond_value))
 							(query_equals feature cond_value)
 
-							;else this is a list of values, for nominals use query_among, for continuous use query_between
+							;else this is a list (or assoc for nominals) of values
 							(if (or (contains_index !nominalsMap feature) (contains_index !ordinalStringToOrdinalMap feature))
-								(query_among feature cond_value)
+								;an assoc with either key of 'include', or 'exclude' to blacklists the specified value(s)
+								(if (~ (assoc) cond_value)
+									(if (contains_index cond_value "exclude")
+										(if (~ [] (get cond_value "exclude"))
+											(query_not_among feature (get cond_value "exclude"))
+											;else exclude the single value
+											(query_not_equals feature (get cond_value "exclude"))
+										)
+
+										;else the key is "include"
+										(if (~ [] (get cond_value "include"))
+											(query_among feature (get cond_value "include"))
+											;else include the single value
+											(query_equals feature (get cond_value "include"))
+										)
+									)
+
+									;else cond_value is a list, use query_among the specified nominal values
+									(query_among feature cond_value)
+								)
+
 								;else continuous, inclusive query between the two provided values
 								(if (= [(null) (null)] cond_value)
 									(query_not_equals feature (null))
@@ -713,10 +735,10 @@
 				)
 				(if (and sort_by_criteria num_cases)
 					(if (= "asc" (get sort_by_criteria "order"))
-						(query_min (get sort_by_criteria "feature") num_cases (true))
+						(query_min (get sort_by_criteria "feature") num_cases .true)
 
 						(= "desc" (get sort_by_criteria "order"))
-						(query_max (get sort_by_criteria "feature") num_cases (true))
+						(query_max (get sort_by_criteria "feature") num_cases .true)
 					)
 					[]
 				)
@@ -739,7 +761,7 @@
 				(map
 					(lambda (if
 						;if the condition for this feature is an equals, add it to the equals_features list
-						(contains_value (list "string" "number") (get_type_string (get condition (current_value))))
+						(contains_value ["string" "number" "bool"] (get_type_string (get condition (current_value))))
 						(accum (assoc equals_features (current_value 1)))
 						;else add it to the other list
 						(accum (assoc other_features (current_value 1)))
@@ -764,7 +786,7 @@
 								(query_equals feature (null))
 
 								;else then feature value must equal
-								(contains_value (list "number" "string") (get_type_string cond_value))
+								(contains_value ["number" "string" "bool"] (get_type_string cond_value))
 								(query_equals feature cond_value)
 
 								;else this is a list of values, for nominals use query_among, for continuous use query_between
@@ -813,10 +835,10 @@
 					)
 					(if (and sort_by_criteria num_cases)
 						(if (= "asc" (get sort_by_criteria "order"))
-							(query_min (get sort_by_criteria "feature") num_cases (true))
+							(query_min (get sort_by_criteria "feature") num_cases .true)
 
 							(= "desc" (get sort_by_criteria "order"))
-							(query_max (get sort_by_criteria "feature") num_cases (true))
+							(query_max (get sort_by_criteria "feature") num_cases .true)
 						)
 						[]
 					)
@@ -827,31 +849,31 @@
 
 
 	;retrieve the top or bottom number of cases for a specified feature, sorted top to bottom for top, and bottom to top for bottom
-	;{read_only (true) idempotent (true)}
+	;{read_only .true idempotent .true}
 	#get_extreme_cases
 	(declare
 		;returns {
 		; 	type "assoc"
-		;	additional_indices (false)
+		;	additional_indices .false
 		; 	indices
 		; 		{
-		; 			features {type "list" required (true) values "string" description "The list of features in the order of values of the sublists in 'cases'."}
+		; 			features {type "list" required .true values "string" description "The list of features in the order of values of the sublists in 'cases'."}
 		; 			cases {
 		; 				type "list"
 		; 				values {type "list" values "any"}
-		;				required (true)
+		;				required .true
 		;				description "A list of lists of case values in the order specified by 'features'."
 		; 			}
 		; 		}
 		; }
 		(assoc
-			;{type "list" values "string" required (true)}
+			;{type "list" values "string" required .true}
 			;the features for which values should be returned
 			features (null)
-			;{type "string" required (true)}
+			;{type "string" required .true}
 			;the feature for which to sort the cases by
 			sort_feature (null)
-			;{type "number" required (true)}
+			;{type "number" required .true}
 			;number of cases to return, positive value will return the top (largest value), negative will return smallest
 			num (null)
 		)
@@ -946,6 +968,7 @@
 	;and a list of cases with non-null values for each feature when there are features that have only a few non-null values
 	;parameters:
 	; features: list of all features to check
+	; regional_data_only : flag, if set to true won't compute or output non-null cases since that logic is handled earlier specific to that regional data
 	#!SelectNonNullCases
 	(let
 		(assoc
@@ -966,7 +989,7 @@
 							(list)
 
 							;else there is more than one non-null value, select at least 2 non-null cases
-							num_nulls
+							(and num_nulls (not regional_data_only))
 							(let
 								(assoc
 									;assoc of case id -> assoc feature -> value
@@ -984,7 +1007,7 @@
 								(if (not (contains_index !nominalsMap feature))
 									(let
 										(assoc
-											unique_values (values not_null_cases_map (true))
+											unique_values (values not_null_cases_map .true)
 										)
 
 										(if (= 1 (size unique_values))
@@ -1028,7 +1051,10 @@
 
 		(assoc
 			"skip_features_map" (filter (lambda (= (list) (current_value))) non_null_cases_features_map)
-			"non_null_cases" (values (apply "append" (filter (values non_null_cases_features_map))) (true))
+			"non_null_cases"
+				(if (not regional_data_only)
+					(values (apply "append" (filter (values non_null_cases_features_map))) .true)
+				)
 		)
 	)
 
