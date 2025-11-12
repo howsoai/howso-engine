@@ -142,89 +142,58 @@
 				)
 		))
 
-		(if compute_all
-			(map
-				(lambda (let
-					(assoc
-						case_id (current_index 1)
-						influence_weight_entropy (first (current_value 1))
-						is_too_far (last (current_value 1))
-					)
-
-					(if (contains_label case_id !internalLabelInfluenceWeightEntropy)
-						(assign_to_entities case_id
-							(associate
-								!internalLabelInfluenceWeightEntropy influence_weight_entropy
-								!internalLabelTooFarForRemoval is_too_far
-							)
-						)
-
-						(accum_entity_roots case_id
-							(zip_labels
-								[ !internalLabelInfluenceWeightEntropy !internalLabelTooFarForRemoval ]
-								[ influence_weight_entropy is_too_far ]
-							)
+		(call !StoreCaseValues (assoc
+			case_values_map
+				(if (or
+						compute_all
+						(<
+							(call !GetNumTrainingCases)
+							(* 1.02 !autoAblationInfluenceWeightEntropySampleSize)
 						)
 					)
-				))
+					(map (lambda (first (current_value))) influence_weight_entropy_map)
 
-				;create an assoc of case id -> [ entropy, case is too far boolean]
-				;boolean is true if this case should not be removed because its closest case is relatively too far (farther that its farthest)
-				(map
-					(lambda
-						;(current_value) is a tuple of [ entropy, closest_case_id, closest_influence, farthest_influence ]
-
-						;in non-surprisal space, influences are inverse distance, inverting them back converts them back to distances to the cases
-						;in surprisal space, influences are probabilities, inverted probabilities are monotonic to surprisals (distances)
-						;thus the comparison below works as intended
-
-						;output a pair of [ entropy, 'is_too_far' boolean ]
-						[
-							(first (current_value 1))
-
-							;if has exact duplicates, just output "duplicate"
-							(if (last (current_value 1))
-								"duplicate"
-
-								;else output .true if this case is too far for removal
-								(>
-									;distance to closest case
-									(/ 1 (get (current_value 1) 2))
-									;distance to closest case's farthest influence
-									(/ 1 (get influence_weight_entropy_map [ (get (current_value 2) 1) 3 ]) )
-								)
-							)
-						]
-					)
-					influence_weight_entropy_map
-				)
-			)
-
-			;else only store the influence weight entropy
-			(call !StoreCaseValues (assoc
-				case_values_map
-					(if (or
-							compute_all
-							(<
-								(call !GetNumTrainingCases)
-								(* 1.02 !autoAblationInfluenceWeightEntropySampleSize)
-							)
-						)
+					;explicitly store null in all the other cases by appending the computed entropy map to a zipped assoc of all case ids
+					(append
+						(zip (call !AllCases))
 						(map (lambda (first (current_value))) influence_weight_entropy_map)
-
-						;explicitly store null in all the other cases by appending the computed entropy map to a zipped assoc of all case ids
-						(append
-							(zip (call !AllCases))
-							(map (lambda (first (current_value))) influence_weight_entropy_map)
-						)
 					)
-				label_name (or label_name !internalLabelInfluenceWeightEntropy)
-			))
-		)
+				)
+			label_name (or label_name !internalLabelInfluenceWeightEntropy)
+		))
 
 		(declare (assoc quantile_value (call !RecomputeAndCacheMaxInfluenceWeightEntropy) ))
 
 		(assign_to_entities (assoc !autoAblationMaxInfluenceWeightEntropy quantile_value ))
+
+		(if compute_all
+			;output an assoc of case id -> "duplicate" or "too_far_for_removal", for any cases that match that criteria
+			;"too_far_for_removal" applies to any case that should not be removed because its closest case is relatively too far (farther that its farthest)
+			(filter (map
+				(lambda
+					;(current_value) is a tuple of [ entropy, closest_case_id, closest_influence, farthest_influence, is_duplicate ]
+
+					;in non-surprisal space, influences are inverse distance, inverting them back converts them back to distances to the cases
+					;in surprisal space, influences are probabilities, inverted probabilities are monotonic to surprisals (distances)
+					;thus the comparison below works as intended
+
+					;output "duplicate" if case is duplate otherwise output "too_far_for_removal" if case is too far to be removed
+					(if (last (current_value))
+						"duplicate"
+
+						;else if this case is too far for removal
+						(>
+							;distance to closest case
+							(/ 1 (get (current_value) 2))
+							;distance to closest case's farthest influence
+							(/ 1 (get influence_weight_entropy_map [ (get (current_value 1) 1) 3 ]) )
+						)
+						"too_far_for_removal"
+					)
+				)
+				influence_weight_entropy_map
+			))
+		)
 	)
 
 	;initialize parameters and internal features related to auto ablation
@@ -561,11 +530,15 @@
 		))
 
 		;Also ensure that we have all influence weight entropies and that they are up-to-date
-		(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-			features features
-			weight_feature distribute_weight_feature
-			use_case_weights .true
-			compute_all .true
+		(declare (assoc
+			;store a map of case id -> "duplicate"/"too_far_for_removal" for any duplicate cases or cases that should not be removed because they are too far
+			case_duplicate_or_far_map
+				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+					features features
+					weight_feature distribute_weight_feature
+					use_case_weights .true
+					compute_all .true
+				))
 		))
 
 		(if thresholds_enabled
@@ -584,78 +557,15 @@
 
 		;if this dataset has duplicates merge them all here first and recompute weight entropies for their remaining representative non-duplicates
 		(declare (assoc
-			all_duplicate_cases_map (zip (contained_entities (query_equals !internalLabelTooFarForRemoval "duplicate")))
+			all_duplicate_cases_map (filter (lambda (= "duplicate" (current_value))) case_duplicate_or_far_map)
 		))
 		(if (size all_duplicate_cases_map)
-			(let
-				(assoc
-					;assoc of case id -> duplicate neighbors (not including the case id)
-					duplicate_neighbors_map {}
-					duplicates []
-				)
-				(while (size all_duplicate_cases_map)
-					;find all duplicates for a given case in this list
-					(assign (assoc
-						duplicates
-							(contained_entities (values
-								(map
-									(lambda (query_equals (current_index) (current_value)) )
-									;assoc of feature -> value for all the values in a duplicate case
-									(zip features (retrieve_from_entity (first (indices all_duplicate_cases_map)) features))
-								)
-							))
-					))
-
-					;quick check for a failure case that should never occur, but if query engine somehow fails the above query to find anything,
-					;ensure that the list all_duplicate_cases_map keeps shrinking to prevent being stuck in an infinite loop
-					(if (= 0 (size duplicates))
-						(assign (assoc
-							all_duplicate_cases_map (remove all_duplicate_cases_map (first (indices all_duplicate_cases_map)) )
-						))
-
-						(seq
-							(assign (assoc
-								all_duplicate_cases_map (remove all_duplicate_cases_map duplicates)
-							))
-							(accum (assoc
-								duplicate_neighbors_map (associate (first duplicates) (tail duplicates))
-							))
-						)
-					)
-				)
-
-				;merge duplicates by iterating over the assoc of case id -> duplicate ids
-				(map
-					(lambda (seq
-						;distribute the total weight from all the dupes to the case
-						(accum_to_entities (current_index) (associate
-							distribute_weight_feature
-								(apply "+" (map
-									(lambda (first (current_value)))
-									(values (compute_on_contained_entities
-										;pull the weight feature value for all the duplicates
-										(query_in_entity_list (current_value 1))
-										(query_exists distribute_weight_feature)
-									))
-								))
-						))
-
-						;remove all the duplicates
-						(apply "destroy_entities" (current_value))
-					))
-					duplicate_neighbors_map
-				)
-
-				;recompute influence weight entropy for the remaining no-longer duplicates
-				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-					features features
-					weight_feature distribute_weight_feature
-					use_case_weights .true
-					compute_all .true
-					specific_case_ids (indices duplicate_neighbors_map)
-				))
-			)
+			(call !ReduceMergeDuplicateCases)
 		)
+
+		(declare (assoc
+			cases_too_far_for_removal (indices (filter (lambda (= "too_far_for_removal" (current_value))) case_duplicate_or_far_map))
+		))
 
 		;Begin looping on data removal. The ultimate end condition is if the dataset gets too small
 		; to continue removing cases. Removes cases with relatively high influence weight entropy, i.e., cases with equidistant neighbors.
@@ -664,7 +574,7 @@
 				cases
 					(contained_entities
 						;ignore cases that have been determined to be too far for removal
-						(query_not_equals !internalLabelTooFarForRemoval .true)
+						(query_not_in_entity_list cases_too_far_for_removal)
 						(query_greater_or_equal_to !internalLabelInfluenceWeightEntropy
 							(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
 								influence_weight_entropy_threshold influence_weight_entropy_threshold
@@ -768,6 +678,86 @@
 		(accum_to_entities (assoc !revision 1))
 		(call !Return (assoc payload output))
 	)
+
+
+	;helper method that merges duplicate cases during the reduce_data flow
+	#!ReduceMergeDuplicateCases
+	(let
+		(assoc
+			;assoc of case id -> duplicate neighbors (not including the case id)
+			duplicate_neighbors_map {}
+			duplicates []
+		)
+		(while (size all_duplicate_cases_map)
+			;find all duplicates for a given case in this list
+			(assign (assoc
+				duplicates
+					(contained_entities (values
+						(map
+							(lambda (query_equals (current_index) (current_value)) )
+							;assoc of feature -> value for all the values in a duplicate case
+							(zip features (retrieve_from_entity (first (indices all_duplicate_cases_map)) features))
+						)
+					))
+			))
+
+			;quick check for a failure case that should never occur, but if query engine somehow fails the above query to find anything,
+			;ensure that the list all_duplicate_cases_map keeps shrinking to prevent being stuck in an infinite loop
+			(if (= 0 (size duplicates))
+				(assign (assoc
+					all_duplicate_cases_map (remove all_duplicate_cases_map (first (indices all_duplicate_cases_map)) )
+				))
+
+				(seq
+					(assign (assoc
+						all_duplicate_cases_map (remove all_duplicate_cases_map duplicates)
+					))
+					(accum (assoc
+						duplicate_neighbors_map (associate (first duplicates) (tail duplicates))
+					))
+				)
+			)
+		)
+
+		;merge duplicates by iterating over the assoc of case id -> duplicate ids
+		(map
+			(lambda (seq
+				;distribute the total weight from all the dupes to the case
+				(accum_to_entities (current_index) (associate
+					distribute_weight_feature
+						(apply "+" (map
+							(lambda (first (current_value)))
+							(values (compute_on_contained_entities
+								;pull the weight feature value for all the duplicates
+								(query_in_entity_list (current_value 1))
+								(query_exists distribute_weight_feature)
+							))
+						))
+				))
+
+				;remove all the duplicates
+				(apply "destroy_entities" (current_value))
+			))
+			duplicate_neighbors_map
+		)
+
+		;recompute influence weight entropy for the remaining no-longer duplicates
+		(declare (assoc
+			cases_too_far_map
+				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+					features features
+					weight_feature distribute_weight_feature
+					use_case_weights .true
+					compute_all .true
+					specific_case_ids (indices duplicate_neighbors_map)
+				))
+		))
+
+		(if (size cases_too_far_map)
+			(accum (assoc case_duplicate_or_far_map cases_too_far_map))
+		)
+	)
+
 
 	;helper method which queries and returns the specified quantile of influence weight entropies
 	; for use in data reduction and auto-ablation.
