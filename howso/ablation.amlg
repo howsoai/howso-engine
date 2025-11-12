@@ -166,9 +166,64 @@
 
 		(assign_to_entities (assoc !autoAblationMaxInfluenceWeightEntropy quantile_value ))
 
+		;if computing on the entire dataset, mark cases that are very close to exactly one other case and can be merged together
+		(if (and compute_all (= (null) specific_case_ids))
+			(declare (assoc
+				extreme_neighbors_map
+					(let
+						(assoc perfect_match_influence (if (= "surprisal_to_prob" dt_parameter) 1 .infinity) )
+
+						;compute the 90%th quantile for closest case influence, so that only cases that are in the 10% closest are considered
+						(declare (assoc
+							ninety_percent_quantile_closest_influence
+								(quantile
+									(values (filter (lambda (!= perfect_match_influence (current_value))) (map (lambda (get (current_value) 2)) influence_weight_entropy_map)))
+									0.9
+								)
+						))
+
+						;from those 10% closest (ignoring duplicate cases), only keep those whose influence weight entropy is under 0.1,
+						;denoting that they are very close to just their one nearest neighbor
+						(declare (assoc
+							extremely_close_to_one_neighbor_map
+								(filter
+									(lambda (and
+										;closest case influence is in the top 10%
+										(> (get (current_value) 2) ninety_percent_quantile_closest_influence)
+										;entropy is < 0.1, meaning significantly closer to one case than any of the others
+										(< (first (current_value)) 0.1)
+										;ignore duplicates since they'll be merged together separately
+										(!= perfect_match_influence (get (current_value) 2))
+									))
+									influence_weight_entropy_map
+								)
+						))
+
+						;create an assoc of case -> neighbor_case to merge into
+						;filters out null if case is reciprocated, but this case has higher entropy and will absorb the one with the lower entropy
+						(filter (map
+							(lambda (let
+								(assoc nearest_case (get (current_value 1) 1))
+								;this case is reciprocated as the closest by nearest_case
+								(if (= (current_index) (get extremely_close_to_one_neighbor_map [nearest_case 1]))
+									;if the entropy of this case is smaller, it should be merged into nearest_case, else it should not be merged
+									(if (<= (first (current_value)) (get extremely_close_to_one_neighbor_map [nearest_case 0]))
+										nearest_case
+									)
+
+									nearest_case
+								)
+							))
+							extremely_close_to_one_neighbor_map
+						))
+					)
+			))
+		)
+
 		(if compute_all
-			;output an assoc of case id -> "duplicate" or "too_far_for_removal", for any cases that match that criteria
-			;"too_far_for_removal" applies to any case that should not be removed because its closest case is relatively too far (farther that its farthest)
+			;output an assoc of case id -> "duplicate" or "too_far_for_removal" or "near_duplicate" (for extremely close single neighbors), depending if any cases match that criteria
+			; "too_far_for_removal" applies to any case that should not be removed because its closest case is relatively too far (farther that its farthest)
+			; "near_duplicate" applies to any cases that are extremely close to exactly one neighbor case
 			(filter (map
 				(lambda
 					;(current_value) is a tuple of [ entropy, closest_case_id, closest_influence, farthest_influence, is_duplicate ]
@@ -189,6 +244,9 @@
 							(/ 1 (get influence_weight_entropy_map [ (get (current_value 1) 1) 3 ]) )
 						)
 						"too_far_for_removal"
+
+						(contains_index extreme_neighbors_map (current_index))
+						"near_duplicate"
 					)
 				)
 				influence_weight_entropy_map
@@ -531,7 +589,7 @@
 
 		;Also ensure that we have all influence weight entropies and that they are up-to-date
 		(declare (assoc
-			;store a map of case id -> "duplicate"/"too_far_for_removal" for any duplicate cases or cases that should not be removed because they are too far
+			;store a map of case id -> "duplicate"/"too_far_for_removal"/"near_duplicate" for any duplicate cases or cases that should not be removed because they are too far
 			case_duplicate_or_far_map
 				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
 					features features
@@ -565,7 +623,15 @@
 
 		(declare (assoc
 			cases_too_far_for_removal (indices (filter (lambda (= "too_far_for_removal" (current_value))) case_duplicate_or_far_map))
+			near_duplicate_cases (indices (filter (lambda (= "near_duplicate" (current_value))) case_duplicate_or_far_map))
 		))
+		;remove and redistribute the near_duplicate cases' weights
+		(if (size near_duplicate_cases)
+			(call !RemoveCases (assoc
+				cases near_duplicate_cases
+				distribute_weight_feature distribute_weight_feature
+			))
+		)
 
 		;Begin looping on data removal. The ultimate end condition is if the dataset gets too small
 		; to continue removing cases. Removes cases with relatively high influence weight entropy, i.e., cases with equidistant neighbors.
