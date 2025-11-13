@@ -483,8 +483,11 @@
 		)
 	)
 
-	;reduce the trained data by removing cases which have an influence weight entropy that falls above
-	; a threshold.
+	;reduce the trained data by removing cases that match the following criteria:
+	;a) it's an exact duplicate
+	;b) a near-duplicate (very similar to exactly one other case)
+	;c) it's not "too far" away (keep outliers and dissimilar cases)
+	;d) its influence weight entropy is relatively high (above a threshold, case can be evenly distributed among its neighbors)
 	;{long_running .true}
 	#reduce_data
 	(declare
@@ -853,64 +856,40 @@
 		)
 	)
 
-	;determine whether a new case (one that is not in the Trainee) should be ablated (trained as weights) or kept.
-	; a return value of true indicates that a case should be kept and a return value of false indicates that the case should be ablated.
+	;determine whether a new case (one that is not in the dataset) should be ablated (trained as weights only) or kept
+	;returns .true if case should be kept and trained
+	;returns .false when case should be ablated
+	;
+	;parameters:
 	; features: list of features to react to
 	; feature_values: list of feature values to react to
-	; num_cases: number of current cases in the dataset
-	#!ShouldNewCaseBeAblated
-	(declare
+	#!ShouldNewCaseNotBeAblated
+	(let
 		(assoc
-			features (list)
-			feature_values (list)
-		)
-
-		;If we do not have influence weight entropies stored, ablation cannot happen.
-		; So, always return true when that is the case.  The same is true for when there
-		; are not enough cases in the dataset.
-		(if (or
-				(< num_cases !autoAblationMinNumCases )
-				(not (and !autoAblationEnabled (call !HasInfluenceWeightEntropies) ))
-			)
-			;return true, keep case / do not ablate
-			(conclude .true)
-		)
-
-		(declare (assoc
-			max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy
-			ninety_percent_quantile_closest_influence !autoAblationNinetyPercentQuantileInfluence
-		))
-
-		;if there is no influence weight entropy cached yet, do the caching here
-		(if (= (null) max_influence_weight_entropy_to_keep)
-			(seq
-				(call !ComputeAndStoreInfluenceWeightEntropies (assoc features features))
-
-				(assign (assoc
-					max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy
-					ninety_percent_quantile_closest_influence !autoAblationNinetyPercentQuantileInfluence
-				))
-			)
-		)
-
-		(declare (assoc
+			; tuple of [ entropy, most influential case id, influence of most influential ]
 			influentials_entropy_tuple
 				(call !ComputeInfluenceWeightEntropy (assoc
 					features features
 					feature_values feature_values
 					output_most_influential_only .true
 				))
-		))
+		)
 
+
+		;case can be ablated if:
+		;a) it's an exact duplicate
+		;b) a near-duplicate (very similar to exactly one other case)
+		;c) it's not "too far" away (keep outliers and dissimilar cases)
+		;d) its influence weight entropy is relatively high (above a threshold, case can be evenly distributed among its neighbors)
 		(or
 			;case may be kept because influentials are not evenly distributed (their entropy is low)
-			(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_tuple))
+			(if (<= (first influentials_entropy_tuple) !autoAblationMaxInfluenceWeightEntropy)
 				;check if case is a near duplicate, if it is, it can be ablated
 				(if (and
 						;entropy is < 0.1, meaning significantly closer to one case than any of the others
 						(< (first influentials_entropy_tuple) 0.1)
 						;closest case influence is in the top 10%, meaning it's very close to its one neighbor
-						(> (last influentials_entropy_tuple) ninety_percent_quantile_closest_influence)
+						(> (last influentials_entropy_tuple) !autoAblationNinetyPercentQuantileInfluence)
 					)
 					.false
 
@@ -968,7 +947,7 @@
 
 			; This is probably unnecessary but in case we cannot compute the requested influence weight
 			; quantile return .true as well (keep the case)
-			(= max_influence_weight_entropy_to_keep (null))
+			(= (null) !autoAblationMaxInfluenceWeightEntropy)
 		)
 	)
 
