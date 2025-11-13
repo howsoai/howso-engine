@@ -162,29 +162,34 @@
 			label_name (or label_name !internalLabelInfluenceWeightEntropy)
 		))
 
-		(declare (assoc quantile_value (call !RecomputeAndCacheMaxInfluenceWeightEntropy) ))
+		(declare (assoc
+			perfect_match_influence (if (= "surprisal_to_prob" dt_parameter) 1 .infinity)
+		))
+		;compute the 90%th quantile for closest case influence, so that only cases that are in the 10% closest are considered
+		(declare (assoc
+			ninety_percent_quantile_closest_influence
+				(quantile
+					(values (filter
+						(lambda (!= perfect_match_influence (current_value)))
+						(map (lambda (get (current_value) 2)) influence_weight_entropy_map)
+					))
+					0.9
+				)
+		))
 
-		(assign_to_entities (assoc !autoAblationMaxInfluenceWeightEntropy quantile_value ))
+		(assign_to_entities (assoc
+			!autoAblationMaxInfluenceWeightEntropy (call !RecomputeAndCacheMaxInfluenceWeightEntropy)
+			!autoAblationNinetyPercentQuantileInfluence ninety_percent_quantile_closest_influence
+		))
 
 		;if computing on the entire dataset, mark cases that are very close to exactly one other case and can be merged together
 		(if (and compute_all (= (null) specific_case_ids))
 			(declare (assoc
-				extreme_neighbors_map
+				near_duplicate_map
 					(let
-						(assoc perfect_match_influence (if (= "surprisal_to_prob" dt_parameter) 1 .infinity) )
-
-						;compute the 90%th quantile for closest case influence, so that only cases that are in the 10% closest are considered
-						(declare (assoc
-							ninety_percent_quantile_closest_influence
-								(quantile
-									(values (filter (lambda (!= perfect_match_influence (current_value))) (map (lambda (get (current_value) 2)) influence_weight_entropy_map)))
-									0.9
-								)
-						))
-
-						;from those 10% closest (ignoring duplicate cases), only keep those whose influence weight entropy is under 0.1,
-						;denoting that they are very close to just their one nearest neighbor
-						(declare (assoc
+						(assoc
+							;from the 10% closest (ignoring duplicate cases), only keep those whose influence weight entropy is under 0.1,
+							;denoting that they are very close to just their one nearest neighbor
 							extremely_close_to_one_neighbor_map
 								(filter
 									(lambda (and
@@ -197,7 +202,7 @@
 									))
 									influence_weight_entropy_map
 								)
-						))
+						)
 
 						;create an assoc of case -> neighbor_case to merge into
 						;filters out null if case is reciprocated, but this case has higher entropy and will absorb the one with the lower entropy
@@ -245,7 +250,7 @@
 						)
 						"too_far_for_removal"
 
-						(contains_index extreme_neighbors_map (current_index))
+						(contains_index near_duplicate_map (current_index))
 						"near_duplicate"
 					)
 				)
@@ -884,14 +889,20 @@
 			(conclude .true)
 		)
 
-		(assign (assoc max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy  ))
+		(assign (assoc
+			max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy
+			ninety_percent_quantile_closest_influence !autoAblationNinetyPercentQuantileInfluence
+		))
 
 		;if there is no influence weight entropy cached yet, do the caching here
 		(if (= (null) max_influence_weight_entropy_to_keep)
 			(seq
 				(call !ComputeAndStoreInfluenceWeightEntropies (assoc features features))
 
-				(assign (assoc max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy ))
+				(assign (assoc
+					max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy
+					ninety_percent_quantile_closest_influence !autoAblationNinetyPercentQuantileInfluence
+				))
 			)
 		)
 
@@ -904,63 +915,72 @@
 				))
 		))
 
-		(+
-			(or
-				;case should be kept because influentials are not evenly distributed (their entropy is low)
-				(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_tuple))
-					.true
-
-					;always ablate perfect matches/identical cases
-					(= .infinity (first influentials_entropy_tuple))
+		(or
+			;case may be kept because influentials are not evenly distributed (their entropy is low)
+			(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_tuple))
+				;check if case is a near duplicate, if it is, it can be ablated
+				(if (and
+						;entropy is < 0.1, meaning significantly closer to one case than any of the others
+						(< (first influentials_entropy_tuple) 0.1)
+						;closest case influence is in the top 10%
+						(> (last influentials_entropy_tuple) ninety_percent_quantile_closest_influence)
+					)
 					.false
 
-					;else ablate? check distance to closest vs its distance to its K'th closest
-					(let
-						(assoc
-							neighbor_cases_pairs
-								(compute_on_contained_entities
-									(query_not_in_entity_list [(get influentials_entropy_tuple 1)])
-									(query_nearest_generalized_distance
-										closest_k
-										features
-										(retrieve_from_entity (get influentials_entropy_tuple 1) features)
-										p_parameter
-										feature_weights
-										!queryDistanceTypeMap
-										query_feature_attributes_map
-										feature_deviations
-										(null)
-										dt_parameter
-										weight_feature
-										(rand)
-										(null) ;radius
-										!numericalPrecision
-										;output as ordered pair
-										.true
-									)
-								)
-						)
-
-						;in non-surprisal space, the values coming out of the query are inverse distance, inverting them back converts them back to distances to the cases
-						;in surprisal space, the values coming out of the query are probabilities, inverted probabilities are monotonic to surprisals (distances)
-						;thus the comparison below works as intended
-						(declare (assoc
-							dist_to_closest_neighbor (/ 1 (last influentials_entropy_tuple))
-							neighbor_dist_to_its_farthest_case (/ 1 (last (last neighbor_cases_pairs)) )
-						))
-
-						;keep this training case if the 'distance' to its closest existing case is relatively large
-						(>
-							dist_to_closest_neighbor
-							neighbor_dist_to_its_farthest_case
-						)
-					)
+					;keep case
+					.true
 				)
 
-				; This is probably unnecessary but in case we cannot compute the requested influence weight
-				; quantile return 1 as well.
-				(= max_influence_weight_entropy_to_keep (null))
+				;always ablate perfect matches/identical cases
+				(= .infinity (first influentials_entropy_tuple))
+				.false
+
+				;else ablate? check distance to closest vs its distance to its K'th closest
+				(let
+					(assoc
+						neighbor_cases_pairs
+							(compute_on_contained_entities
+								(query_not_in_entity_list [(get influentials_entropy_tuple 1)])
+								(query_nearest_generalized_distance
+									closest_k
+									features
+									(retrieve_from_entity (get influentials_entropy_tuple 1) features)
+									p_parameter
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									(null)
+									dt_parameter
+									weight_feature
+									(rand)
+									(null) ;radius
+									!numericalPrecision
+									;output as ordered pair
+									.true
+								)
+							)
+					)
+
+					;in non-surprisal space, the values coming out of the query are inverse distance, inverting them back converts them back to distances to the cases
+					;in surprisal space, the values coming out of the query are probabilities, inverted probabilities are monotonic to surprisals (distances)
+					;thus the comparison below works as intended
+					(declare (assoc
+						dist_to_closest_neighbor (/ 1 (last influentials_entropy_tuple))
+						neighbor_dist_to_its_farthest_case (/ 1 (last (last neighbor_cases_pairs)) )
+					))
+
+					;keep this training case if the 'distance' to its closest existing case is relatively large
+					(>
+						dist_to_closest_neighbor
+						neighbor_dist_to_its_farthest_case
+					)
+				)
 			)
+
+			; This is probably unnecessary but in case we cannot compute the requested influence weight
+			; quantile return 1 as well.
+			(= max_influence_weight_entropy_to_keep (null))
 		)
 	)
 
