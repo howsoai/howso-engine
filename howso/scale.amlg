@@ -2,15 +2,15 @@
 (null
 	;alternate read-only train call that given cases, returns the case data that should be trained and the case-id -> weight accumulating maps to be used on a
 	;write-permissioned follow up call to the Trainee
-	;{long_running (true) read_only (true)}
+	;{long_running .true read_only .true}
 	#compute_train_payload
 	(declare
 		;{ref "ComputeTrainPayloadResponse"}
 		(assoc
-			;{type "list" values {type "list" min_size 1} min_size 1  required (true)}
+			;{type "list" values {type "list" min_size 1} min_size 1  required .true}
 			;list of cases, ie a list of lists of values.
 			cases (null)
-			;{type "list" values "string" required (true)}
+			;{type "list" values "string" required .true}
 			;the list of features.
 			features (null)
 			;{type "list" values "string"}
@@ -26,25 +26,29 @@
 			series (null)
 			;{type "boolean"}
 			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
-			input_is_substituted (false)
+			input_is_substituted .false
 			;{type "boolean"}
 			;flag, allows feature names beginning with "." if true, otherwise an error will be given if any features start with ".".
-			allow_training_reserved_features (false)
+			allow_training_reserved_features .false
 			;{type "string"}
 			;name of feature into which to accumulate neighbors' influences as weight for ablated cases. Will default to the default auto ablation weight
 			;feature if unspecified
 			accumulate_weight_feature (null)
 			;{type "boolean"}
 			;flag, if set to true, and accumulate_weight_feature is provided, will not train on the cases, but instead accumulate all of their neighbor weights.
-			train_weights_only (false)
+			train_weights_only .false
 			;{type "boolean"}
 			;flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended.
 			;This flag is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
-			skip_auto_analyze (false)
+			skip_auto_analyze .false
 			;{type "boolean"}
 			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
 			;This flag is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
-			skip_reduce_data (false)
+			skip_reduce_data .false
+			;{type "number" min 0}
+			;if specified, then the training indices for this batch of cases will start at this value. This value must be greater than the last trained index of the session.
+			;This value is just passed back in the response to be used within `process_train_payload` which is designed to take the response of this label
+			start_index (null)
 		)
 		(call !ValidateParameters)
 
@@ -152,16 +156,16 @@
 			given_skip_auto_analyze skip_auto_analyze
 
 			;flags needed to prevent write ops in Train code
-			read_only_mode (true)
-			run_autoanalyze_check (false)
+			read_only_mode .true
+			run_autoanalyze_check .false
 
 			ablated_indices_list (list)
 			derived_case_features (list)
 		))
 		(assign (assoc
 			;update these flags needed to prevent write ops in Train code
-			skip_reduce_data (true)
-			skip_auto_analyze (true)
+			skip_reduce_data .true
+			skip_auto_analyze .true
 		))
 		(declare (assoc ablation_trained_instance_count num_cases ))
 
@@ -284,6 +288,7 @@
 					"skip_reduce_data" given_skip_reduce_data
 					"new_total_mass" total_mass
 					"new_total_rebalance_mass" total_rebalance_mass
+					"start_index" start_index
 				}
 		))
 	)
@@ -292,7 +297,7 @@
 	;sibling method of #compute_train_payload that takes that endpoints return data as input.
 	;this method simply trains the given case data, accumulates to the weight feature, and makes
 	;any case edits that are given
-	;{long_running (false) use_active_session (true)}
+	;{long_running .false use_active_session .true}
 	#process_train_payload
 	(declare
 		;{ref "ProcessTrainPayloadResponse"}
@@ -318,10 +323,13 @@
 			session (null)
 			;{type "boolean"}
 			;flag, if set to true, will not auto_analyze, but will instead return the status "analyze" which indicates that an analyze call is recommended
-			skip_auto_analyze (false)
+			skip_auto_analyze .false
 			;{type "boolean"}
 			;flag, if set to true, will not reduce_data, but will instead return the status "reduce_data" which indicates that a reduce_data call is recommended
-			skip_reduce_data (false)
+			skip_reduce_data .false
+			;{type "number" exclusive_min 0}
+			;if specified, then the training indices for this batch of cases will start at this value. This value must be greater than the last trained index of the session.
+			start_index (null)
 			;{type "number"}
 			;The new value to update the Trainee's cached total mass to after the operation is completed.
 			new_total_mass (null)
@@ -401,6 +409,25 @@
 			trained_instance_count (retrieve_from_entity session ".trained_instance_count")
 			total_instance_count (retrieve_from_entity session ".total_instance_count")
 			num_cases (call !GetNumTrainingCases)
+		))
+
+		;if a start_index is given, it should be greater than the next index that would be trained for this session (to prevent idx collisions)
+		(if (and
+				start_index
+				(< start_index (retrieve_from_entity session ".next_trained_index"))
+			)
+			(call !Return (assoc
+				errors ["The given value for `start_index` must be greater than the last trained index of the specified sesion."]
+			))
+		)
+
+		(declare (assoc
+			next_trained_index
+				(if start_index
+					start_index
+
+					(retrieve_from_entity session ".next_trained_index")
+				)
 		))
 
 		(if rebalance_weights
@@ -483,7 +510,7 @@
 									features features
 									feature_values (current_value 1)
 									session (get_value session)
-									session_training_index (+ total_instance_count (current_index 1))
+									session_training_index (+ next_trained_index (current_index 1))
 								))
 							)
 							cases
@@ -507,7 +534,7 @@
 				;the default !reduceDataInfluenceWeightEntropyThreshold of 0.6 will ensure that approximately 1/e of the data is removed
 				(if
 					(and
-						(>= (+ !dataMassChangeSinceLastDataReduction (size cases)) !autoAblationMaxNumCases)
+						(>= (+ num_cases (size cases)) !autoAblationMaxNumCases)
 						(not skip_reduce_data)
 						(size !hyperparameterMetadataMap)
 					)
@@ -524,7 +551,7 @@
 					(seq
 						;ensure we only set the reduce_data status output if a reduction is actually necessary.
 						(if (and
-								(>= (+ !dataMassChangeSinceLastDataReduction (size cases)) !autoAblationMaxNumCases)
+								(>= (+ num_cases (size cases)) !autoAblationMaxNumCases)
 								skip_reduce_data
 							)
 							(assign (assoc status_output "reduce_data"))
@@ -537,10 +564,16 @@
 			)
 		)
 
+		(if (or (size cases) (size weight_accumulation_maps))
+			(assign_to_entities session (assoc
+				".next_trained_index" (+ next_trained_index (size cases) (size weight_accumulation_maps))
+			))
+		)
+
 		(call !UpdateDependentFeaturesMaps)
 		;if there are features that have nulls, check if they still have nulls next time we react or analyze
 		(if !inactiveFeaturesMap
-			(assign_to_entities (assoc !inactiveFeaturesNeedCaching (true) ))
+			(assign_to_entities (assoc !inactiveFeaturesNeedCaching .true ))
 		)
 
 		(accum_to_entities (assoc !revision 1))

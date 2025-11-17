@@ -1,0 +1,200 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_combine_subtrainee.amlg"))
+
+	(declare (assoc result (null)))
+
+	;create trainee A via hierarchy method
+	(call_entity "howso" "create_subtrainee" (assoc path ["A"] child_id "A" ))
+
+	;load trainee B as though it's being injected from an external source directly into the trainee
+	(load_entity "../howso.amlg" ["howso" ".trainee_container" "B"] (null) .false {escape_resource_name .false escape_contained_resource_names .false} )
+	(assign_to_entities ["howso" ".trainee_container" "B"] (assoc filepath "../"))
+	(call_entity ["howso" ".trainee_container" "B"] "initialize" (assoc trainee_id "B"))
+
+	;manually add subtrainee B to the trainee hierarchy
+	(call_entity "howso" "add_hierarchy_relationship" (assoc
+		id "B"
+		entity_path_id "B"
+	))
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		feature_attributes (assoc "nom" (assoc "type" "nominal") )
+	))
+	(call_entity "howso" "execute_on_subtrainee" (assoc
+		child_id "A"
+		method "set_feature_attributes"
+		payload (assoc feature_attributes (assoc "nom" (assoc "type" "nominal") ) )
+	))
+	(call_entity "howso" "execute_on_subtrainee" (assoc
+		child_id "B"
+		method "set_feature_attributes"
+		payload (assoc feature_attributes (assoc "nom" (assoc "type" "nominal") ) )
+	))
+
+	(call_entity "howso" "train" (assoc
+		features (list "a" "b" "nom")
+		session "session_one"
+		cases
+			(list
+				(list 10 20 "x")
+				(list 11 22 "x")
+				(list 12 24 "x")
+				(list 13 26 "y")
+
+				(list 10 20 "x")
+				(list 11 22 "x")
+				(list 12 24 "x")
+				(list 13 26 "y")
+				(list 13 25 "y")
+			)
+	))
+
+	(call_entity "howso" "execute_on_subtrainee" (assoc
+		child_id "A"
+		method "train"
+		payload
+			(assoc
+				features (list "a" "b" "nom")
+				session "session_two"
+				cases
+					(list
+						(list 1 1 "w")
+						(list 2 1 (null))
+						(list 3 3 "w")
+						(list 4 4 "w")
+						(list 9 5 "x")
+						(list 10 6 "x")
+					)
+			)
+	))
+	(call_entity "howso" "execute_on_subtrainee" (assoc
+		child_id "B"
+		method "train"
+		payload
+			(assoc
+				features (list "a" "b" "nom")
+				session "session_one"
+				cases
+					(list
+						(list 3 5 "w")
+						(list 4 5 "w")
+						(list 9 9 "x")
+						(list 16 16 "y")
+					)
+			)
+	))
+
+	(assign (assoc
+		result (call_entity "howso" "combine_with_subtrainees")
+	))
+	(call keep_result_errors)
+	(print "Expected session-index collision error: ")
+	(call assert_same (assoc
+		exp "Session-index collision with subtrainee: B"
+		obs result
+	))
+
+	(call_entity "howso" "remove_cases" (assoc
+		case_indices
+			[
+				[ "session_one" 0]
+				[ "session_one" 1]
+				[ "session_one" 2]
+				[ "session_one" 3]
+			]
+	))
+
+	(declare (assoc
+		trainee_case_6_id (contained_entities "howso" (query_equals ".session_training_index" 5))
+		subtrainee_case_6_id (contained_entities ["howso" ".trainee_container" "A"] (query_equals ".session_training_index" 5))
+	))
+
+	;rename subtrainee case 6 to trainee's  so that there'll be a name collision
+	(move_entities ["howso" ".trainee_container" "A" subtrainee_case_6_id] ["howso" ".trainee_container" "A" trainee_case_6_id] )
+
+	(call_entity "howso" "combine_with_subtrainees")
+
+	(assign (assoc
+		result (call_entity "howso" "get_num_training_cases")
+	))
+	(call keep_result_payload)
+
+	(print "Combined all cases into trainee: ")
+	(call assert_same (assoc
+		exp 15
+		obs (get result "count")
+	))
+
+	(assign (assoc result (call_entity "howso" "get_hierarchy") ))
+	(call keep_result_payload)
+
+	(print "Subtrainees removed and hierarchy is empty: ")
+	(call assert_same (assoc
+		obs result
+		exp
+			{
+				children []
+				contained .true
+				id "model"
+				path []
+			}
+	))
+
+	(call exit_if_failures (assoc msg "Cases combined correctly and subtrainees removed." ))
+
+	(assign (assoc
+		result  (call_entity "howso" "get_sessions")
+	))
+	(call keep_result_payload)
+	(print "Sessions moved and combined: ")
+	(call assert_same (assoc
+		obs result
+		exp [ {id "session_one"} {id "session_two"} ]
+	))
+
+	(assign (assoc
+		subtrainee_case_6_id (contained_entities "howso" (query_equals ".session_training_index" 5) (query_equals ".session" "session_two"))
+	))
+	(print "Case collision renamed case to new id: ")
+	(call assert_true (assoc
+		obs
+			;there's one case and it doesn't match the renamed id because it was assigned a new one
+			(and
+				(= 1 (size subtrainee_case_6_id))
+				(!= subtrainee_case_6_id trainee_case_6_id)
+			)
+	))
+
+	(print "Case collision updated session info: ")
+	(call assert_same (assoc
+		exp (get (retrieve_from_entity ["howso" "session_two"] ".indices_map") 5)
+		obs (first subtrainee_case_6_id)
+	))
+	(call assert_same (assoc
+		exp (get (retrieve_from_entity ["howso" "session_two"] ".replay_steps") 5)
+		obs (first subtrainee_case_6_id)
+	))
+
+	(call exit_if_failures (assoc msg "Sessions combined correctly." ))
+
+	;manually add subtrainee B to the trainee hierarchy
+	(call_entity "howso" "add_hierarchy_relationship" (assoc
+		id "ext"
+		entity_path_id "external"
+		is_contained .false
+	))
+
+	(assign (assoc
+		result (call_entity "howso" "combine_with_subtrainees" (assoc child_ids ["ext"]))
+	))
+	(call keep_result_errors)
+
+	(print "Errors out attempting to combine externally stored subtrainee: ")
+	(call assert_same (assoc
+		obs result
+		exp "The following subtrainees are not contained and cannot be automatically combined: [\"external\"]"
+	))
+
+	(call exit_if_failures (assoc msg unit_test_name ))
+)

@@ -3,23 +3,25 @@
 		"../howso.amlg"
 		"howso"
 		(null)
-		(false)
-		{escape_resource_name (false) escape_contained_resource_names (false)}
+		.false
+		{escape_resource_name .false escape_contained_resource_names .false}
 	)
-	(set_entity_permissions "howso" (true))
+	(set_entity_permissions "howso" .true)
 	(call_entity "howso" "initialize" (assoc trainee_id "model" filepath "../"))
 
 	(declare (assoc test_start (system_time)))
 
 	(declare (assoc
 		;set to true to see full output
-		verbose (false)
+		verbose .false
 		;set the amount of data to use
 		dataset_size 10000  ; 10000 = full dataset size
 		;set to true to also run analyze
-		do_analyze (false)
+		do_analyze .false
+		;set this to null to use max samples
+		num_feature_probability_samples 20000
 		;set to true to use case weights in analyze
-		use_case_weights (false)
+		use_case_weights .false
 
 	    data (load "performance_data/mnist_10k.csv")
 	))
@@ -35,13 +37,15 @@
 		context_features_key (apply "concat" (weave (sort (trunc features)) "."))
 	))
 
-	(call_entity "howso" "set_params" (assoc
-		hyperparameter_map
-			(assoc
-				"targetless" (associate all_features_key (assoc ".none" (assoc "k" 8 "p" 2 "dt" -1)))
-				"targeted" (assoc "target" (associate context_features_key (assoc ".none" (assoc "k" 13 "p" 2 "dt" -1))))
-			)
-	))
+	(if (not do_analyze)
+		(call_entity "howso" "set_params" (assoc
+			hyperparameter_map
+				(assoc
+					"targetless" (associate all_features_key (assoc ".none" (assoc "k" 8 "p" 2 "dt" -1)))
+					"targeted" (assoc "target" (associate context_features_key (assoc ".none" (assoc "k" 13 "p" 2 "dt" -1))))
+				)
+		))
+	)
 
 	(call_entity "howso" "set_feature_attributes" (assoc
 		feature_attributes
@@ -68,26 +72,33 @@
 	(if do_analyze
 		(seq
 			(print "analyzing mnist ...\n")
-			(call_entity "howso" "analyze" (assoc
-				context_features (trunc features)
-				action_features (list (last features))
-				targeted_model "single_targeted"
-				use_case_weights use_case_weights
-				convergence_threshold 0
-			))
-			(declare (assoc analyze_time (- (system_time) start) ))
-			(print
-				(call_entity "howso" "get_params" (assoc action_feature "target"))
+			(call_entity "howso" "analyze"
+				(append
+					(assoc
+						use_case_weights use_case_weights
+						convergence_threshold 0
+					)
+					(if num_feature_probability_samples { num_feature_probability_samples num_feature_probability_samples } {})
+				)
 			)
+			(declare (assoc analyze_time (- (system_time) start) ))
 			(print "Analyze time: " analyze_time "\n")
 
 		)
 
 		;else skip analyze, only compute and cache expected values
 		(seq
+			(accum_entity_roots "howso" [ (set_labels (lambda (call !UpdateInactiveFeatures)) ["UpdateInactiveFeatures"] )])
+			(accum_entity_roots "howso" [
+				(set_labels
+					(lambda (call !CacheExpectedValuesAndProbabilities (assoc features features use_case_weights use_case_weights)) )
+					["CacheExpectedValuesAndProbabilities"]
+				)
+			])
+
 			(assign (assoc start (system_time) ))
-			(call_entity (list "howso" "mnist") "UpdateInactiveFeatures")
-			(call_entity (list "howso" "mnist") "CacheExpectedValuesAndProbabilities" (assoc
+			(call_entity "howso" "UpdateInactiveFeatures")
+			(call_entity "howso" "CacheExpectedValuesAndProbabilities" (assoc
 				features features
 				use_case_weights use_case_weights
 			))
@@ -95,14 +106,8 @@
 		)
 	)
 
-	(declare (assoc params (get (call_entity "howso" "get_params" (assoc action_feature (last features))) (list 1 "payload")) ))
-	(if verbose (print "analyzed to: " (get params "hyperparameter_map")))
-
-	(assign (assoc
-		k (get params (list "hyperparameter_map" "k"))
-		p (get params (list "hyperparameter_map" "p"))
-	))
-	(print "MNIST 10k params (k p): " k " " p "\n- - - - -\n")
+	(declare (assoc params (get (call_entity "howso" "get_params") (list 1 "payload")) ))
+	(if verbose (print "analyzed to: " params))
 
 	(print "Reacting ...\n")
 	(assign (assoc start (system_time) ))
@@ -128,7 +133,6 @@
 	(print "React time: " (- (system_time) start) "\n")
 	(declare (assoc correct (/ num_correct (* .1 dataset_size))))
 	(print "Accuracy: " correct "\n")
-	(destroy_entities "mnist")
 	(print "Total time: " (- (system_time) test_start) "\n")
 	(print "MNIST 10k\n- - - - - \n")
 	(destroy_entities "howso")
