@@ -1,5 +1,5 @@
 (null
-	#!DeepDive
+	#!ComputeResponsibleACValues
 	(declare
 		(assoc
 			action_feature (null)
@@ -256,18 +256,9 @@
 				)
 		))
 
-		(print (unparse focus_features) " : "  (/ (apply "+" (map (lambda (first (current_value))) case_acs)) (size case_ids)) "\n")
-
-		(if (= 1 (size focus_features))
-			(if (contains_index !nominalsMap (first focus_features))
-				(call !ResponsibleNominalAC (assoc case_acs (map (lambda [(first (current_value 1)) (last (last (current_value 1)))]) case_acs)  ))
-				(call !ResponsibleContinuousAC (assoc case_acs (map (lambda [(first (current_value 1)) (last (last (current_value 1)))]) case_acs)  ))
-			)
-
-			;else have to go through all possible combinations of values
-			(call !ResponsibleValuesMultipleFeatures)
-		)
+		(call !ResponsibleValuesMultipleFeatures)
 	)
+
 
 	#!ResponsibleValuesMultipleFeatures
 	(let
@@ -318,11 +309,14 @@
 		(lambda
 			;sort the classes/buckets of the next remaining feature
 			(if (size remaining_focus_features)
-				(call !RecursivelyProcessFocusFeatures (assoc
-					remaining_focus_features (tail remaining_focus_features)
-					feature_case_ac_map (get focus_case_acs next_focus_index)
-					next_focus_index (+ 1 next_focus_index)
-				))
+				(associate
+					(current_value 1)
+						(call !RecursivelyProcessFocusFeatures (assoc
+							remaining_focus_features (tail remaining_focus_features)
+							feature_case_ac_map (get focus_case_acs next_focus_index)
+							next_focus_index (+ 1 next_focus_index)
+						))
+				)
 
 				;else output the AC values for this class/bucket
 				(associate (current_value 1) (get feature_case_ac_map (current_value 1) ) )
@@ -340,18 +334,21 @@
 
 
 	#!DetermineContinuousBuckets
-	(seq
+	(let
+		(assoc
+			sorted_unique_values
+				;sort is descending order
+				(sort
+					(lambda (< (current_value) (current_value 1)) )
+					(values
+						(map (lambda (last (current_value))) case_acs)
+						.true
+					)
+				)
+		)
 
-		;sort is descending order
 		(declare (assoc
-			sorted_acs_by_values (sort (lambda (< (last (current_value)) (last (current_value 1))) ) case_acs)
-		))
-		(declare (assoc
-			sorted_unique_values (values (map (lambda (last (current_value))) sorted_acs_by_values) .true)
-		))
-
-		(declare (assoc
-			num_buckets (min 30 (size sorted_unique_values) )
+			num_buckets (min 30 (size sorted_unique_values))
 			total_num (size sorted_unique_values)
 		))
 
@@ -368,7 +365,7 @@
 				)
 		))
 
-		;assoc of bucket -> all the unique values that go into that bucket
+		;assoc of bucket -> values tuple of [mean, median, min, max] of all the unique values that go into that bucket
 		(zip
 			(range 0 (- num_buckets 1))
 			(map
@@ -377,21 +374,36 @@
 						index_quantile_low (floor (* total_num  (first (current_value 1))))
 						index_quantile_high (- (floor (* total_num (last (current_value 1)))) 1)
 					)
-					(unzip sorted_unique_values (range index_quantile_low index_quantile_high))
+					(declare (assoc
+						sorted_bucket_values (unzip sorted_unique_values (range index_quantile_low index_quantile_high))
+					))
+
+					;values tuple of [mean, median, min, max]
+					[
+						(generalized_mean sorted_bucket_values)
+						(get
+							sorted_bucket_values
+							(/ (size sorted_bucket_values) 2)
+						)
+						;min
+						(last sorted_bucket_values)
+						;max
+						(first sorted_bucket_values)
+					]
 				))
 				bucket_percent_range_pairs
 			)
 		)
 	)
 
-	;output map of bucket index -> tuple of ac [ mean, median, min, max]
+	;output map of bucket index -> tuple of [ mean ac, median ac, min ac, max ac,  [ mean value, median value, min value, max value ] ]
 	#!ResponsibleContinuousAC
 	(map
 		(lambda (let
 			(assoc
 				bucket (current_index 1)
-				min (last (current_value 1))
-				max (first (current_value 1))
+				min (get (current_value 1) 2)
+				max (last (current_value 1))
 			)
 
 			;all the ac values for this bucket of continuous values inbetween [min, max]
@@ -409,12 +421,14 @@
 					)
 			))
 
-			;output a tuple of ac:  [ mean, median, min, max]
+			;output a tuple of:  [ mean ac, median ac, min ac, max ac [values tuple]]
 			[
 				(generalized_mean bucket_acs)
 				(get (sort bucket_acs) (/ (size bucket_acs) 2))
 				(apply "min" bucket_acs)
 				(apply "max" bucket_acs)
+				;values tuple of [mean, median, min, max]
+				(current_value 1)
 			]
 		))
 		(call !DetermineContinuousBuckets)
@@ -429,7 +443,7 @@
 		))
 	)
 
-	;output an assoc of class -> pair of ac: [ mean, median ]
+	;output an assoc of class -> pair [ mean ac, median ac ]
 	#!ResponsibleNominalAC
 	(map
 		(lambda
