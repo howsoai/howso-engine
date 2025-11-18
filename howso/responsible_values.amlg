@@ -285,7 +285,7 @@
 	;if there are remaining focus features, process them recursively
 	;
 	;parameters:
-	; feature_case_ac_map: the current feature's case_ac_map of class/bucket -> values
+	; feature_case_ac_map: the current feature's case_ac_map of class/bucket -> [ ac [min max] ]
 	; remaininy_focus_features: remaining focus features if there were multiple features
 	; next_focus_index: the index of the next focus feature (relative to the original focus_features parameter), if there are any remaining focus features
 	; feature_indices: list of the previous focus feature indices, if there are remaining focus features
@@ -311,15 +311,15 @@
 									;for continuous accumulate the pair of min/max of values this bucket
 									(let
 										(assoc
-											min (get feature_case_ac_map [(current_value 3) 4 2] )
-											max (get feature_case_ac_map [(current_value 3) 4 3] )
+											min (get (current_value 2) [1 1] )
+											max (get (current_value 2) [1 2] )
 										)
 										;output as a nested pair to ensure it accumulates to the list as a pair
 										[[ min max ]]
 									)
 
 									;for nominal accumulate the class value itself
-									(current_value 1)
+									(current_index 1)
 								)
 							)
 					))
@@ -380,38 +380,28 @@
 							)
 					))
 
-					(associate
-						(current_value 1)
-							(call !RecursivelyProcessFocusFeatures (assoc
-								remaining_focus_features (tail remaining_focus_features)
-								feature_case_ac_map
-									(if (contains_index !nominalsMap (first remaining_focus_features))
-										(call !ResponsibleNominalAC (assoc case_acs next_feature_acs ))
-										(call !ResponsibleContinuousAC (assoc case_acs next_feature_acs ))
-									)
-								next_focus_index (+ 1 next_focus_index)
-								feature_indices (append feature_indices next_focus_index)
-								feature_values previous_feature_values
-							))
-					)
+					(call !RecursivelyProcessFocusFeatures (assoc
+						remaining_focus_features (tail remaining_focus_features)
+						feature_case_ac_map
+							(if (contains_index !nominalsMap (first remaining_focus_features))
+								(call !ResponsibleNominalAC (assoc case_acs next_feature_acs ))
+								(call !ResponsibleContinuousAC (assoc case_acs next_feature_acs ))
+							)
+						next_focus_index (+ 1 next_focus_index)
+						feature_indices (append feature_indices next_focus_index)
+						feature_values previous_feature_values
+					))
 				)
 
 				;else output the AC values for this class/bucket
-				(associate (current_value 1) (get feature_case_ac_map (current_value 1) ) )
+				(current_value 1)
 			)
 		)
-		;sort classes/buckets by mean AC in descending order
-		(sort
-			(lambda (<
-				(first (get feature_case_ac_map (current_value)))
-				(first (get feature_case_ac_map (current_value 1)))
-			))
-			(indices feature_case_ac_map)
-		)
+		feature_case_ac_map
 	)
 
 	;given a case_acs for a continuous feature, bin them into buckets by quantiles
-	;outputs map of bucket -> values tuple of: [mean, median, min, max]
+	;outputs map of bucket -> values pair of: [ min, max]
 	;
 	;parameters:
 	; case_acs: list of pairs of [ ac_value feature_value ]
@@ -447,7 +437,7 @@
 				)
 		))
 
-		;assoc of bucket -> values tuple of: [mean, median, min, max] of all the unique values that go into that bucket
+		;assoc of bucket -> values pair of:  min, max] of all the unique values that go into that bucket
 		(zip
 			(range 0 (- num_buckets 1))
 			(map
@@ -460,13 +450,8 @@
 						sorted_bucket_values (unzip sorted_unique_values (range index_quantile_low index_quantile_high))
 					))
 
-					;values tuple of [mean, median, min, max]
+					;values pair of [ min, max]
 					[
-						(generalized_mean sorted_bucket_values)
-						(get
-							sorted_bucket_values
-							(/ (size sorted_bucket_values) 2)
-						)
 						;min
 						(last sorted_bucket_values)
 						;max
@@ -479,7 +464,7 @@
 	)
 
 	;output responsible values for a continuous feature
-	;output map of bucket -> tuple of: [ mean ac, median ac, min ac, max ac,  [ mean value, median value, min value, max value ] ]
+	;output map of bucket -> pair of: [ mean ac  [ min value, max value ] ]
 	;
 	;parameters:
 	; case_acs: list of pairs of [ac_value feature_value ]
@@ -488,13 +473,14 @@
 		(lambda (let
 			(assoc
 				bucket (current_index 1)
-				min (get (current_value 1) 2)
+				min (first (current_value 1))
 				max (last (current_value 1))
 			)
 
-			;all the ac values for this bucket of continuous values inbetween [min, max]
-			(declare (assoc
-				bucket_acs
+			;output a tuple of:  [ mean ac, [values tuple]]
+			[
+				(generalized_mean
+					;all the ac values for this bucket of continuous values inbetween [min, max]
 					(map
 						(lambda (first (current_value)))
 						(filter
@@ -505,15 +491,8 @@
 							case_acs
 						)
 					)
-			))
-
-			;output a tuple of:  [ mean ac, median ac, min ac, max ac [values tuple]]
-			[
-				(generalized_mean bucket_acs)
-				(get (sort bucket_acs) (/ (size bucket_acs) 2))
-				(apply "min" bucket_acs)
-				(apply "max" bucket_acs)
-				;values tuple of [mean, median, min, max]
+				)
+				;values tuple of [mean, min, max]
 				(current_value 1)
 			]
 		))
@@ -521,21 +500,17 @@
 	)
 
 	;output responsible values for a nominal feature
-	;output an assoc of class -> pair [ mean ac, median ac ]
+	;output an assoc of class -> [mean ac]
 	;
 	;parameters:
 	; case_acs: list of pairs of [ac_value feature_value ]
 	#!ResponsibleNominalAC
 	(map
 		(lambda
-			;output mean and median ac values
+			;output mean ac values
 			(if (~ [] (current_value))
-				[
-					(generalized_mean (current_value 1))
-					(get (sort (current_value 1)) (/ (size (current_value 1)) 2))
-				]
-
-				[ (current_value 1) (current_value 1)]
+				[(generalized_mean (current_value 1))]
+				[(current_value 1)]
 			)
 		)
 		;accumulate the AC values for each class to create an assoc of class -> list of ac values
