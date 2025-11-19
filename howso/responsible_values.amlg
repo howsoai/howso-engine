@@ -254,31 +254,120 @@
 				)
 		))
 
-		;Iterate over the focus features, outputing the responsible values, sorted in order of largest accuracy contribution
-		;process each feature in the order of focus_features, such that for each value of feature 1, it outputs the sorted values of feature 2, etc.
-		(call !RecursivelyProcessFocusFeatures (assoc
-			remaining_focus_features (tail focus_features)
-			feature_case_ac_map
-				(if (contains_index !nominalsMap (first focus_features))
-					(call !ResponsibleNominalAC (assoc
-						case_acs
-							(map
-								(lambda [ (first (current_value 1)) (get (current_value 1) [1 0]) ])
-								case_acs
-							)
+		;a index map to match index of focus feature to focus value
+		(declare (assoc
+			focus_feature_index_map (zip focus_features (range 0 (- (size focus_features) 1)))
+		))
+
+		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
+		(declare (assoc
+			continuous_feature_buckets_map
+				(map
+					(lambda (let
+						(assoc focus_feature_index (get focus_feature_index_map (current_index 1)) )
+						(call !DetermineContinuousBuckets (assoc
+							sorted_unique_values
+								;sort is descending order
+								(sort
+									(lambda (< (current_value) (current_value 1)) )
+									(values
+										(map (lambda (get (current_value) [1 focus_feature_index])) case_acs)
+										.true
+									)
+								)
+						))
 					))
-					(call !ResponsibleContinuousAC (assoc
-						case_acs
-							(map
-								(lambda [ (first (current_value 1)) (get (current_value 1) [1 0]) ])
-								case_acs
-							)
+					(zip (filter
+						(lambda (not (contains_index !nominalsMap (current_value))))
+						focus_features
 					))
 				)
-			next_focus_index 1
-			feature_indices [0]
-			feature_values []
 		))
+
+		;Iterate over the focus features, outputing the responsible values, sorted in order of largest accuracy contribution
+		;process each feature in the order of focus_features, such that for each value of feature 1, it outputs the sorted values of feature 2, etc.
+		(declare (assoc
+			values_map
+				(call !RecursivelyProcessFocusFeatures (assoc
+					remaining_focus_features (tail focus_features)
+					feature_case_ac_map
+						(if (contains_index !nominalsMap (first focus_features))
+							(call !ResponsibleNominalAC (assoc
+								case_acs
+									(map
+										(lambda [ (first (current_value 1)) (get (current_value 1) [1 0]) ])
+										case_acs
+									)
+							))
+							(call !ResponsibleContinuousAC (assoc
+								case_acs
+									(map
+										(lambda [ (first (current_value 1)) (get (current_value 1) [1 0]) ])
+										case_acs
+									)
+							))
+						)
+					next_focus_index 1
+					feature_indices [0]
+					feature_values []
+				))
+		))
+
+		(declare (assoc
+			all_values_lists
+				(apply "append" (values
+					(call !ReduceNestedAssocIntoLists (assoc
+						nested_assoc values_map
+						values_lists []
+					))
+				))
+		))
+
+		;replace buckets with pairs of [min max] for each continuous feature
+		(if (size continuous_feature_buckets_map)
+			(map
+				(lambda
+					;iterate over the values in the row
+					(map
+						(lambda
+							(if (contains_index !nominalsMap (get focus_features (current_index)))
+								(current_value)
+
+								;else it's the AC value, whose index exceeds the indices of focus_features
+								(>= (current_index) (size focus_features))
+								(current_value)
+
+								;else convert bucket to pair of min-max for this continuous feature
+								(get continuous_feature_buckets_map [(get focus_features (current_index 1)) (current_value 1)])
+							)
+						)
+						(current_value)
+					)
+				)
+				all_values_lists
+			)
+
+			;else output it as-is
+			all_values_lists
+		)
+	)
+
+	#!ReduceNestedAssocIntoLists
+	(map
+		(lambda
+			(if (~ (assoc) (current_value))
+				(apply "append" (values
+					(call !ReduceNestedAssocIntoLists (assoc
+						nested_assoc (current_value 1)
+						values_lists (append values_lists (current_index 1))
+					))
+				))
+
+				;else (current_value) is the AC, append it as the last column
+				[(append values_lists (current_index 1) (current_value 1))]
+			)
+		)
+		nested_assoc
 	)
 
 	;sort the class/buckets descending by AC, and output the corresponding values to the class/bucket
@@ -311,8 +400,8 @@
 									;for continuous accumulate the pair of min/max of values this bucket
 									(let
 										(assoc
-											min (get (current_value 2) [1 1] )
-											max (get (current_value 2) [1 2] )
+											min (get (current_value 2) [1 0] )
+											max (get (current_value 2) [1 1] )
 										)
 										;output as a nested pair to ensure it accumulates to the list as a pair
 										[[ min max ]]
@@ -324,6 +413,7 @@
 							)
 					))
 
+					;list of pairs of [ac next_feature_value ]
 					(declare (assoc
 						next_feature_acs
 							(map
@@ -385,7 +475,10 @@
 						feature_case_ac_map
 							(if (contains_index !nominalsMap (first remaining_focus_features))
 								(call !ResponsibleNominalAC (assoc case_acs next_feature_acs ))
-								(call !ResponsibleContinuousAC (assoc case_acs next_feature_acs ))
+								(call !ResponsibleContinuousAC (assoc
+									case_acs next_feature_acs
+									feature (first remaining_focus_features)
+								))
 							)
 						next_focus_index (+ 1 next_focus_index)
 						feature_indices (append feature_indices next_focus_index)
@@ -394,7 +487,7 @@
 				)
 
 				;else output the AC values for this class/bucket
-				(current_value 1)
+				(first (current_value))
 			)
 		)
 		feature_case_ac_map
@@ -404,61 +497,40 @@
 	;outputs map of bucket -> values pair of: [ min, max]
 	;
 	;parameters:
-	; case_acs: list of pairs of [ ac_value feature_value ]
+	; sorted_unique_values: list of all sorted unique values in descending order
 	#!DetermineContinuousBuckets
-	(let
-		(assoc
-			sorted_unique_values
-				;sort is descending order
-				(sort
-					(lambda (< (current_value) (current_value 1)) )
-					(values
-						(map (lambda (last (current_value))) case_acs)
-						.true
-					)
-				)
-		)
+	(declare
+		(assoc sorted_unique_values [] )
 
 		(declare (assoc
 			num_buckets (min 30 (size sorted_unique_values))
 			total_num (size sorted_unique_values)
 		))
 
-		(declare (assoc
-			;num_buckets list of pairs, specifying the min and max percentage range for each bucket.
-			;e.g., if there were two buckets, this would output: [ [0 0.5] [0.5 1] ]
-			bucket_percent_range_pairs
-				(range
-					(lambda [
-						(* (/ 1 num_buckets) (- (current_index 1) 1))
-						(* (/ 1 num_buckets) (current_index 1))
-					])
-					1 num_buckets 1
-				)
-		))
-
 		;assoc of bucket -> values pair of:  min, max] of all the unique values that go into that bucket
 		(zip
 			(range 0 (- num_buckets 1))
-			(map
+
+			(range
 				(lambda (let
 					(assoc
-						index_quantile_low (floor (* total_num  (first (current_value 1))))
-						index_quantile_high (- (floor (* total_num (last (current_value 1)))) 1)
+						;start and end percentage for each bucket
+						;e.g., if there were two buckets, first bucket these values would be 0 and 0.5, and for the second bucket they'd be 0.5 and 1
+						start_quantile_percentage (* (/ 1 num_buckets) (- (current_index 1) 1))
+						end_quantile_percentage (* (/ 1 num_buckets) (current_index 1))
 					)
+					(declare (assoc
+						index_quantile_low (floor (* total_num  start_quantile_percentage))
+						index_quantile_high (- (floor (* total_num end_quantile_percentage)) 1)
+					))
 					(declare (assoc
 						sorted_bucket_values (unzip sorted_unique_values (range index_quantile_low index_quantile_high))
 					))
 
 					;values pair of [ min, max]
-					[
-						;min
-						(last sorted_bucket_values)
-						;max
-						(first sorted_bucket_values)
-					]
+					[ (last sorted_bucket_values) (first sorted_bucket_values) ]
 				))
-				bucket_percent_range_pairs
+				1 num_buckets 1
 			)
 		)
 	)
@@ -496,7 +568,7 @@
 				(current_value 1)
 			]
 		))
-		(call !DetermineContinuousBuckets)
+		(get continuous_feature_buckets_map feature)
 	)
 
 	;output responsible values for a nominal feature
