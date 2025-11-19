@@ -1,9 +1,10 @@
 (null
-	#!ComputeResponsibleACValues
+	#!ComputeValueRobustAccuracyContributions
 	(declare
 		(assoc
 			action_feature (null)
 			focus_features (null)
+			max_num_buckets (null)
 			features []
 		)
 
@@ -265,7 +266,8 @@
 				(map
 					(lambda (let
 						(assoc focus_feature_index (get focus_feature_index_map (current_index 1)) )
-						(call !DetermineContinuousBuckets (assoc
+						(call !BinValuesByQuantiles (assoc
+							max_num_buckets max_num_buckets
 							sorted_unique_values
 								;sort is descending order
 								(sort
@@ -292,14 +294,14 @@
 					remaining_focus_features (tail focus_features)
 					feature_case_ac_map
 						(if (contains_index !nominalsMap (first focus_features))
-							(call !ResponsibleNominalAC (assoc
+							(call !ComputeNominalValueRobustACMap (assoc
 								case_acs
 									(map
 										(lambda [ (first (current_value 1)) (get (current_value 1) [1 0]) ])
 										case_acs
 									)
 							))
-							(call !ResponsibleContinuousAC (assoc
+							(call !ComputeContinuousValueRobustACMap (assoc
 								case_acs
 									(map
 										(lambda [ (first (current_value 1)) (get (current_value 1) [1 0]) ])
@@ -323,53 +325,33 @@
 				))
 		))
 
-		;replace buckets with pairs of [min max] for each continuous feature
-		(if (size continuous_feature_buckets_map)
-			(map
-				(lambda
-					;iterate over the values in the row
+		;split the lists of all values into two corresponding lists for output: just the unique focus values and their corresponding ACs
+		{
+			"focus_values"
+				;replace buckets with pairs of [min max] for each continuous feature
+				(if (size continuous_feature_buckets_map)
 					(map
 						(lambda
-							(if (contains_index !nominalsMap (get focus_features (current_index)))
-								(current_value)
-
-								;else it's the AC value, whose index exceeds the indices of focus_features
-								(>= (current_index) (size focus_features))
-								(current_value)
-
-								;else convert bucket to pair of min-max for this continuous feature
-								(get continuous_feature_buckets_map [(get focus_features (current_index 1)) (current_value 1)])
+							;iterate over the values in the row
+							(map
+								(lambda
+									(if (contains_index !nominalsMap (get focus_features (current_index)))
+										(current_value)
+										;else convert bucket to pair of min-max for this continuous feature
+										(get continuous_feature_buckets_map [(get focus_features (current_index 1)) (current_value 1)])
+									)
+								)
+								(trunc (current_value))
 							)
 						)
-						(current_value)
+						all_values_lists
 					)
+
+					;else truncate the ac values, keep the rest as-is
+					(map (lambda (trunc (current_value))) all_values_lists)
 				)
-				all_values_lists
-			)
-
-			;else output it as-is
-			all_values_lists
-		)
-	)
-
-	;helper method to collate nested assocs into flat lists of all possible unique values
-	;eg: { A { b 1 c 2}   X { y 3 z 4} } will be collated into: [ [ A b 1] [A c 2] [X y 3] [X z 4] ]
-	#!CollateNestedAssocIntoLists
-	(map
-		(lambda
-			(if (~ (assoc) (current_value))
-				(apply "append" (values
-					(call !CollateNestedAssocIntoLists (assoc
-						nested_assoc (current_value 1)
-						values_lists (append values_lists (current_index 1))
-					))
-				))
-
-				;else (current_value) is a leaf value, append it as the last value in the list
-				[(append values_lists (current_index 1) (current_value 1))]
-			)
-		)
-		nested_assoc
+			"ac_values" (map (lambda (last (current_value))) all_values_lists)
+		}
 	)
 
 	;sort the class/buckets descending by AC, and output the corresponding values to the class/bucket
@@ -476,8 +458,8 @@
 						remaining_focus_features (tail remaining_focus_features)
 						feature_case_ac_map
 							(if (contains_index !nominalsMap (first remaining_focus_features))
-								(call !ResponsibleNominalAC (assoc case_acs next_feature_acs ))
-								(call !ResponsibleContinuousAC (assoc
+								(call !ComputeNominalValueRobustACMap (assoc case_acs next_feature_acs ))
+								(call !ComputeContinuousValueRobustACMap (assoc
 									case_acs next_feature_acs
 									feature (first remaining_focus_features)
 								))
@@ -495,54 +477,12 @@
 		feature_case_ac_map
 	)
 
-	;given a case_acs for a continuous feature, bin them into buckets by quantiles
-	;outputs map of bucket -> values pair of: [ min, max]
-	;
-	;parameters:
-	; sorted_unique_values: list of all sorted unique values in descending order
-	#!DetermineContinuousBuckets
-	(declare
-		(assoc sorted_unique_values [] )
-
-		(declare (assoc
-			num_buckets (min 30 (size sorted_unique_values))
-			total_num (size sorted_unique_values)
-		))
-
-		;assoc of bucket -> values pair of:  min, max] of all the unique values that go into that bucket
-		(zip
-			(range 0 (- num_buckets 1))
-
-			(range
-				(lambda (let
-					(assoc
-						;start and end percentage for each bucket
-						;e.g., if there were two buckets, first bucket these values would be 0 and 0.5, and for the second bucket they'd be 0.5 and 1
-						start_quantile_percentage (* (/ 1 num_buckets) (- (current_index 1) 1))
-						end_quantile_percentage (* (/ 1 num_buckets) (current_index 1))
-					)
-					(declare (assoc
-						index_quantile_low (floor (* total_num  start_quantile_percentage))
-						index_quantile_high (- (floor (* total_num end_quantile_percentage)) 1)
-					))
-					(declare (assoc
-						sorted_bucket_values (unzip sorted_unique_values (range index_quantile_low index_quantile_high))
-					))
-
-					;values pair of [ min, max]
-					[ (last sorted_bucket_values) (first sorted_bucket_values) ]
-				))
-				1 num_buckets 1
-			)
-		)
-	)
-
 	;output responsible values for a continuous feature
 	;output map of bucket -> pair of: [ mean ac  [ min value, max value ] ]
 	;
 	;parameters:
 	; case_acs: list of pairs of [ac_value feature_value ]
-	#!ResponsibleContinuousAC
+	#!ComputeContinuousValueRobustACMap
 	(map
 		(lambda (let
 			(assoc
@@ -578,7 +518,7 @@
 	;
 	;parameters:
 	; case_acs: list of pairs of [ac_value feature_value ]
-	#!ResponsibleNominalAC
+	#!ComputeNominalValueRobustACMap
 	(map
 		(lambda
 			;output mean ac values
@@ -596,5 +536,95 @@
 			(map (lambda (first (current_value))) case_acs)
 		)
 	)
+
+	;given a case_acs for a continuous feature, bin them into buckets by quantiles
+	;outputs map of bucket -> values pair of: [ min, max]
+	;
+	;parameters:
+	; sorted_unique_values: list of all sorted unique values in descending order
+	; max_num_buckets: optional number of maximum buckets to bin values
+	#!BinValuesByQuantiles
+	(declare
+		(assoc
+			sorted_unique_values []
+			max_num_buckets 30
+		)
+
+		(declare (assoc
+			num_buckets (min max_num_buckets (size sorted_unique_values))
+			total_num (size sorted_unique_values)
+		))
+
+		;assoc of bucket -> values pair of:  min, max] of all the unique values that go into that bucket
+		(zip
+			(range 0 (- num_buckets 1))
+
+			(range
+				(lambda (let
+					(assoc
+						;start and end percentage for each bucket
+						;e.g., if there were two buckets, first bucket these values would be 0 and 0.5, and for the second bucket they'd be 0.5 and 1
+						start_quantile_percentage (* (/ 1 num_buckets) (- (current_index 1) 1))
+						end_quantile_percentage (* (/ 1 num_buckets) (current_index 1))
+					)
+					(declare (assoc
+						index_quantile_low (floor (* total_num  start_quantile_percentage))
+						index_quantile_high (- (floor (* total_num end_quantile_percentage)) 1)
+					))
+					(declare (assoc
+						sorted_bucket_values (unzip sorted_unique_values (range index_quantile_low index_quantile_high))
+					))
+
+					;values pair of [ min, max]
+					[ (last sorted_bucket_values) (first sorted_bucket_values) ]
+				))
+				1 num_buckets 1
+			)
+		)
+	)
+
+	;helper method to collate nested assocs into flat lists of all possible unique values,
+	;while filtering out any list whose leaf node is null
+	;
+	;example:
+	; {
+	;	A {
+	;		b 0
+	;		c 1
+	;		d { g 2 }
+	;	}
+	;	X {
+	;		y 3
+	;		z 4
+	;	}
+	; }
+	; will be collated into:
+	; [
+	; 	[A b 0]
+	; 	[A c 1]
+	; 	[A d g 2]
+	; 	[X y 3]
+	; 	[X z 4]
+	; ]
+	#!CollateNestedAssocIntoLists
+	(filter (map
+		(lambda
+			(if (~ (assoc) (current_value))
+				(apply "append" (values
+					(call !CollateNestedAssocIntoLists (assoc
+						nested_assoc (current_value 1)
+						values_lists (append values_lists (current_index 1))
+					))
+				))
+
+				;else (current_value) is a leaf value, append it as the last value in the list
+				(!= (null) (current_value))
+				[(append values_lists (current_index 1) (current_value 1))]
+
+				;leave null leaf values so they'll be filtered out
+			)
+		)
+		nested_assoc
+	))
 
 )
