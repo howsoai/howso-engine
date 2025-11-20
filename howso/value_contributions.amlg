@@ -25,6 +25,10 @@
 			;create a backup of context_features for time series flows
 			original_context_features (if !tsTimeFeature (replace context_features))
 			num_features (size context_features)
+
+			feature_is_nominal (contains_index !nominalsMap action_feature)
+			feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
+			feature_is_dependent (contains_index !dependentFeatureMap action_feature)
 		))
 		(if (= (null) hyperparam_map)
 			(assign (assoc
@@ -50,15 +54,10 @@
 		))
 
 		(declare (assoc
-			enabled_num_features_probability_map (call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (+ 1 num_features) ))
+			enabled_num_features_probability_map (call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features num_features))
 			all_features_map (zip features)
 			feature_deviations (get hyperparam_map "featureDeviations")
-
-			feature action_feature
-			feature_is_nominal (contains_index !nominalsMap action_feature)
-			output_categorical_action_probabilities .true
-			feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
-			feature_is_non_string_edit_distance .false
+			feature_is_non_string_edit_distance (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap action_feature)))
 		))
 
 		(declare (assoc
@@ -94,7 +93,7 @@
 									;number of features to enable is probabilistically weighted
 									(if (and !tsTimeFeature (!= (size context_features) num_features))
 										(rand
-											(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (+ 1 num_features) ))
+											(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features num_features))
 										)
 
 										(rand enabled_num_features_probability_map)
@@ -125,29 +124,23 @@
 							))
 						)
 
-						(declare (assoc
-							dependent_queries_list
-								;if any of the features being predicted are dependent to any of the contexts, then
-								;append all the dependencies together for the query
-								(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
-									(apply "append" (map
-										(lambda
-											(call !ComputeDependentQueries (assoc
-												context_features react_context_features
-												context_values (unzip case_values_map react_context_features)
-												action_feature (current_value 1)
-											))
-										)
-										;just the features to be predicted that have dependencies defined
-										(indices (keep !dependentFeatureMap (indices removed_features_map)))
+						(if feature_is_dependent
+							(declare (assoc
+								dependent_queries_list
+									(call !ComputeDependentQueries (assoc
+										context_features react_context_features
+										context_values (unzip case_values_map react_context_features)
+										action_feature action_feature
 									))
-								)
-						))
+							))
+						)
 
 						;do a num_reacts_per_case of robust reacts without any of the focus features
 						(declare (assoc
 							without_focus_features_action_diff
 								(call !InterpolateAndComputeDiffToCase (assoc
+									feature action_feature
+									output_categorical_action_probabilities .true
 									candidate_cases_lists
 										(if (= 0 (size  react_context_features))
 											[[][][]]
@@ -204,21 +197,13 @@
 							))
 						)
 
-						;if any of the features being predicted are dependent to any of the contexts, then
-						;append all the dependencies together for the query
-						(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
+						(if feature_is_dependent
 							(assign (assoc
 								dependent_queries_list
-									(apply "append" (map
-										(lambda
-											(call !ComputeDependentQueries (assoc
-												context_features react_context_features
-												context_values (unzip case_values_map react_context_features)
-												action_feature (current_value 1)
-											))
-										)
-										;just the features to be predicted that have dependencies defined
-										(indices (keep !dependentFeatureMap (indices removed_features_map)))
+									(call !ComputeDependentQueries (assoc
+										context_features react_context_features
+										context_values (unzip case_values_map react_context_features)
+										action_feature action_feature
 									))
 							))
 						)
@@ -226,6 +211,8 @@
 						(declare (assoc
 							with_focus_features_action_diff
 								(call !InterpolateAndComputeDiffToCase (assoc
+									feature action_feature
+									output_categorical_action_probabilities .true
 									candidate_cases_lists
 										(compute_on_contained_entities
 											(query_not_in_entity_list [(replace case_id)])
@@ -298,7 +285,7 @@
 				)
 		))
 
-		;Iterate over the focus features, outputing the responsible values, sorted in order of largest accuracy contribution
+		;Iterate over the focus features, outputing values
 		;process each feature in the order of focus_features, such that for each value of feature 1, it outputs the sorted values of feature 2, etc.
 		(declare (assoc
 			values_map
