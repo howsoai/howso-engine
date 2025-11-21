@@ -956,75 +956,26 @@
 
 		;distribute both weight and mass
 		(if has_rebalance_features
-			(if (= 1 (size distributed_cases_maps))
-				(map
-					(lambda
-						(assign_to_entities (current_index) (associate
-							original_distribute_weight_feature (first (current_value 1))
-							!internalLabelProbabilityMass (last (current_value 1))
-						))
-					)
-					;grab the one map of closest cases -> pair of [weight, mass] and keep just the weights
-					(map
-						(lambda (first (current_value)))
-						(last (first distributed_cases_maps))
-					)
-					;grab the one map of closest cases -> pair of [weight, mass] and keep just the masses
-					(map
-						(lambda (last (current_value)))
-						(last (first distributed_cases_maps))
-					)
+			;have to reduce all the closest cases maps into maps of individual case -> total accumulated weight or mass
+			||(map
+				(lambda
+					(assign_to_entities (current_index) (associate
+						original_distribute_weight_feature (first (current_value 1))
+						!internalLabelProbabilityMass (last (current_value 1))
+					))
 				)
-
-				;else have to reduce all the closest cases maps into maps of individual case -> total accumulated weight or mass
-				(let
-					(assoc
-						accumulated_individual_weights_map
-							(reduce
-								(lambda
-									;add each cases's weight together
-									(map
-										(lambda (+
-											(or (first (first (current_value))))
-											(or (first (last (current_value))))
-										))
-										(previous_result)
-										(current_value)
-									)
-								)
-								(map (lambda (last (current_value))) (values distributed_cases_maps))
-							)
-
-						;reduce all the closest cases maps into one map of individual case -> total accumulated masses
-						accumulated_individual_masses_map
-							(reduce
-								(lambda
-									;add each cases's mass together
-									(map
-										(lambda (+
-											(or (last (first (current_value))))
-											(or (last (last (current_value))))
-										))
-										(previous_result)
-										(current_value)
-									)
-								)
-								(map (lambda (last (current_value))) (values distributed_cases_maps))
-							)
-					)
-
-					;distribute the corresponding portion of this case's weight based on the neighbor's influence
-					||(map
-						(lambda
-							(assign_to_entities (current_index) (associate
-								original_distribute_weight_feature (first (current_value 1))
-								!internalLabelProbabilityMass (last (current_value 1))
-							))
-						)
-						accumulated_individual_weights_map
-						accumulated_individual_masses_map
-					)
-				)
+				;reduce all the closest cases maps into one map of individual case -> total accumulated weight
+				(call !ReduceAssocsListValuePair (assoc
+					list_of_assocs (map (lambda (last (current_value))) (values distributed_cases_maps))
+					;weight is stored as the first in a pair
+					index 0
+				))
+				;reduce all the closest cases maps into one map of individual case -> total accumulated masses
+				(call !ReduceAssocsListValuePair (assoc
+					list_of_assocs (map (lambda (last (current_value))) (values distributed_cases_maps))
+					;mass is stored as the second in a pair
+					index 1
+				))
 			)
 
 			;else no rebalance features, distribute the corresponding portion of this case's weight based on the neighbor's influence
@@ -1033,20 +984,9 @@
 					(accum_to_entities (current_index) (associate distribute_weight_feature (current_value 1)) )
 				)
 				;reduce all the closest cases maps into one map of individual case -> total accumulated weight
-				(reduce
-					(lambda
-						;add each cases's weight together
-						(map
-							(lambda (+
-								(or (first (current_value)))
-								(or (last (current_value)))
-							))
-							(previous_result)
-							(current_value)
-						)
-					)
-					(map (lambda (last (current_value))) (values distributed_cases_maps))
-				)
+				(call !ReduceAssocsList (assoc
+					list_of_assocs (map (lambda (last (current_value))) (values distributed_cases_maps))
+				))
 			)
 		)
 
@@ -1061,6 +1001,60 @@
 					(values distributed_cases_maps)
 				))
 		))
+	)
+
+	;Helper method to reduce a list of assocs into one assoc with all the values summed up.
+	;functions the same way as this reduce, but is much more performant for lists of size > 4:
+	;
+	; (reduce
+	; 	(lambda
+	; 		(map
+	; 			(lambda (+ (or (first (current_value))) (or (last (current_value))) ) )
+	; 			(previous_result)
+	; 			(current_value)
+	; 		)
+	; 	)
+	; 	list_of_assocs
+	; )
+	;
+	; example input of: [ { a 1 b 2} { a 2 c 3} { b 2 d 2} ] outputs: { a 3 b 4 c 3 d 2}
+	;
+	;parameters:
+	; list_of_assocs: list of assocs that needs to be reduced down to one assoc with each key's values added up
+	#!ReduceAssocsList
+	(map
+		(lambda
+			(apply "+"
+				(filter (map
+					(lambda (get (current_value) (current_index 1)))
+					list_of_assocs
+				))
+			)
+		)
+		;assoc of only the unique ids among all the lists
+		(zip (indices (apply "append" list_of_assocs)))
+	)
+
+	;Helper method just like !ReduceAssocsList, but where values for each key are a tuple.
+	;The index of the value being added up for output needs to be provided.
+	;
+	; example input of: [ { a [1 2] b [2 3]} { a [2 3] c [3 6]} { b [2 3] d [2 8]} ] with index=1, outputs: { a 5 b 6 c 6 d 8}
+	;
+	;parameters:
+	; list_of_assocs: list of assocs that needs to be reduced down to one assoc with each key's values added up
+	; index: index of value in a tuple
+	#!ReduceAssocsListValuePair
+	(map
+		(lambda
+			(apply "+"
+				(filter (map
+					(lambda (get (current_value) [(current_index 2) index]))
+					list_of_assocs
+				))
+			)
+		)
+		;assoc of only the unique ids among all the lists
+		(zip (indices (apply "append" list_of_assocs)))
 	)
 
 	;Holds out random cases and returns the name of the contained entity holding them.
