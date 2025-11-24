@@ -1,15 +1,16 @@
 ;Contains methods for ablation flows.
 (null
 
-	;compute the entropy of the influence weights of the context's influential cases
+	;compute the entropy of the influence weights of the context's influential cases. equidistant neighbors = high entropy
 	; features: list of features to react to
 	; feature_values: optional list of feature values to react to
 	; case_id: optional case id in the dataset to react to
 	; use_case_weights: optional flag default true. if false, case weights will not be used during the react
 	; weight_feature: optional, default '.case_weight'. name of feature whose values to use as case weights
-	; output_most_influential: optional, boolean, default false. when false outputs influential cases' entropy,
-	;	when true will output a tuple of [ entropy, most influential case id, distance to most influential case ]
-	#!ComputeInfluenceWeightEntropy
+	; output_most_influential_only: optional, boolean, default false. outputs influential cases' entropy and neighbor info
+	;	when true, outputs a tuple of [ entropy, most influential case id, influence of most influential ]
+	;	when false, outputs a tuple of [ entropy, most influential case id, influence of most influential, influence of least influential, is_duplicate]
+	#!ComputeInfluenceWeightEntropyTuple
 	(declare
 		(assoc
 			features (list)
@@ -17,7 +18,7 @@
 			case_id (null)
 			use_case_weights .true
 			weight_feature !autoAblationWeightFeature
-			output_most_influential .false
+			output_most_influential_only .false
 		)
 
 		(if (not use_case_weights)
@@ -58,25 +59,38 @@
 				(and
 					(>= (first (last local_cases_pairs)) 1)
 					(= "surprisal_to_prob" dt_parameter)
-					(if use_case_weights
-						(=
-							(first (last local_cases_pairs))
-							(retrieve_from_entity (first (first local_cases_pairs)) weight_feature )
-						)
-						.true
-					)
 				)
 				(conclude [ .infinity (null) ])
 			)
 		)
 
-		(declare (assoc influence_weight_entropy (entropy (normalize (last local_cases_pairs))) ))
-
-		;outputs the case id of the most influential and distance to it, else output just the entropy value
-		(if output_most_influential
-			[ influence_weight_entropy (first (first local_cases_pairs)) (first (last local_cases_pairs)) ]
-			influence_weight_entropy
+		;outputs the tuple of [ entropy, most influential case id, influence of most influential ]
+		(if output_most_influential_only
+			(conclude [ (entropy (normalize (last local_cases_pairs)))  (first (first local_cases_pairs))  (first (last local_cases_pairs)) ] )
 		)
+
+		(declare (assoc closest_influence (first (last local_cases_pairs)) ))
+
+		;true if this case has exact duplicates
+		(declare (assoc
+			is_duplicate
+				(or
+					(= .infinity closest_influence)
+					(and
+						(= "surprisal_to_prob" dt_parameter)
+						(>= closest_influence 1)
+					)
+				)
+		))
+
+		;output tuple of: [ entropy, most influential case id, influence of most influential, influence of least influential, is_duplicate]
+		[
+			(entropy (normalize (last local_cases_pairs)))
+			(first (first local_cases_pairs))
+			closest_influence
+			(last (last local_cases_pairs))
+			is_duplicate
+		]
 	)
 
 	;used to compute and store the influence weight entropies (IWE) for all cases contained in the Trainee in #Analyze
@@ -84,13 +98,19 @@
 	; label_name: optional name of the feature to store influence weight entropies in.
 	; compute_all: optional, boolean. if set to true will compute IWE for all cases.
 	;	default is false, which samples up to !autoAblationInfluenceWeightEntropySampleSize (default of 2000) cases
+	; specific_case_ids: optional, list of specific case_ids for which to compute. only applicable if compute_all is also true
 	#!ComputeAndStoreInfluenceWeightEntropies
-	(let
+	(declare
 		(assoc
+			label_name (null)
+			compute_all .false
+			specific_case_ids (null)
+		)
+		(declare (assoc
 			influence_weight_entropy_map
 				||(map
 					(lambda
-						(call !ComputeInfluenceWeightEntropy (assoc
+						(call !ComputeInfluenceWeightEntropyTuple (assoc
 							case_id (current_index 1)
 							features features
 							use_case_weights use_case_weights
@@ -106,7 +126,7 @@
 									(* 1.02 !autoAblationInfluenceWeightEntropySampleSize)
 								)
 							)
-							(call !AllCases)
+							(or specific_case_ids (call !AllCases))
 
 							;else compute on a random sample of !autoAblationInfluenceWeightEntropySampleSize cases
 							(call !AllCases (assoc
@@ -116,7 +136,7 @@
 						)
 					)
 				)
-		)
+		))
 
 		(call !StoreCaseValues (assoc
 			case_values_map
@@ -127,24 +147,115 @@
 							(* 1.02 !autoAblationInfluenceWeightEntropySampleSize)
 						)
 					)
-					influence_weight_entropy_map
+					(map (lambda (first (current_value))) influence_weight_entropy_map)
 
 					;explicitly store null in all the other cases by appending the computed entropy map to a zipped assoc of all case ids
 					(append
 						(zip (call !AllCases))
-						influence_weight_entropy_map
+						(map (lambda (first (current_value))) influence_weight_entropy_map)
 					)
 				)
 			label_name (or label_name !internalLabelInfluenceWeightEntropy)
 		))
 
 		(declare (assoc
-			quantile_value (call !RecomputeAndCacheMaxInfluenceWeightEntropy)
+			perfect_match_influence (if (= "surprisal_to_prob" dt_parameter) 1 .infinity)
+		))
+		;compute the 90%th quantile for closest case influence, so that only cases that are in the 10% closest are considered
+		(declare (assoc
+			ninety_percent_quantile_closest_influence
+				(quantile
+					(values (filter
+						(lambda (!= perfect_match_influence (current_value)))
+						(map (lambda (get (current_value) 2)) influence_weight_entropy_map)
+					))
+					0.9
+				)
 		))
 
+		;recompute this value for the entire dataset
 		(assign_to_entities (assoc
-			!autoAblationMaxInfluenceWeightEntropy quantile_value
+			!autoAblationMaxInfluenceWeightEntropy (call !RecomputeAndCacheMaxInfluenceWeightEntropy)
 		))
+
+		;do not compute the 90% quantile for just the specific cases
+		(if (= (null) specific_case_ids)
+			(assign_to_entities (assoc
+				!autoAblationNinetyPercentQuantileInfluence ninety_percent_quantile_closest_influence
+			))
+		)
+
+		;if computing on the entire dataset, mark cases that are very close to exactly one other case and can be merged together
+		(if (and compute_all (= (null) specific_case_ids))
+			(declare (assoc
+				near_duplicate_map
+					(let
+						(assoc
+							;from the 10% closest (ignoring duplicate cases), only keep those whose influence weight entropy is under 0.1,
+							;denoting that they are very close to just their one nearest neighbor
+							extremely_close_to_one_neighbor_map
+								(filter
+									(lambda (and
+										;closest case influence is in the top 10%
+										(> (get (current_value) 2) ninety_percent_quantile_closest_influence)
+										;entropy is < 0.1, meaning significantly closer to one case than any of the others
+										(< (first (current_value)) 0.1)
+										;ignore duplicates since they'll be merged together separately
+										(!= perfect_match_influence (get (current_value) 2))
+									))
+									influence_weight_entropy_map
+								)
+						)
+
+						;create an assoc of case -> neighbor_case to merge into
+						;filters out null if case is reciprocated, but this case has higher entropy and will absorb the one with the lower entropy
+						(filter (map
+							(lambda (let
+								(assoc nearest_case (get (current_value 1) 1))
+								;this case is reciprocated as the closest by nearest_case
+								(if (= (current_index) (get extremely_close_to_one_neighbor_map [nearest_case 1]))
+									;if the entropy of this case is smaller, it should be merged into nearest_case, else it should not be merged
+									(if (<= (first (current_value)) (get extremely_close_to_one_neighbor_map [nearest_case 0]))
+										nearest_case
+									)
+
+									nearest_case
+								)
+							))
+							extremely_close_to_one_neighbor_map
+						))
+					)
+			))
+		)
+
+		(if compute_all
+			;output an assoc of case id -> "duplicate" or "too_far_for_removal" or "near_duplicate" (for extremely close single neighbors), depending if any cases match that criteria
+			; "too_far_for_removal" applies to any case that should not be removed because its closest case is relatively too far (farther that its farthest)
+			; "near_duplicate" applies to any cases that are extremely close to exactly one neighbor case
+			(filter (map
+				(lambda
+					;(current_value) is a tuple of [ entropy, closest_case_id, closest_influence, farthest_influence, is_duplicate ]
+
+					;output "duplicate" if case is duplate otherwise output "too_far_for_removal" if case is too far to be removed
+					(if (last (current_value))
+						"duplicate"
+
+						;else if this case is too far for removal, if its probability (inverse distance) is too small
+						(<
+							;closest case probability (inverse distance)
+							(get (current_value) 2)
+							;closest case's farthest neighbor influence probability (inverse distance)
+							(get influence_weight_entropy_map [ (get (current_value 1) 1) 3 ])
+						)
+						"too_far_for_removal"
+
+						(contains_index near_duplicate_map (current_index))
+						"near_duplicate"
+					)
+				)
+				influence_weight_entropy_map
+			))
+		)
 	)
 
 	;initialize parameters and internal features related to auto ablation
@@ -378,8 +489,11 @@
 		)
 	)
 
-	;reduce the trained data by removing cases which have an influence weight entropy that falls above
-	; a threshold.
+	;reduce the trained data by removing cases that match the following criteria:
+	;a) it's an exact duplicate
+	;b) a near-duplicate (very similar to exactly one other case)
+	;c) it's not "too far" away (keep outliers and dissimilar cases)
+	;d) its influence weight entropy is relatively high (above a threshold, case can be evenly distributed among its neighbors)
 	;{long_running .true}
 	#reduce_data
 	(declare
@@ -477,14 +591,19 @@
 			feature_weights (get hyperparam_map "featureWeights")
 			feature_deviations (get hyperparam_map "featureDeviations")
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+			pre_reduce_num_cases (call !GetNumTrainingCases)
 		))
 
 		;Also ensure that we have all influence weight entropies and that they are up-to-date
-		(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-			features features
-			weight_feature distribute_weight_feature
-			use_case_weights .true
-			compute_all .true
+		(declare (assoc
+			;store a map of case id -> "duplicate"/"too_far_for_removal"/"near_duplicate" for any duplicate cases or cases that should not be removed because they are too far
+			case_duplicate_or_far_map
+				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+					features features
+					weight_feature distribute_weight_feature
+					use_case_weights .true
+					compute_all .true
+				))
 		))
 
 		(if thresholds_enabled
@@ -501,26 +620,48 @@
 			))
 		)
 
+		;if this dataset has duplicates merge them all here first and recompute weight entropies for their remaining representative non-duplicates
+		(declare (assoc
+			all_duplicate_cases_map (filter (lambda (= "duplicate" (current_value))) case_duplicate_or_far_map)
+		))
+		(if (size all_duplicate_cases_map)
+			(call !ReduceMergeDuplicateCases)
+		)
+
+		(declare (assoc
+			cases_too_far_for_removal (indices (filter (lambda (= "too_far_for_removal" (current_value))) case_duplicate_or_far_map))
+			near_duplicate_cases (indices (filter (lambda (= "near_duplicate" (current_value))) case_duplicate_or_far_map))
+		))
+		;remove and redistribute the near_duplicate cases' weights
+		(if (size near_duplicate_cases)
+			(call !RemoveCases (assoc
+				cases near_duplicate_cases
+				distribute_weight_feature distribute_weight_feature
+			))
+		)
+
 		;Begin looping on data removal. The ultimate end condition is if the dataset gets too small
-		; to continue removing cases.
+		; to continue removing cases. Removes cases with relatively high influence weight entropy, i.e., cases with equidistant neighbors.
 		(while (< !autoAblationMinNumCases (call !GetNumTrainingCases))
 			(assign (assoc
-				cases
-					(call !GetCasesByCondition (assoc
-						condition
-							(associate
-								!internalLabelInfluenceWeightEntropy
-									(list
-										(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-											influence_weight_entropy_threshold influence_weight_entropy_threshold
-											weight_feature distribute_weight_feature
-										))
-										.infinity
-									)
-							)
-						num_cases
-							(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
+				max_influence_weight_entropy_to_keep
+					(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
+						influence_weight_entropy_threshold influence_weight_entropy_threshold
+						weight_feature distribute_weight_feature
 					))
+			))
+			(assign (assoc
+				cases
+					(contained_entities
+						;ignore cases that have been determined to be too far for removal
+						(query_not_in_entity_list cases_too_far_for_removal)
+						(query_greater_or_equal_to !internalLabelInfluenceWeightEntropy max_influence_weight_entropy_to_keep)
+						;grab the largest entropy values of specified batch_size number of cases
+						(query_max !internalLabelInfluenceWeightEntropy
+							(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
+							.true
+						)
+					)
 			))
 
 			(if !tsTimeFeature
@@ -535,54 +676,117 @@
 				))
 			)
 
-			;if there are no cases which satisfy the criteria, then break.
-			(if (not (size cases)) (conclude))
+			(if (size cases)
+				(seq
+					(call !RemoveCases (assoc
+						cases cases
+						distribute_weight_feature distribute_weight_feature
+					))
 
-			(call !RemoveCases (assoc
-				cases cases
-				distribute_weight_feature distribute_weight_feature
-			))
+					(if thresholds_enabled
+						(let
+							(assoc
+								batch_threshold_info (null)
+								new_prediction_stats_map
+									(get
+										(call !CalculateFeatureResiduals (assoc
+											weight_feature distribute_weight_feature
+											use_case_weights .true
+											compute_all_statistics .true
+										))
+										"prediction_stats"
+									)
+							)
+							(assign (assoc
+								batch_threshold_info
+									(call !CheckThresholds (assoc
+										abs_threshold_map abs_threshold_map
+										delta_threshold_map delta_threshold_map
+										rel_threshold_map rel_threshold_map
+										prev_prediction_stats_map prev_prediction_stats_map
+										new_prediction_stats_map new_prediction_stats_map
+									))
+							))
+							(if (apply "or" (values batch_threshold_info))
+								(seq
+									(accum "output" ["threshold_info"] batch_threshold_info)
+									(conclude)
+								)
+								(assign (assoc
+									prev_prediction_stats_map new_prediction_stats_map
+								))
+							)
+						)
+					)
+				)
 
-			(call !AutoAnalyzeIfNeeded (assoc
-				skip_auto_analyze skip_auto_analyze
-				in_reduce_data .true
-			))
+				;enough cases have been removed, can stop removing
+				(<= (call !GetNumTrainingCases) !postReduceMaxCases)
+				(conclude)
 
-			(if thresholds_enabled
+				;else no cases left to remove even though the desired dataset size has not been reached yet
+				;if the number of these these "too far" cases is bigger than the dataset, some of them must be removed
+				;clear out the list so the next iteration can ignore it
+				(<= (call !GetNumTrainingCases) (size cases_too_far_for_removal))
+				(assign (assoc cases_too_far_for_removal [] ))
+
+				;else recompute all the influence entropies since dataset has been updated
 				(let
 					(assoc
-						batch_threshold_info (null)
-						new_prediction_stats_map
-							(get
-								(call !CalculateFeatureResiduals (assoc
-									weight_feature distribute_weight_feature
-									use_case_weights .true
-									compute_all_statistics .true
-								))
-								"prediction_stats"
-							)
+						;number of cases that were supposed to be removed during this iteration
+						num_cases_to_remove (min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
 					)
 					(assign (assoc
-						batch_threshold_info
-							(call !CheckThresholds (assoc
-								abs_threshold_map abs_threshold_map
-								delta_threshold_map delta_threshold_map
-								rel_threshold_map rel_threshold_map
-								prev_prediction_stats_map prev_prediction_stats_map
-								new_prediction_stats_map new_prediction_stats_map
+						case_duplicate_or_far_map
+							(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+								features features
+								weight_feature distribute_weight_feature
+								use_case_weights .true
+								compute_all .true
 							))
 					))
-					(if (apply "or" (values batch_threshold_info))
-						(seq
-							(accum "output" ["threshold_info"] batch_threshold_info)
-							(conclude)
+					(assign (assoc
+						cases_too_far_for_removal (indices (filter (lambda (= "too_far_for_removal" (current_value))) case_duplicate_or_far_map))
+						near_duplicate_cases (indices (filter (lambda (= "near_duplicate" (current_value))) case_duplicate_or_far_map))
+					))
+
+					;remove the new near duplicates here
+					(if (size near_duplicate_cases)
+						;if there were fewer cases that needed to be removed than there are near duplicates, select some near duplicates to remove
+						(if (> (size near_duplicate_cases) num_cases_to_remove)
+							(call !RemoveCases (assoc
+								cases (rand near_duplicate_cases num_cases_to_remove .true)
+								distribute_weight_feature distribute_weight_feature
+							))
+
+							;else remove all near duplicates
+							(call !RemoveCases (assoc
+								cases near_duplicate_cases
+								distribute_weight_feature distribute_weight_feature
+							))
 						)
-						(assign (assoc
-							prev_prediction_stats_map new_prediction_stats_map
-						))
+
+						;else if the entropy value to keep hasn't changed since the recomputation, nothing has changed, can stop iteration
+						(=
+							max_influence_weight_entropy_to_keep
+							(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
+								influence_weight_entropy_threshold influence_weight_entropy_threshold
+								weight_feature distribute_weight_feature
+							))
+						)
+						(conclude)
 					)
 				)
 			)
+		)
+
+		;if the number of cases has been reduced by 'e' or more, auto analyze if needed
+		(if (< (call !GetNumTrainingCases) (/ pre_reduce_num_cases 2.718281828459))
+			(call !AutoAnalyzeIfNeeded (assoc
+				skip_auto_analyze skip_auto_analyze
+				;no need to compute entropies for all cases anymore since reduction is complete
+				in_reduce_data .false
+			))
 		)
 
 		(declare (assoc
@@ -597,6 +801,90 @@
 		(accum_to_entities (assoc !revision 1))
 		(call !Return (assoc payload output))
 	)
+
+
+	;helper method that merges duplicate cases during the reduce_data flow
+	#!ReduceMergeDuplicateCases
+	(let
+		(assoc
+			;assoc of case id -> duplicate neighbors (not including the case id)
+			duplicate_neighbors_map {}
+			duplicates []
+		)
+		(while (size all_duplicate_cases_map)
+			;find all duplicates for a given case in this list
+			(assign (assoc
+				duplicates
+					(contained_entities (values
+						(map
+							(lambda (query_equals (current_index) (current_value)) )
+							;assoc of feature -> value for all the values in a duplicate case
+							(zip features (retrieve_from_entity (first (indices all_duplicate_cases_map)) features))
+						)
+					))
+			))
+
+			;quick check for a failure case that should never occur, but if query engine somehow fails the above query to find anything,
+			;ensure that the list all_duplicate_cases_map keeps shrinking to prevent being stuck in an infinite loop
+			(if (= 0 (size duplicates))
+				(assign (assoc
+					all_duplicate_cases_map (remove all_duplicate_cases_map (first (indices all_duplicate_cases_map)) )
+				))
+
+				(seq
+					(assign (assoc
+						all_duplicate_cases_map (remove all_duplicate_cases_map duplicates)
+					))
+					(accum (assoc
+						duplicate_neighbors_map (associate (first duplicates) (tail duplicates))
+					))
+				)
+			)
+		)
+
+		;merge duplicates by iterating over the assoc of case id -> duplicate ids
+		(map
+			(lambda (seq
+				;distribute the total weight from all the dupes to the case
+				(accum_to_entities (current_index) (associate
+					distribute_weight_feature
+						(apply "+" (map
+							(lambda (first (current_value)))
+							(values (compute_on_contained_entities
+								;pull the weight feature value for all the duplicates
+								(query_in_entity_list (current_value 1))
+								(query_exists distribute_weight_feature)
+							))
+						))
+				))
+
+				;remove all the duplicates
+				(call !RemoveCases (assoc
+					cases (current_value 1)
+					;weight has already been distributed, don't do it again
+					distribute_weight_feature (null)
+				))
+			))
+			duplicate_neighbors_map
+		)
+
+		;recompute influence weight entropy for the remaining no-longer duplicates
+		(declare (assoc
+			cases_too_far_map
+				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
+					features features
+					weight_feature distribute_weight_feature
+					use_case_weights .true
+					compute_all .true
+					specific_case_ids (indices duplicate_neighbors_map)
+				))
+		))
+
+		(if (size cases_too_far_map)
+			(accum (assoc case_duplicate_or_far_map cases_too_far_map))
+		)
+	)
+
 
 	;helper method which queries and returns the specified quantile of influence weight entropies
 	; for use in data reduction and auto-ablation.
@@ -628,112 +916,92 @@
 		)
 	)
 
-	;determine whether a new case (one that is not in the Trainee) should be ablated (trained as weights) or kept.
-	; a return value of true indicates that a case should be kept and a return value of false indicates that the case should be ablated.
+	;determine whether a new case (one that is not in the dataset) should be ablated (trained as weights only) or kept
+	;returns .true if case should be kept and trained
+	;returns .false when case should be ablated
+	;
+	;parameters:
 	; features: list of features to react to
 	; feature_values: list of feature values to react to
-	; num_cases: number of current cases in the dataset
-	#!ShouldNewCaseBeAblated
-	(declare
+	#!ShouldNewCaseBeTrained
+	(let
 		(assoc
-			features (list)
-			feature_values (list)
-
-			;internal
-			max_influence_weight_entropy_to_keep .infinity
-		)
-
-		;If we do not have influence weight entropies stored, ablation cannot happen.
-		; So, always return true when that is the case.  The same is true for when there
-		; are not enough cases in the dataset.
-		(if
-			(or
-				(not (and
-					(call !HasInfluenceWeightEntropies) !autoAblationEnabled
-				))
-				(< num_cases !autoAblationMinNumCases )
-			)
-			;return true, keep case / do not ablate
-			(conclude .true)
-		)
-
-		(assign (assoc max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy  ))
-
-		;if there is no influence weight entropy cached yet, do the caching here
-		(if (= (null) max_influence_weight_entropy_to_keep)
-			(seq
-				(call !ComputeAndStoreInfluenceWeightEntropies (assoc features features))
-
-				(assign (assoc max_influence_weight_entropy_to_keep !autoAblationMaxInfluenceWeightEntropy ))
-			)
-		)
-
-		(declare (assoc
+			; tuple of [ entropy, most influential case id, influence of most influential ]
 			influentials_entropy_tuple
-				(call !ComputeInfluenceWeightEntropy (assoc
+				(call !ComputeInfluenceWeightEntropyTuple (assoc
 					features features
 					feature_values feature_values
-					output_most_influential .true
+					output_most_influential_only .true
 				))
-		))
+		)
 
-		(+
-			(or
-				;case should be kept because influentials are not evenly distributed (their entropy is low)
-				(if (> max_influence_weight_entropy_to_keep (first influentials_entropy_tuple))
-					.true
-
-					;always ablate perfect matches/identical cases
-					(= .infinity (first influentials_entropy_tuple))
+		;case can be ablated if:
+		;a) it's an exact duplicate
+		;b) a near-duplicate (very similar to exactly one other case)
+		;c) it's not "too far" away (keep outliers and dissimilar cases)
+		;d) its influence weight entropy is relatively high (above a threshold, case can be evenly distributed among its neighbors)
+		(or
+			;case may be kept because influentials are not evenly distributed (their entropy is low)
+			(if (<= (first influentials_entropy_tuple) !autoAblationMaxInfluenceWeightEntropy)
+				;check if case is a near duplicate, if it is, it can be ablated
+				(if (and
+						;entropy is < 0.1, meaning significantly closer to one case than any of the others
+						(< (first influentials_entropy_tuple) 0.1)
+						;closest case influence is in the top 10%, meaning it's very close to its one neighbor
+						(> (last influentials_entropy_tuple) !autoAblationNinetyPercentQuantileInfluence)
+					)
 					.false
 
-					;else ablate? check distance to closest vs its distance to its K'th closest
-					(let
-						(assoc
-							neighbor_cases_pairs
-								(compute_on_contained_entities
-									(query_not_in_entity_list [(get influentials_entropy_tuple 1)])
-									(query_nearest_generalized_distance
-										closest_k
-										features
-										(retrieve_from_entity (get influentials_entropy_tuple 1) features)
-										p_parameter
-										feature_weights
-										!queryDistanceTypeMap
-										query_feature_attributes_map
-										feature_deviations
-										(null)
-										dt_parameter
-										weight_feature
-										(rand)
-										(null) ;radius
-										!numericalPrecision
-										;output as ordered pair
-										.true
-									)
-								)
-						)
-
-						;in non-surprisal space, the values coming out of the query are inverse distance, inverting them back converts them back to distances to the cases
-						;in surprisal space, the values coming out of the query are probabilities, inverted probabilities are monotonic to surprisals (distances)
-						;thus the comparison below works as intended
-						(declare (assoc
-							dist_to_closest_neighbor (/ 1 (last influentials_entropy_tuple))
-							neighbor_dist_to_its_farthest_case (/ 1 (last (last neighbor_cases_pairs)) )
-						))
-
-						;keep this training case if the 'distance' to its closest existing case is relatively large
-						(>
-							dist_to_closest_neighbor
-							neighbor_dist_to_its_farthest_case
-						)
-					)
+					;else keep case
+					.true
 				)
 
-				; This is probably unnecessary but in case we cannot compute the requested influence weight
-				; quantile return 1 as well.
-				(= max_influence_weight_entropy_to_keep (null))
+				;always ablate perfect matches/identical cases
+				;entropy value will have been set to .infinity by !ComputeInfluenceWeightEntropyTuple for duplicates
+				(= .infinity (first influentials_entropy_tuple))
+				.false
+
+				;else ablate? check distance to closest vs its distance to its K'th closest
+				(let
+					(assoc
+						neighbor_cases_pairs
+							(compute_on_contained_entities
+								(query_not_in_entity_list [(get influentials_entropy_tuple 1)])
+								(query_nearest_generalized_distance
+									closest_k
+									features
+									(retrieve_from_entity (get influentials_entropy_tuple 1) features)
+									p_parameter
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									(null)
+									dt_parameter
+									weight_feature
+									(rand)
+									(null) ;radius
+									!numericalPrecision
+									;output as ordered pair
+									.true
+								)
+							)
+					)
+
+					;keep this training case if the 'distance' to its closest existing case is relatively large
+					;i.e., if its probability (inverse distance) is too small
+					(<
+						;closest case probability (inverse distance)
+						(last influentials_entropy_tuple)
+						;closest case's farthest neighbor influence probability (inverse distance)
+						(last (last neighbor_cases_pairs))
+					)
+				)
 			)
+
+			; This is probably unnecessary but in case we cannot compute the requested influence weight
+			; quantile return .true as well (keep the case)
+			(= (null) !autoAblationMaxInfluenceWeightEntropy)
 		)
 	)
 

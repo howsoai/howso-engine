@@ -811,7 +811,6 @@
 														(list
 															(indices local_cases_map)
 															(values local_cases_map)
-
 															(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
 														)
 													)
@@ -978,7 +977,6 @@
 						(assoc
 							feature (get_value (current_value 1))
 							feature_is_nominal (contains_index !nominalsMap (current_value 1))
-							feature_is_ordinal (contains_index ordinal_features_map (current_value 1))
 							react_context_features (indices (remove context_features_map (current_value 1)))
 							feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_value 1))
 							feature_is_non_string_edit_distance .false
@@ -1155,67 +1153,100 @@
 
 	)
 
-
-	;helper method for RunRobustResiduals, RunFullResiduals, and ComputeDeviations to compute difference between interpolated value and actual case value
-	#!InterpolateAndComputeDiffToCase
-	(if (contains_index features_for_derivation_map feature)
+	;Helper method for InterpolateAndComputeDiffToCase that will do the derivation procedure for features that require it
+	#!InterpolateOrDerive
+	(if (and
+			;a feature to be derived AND at least one of the features needed for derivation are
+			;in the context
+			(contains_index features_for_derivation_map feature)
+			(size (keep
+				(zip (get features_for_derivation_map feature))
+				react_context_features
+			))
+		)
 		;feature must be derived. interpolate necessary features and derive
 		(let
 			(assoc
-				values_for_derivation_map
-					(map
-						(lambda
-							(if (contains_value react_context_features (current_index))
-								;use case value if its in the context
-								(get case_values_map (current_index))
-
-								;otherwise interpolate among inf. cases
-								(call !InterpolateActionValues (assoc
-									action_feature (current_index 1)
-									candidate_case_ids (first candidate_cases_lists)
-									candidate_case_weights (get candidate_cases_lists 1)
-									candidate_case_values
-										;retrieve the feature to be interpolated from each case
-										(map (lambda (retrieve_from_entity (current_value) (current_index 2))) (first candidate_cases_lists))
-									allow_nulls .false
-									output_influence_weights .false
-								))
-							)
-						)
+				action_features_for_derivation
+					;the non-context features needed for derivation
+					(indices (remove
 						(zip (get features_for_derivation_map feature))
-					)
+						react_context_features
+					))
 			)
 
-			(call !ComputeDiffTuple (assoc
-				interpolated_value
-					(call_sandboxed
-						(call !ParseDerivedFeatureCode (assoc
-							code_string (get !featureAttributes [feature "derived_feature_code"])
-							value (lambda (if (= lag 0) (get case feature) ) )
-						))
-						{"case" values_for_derivation_map}
-						!sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false
-					)
-			))
-		)
+			(declare (assoc
+				values_for_derivation_map
+					(append
+						;context values needed for derivation
+						(keep (keep case_values_map react_context_features) (get features_for_derivation_map feature))
+						;predict the rest
+						(zip
+							action_features_for_derivation
+							(call !ReactDiscriminative (assoc
+								action_features action_features_for_derivation
 
-		;else use standard interpolation and diff logic
-		(let
-			(assoc
-				interpolated_value
-					;no candidate cases means we use expected feature value
-					(if (= 0 (size (first candidate_cases_lists)))
-						;global nominal probabilities will pulled below
-						(if feature_is_nominal
-							(null)
-							;else get continuous expected value
-							(call !CalculateFeatureExpectedValue (assoc
-								feature feature
-								allow_nulls .false
+								context_features react_context_features
+								context_values (unzip case_values_map react_context_features)
+								ignore_case case_id
+								return_action_values_only .true
+								filtering_queries
+									;any of these may be null, so put an empty list first
+									(append
+										[]
+										time_series_filter_query
+										dependent_queries_list
+										context_condition_filter_query
+									)
 							))
 						)
+					)
+			))
 
-						;else interpolate the feature value from the local data
+
+			(call_sandboxed
+				(call !ParseDerivedFeatureCode (assoc
+					code_string (get !featureAttributes [feature "derived_feature_code"])
+					value (lambda (if (= lag 0) (get case feature) ) )
+				))
+				{"case" values_for_derivation_map}
+				!sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false
+			)
+		)
+
+		;else normal interpolate
+		(call !InterpolateActionValues (assoc
+			action_feature feature
+			candidate_case_ids (first candidate_cases_lists)
+			candidate_case_weights (get candidate_cases_lists 1)
+			candidate_case_values (last candidate_cases_lists)
+			allow_nulls .false
+			output_influence_weights .false
+		))
+	)
+
+
+	;helper method for RunRobustResiduals, RunFullResiduals, and ComputeDeviations to compute difference between interpolated value and actual case value
+	#!InterpolateAndComputeDiffToCase
+	(let
+		(assoc
+			interpolated_value
+				;no candidate cases means we use expected feature value
+				(if (= 0 (size (first candidate_cases_lists)))
+					;global nominal probabilities will pulled below
+					(if feature_is_nominal
+						(null)
+						;else get continuous expected value
+						(call !CalculateFeatureExpectedValue (assoc
+							feature feature
+							allow_nulls .false
+						))
+					)
+
+					;else interpolate the feature value from the local data (or derive if appropriate)
+					(if (size features_for_derivation_map)
+						(call !InterpolateOrDerive)
+
 						(call !InterpolateActionValues (assoc
 							action_feature feature
 							candidate_case_ids (first candidate_cases_lists)
@@ -1225,103 +1256,97 @@
 							output_influence_weights .false
 						))
 					)
-			)
+				)
+		)
 
-			;small wrapper around ComputeFeatureMAEDiff, but possibly wrapped in extra information
-			;for other prediction stats
-			#!ComputeDiffTuple
-			(if (= (null) case_feature_value)
+		;small wrapper around ComputeFeatureMAEDiff, but possibly wrapped in extra information
+		;for other prediction stats
+		#!ComputeDiffTuple
+		(if (= (null) case_feature_value)
+			(null)
+
+			compute_all_statistics
+			(if feature_is_nominal
+				;output [diff, cap, actual, predicted] for computing MAE, accuracy, precision, recall
+				(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
+
+				;else continuous, output [diff, ordinal_diff, actual, predicted] for computing MAE, RSME, R^2
+				(and
+					(= (null) (- case_feature_value interpolated_value))
+					(not feature_is_edit_distance)
+				)
 				(null)
 
-				compute_all_statistics
-				(if feature_is_nominal
-					;output [diff, cap, actual, predicted] for computing MAE, accuracy, precision, recall
+				;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
+				(if feature_is_non_string_edit_distance
+					(append (call !ComputeFeatureMAEDiff) (list case_feature_value) (list interpolated_value))
+
 					(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
+				)
+			)
 
-					;else continuous, output [diff, ordinal_diff, actual, predicted] for computing MAE, RSME, R^2
-					(and
-						(= (null) (- case_feature_value interpolated_value))
-						(not feature_is_edit_distance)
-					)
-					(null)
+			;else just output diff (Mean Absolute Error)
+			#!ComputeFeatureMAEDiff
+			(declare
+				(assoc
+					diff
+						(if feature_is_nominal
+							(- 1
+								(if (size (first candidate_cases_lists))
+									(get categorical_action_probabilities_map (list feature case_feature_value))
 
-					;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
-					(if feature_is_non_string_edit_distance
-						(append (call !ComputeFeatureMAEDiff) (list case_feature_value) (list interpolated_value))
+									;else return expected value
+									(get
+										(call !ComputeNominalClassProbabilities (assoc feature feature))
+										case_feature_value
+									)
+								)
+							)
 
-						(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
-					)
+							;else continuous
+							(if feature_is_edit_distance
+								;use string edit distance only if it's a string
+								(edit_distance case_feature_value interpolated_value
+									(or
+										(= "string" (get !editDistanceFeatureTypesMap  feature))
+										(= "string_mixable" (get !editDistanceFeatureTypesMap  feature))
+									)
+								)
+
+								(abs (- case_feature_value interpolated_value))
+							)
+						)
 				)
 
-				;else just output diff (Mean Absolute Error)
-				#!ComputeFeatureMAEDiff
-				(declare
-					(assoc
-						diff
-							(if feature_is_nominal
-								(- 1
-									(if (size (first candidate_cases_lists))
-										(get categorical_action_probabilities_map (list feature case_feature_value))
-
-										;else return expected value
-										(get
-											(call !ComputeNominalClassProbabilities (assoc feature feature))
-											case_feature_value
-										)
-									)
-								)
-
-								;else continuous
-								(if feature_is_edit_distance
-									;use string edit distance only if it's a string
-									(edit_distance case_feature_value interpolated_value
-										(or
-											(= "string" (get !editDistanceFeatureTypesMap  feature))
-											(= "string_mixable" (get !editDistanceFeatureTypesMap  feature))
-										)
-									)
-
-									(abs (- case_feature_value interpolated_value))
-								)
-							)
+				;output the residual. if it's (null), output null for non-nominals, and 1 (or case weight) for nominals
+				(if (= (null) diff)
+					(if feature_is_nominal
+						(if compute_all_statistics
+							[1 (filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))]
+							1
+						)
 					)
 
-					;output the residual. if it's (null), output null for non-nominals, and 1 (or case weight) for nominals
-					(if (= (null) diff)
-						(if feature_is_nominal
-							(if compute_all_statistics
-								[1 (filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))]
-								1
-							)
-						)
+					;else for ordinals, output tuple [diff, ordinal_diff], and just diff for computing mda flows
+					(contains_index ordinal_features_map feature)
+					(if computing_mda
+						diff
 
-						;else output tuple [diff, ordinal_diff] for ordinals, and diff for continuous if applicable
-						(contains_index ordinal_features_map feature)
-						(let
-							(assoc
-								ordinal_diff
-									(if (!= (null) (get !ordinalFeaturesRangesMap feature))
-										(if diff
-											(/ diff (get !ordinalFeaturesRangesMap feature))
-											0
-										)
-									)
-							)
-
-							;output only diff if computing mda for feature weights during analyze
-							;otherwise output the tuple for residual aggregation flows
-							(if computing_mda
-								diff
-								[diff ordinal_diff]
-							)
-						)
-
-						;else output it as-is
-						(if (and feature_is_nominal compute_all_statistics)
-							[diff (filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))]
-
+						;otherwise output the tuple for residual aggregation flows
+						[
 							diff
-						)
+							(if diff
+								(/ diff (get !ordinalFeaturesRangesMap feature))
+								0
+							)
+						]
+					)
+
+					;else output it as-is
+					(if (and feature_is_nominal compute_all_statistics)
+						[diff (filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))]
+
+						diff
 					)
 				)
 			)
