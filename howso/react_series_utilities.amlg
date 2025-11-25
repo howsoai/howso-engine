@@ -453,6 +453,7 @@
 		(declare (assoc
 			requested_details (indices (filter (lambda (current_value)) details))
 			output_details (contains_value details .true)
+			entire_detail_data []
 		))
 
 		(if output_details
@@ -462,6 +463,7 @@
 				))
 				(declare (assoc
 					series_detail_values_map (map (lambda (list)) (zip (indices case_detail_values_map)))
+					reset_case_detail_values_map (replace case_detail_values_map)
 				))
 			)
 		)
@@ -569,21 +571,7 @@
 						;reset the case details that are held in lists. (influential_cases, generate_attempts, etc.)
 						;these detail values are not overwritten through appends
 						(assign (assoc
-							case_detail_values_map
-								(map
-									(lambda
-										(if (= (list) (get_type (current_value)))
-											(list)
-
-											;generate_attempts is sum-ed into a digit, must be reset as a list
-											(= 0 (get_type (current_value)))
-											(list)
-
-											(current_value)
-										)
-									)
-									case_detail_values_map
-								)
+							case_detail_values_map (replace reset_case_detail_values_map)
 						))
 					)
 
@@ -857,57 +845,34 @@
 							;retries holds the amount of times the case was retried. Add 1 to represent generate_attempts
 							(if (and (not previous_row_failed) (contains_index case_detail_values_map "generate_attempts"))
 								(assign (assoc
-									case_detail_values_map
-										(set
-											case_detail_values_map
-											"generate_attempts"
-											(+ retries 1)
-										)
+									case_detail_values_map (set case_detail_values_map "generate_attempts" (+ retries 1) )
 								))
 							)
 
-							(append
-								(if (= 0 (current_index))
-									[]
-
-									series_failed
-									[]
-
-									(previous_result)
-								)
-								;if row failed (i.e., failed to derive values), don't append anything
-								(if (or previous_row_failed series_failed)
-									[]
-
-									;store accumulated data into previous_result as an assoc
-									[
-										(append
-											(assoc "series_data" (last series_data))
-											case_detail_values_map
-										)
-									]
-								)
-							)
+							;if row failed (i.e., failed to derive values), don't append anything
+							(accum (assoc
+								entire_detail_data (if (or previous_row_failed series_failed) [] [case_detail_values_map])
+							))
 						)
+					)
 
-						;else store into previous_result as just the last row of series_data
-						(append
-							(if (= 0 (current_index))
-								[]
+					;store into previous_result as the last row of series_data
+					(append
+						(if (= 0 (current_index))
+							[]
 
-								;if the series failed (due to uniqueness), the previous result's stored data
-								;must be cleared.
-								series_failed
-								[]
+							;if the series failed (due to uniqueness), the previous result's stored data
+							;must be cleared.
+							series_failed
+							[]
 
-								(previous_result)
-							)
-							;if row or series failed (i.e., derivation or uniqueness failed), don't append anything
-							(if (or previous_row_failed series_failed)
-								[]
+							(previous_result)
+						)
+						;if row or series failed (i.e., derivation or uniqueness failed), don't append anything
+						(if (or previous_row_failed series_failed)
+							[]
 
-								[(last series_data)]
-							)
+							[(last series_data)]
 						)
 					)
 				) ;while loop
@@ -929,61 +894,56 @@
 
 		;if output_details, entire_series_data is a list of assocs, one assoc per row
 		(if output_details
-			(seq
-				;reduce all the detail assocs into one assoc where each key is a list of items corresponding to each row
-				;eg:
-				; {
-				;	'categorical_action_probabilties' [ {'a' 0.4 'b' 0.5}  {'a' 0.2 'b' 0.8} ]
-				;	'generate_attempts' [ 1 2 ]
-				;}
-				(assign (assoc
-					series_detail_values_map
-						(if (> (size entire_series_data) 1)
-							(reduce
-								(lambda
-									(map
-										(lambda
-											(append
-												(if (= 1 (current_index 1))
-													;if first item is a list or assoc, wrap in a list to accumulate as an individual item
-													(if (size (first (current_value)))
-														[(first (current_value 1))]
-														;else just accumulate number values
-														(first (current_value))
-													)
+			;reduce all the detail assocs into one assoc where each key is a list of items corresponding to each row
+			;eg:
+			; {
+			;	'categorical_action_probabilties' [ {'a' 0.4 'b' 0.5}  {'a' 0.2 'b' 0.8} ]
+			;	'generate_attempts' [ 1 2 ]
+			;}
+			(assign (assoc
+				series_detail_values_map
+					(if (> (size entire_detail_data) 1)
+						(reduce
+							(lambda
+								(map
+									(lambda
+										(append
+											(if (= 1 (current_index 1))
+												;if first item is a list or assoc, wrap in a list to accumulate as an individual item
+												(if (size (first (current_value)))
+													[(first (current_value 1))]
 													;else just accumulate number values
 													(first (current_value))
 												)
+												;else just accumulate number values
+												(first (current_value))
+											)
 
-												;if item is a list or assoc, wrap in a list to accumulate as an individual item
-												(if (size (last (current_value)))
-													[(last (current_value 1))]
-													;else just accumulate number values
-													(last (current_value))
-												)
+											;if item is a list or assoc, wrap in a list to accumulate as an individual item
+											(if (size (last (current_value)))
+												[(last (current_value 1))]
+												;else just accumulate number values
+												(last (current_value))
 											)
 										)
-										;accumulate all the details and not the series_data itself
-										(remove (previous_result) "series_data")
-										(remove (current_value) "series_data")
 									)
+									;accumulate all the details
+									(previous_result)
+									(current_value)
 								)
-								entire_series_data
 							)
-
-							;if only 1, then the reduce will not do anything. Instead, wrap the details in an extra list and drop "series_data"
-							(map
-								(lambda
-									[(current_value 1)]
-								)
-								(remove (first entire_series_data) "series_data")
-							)
+							entire_detail_data
 						)
-				))
 
-				;grab each row of series_data and store into entire_series_data
-				(assign (assoc entire_series_data (map (lambda (get (current_value) "series_data")) entire_series_data) ))
-			)
+						;if only 1, then the reduce will not do anything. Instead, wrap the details in an extra list and drop "series_data"
+						(map
+							(lambda
+								[(current_value 1)]
+							)
+							(first entire_detail_data)
+						)
+					)
+			))
 		)
 
 		;backfill entire entire_series_data with the stationary feature value(s)
