@@ -58,7 +58,10 @@
 			enabled_num_features_probability_map (call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features num_features))
 			all_features_map (zip features)
 			feature_deviations (get hyperparam_map "featureDeviations")
-			feature_is_non_string_edit_distance (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap action_feature)))
+
+			;in order to compute PC for a continuous action feature, it needs interpolation to be separate from computing the diff to the actual value
+			;since diff is output as an absolute value
+			compute_pc_for_continuous (and compute_pc (not (or feature_is_nominal feature_is_edit_distance)))
 		))
 
 		;list of tuples of : [ AC, PC, directional PC, values ]
@@ -137,41 +140,65 @@
 							))
 						)
 
-						;do a num_reacts_per_case of robust reacts without any of the specific features
 						(declare (assoc
-							without_ac_features_action_diff
-								(call !InterpolateAndComputeDiffToCase (assoc
-									feature action_feature
-									output_categorical_action_probabilities .true
-									candidate_cases_lists
-										(if (= 0 (size  react_context_features))
-											[[][][]]
-											(compute_on_contained_entities
-												(query_not_in_entity_list [(replace case_id)])
-												(if ignore_null_action_feature (query_not_equals action_feature (null)))
-												(if (size context_condition_filter_query) context_condition_filter_query)
-												dependent_queries_list
-												time_series_filter_query
-												(query_nearest_generalized_distance
-													k_parameter
-													(replace react_context_features)
-													(replace (unzip case_values_map react_context_features))
-													p_parameter
-													feature_weights
-													!queryDistanceTypeMap
-													query_feature_attributes_map
-													feature_deviations
-													(null)
-													dt_parameter
-													(if valid_weight_feature weight_feature)
-													tie_break_random_seed
-													(null) ;radius
-													!numericalPrecision
-													action_feature
-												)
+							without_ac_features_action_pair
+								(let
+									(assoc
+										interpolated_value
+											(call !InterpolateOrDeriveActionValues (assoc
+												feature action_feature
+												output_categorical_action_probabilities .true
+												candidate_cases_lists
+													(if (= 0 (size  react_context_features))
+														[[][][]]
+														(compute_on_contained_entities
+															(query_not_in_entity_list [(replace case_id)])
+															(if ignore_null_action_feature (query_not_equals action_feature (null)))
+															(if (size context_condition_filter_query) context_condition_filter_query)
+															dependent_queries_list
+															time_series_filter_query
+															(query_nearest_generalized_distance
+																k_parameter
+																(replace react_context_features)
+																(replace (unzip case_values_map react_context_features))
+																p_parameter
+																feature_weights
+																!queryDistanceTypeMap
+																query_feature_attributes_map
+																feature_deviations
+																(null)
+																dt_parameter
+																(if valid_weight_feature weight_feature)
+																tie_break_random_seed
+																(null) ;radius
+																!numericalPrecision
+																action_feature
+															)
+														)
+													)
+											))
+									)
+
+									(declare (assoc
+										diff
+											(if (or compute_ac feature_is_nominal feature_is_edit_distance)
+												(call !InterpolateAndComputeDiffToCase (assoc
+													feature action_feature
+													interpolated_value interpolated_value
+												))
 											)
+									))
+
+									[
+										diff
+										;the original categorical action probability for a nominal is 1-difference
+										(if feature_is_nominal
+											(- 1 diff)
+											;else output the predicted value for continuous
+											interpolated_value
 										)
-								))
+									]
+								)
 						))
 
 						;append features
@@ -211,49 +238,75 @@
 						)
 
 						(declare (assoc
-							with_ac_features_action_diff
-								(call !InterpolateAndComputeDiffToCase (assoc
-									feature action_feature
-									output_categorical_action_probabilities .true
-									candidate_cases_lists
-										(compute_on_contained_entities
-											(query_not_in_entity_list [(replace case_id)])
-											(if ignore_null_action_feature (query_not_equals action_feature (null)))
-											(if (size context_condition_filter_query) context_condition_filter_query)
-											dependent_queries_list
-											time_series_filter_query
-											(query_nearest_generalized_distance
-												k_parameter
-												(replace react_context_features)
-												(replace (unzip case_values_map react_context_features))
-												p_parameter
-												feature_weights
-												!queryDistanceTypeMap
-												query_feature_attributes_map
-												feature_deviations
-												(null)
-												dt_parameter
-												(if valid_weight_feature weight_feature)
-												tie_break_random_seed
-												(null) ;radius
-												!numericalPrecision
-												action_feature
+							with_ac_features_action_pair
+								(let
+									(assoc
+										interpolated_value
+											(call !InterpolateOrDeriveActionValues (assoc
+												feature action_feature
+												output_categorical_action_probabilities .true
+												candidate_cases_lists
+													(compute_on_contained_entities
+														(query_not_in_entity_list [(replace case_id)])
+														(if ignore_null_action_feature (query_not_equals action_feature (null)))
+														(if (size context_condition_filter_query) context_condition_filter_query)
+														dependent_queries_list
+														time_series_filter_query
+														(query_nearest_generalized_distance
+															k_parameter
+															(replace react_context_features)
+															(replace (unzip case_values_map react_context_features))
+															p_parameter
+															feature_weights
+															!queryDistanceTypeMap
+															query_feature_attributes_map
+															feature_deviations
+															(null)
+															dt_parameter
+															(if valid_weight_feature weight_feature)
+															tie_break_random_seed
+															(null) ;radius
+															!numericalPrecision
+															action_feature
+														)
+													)
+											))
+									)
+
+									(declare (assoc
+										diff
+											(if (or compute_ac feature_is_nominal feature_is_edit_distance)
+												(call !InterpolateAndComputeDiffToCase (assoc
+													feature action_feature
+													interpolated_value interpolated_value
+												))
 											)
+									))
+
+									[
+										diff
+										;the original categorical action probability for a nominal is 1-difference
+										(if feature_is_nominal
+											(- 1 diff)
+											;else output the predicted value for continuous
+											interpolated_value
 										)
-								))
+									]
+								)
 						))
 
 						;output a tuple of : [ AC, PC, directional PC, values ]
 						[
-							;AC
-							(-
-								without_ac_features_action_diff
-								with_ac_features_action_diff
+							(if compute_ac
+								(- (first without_ac_features_action_pair) (first with_ac_features_action_pair) )
 							)
-							;PC
-							(null)
+							(if compute_pc
+								(abs (- (last with_ac_features_action_pair) (last without_ac_features_action_pair)))
+							)
 							;directional PC
-							(null)
+							(if compute_pc
+								(- (last with_ac_features_action_pair) (last without_ac_features_action_pair))
+							)
 							;case values
 							(unzip case_values_map value_robust_contribution_features)
 						]
@@ -417,7 +470,7 @@
 								)
 								;output directional PC for this combination of feature_values
 								(if compute_pc
-									(generalized_mean (map (lambda (last (current_value))) matching_ac_pc_tuples))
+									(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
 								)
 							]
 						)
