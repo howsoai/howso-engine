@@ -1,15 +1,17 @@
 (null
-	#!ComputeValueRobustAccuracyContributions
+	#!ComputeValueRobustContributions
 	(declare
 		(assoc
 			action_feature (null)
-			value_robust_ac_features (null)
+			value_robust_contribution_features (null)
 			max_num_buckets (null)
 			features []
+			compute_ac .false
+			compute_pc .false
 		)
 
 		(declare (assoc
-			context_features (filter (lambda (not (contains_value (append action_feature value_robust_ac_features) (current_value)))) features)
+			context_features (filter (lambda (not (contains_value (append action_feature value_robust_contribution_features) (current_value)))) features)
 			case_features (values (append features (if !tsTimeFeature [".series_index"] [])) .true)
 		))
 
@@ -59,8 +61,9 @@
 			feature_is_non_string_edit_distance (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap action_feature)))
 		))
 
+		;list of tuples of : [ AC, PC, directional PC, values ]
 		(declare (assoc
-			case_acs
+			case_ac_pc_tuples
 				||(map
 					(lambda (let
 						(assoc
@@ -172,9 +175,9 @@
 						))
 
 						;append features
-						(accum (assoc react_context_features value_robust_ac_features ))
+						(accum (assoc react_context_features value_robust_contribution_features ))
 						(assign (assoc
-							removed_features_map (remove removed_features_map value_robust_ac_features)
+							removed_features_map (remove removed_features_map value_robust_contribution_features)
 							categorical_action_probabilities_map (assoc)
 						))
 
@@ -240,13 +243,19 @@
 								))
 						))
 
-						;output a pair of : [ AC for the feature, values ]
+						;output a tuple of : [ AC, PC, directional PC, values ]
 						[
+							;AC
 							(-
 								without_ac_features_action_diff
 								with_ac_features_action_diff
 							)
-							(unzip case_values_map value_robust_ac_features)
+							;PC
+							(null)
+							;directional PC
+							(null)
+							;case values
+							(unzip case_values_map value_robust_contribution_features)
 						]
 					))
 					case_ids
@@ -255,7 +264,7 @@
 
 		;a index map to match index of feature to value
 		(declare (assoc
-			ac_feature_index_map (zip value_robust_ac_features (range 0 (- (size value_robust_ac_features) 1)))
+			contribution_feature_index_map (zip value_robust_contribution_features (range 0 (- (size value_robust_contribution_features) 1)))
 		))
 
 		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
@@ -263,7 +272,7 @@
 			continuous_feature_buckets_map
 				(map
 					(lambda (let
-						(assoc ac_feature_index (get ac_feature_index_map (current_index 1)) )
+						(assoc ac_feature_index (get contribution_feature_index_map (current_index 1)) )
 						(call !BinValuesByQuantiles (assoc
 							max_num_buckets max_num_buckets
 							sorted_unique_values
@@ -271,7 +280,7 @@
 								(sort
 									(lambda (< (current_value) (current_value 1)) )
 									(values
-										(map (lambda (get (current_value) [1 ac_feature_index])) case_acs)
+										(map (lambda (get (current_value) [3 ac_feature_index])) case_ac_pc_tuples)
 										.true
 									)
 								)
@@ -279,7 +288,7 @@
 					))
 					(zip (filter
 						(lambda (not (contains_index !nominalsMap (current_value))))
-						value_robust_ac_features
+						value_robust_contribution_features
 					))
 				)
 		))
@@ -288,30 +297,30 @@
 		(declare (assoc
 			feature_value_lists_map
 				(zip
-					value_robust_ac_features
+					value_robust_contribution_features
 					(map
 						(lambda (let
 							(assoc f_idx (current_index 1))
 							(if (contains_index !nominalsMap (current_value))
 								;all unique classes
-								(values (map (lambda (get (current_value) [1 f_idx]) ) case_acs) .true)
+								(values (map (lambda (get (current_value) [3 f_idx]) ) case_ac_pc_tuples) .true)
 
 								;all unique buckets
 								(indices (get continuous_feature_buckets_map (current_value)))
 							)
 
 						))
-						value_robust_ac_features
+						value_robust_contribution_features
 					)
 				)
 		))
 
-		;create a list of all possible value combinations for the value_robust_ac_features
+		;create a list of all possible value combinations for the value_robust_contribution_features
 		(declare (assoc
 			all_unique_value_combinations
 				(apply "append"
 					(call !RecurseAccumulateFeatureValues (assoc
-						features value_robust_ac_features
+						features value_robust_contribution_features
 						values []
 					))
 				)
@@ -320,79 +329,98 @@
 
 		(if (not has_multiple_features)
 			(declare (assoc
-				ac_feature_bucket_map (get continuous_feature_buckets_map (first value_robust_ac_features))
-				ac_feature_is_continuous (not (contains_index !nominalsMap (first value_robust_ac_features)))
+				ac_feature_bucket_map (get continuous_feature_buckets_map (first value_robust_contribution_features))
+				ac_feature_is_continuous (not (contains_index !nominalsMap (first value_robust_contribution_features)))
 			))
 		)
 
-		;given all possible value combinations, compute the ac for each combination
+		;given all possible value combinations, compute the ac/pc for each combination
+		;list of tuples of: [ AC, PC, directional PC]
 		(declare (assoc
-			corresponding_acs
+			corresponding_contribution_tuples
 				||(map
 					(lambda (let
 						(assoc feature_values (current_value 1))
 
-						;output AC for the feature_values
-						(generalized_mean (map
-							(lambda (first (current_value)))
-							;filter case acs by the unique feature values
-							(if has_multiple_features
-								(filter
-									(lambda
-										(apply "and" (map
-											(lambda (let
-												(assoc ac_feature (get value_robust_ac_features (current_index 1)) )
-												;nominal must match exactly
-												(if (contains_index !nominalsMap ac_feature)
-													(= (first (current_value)) (last (current_value)))
+						;filter all the ac_pc tuples by the unique feature values to leave only those that were used to predict this exact feature value(s) combination
+						(declare (assoc
+							matching_ac_pc_tuples
+								(if has_multiple_features
+									(filter
+										(lambda
+											(apply "and" (map
+												(lambda (let
+													(assoc ac_feature (get value_robust_contribution_features (current_index 1)) )
+													;nominal must match exactly
+													(if (contains_index !nominalsMap ac_feature)
+														(= (first (current_value)) (last (current_value)))
 
-													;else continuous values will be a pair of [min max] for a value to fall between
-													(and
-														(<=
-															(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 0])
-															(last (current_value))
-														)
-														(>=
-															(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 1])
-															(last (current_value))
+														;else continuous values will be a pair of [min max] for a value to fall between
+														(and
+															(<=
+																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 0])
+																(last (current_value))
+															)
+															(>=
+																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 1])
+																(last (current_value))
+															)
 														)
 													)
-												)
+												))
+												;grab the values to filter by
+												feature_values
+												;grab the values for this case's ac
+												(last (current_value))
 											))
-											;grab the values to filter by
-											feature_values
-											;grab the values for this case's ac
-											(last (current_value))
-										))
-									)
-									case_acs
-								)
-
-								;same code but optimized for the one current feature
-								(let
-									(assoc value (first feature_values))
-									(if ac_feature_is_continuous
-										(filter
-											(lambda (and
-												;continuous values will be a pair of [min max] for a value to fall between
-												(<= (get ac_feature_bucket_map [value 0]) (get (current_value) [1 0]) )
-												(>= (get ac_feature_bucket_map [value 0]) (get (current_value) [1 0]) )
-											))
-											case_acs
 										)
+										case_ac_pc_tuples
+									)
 
-										;else if current feature is nominal
-										(filter
-											(lambda
-												;must match current nominal value exactly
-												(= value (get (current_value) [1 0]) )
+									;same code but optimized for the one current feature (index of 0)
+									(let
+										(assoc value (first feature_values))
+										(if ac_feature_is_continuous
+											(filter
+												(lambda (and
+													;continuous values will be a pair of [min max] for a value to fall between
+													(<= (get ac_feature_bucket_map [value 0]) (get (current_value) [3 0]) )
+													(>= (get ac_feature_bucket_map [value 0]) (get (current_value) [3 0]) )
+												))
+												case_ac_pc_tuples
 											)
-											case_acs
+
+											;else if current feature is nominal
+											(filter
+												(lambda
+													;must match current nominal value exactly
+													(= value (get (current_value) [3 0]) )
+												)
+												case_ac_pc_tuples
+											)
 										)
 									)
 								)
-							)
 						))
+
+						;matching_ac_pc_tuples will be empty if this feature_values did not appear in the dataset (or no reacts were registered using them),
+						;of so, output null so it can be filtered out later
+						(if (size matching_ac_pc_tuples)
+							[
+								;output AC for this combination of feature_values
+								(if compute_ac
+									(generalized_mean (map (lambda (first (current_value))) matching_ac_pc_tuples))
+								)
+								;output PC for this combination of feature_values
+								(if compute_pc
+									(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
+								)
+								;output directional PC for this combination of feature_values
+								(if compute_pc
+									(generalized_mean (map (lambda (last (current_value))) matching_ac_pc_tuples))
+								)
+							]
+						)
 					))
 					all_unique_value_combinations
 				)
@@ -400,38 +428,45 @@
 
 
 		;remove combinations that did not appear in the dataset and don't have an AC value
-		(if (contains_value corresponding_acs (null))
+		(if (contains_value corresponding_contribution_tuples (null))
 			(let
 				(assoc
 					null_indices
 						(filter
-							(lambda (= (null) (get corresponding_acs (current_value))))
-							(indices corresponding_acs)
+							(lambda (= (null) (get corresponding_contribution_tuples (current_value))))
+							(indices corresponding_contribution_tuples)
 						)
 				)
 
 				(assign (assoc
-					corresponding_acs (remove corresponding_acs null_indices)
+					corresponding_contribution_tuples (filter corresponding_contribution_tuples)
 					all_unique_value_combinations (remove all_unique_value_combinations null_indices)
 				))
 			)
 		)
 
-		;sort from highest to lowest
+		;sort from highest to lowest, by AC if computing AC, otherwise by PC
 		(declare (assoc
 			sorted_indices
-				(sort
-					(lambda
-						(<= (get corresponding_acs (current_value)) (get corresponding_acs (current_value 1)) )
+				(if compute_ac
+					(sort
+						(lambda
+							(<= (get corresponding_contribution_tuples [(current_value 1) 0]) (get corresponding_contribution_tuples [(current_value 2) 0] ) )
+						)
+						(indices corresponding_contribution_tuples)
 					)
-					(indices corresponding_acs)
+
+					;else sort by PC
+					(sort
+						(lambda
+							(<= (get corresponding_contribution_tuples [(current_value 1) 1]) (get corresponding_contribution_tuples [(current_value 2) 1] ) )
+						)
+						(indices corresponding_contribution_tuples)
+					)
 				)
 		))
-
-		;split the lists of all values into two corresponding lists for output: just the unique feature values and their corresponding ACs
-		{
-			"features" value_robust_ac_features
-			"feature_values"
+		(declare (assoc
+			sorted_feature_values
 				;replace buckets with pairs of [min max] for each continuous feature
 				(if (size continuous_feature_buckets_map)
 					(map
@@ -439,10 +474,10 @@
 							;iterate over the values in the row
 							(map
 								(lambda (replace
-									(if (contains_index !nominalsMap (get value_robust_ac_features (current_index)))
+									(if (contains_index !nominalsMap (get value_robust_contribution_features (current_index)))
 										(current_value)
 										;else convert bucket to pair of min-max for this continuous feature
-										(get continuous_feature_buckets_map [(get value_robust_ac_features (current_index 1)) (current_value 1)])
+										(get continuous_feature_buckets_map [(get value_robust_contribution_features (current_index 1)) (current_value 1)])
 									)
 								))
 								(current_value)
@@ -451,15 +486,40 @@
 						(unzip all_unique_value_combinations sorted_indices)
 					)
 
-					;else keep rest as-is
+					;else keep values as-is
 					(unzip all_unique_value_combinations sorted_indices)
 				)
-			"ac_values" (unzip corresponding_acs sorted_indices)
-		}
+		))
+
+		;split the lists of all values into corresponding lists for output:
+		;just the unique feature values and their corresponding AC and/or PC values
+		(if (and compute_ac compute_pc)
+			{
+				"features" value_robust_contribution_features
+				"feature_values" sorted_feature_values
+				"ac_values" (map (lambda (first (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
+				"pc_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
+				"pc_directional_values" (map (lambda (last (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
+			}
+
+			compute_ac
+			{
+				"features" value_robust_contribution_features
+				"feature_values" sorted_feature_values
+				"ac_values" (map (lambda (first (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
+			}
+
+			;else compute_pc
+			{
+				"features" value_robust_contribution_features
+				"feature_values" sorted_feature_values
+				"pc_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
+				"pc_directional_values" (map (lambda (last (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
+			}
+		)
 	)
 
-
-	;given a case_acs for a continuous feature, bin them into buckets by quantiles
+	;given a case_ac_pc_tuples for a continuous feature, bin them into buckets by quantiles
 	;outputs map of bucket -> values pair of: [ min, max]
 	;
 	;parameters:
