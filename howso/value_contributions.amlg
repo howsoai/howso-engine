@@ -523,7 +523,9 @@
 		(get feature_value_lists_map (first features))
 	)
 
-	;values-causal, there can probably only be one value_robust_ac_feature
+	;Measure the average AC-Surprisal asymmetry among buckets of values for value_robust_ac_feature when predicting action_feature
+	;For each case, measure the AC of value_robust_ac_feature in predicting action_feature *and* the reverse. Then convert each AC into
+	;surprisal and measure the difference.
 	#!ComputeValueRobustSurprisalAsymmetry
 	(declare
 		(assoc
@@ -533,6 +535,7 @@
 			features []
 		)
 
+		;robust_residuals are used as the deviation for the ACs when converting to surprisal.
 		(declare (assoc
 			robust_residuals_map
 				(map
@@ -542,7 +545,7 @@
 							features context_features
 							context_features context_features
 							case_ids
-								;don't need all 100k
+								;don't need all 100k samples for robust residuals, 10k will do.
 								(rand case_ids 10000)
 							robust_residuals .true
 							use_case_weights use_case_weights
@@ -561,7 +564,8 @@
 
 		(declare (assoc
 			context_features (filter (lambda (not (contains_value [action_feature value_robust_ac_feature] (current_value)))) features)
-			case_features (values (append features (if !tsTimeFeature [".series_index"] [])) .true)
+			;all features needed
+			case_features (values (append features action_feature value_robust_ac_feature (if !tsTimeFeature [".series_index"] [])) .true)
 		))
 
 		(declare (assoc
@@ -614,7 +618,6 @@
 
 		(declare (assoc
 			enabled_num_features_probability_map (call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features num_features))
-			all_features_map (zip features)
 			feature_deviations (get hyperparam_map "featureDeviations")
 
 			action_feature_is_non_string_edit_distance (and action_feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap action_feature)))
@@ -633,8 +636,8 @@
 							feature_weights (get hyperparam_map "featureWeights")
 							context_features context_features
 							categorical_action_probabilities_map (assoc)
+							dependent_queries_list (list)
 						)
-						(declare (assoc case_feature_value (get case_values_map action_feature) ))
 
 						(if !tsTimeFeature
 							(assign (assoc
@@ -663,6 +666,9 @@
 									.true
 								)
 						))
+						(declare (assoc
+							robustly_selected_context_features (replace react_context_features)
+						))
 
 
 						(if !tsTimeFeature
@@ -684,7 +690,7 @@
 						)
 
 						(if action_feature_is_dependent
-							(declare (assoc
+							(assign (assoc
 								dependent_queries_list
 									(call !ComputeDependentQueries (assoc
 										context_features react_context_features
@@ -701,11 +707,10 @@
 								(call !InterpolateAndComputeDiffToCase (assoc
 									feature action_feature
 									case_feature_value (get case_values_map action_feature)
-									output_categorical_action_probabilities .true
-
 									feature_is_nominal action_feature_is_nominal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
 
+									output_categorical_action_probabilities .true
 									candidate_cases_lists
 										(if (= 0 (size react_context_features))
 											[[][][]]
@@ -737,18 +742,27 @@
 								))
 						))
 
+						(if ac_feature_is_dependent
+							(assign (assoc
+								dependent_queries_list
+									(call !ComputeDependentQueries (assoc
+										context_features react_context_features
+										context_values (unzip case_values_map react_context_features)
+										action_feature value_robust_ac_feature
+									))
+							))
+						)
+
 						;predict value_robust_ac_feature without action_feature
 						(declare (assoc
 							without_action_feature_ac_feature_diff
 								(call !InterpolateAndComputeDiffToCase (assoc
 									feature value_robust_ac_feature
 									case_feature_value (get case_values_map value_robust_ac_feature)
-									output_categorical_action_probabilities .true
-									candidate_cases_lists only_context_features_candidate_cases_lists
-
 									feature_is_nominal ac_feature_is_nominal
 									feature_is_non_string_edit_distance ac_feature_is_non_string_edit_distance
 
+									output_categorical_action_probabilities .true
 									candidate_cases_lists
 										(if (= 0 (size react_context_features))
 											[[][][]]
@@ -781,8 +795,8 @@
 						))
 
 						;now to predict action_feature including value_robust_ac_feature
-						(accum (assoc react_context_features [value_robust_ac_feature] ))
 						(assign (assoc
+							react_context_features (append robustly_selected_context_features value_robust_ac_feature)
 							categorical_action_probabilities_map (assoc)
 						))
 
@@ -854,8 +868,8 @@
 						))
 
 						;now we must predict value_robust_ac_feature using context + action_feature
-						(assign (assoc react_context_features (append context_features action_feature) ))
 						(assign (assoc
+							react_context_features (append robustly_selected_context_features action_feature)
 							categorical_action_probabilities_map (assoc)
 						))
 
@@ -925,8 +939,6 @@
 										)
 								))
 						))
-
-						;TODO: now gotta convert these 4 diffs into 2 mdas, then 2 surprisals, then 1 difference in surprisal
 
 						(declare (assoc
 							ac_for_action_feature (- without_ac_feature_action_diff with_ac_feature_action_diff)
@@ -1033,7 +1045,7 @@
 						values []
 					))
 				)
-			has_multiple_features (> (size features) 1)
+			has_multiple_features (> (size value_robust_ac_features) 1)
 		))
 
 		(if (not has_multiple_features)
@@ -1043,7 +1055,7 @@
 			))
 		)
 
-		;given all possible value combinations, compute the ac for each combination
+		;given all possible value combinations, compute the mean surprisal asymmetry for each combination
 		(declare (assoc
 			corresponding_acs
 				||(map
