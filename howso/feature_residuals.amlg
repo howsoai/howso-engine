@@ -883,7 +883,7 @@
 				(if in_analyze
 					(zip
 						nominal_features
-						(map
+						||(map
 							(lambda
 								(zip
 									(lambda
@@ -907,7 +907,7 @@
 					(zip
 						nominal_features
 						;iterate over nominal features, where (current_value) is a list of react tuples for each feature
-						(map
+						||(map
 							(lambda
 								(map
 									(lambda
@@ -969,218 +969,186 @@
 				)
 		))
 
-		;accuracy is: num correct predictions / all predictions
-		(assign (assoc
-			accuracy_map
-				(map
-					(lambda
-						(let
-							;grab the current action feature's confusion matrix
-							(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
-							(if (size confusion_matrix)
-								(/
-									;correct predictions count
-									(apply "+" (values
-										;get correct prediction count for each class
-										(map
-											(lambda (or (get (current_value) (current_index))))
-											confusion_matrix
-										)
-									))
-									;total predictions count
-									(apply "+" (values
-										;add up all prediction counts for all classes
-										(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
-									))
-								)
-							)
-						)
-					)
-					(zip nominal_features)
-				)
-		))
-
-		;recall for a single class is = TruePositives / (TruePositives + FalseNegatives)
-		(assign (assoc
-			recall_map
-				(map
-					(lambda
-						(let
-							;grab the current action feature's confusion matrix
-							(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
-							(if (size confusion_matrix)
-								;for each row in confusion matrix, average out: correct / total of row
-								(/
-									(apply "+"
-										(values (map
-											(lambda (let
-												(assoc row_total (apply "+" (values (current_value 1))) )
-												;if there were no  predictions at all for this class, prevent divide by zero
-												(if (> row_total 0)
-													(/ (or (get (current_value) (current_index)) 0) row_total)
-													0
-												)
-											))
-											confusion_matrix
-										))
-									)
-									;The 'confusion_matrix' may not be a square matrix. Divides by the length of the rows or columns
-									; as if the matrix was square by taking the max of the number of non-empty rows or the number
-									; of uniquely predicted column indices.
-									(max
-										;Number of rows, filter out empty rows
-										(size
-											(filter (lambda (size (current_value))) confusion_matrix)
-										)
-										;Number of unique columns
-										(size (values
-											(apply "append"
-												(map
-													(lambda (indices (current_value)))
-													(values confusion_matrix)
-												)
+		;accumulate nominal feature stats (accuracy, precision, recall, mcc) in one pass
+		||(map
+			(lambda
+				(let
+					;grab the current action feature's confusion matrix
+					(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
+					(if (size confusion_matrix)
+						(accum (assoc
+							;accuracy is: num correct predictions / all predictions
+							accuracy_map
+								(associate (current_index 2)
+									(/
+										;correct predictions count
+										(apply "+" (values
+											;get correct prediction count for each class
+											(map
+												(lambda (or (get (current_value) (current_index))))
+												confusion_matrix
 											)
-											.true
+										))
+										;total predictions count
+										(apply "+" (values
+											;add up all prediction counts for all classes
+											(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
 										))
 									)
 								)
-							)
-					))
-					(zip nominal_features)
-				)
-		))
-
-		;precision for a single class is = TruePositives / (TruePositives + FalsePositives)
-		(assign (assoc
-			precision_map
-				(map
-					(lambda
-						(let
-							;grab the current action feature's confusion matrix
-							(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
-							(if (size confusion_matrix)
-								;for each column in confusion matrix, average out: correct / total of column
-								(/
-									;correct predictions count
-									(apply "+"
-										(values (map
-											(lambda (let
-												(assoc
-													class (current_index 1)
-													column_total (null)
-												)
-												(assign (assoc
-													column_total
-														(apply "+"
-															(values (map
-																(lambda (or (get (current_value) class) 0) )
-																confusion_matrix
-															))
-														)
-												))
-												;if there were no guesses for this class at all, prevent divide by zero
-												(if (> column_total 0)
-													(/ (or (get (current_value) class) 0) column_total)
-													0
-												)
-											))
-											confusion_matrix
-										))
-									)
-									;The 'confusion_matrix' may not be a square matrix. Divides by the length of the rows or columns
-									; as if the matrix was square by taking the max of the number of non-empty rows or the number
-									; of uniquely predicted column indices.
-									(max
-										;Number of rows, filter out empty rows
-										(size
-											(filter (lambda (size (current_value))) confusion_matrix)
-										)
-										;Number of unique columns
-										(size (values
-											(apply "append"
-												(map
-													(lambda (indices (current_value)))
-													(values confusion_matrix)
-												)
-											)
-											.true
-										))
-									)
-								)
-							)
-						)
-					)
-					(zip nominal_features)
-				)
-		))
-
-		; Generalized multi-class formula for Matthews Correlation Coefficient (mcc) is located https://en.wikipedia.org/wiki/Phi_coefficient#Multiclass_case
-		(assign (assoc
-			mcc_map
-				(map
-					(lambda
-						(let
-							;grab the current action feature's confusion matrix
-							(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
-							(if (size confusion_matrix)
-								(let
-									(assoc
-										;get the total correctly predicted counts, variable c in the mcc formula
-										total_predicted_correct
-											(apply "+" (values
-												(map (lambda (or (get (current_value) (current_index))) ) confusion_matrix)
-											))
-										;get the total number of samples, variable s in the mcc formula
-										total_samples
-											(apply "+" (values
-												(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
-											))
-										;get a list containing the true counts of each class, vector t in the mcc formula
-										true_counts
-											(append (values
-												(map
-													(lambda (apply "+" (filter (values (get confusion_matrix (current_index))))))
-													confusion_matrix
-												)
-											))
-										;get a list containing the predicted counts of each class, vector p in the mcc formula
-										predicted_counts
-											(append (values
-												(map
-													(lambda
-														(apply "+" (values (map
-															;current_index 1 is the predicted class that is being aggregated
-															(lambda (or (get (current_value) (current_index 1))) 0)
-															confusion_matrix
-														)))
+							;recall for a single class is = TruePositives / (TruePositives + FalseNegatives)
+							recall_map
+								(associate (current_index 2)
+									;for each row in confusion matrix, average out: correct / total of row
+									(/
+										(apply "+"
+											(values (map
+												(lambda (let
+													(assoc row_total (apply "+" (values (current_value 1))) )
+													;if there were no  predictions at all for this class, prevent divide by zero
+													(if (> row_total 0)
+														(/ (or (get (current_value) (current_index)) 0) row_total)
+														0
 													)
-													confusion_matrix
-												)
+												))
+												confusion_matrix
 											))
-									)
-
-									;calculates the mcc
-									(declare (assoc
-										mcc_numerator
-											(- (* total_predicted_correct total_samples) (dot_product true_counts predicted_counts))
-										mcc_denominator
-											(*
-												(sqrt (- (pow total_samples 2) (dot_product true_counts true_counts)))
-												(sqrt (- (pow total_samples 2) (dot_product predicted_counts predicted_counts)))
+										)
+										;The 'confusion_matrix' may not be a square matrix. Divides by the length of the rows or columns
+										; as if the matrix was square by taking the max of the number of non-empty rows or the number
+										; of uniquely predicted column indices.
+										(max
+											;Number of rows, filter out empty rows
+											(size
+												(filter (lambda (size (current_value))) confusion_matrix)
 											)
-									))
-
-									(if (or (= mcc_numerator 0) (= mcc_denominator 0))
-										0
-										(/ mcc_numerator mcc_denominator)
+											;Number of unique columns
+											(size (values
+												(apply "append"
+													(map
+														(lambda (indices (current_value)))
+														(values confusion_matrix)
+													)
+												)
+												.true
+											))
+										)
 									)
 								)
-							)
-						)
+							;precision for a single class is = TruePositives / (TruePositives + FalsePositives)
+							precision_map
+								(associate (current_index 2)
+									;for each column in confusion matrix, average out: correct / total of column
+									(/
+										;correct predictions count
+										(apply "+"
+											(values (map
+												(lambda (let
+													(assoc
+														class (current_index 1)
+														column_total (null)
+													)
+													(assign (assoc
+														column_total
+															(apply "+"
+																(values (map
+																	(lambda (or (get (current_value) class) 0) )
+																	confusion_matrix
+																))
+															)
+													))
+													;if there were no guesses for this class at all, prevent divide by zero
+													(if (> column_total 0)
+														(/ (or (get (current_value) class) 0) column_total)
+														0
+													)
+												))
+												confusion_matrix
+											))
+										)
+										;The 'confusion_matrix' may not be a square matrix. Divides by the length of the rows or columns
+										; as if the matrix was square by taking the max of the number of non-empty rows or the number
+										; of uniquely predicted column indices.
+										(max
+											;Number of rows, filter out empty rows
+											(size
+												(filter (lambda (size (current_value))) confusion_matrix)
+											)
+											;Number of unique columns
+											(size (values
+												(apply "append"
+													(map
+														(lambda (indices (current_value)))
+														(values confusion_matrix)
+													)
+												)
+												.true
+											))
+										)
+									)
+								)
+							;generalized multi-class formula for Matthews Correlation Coefficient (mcc) is located https://en.wikipedia.org/wiki/Phi_coefficient#Multiclass_case
+							mcc_map
+								(associate (current_index 2)
+									(let
+										(assoc
+											;get the total correctly predicted counts, variable c in the mcc formula
+											total_predicted_correct
+												(apply "+" (values
+													(map (lambda (or (get (current_value) (current_index))) ) confusion_matrix)
+												))
+											;get the total number of samples, variable s in the mcc formula
+											total_samples
+												(apply "+" (values
+													(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
+												))
+											;get a list containing the true counts of each class, vector t in the mcc formula
+											true_counts
+												(append (values
+													(map
+														(lambda (apply "+" (filter (values (get confusion_matrix (current_index))))))
+														confusion_matrix
+													)
+												))
+											;get a list containing the predicted counts of each class, vector p in the mcc formula
+											predicted_counts
+												(append (values
+													(map
+														(lambda
+															(apply "+" (values (map
+																;current_index 1 is the predicted class that is being aggregated
+																(lambda (or (get (current_value) (current_index 1))) 0)
+																confusion_matrix
+															)))
+														)
+														confusion_matrix
+													)
+												))
+										)
+
+										;calculates the mcc
+										(declare (assoc
+											mcc_numerator
+												(- (* total_predicted_correct total_samples) (dot_product true_counts predicted_counts))
+											mcc_denominator
+												(*
+													(sqrt (- (pow total_samples 2) (dot_product true_counts true_counts)))
+													(sqrt (- (pow total_samples 2) (dot_product predicted_counts predicted_counts)))
+												)
+										))
+
+										(if (or (= mcc_numerator 0) (= mcc_denominator 0))
+											0
+											(/ mcc_numerator mcc_denominator)
+										)
+									)
+								)
+						))
 					)
-					(zip nominal_features)
 				)
-		))
+			)
+			(zip nominal_features)
+		)
 
 		(if (= (null) param_path)
 			(declare (assoc param_path (get hyperparam_map "paramPath")))
@@ -1210,7 +1178,6 @@
 					)
 				)
 		))
-
 
 		;copy over all the stats for non-primary shared features
 		(if use_shared_deviations
