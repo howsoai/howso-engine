@@ -188,27 +188,45 @@
 	;					i.e.: { "residual_map" : { "featureA" : 3.4... } }
 	; using_shared_deviations: boolean, default (null). If true, will only use parent features and expand according to the shared deviations groups
 	#!ExpandResidualValuesToUncertainty
-	(set
-		feature_residuals_map
-		"residual_map"
-		(let (assoc
-			temp_residual_map
-				(map
+	(declare
+		(assoc
+			has_shared_deviations (and using_shared_deviations (size !sharedDeviationsMap))
+		)
+
+		;check if any feature residuals need to be modified
+		(declare (assoc
+			need_modification_residuals_map
+				(filter (map
 					(lambda
 						;inactive features are bound to min residual
 						(if (contains_index !inactiveFeaturesMap (current_index))
 							(get !cachedFeatureMinResidualMap (current_index))
 
-							;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
+							;if residual is too small, replace it with the minimim allowed
+							(<
+								(current_value)
+								(max
+									(get !cachedFeatureMinResidualMap (current_index))
+									(get !userSpecifiedFeatureErrorsMap (current_index))
+								)
+							)
+							(max
+								(get !cachedFeatureMinResidualMap (current_index))
+								(get !userSpecifiedFeatureErrorsMap (current_index))
+							)
+
+							(= (null) (current_value))
+							(max (get !cachedFeatureMinResidualMap (current_index)) (get !userSpecifiedFeatureErrorsMap (current_index)) )
+
+							;else nominal may need to set upper bound, accounting for imbalanced classes
 							(contains_index !nominalsMap (current_index))
 							(let
 								(assoc
 									;map of class -> count
 									feature_grouping
-										(if (size !sharedDeviationsMap)
+										(if has_shared_deviations
 											(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve (current_index 2)))
 										)
-									current_feature (current_index 1)
 								)
 								(declare (assoc
 									class_counts_map
@@ -229,69 +247,47 @@
 												;list of each feature's class count assocs
 												(map
 													(lambda
-														(compute_on_contained_entities
-															(query_value_masses (current_value) (null))
-														)
+														(compute_on_contained_entities (query_value_masses (current_value) (null)) )
 													)
 													feature_grouping
 												)
 											)
-
-											(compute_on_contained_entities
-												(query_value_masses current_feature (null))
-											)
+											;else a map of class -> count
+											(compute_on_contained_entities (query_value_masses (current_index 1) (null)) )
 										)
+
 								))
 
-								;do not max cap nominal deviations if less than 2 classes have been trained
-								(if (<= (size class_counts_map) 1)
-									(max
-										(get !cachedFeatureMinResidualMap (current_index))
-										(current_value)
-										(get !userSpecifiedFeatureErrorsMap (current_index))
-									)
-
-									;else cap the max nominal deviation
+								;only need to cap max nominal deviations if 2 or more classes have been trained
+								(if (> (size class_counts_map) 1)
 									(let
-										(assoc total_count (apply "+" (values class_counts_map)) )
-
-										(min
+										(assoc
+											total_count (apply "+" (values class_counts_map))
+										)
+										(declare (assoc
 											;nominal max deviation is the sum of: each class's probability multiplied by probability of getting it wrong
-											(apply "+"
-												(map
-													(lambda (let
-														(assoc class_prob (* (/ (current_value 1) total_count)) )
-														(* class_prob (- 1 class_prob))
-													))
-													(values class_counts_map)
+											nominal_max_deviation
+												(apply "+"
+													(map
+														(lambda (let
+															(assoc class_prob (/ (current_value 1) total_count) )
+															(* class_prob (- 1 class_prob))
+														))
+														(values class_counts_map)
+													)
 												)
-											)
-
-											(max
-												(get !cachedFeatureMinResidualMap (current_index))
-												(current_value)
-												(get !userSpecifiedFeatureErrorsMap (current_index))
-											)
+										))
+										(if (> (current_value) nominal_max_deviation)
+											nominal_max_deviation
 										)
 									)
 								)
 							)
-
-							;else continuous value don't have upper bounds, set the lower bound
-							(max
-								(get !cachedFeatureMinResidualMap (current_index))
-								(current_value)
-								(get !userSpecifiedFeatureErrorsMap (current_index))
-							)
 						)
 					)
-
 					;if using shared deviations, map over a reduced residuals map with only features that are not
 					; in a shared deviations group or are the primary keys of a shared deviations group
-					(if (and
-							using_shared_deviations
-							(size !sharedDeviationsMap)
-						)
+					(if has_shared_deviations
 						(remove
 							(get feature_residuals_map "residual_map")
 							!sharedDeviationsNonPrimaryFeatures
@@ -299,18 +295,50 @@
 
 						(get feature_residuals_map "residual_map")
 					)
+				))
+		))
+
+		(if has_shared_deviations
+			(set
+				feature_residuals_map
+				"residual_map"
+				(call !ExpandForSharedDeviations (assoc
+					compressed_values
+						(if (size need_modification_residuals_map)
+							;iterate over the residual map and use the values from need_modification_residuals_map where those values are defined
+							(map
+								(lambda
+									(if (!= (null) (last (current_value))) (last (current_value)) (first (current_value)) )
+								)
+								(remove (get feature_residuals_map "residual_map") !sharedDeviationsNonPrimaryFeatures)
+								need_modification_residuals_map
+							)
+
+							(remove (get feature_residuals_map "residual_map") !sharedDeviationsNonPrimaryFeatures)
+						)
+				))
+			)
+
+			;else output the modified residuals
+			(size need_modification_residuals_map)
+			(set
+				feature_residuals_map
+				"residual_map"
+				;iterate over the residual map and use the values from need_modification_residuals_map where those values are defined
+				(map
+					(lambda
+						(if (!= (null) (last (current_value))) (last (current_value)) (first (current_value)) )
+					)
+					(get feature_residuals_map "residual_map")
+					need_modification_residuals_map
 				)
 			)
 
-			(if (and
-					using_shared_deviations
-					(size !sharedDeviationsMap)
-				)
-				(call !ExpandForSharedDeviations (assoc compressed_values temp_residual_map))
-				temp_residual_map
-			)
+			;else output unmodified residuals
+			feature_residuals_map
 		)
 	)
+
 
 	;helper method to sample cases from the dataset, outputs a list of case ids
 	;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
