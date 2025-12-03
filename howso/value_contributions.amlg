@@ -530,7 +530,7 @@
 	(declare
 		(assoc
 			action_feature (null)
-			value_robust_ac_feature (null)
+			value_robust_ac_features (null)
 			max_num_buckets (null)
 			features []
 		)
@@ -563,9 +563,9 @@
 		))
 
 		(declare (assoc
-			context_features (filter (lambda (not (contains_value [action_feature value_robust_ac_feature] (current_value)))) features)
+			context_features (filter (lambda (not (contains_value (append value_robust_ac_features action_feature) (current_value)))) features)
 			;all features needed
-			case_features (values (append features action_feature value_robust_ac_feature (if !tsTimeFeature [".series_index"] [])) .true)
+			case_features (values (append features action_feature value_robust_ac_features (if !tsTimeFeature [".series_index"] [])) .true)
 		))
 
 		(declare (assoc
@@ -576,10 +576,15 @@
 					(!= .false (get !featureNullRatiosMap (list action_feature "has_nulls")) )
 					(not (contains_index !inactiveFeaturesMap action_feature) )
 				)
-			ignore_null_ac_feature
-				(and
-					(!= .false (get !featureNullRatiosMap (list value_robust_ac_feature "has_nulls")) )
-					(not (contains_index !inactiveFeaturesMap value_robust_ac_feature) )
+			ignore_null_ac_features_map
+				(map
+					(lambda
+						(and
+							(!= .false (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) )
+							(not (contains_index !inactiveFeaturesMap (current_index)) )
+						)
+					)
+					(zip value_robust_ac_features)
 				)
 			;create a backup of context_features for time series flows
 			original_context_features (if !tsTimeFeature (replace context_features))
@@ -589,9 +594,21 @@
 			action_feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
 			action_feature_is_dependent (contains_index !dependentFeatureMap action_feature)
 
-			ac_feature_is_nominal (contains_index !nominalsMap value_robust_ac_feature)
-			ac_feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap value_robust_ac_feature)
-			ac_feature_is_dependent (contains_index !dependentFeatureMap value_robust_ac_feature)
+			ac_feature_is_nominal_map
+				(map
+					(lambda (contains_index !nominalsMap (current_index)))
+					(zip value_robust_ac_features)
+				)
+			ac_feature_is_edit_distance_map
+				(map
+					(lambda (contains_index !editDistanceFeatureTypesMap (current_index)))
+					(zip value_robust_ac_features)
+				)
+			ac_feature_is_dependent_map
+				(map
+					(lambda (contains_index !dependentFeatureMap (current_index)))
+					(zip value_robust_ac_features)
+				)
 		))
 		(if (= (null) hyperparam_map)
 			(assign (assoc
@@ -621,7 +638,13 @@
 			feature_deviations (get hyperparam_map "featureDeviations")
 
 			action_feature_is_non_string_edit_distance (and action_feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap action_feature)))
-			ac_feature_is_non_string_edit_distance (and ac_feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap value_robust_ac_feature)))
+			ac_feature_is_non_string_edit_distance_map (and ac_feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap value_robust_ac_feature)))
+				(map
+					(lambda
+						(and (get ac_feature_is_edit_distance_map (current_index)) (!= "string_mixable" (get !editDistanceFeatureTypesMap (current_index))))
+					)
+					(zip value_robust_ac_features)
+				)
 		))
 
 		(declare (assoc
@@ -700,10 +723,9 @@
 							))
 						)
 
-
-						;predict action_feature without value_robust_ac_feature
+						;predict action_feature without value_robust_ac_features
 						(declare (assoc
-							without_ac_feature_action_diff
+							without_ac_features_action_diff
 								(call !InterpolateAndComputeDiffToCase (assoc
 									feature action_feature
 									case_feature_value (get case_values_map action_feature)
@@ -713,7 +735,8 @@
 									output_categorical_action_probabilities .true
 									candidate_cases_lists
 										(if (= 0 (size react_context_features))
-											[[][][]]
+											[[] [] []]
+											;else
 											(compute_on_contained_entities
 												(query_not_in_entity_list [(replace case_id)])
 												(if ignore_null_action_feature (query_not_equals action_feature (null)))
@@ -742,61 +765,72 @@
 								))
 						))
 
-						(if ac_feature_is_dependent
-							(assign (assoc
-								dependent_queries_list
-									(call !ComputeDependentQueries (assoc
-										context_features react_context_features
-										context_values (unzip case_values_map react_context_features)
-										action_feature value_robust_ac_feature
-									))
-							))
-						)
-
-						;predict value_robust_ac_feature without action_feature
+						;now predict each of value_robust_ac_features without action_feature as a context
 						(declare (assoc
-							without_action_feature_ac_feature_diff
-								(call !InterpolateAndComputeDiffToCase (assoc
-									feature value_robust_ac_feature
-									case_feature_value (get case_values_map value_robust_ac_feature)
-									feature_is_nominal ac_feature_is_nominal
-									feature_is_non_string_edit_distance ac_feature_is_non_string_edit_distance
-
-									output_categorical_action_probabilities .true
-									candidate_cases_lists
-										(if (= 0 (size react_context_features))
-											[[][][]]
-											(compute_on_contained_entities
-												(query_not_in_entity_list [(replace case_id)])
-												(if ignore_null_ac_feature (query_not_equals value_robust_ac_feature (null)))
-												(if (size context_condition_filter_query) context_condition_filter_query)
-												dependent_queries_list
-												time_series_filter_query
-												(query_nearest_generalized_distance
-													k_parameter
-													(replace react_context_features)
-													(replace (unzip case_values_map react_context_features))
-													p_parameter
-													feature_weights
-													!queryDistanceTypeMap
-													query_feature_attributes_map
-													feature_deviations
-													(null)
-													dt_parameter
-													(if valid_weight_feature weight_feature)
-													tie_break_random_seed
-													(null) ;radius
-													!numericalPrecision
-													value_robust_ac_feature
-												)
-											)
+							without_action_ac_feature_diffs
+								(map
+									(lambda (let
+										(assoc
+											ac_feature (current_value 1)
 										)
-								))
+
+										(declare (assoc
+											dependent_queries_list
+												(if (get ac_feature_is_dependent_map ac_feature)
+													(call !ComputeDependentQueries (assoc
+														context_features react_context_features
+														context_values (unzip case_values_map react_context_features)
+														action_feature ac_feature
+													))
+													;else
+													(null)
+												)
+										))
+
+										(call !InterpolateAndComputeDiffToCase (assoc
+											feature ac_feature
+											case_feature_value (get case_values_map ac_feature)
+											feature_is_nominal (get ac_feature_is_nominal_map ac_feature)
+											feature_is_non_string_edit_distance (get ac_feature_is_non_string_edit_distance_map ac_feature)
+
+											output_categorical_action_probabilities .true
+											candidate_cases_lists
+												(if (= 0 (size react_context_features))
+													[[][][]]
+													(compute_on_contained_entities
+														(query_not_in_entity_list [(replace case_id)])
+														(if (get ignore_null_ac_features_map ac_feature) (query_not_equals ac_feature (null)))
+														(if (size context_condition_filter_query) context_condition_filter_query)
+														dependent_queries_list
+														time_series_filter_query
+														(query_nearest_generalized_distance
+															k_parameter
+															(replace react_context_features)
+															(replace (unzip case_values_map react_context_features))
+															p_parameter
+															feature_weights
+															!queryDistanceTypeMap
+															query_feature_attributes_map
+															feature_deviations
+															(null)
+															dt_parameter
+															(if valid_weight_feature weight_feature)
+															tie_break_random_seed
+															(null) ;radius
+															!numericalPrecision
+															ac_feature
+														)
+													)
+												)
+										))
+									))
+									value_robust_ac_features
+								)
 						))
 
-						;now to predict action_feature including value_robust_ac_feature
+						;now to predict action_feature including value_robust_ac_features
 						(assign (assoc
-							react_context_features (append robustly_selected_context_features value_robust_ac_feature)
+							react_context_features (append robustly_selected_context_features value_robust_ac_features)
 							categorical_action_probabilities_map (assoc)
 						))
 
@@ -830,7 +864,7 @@
 						)
 
 						(declare (assoc
-							with_ac_feature_action_diff
+							with_ac_features_action_diff
 								(call !InterpolateAndComputeDiffToCase (assoc
 									feature action_feature
 									output_categorical_action_probabilities .true
@@ -867,7 +901,7 @@
 								))
 						))
 
-						;now we must predict value_robust_ac_feature using context + action_feature
+						;now we must predict value_robust_ac_features using context + action_feature
 						(assign (assoc
 							react_context_features (append robustly_selected_context_features action_feature)
 							categorical_action_probabilities_map (assoc)
@@ -891,58 +925,77 @@
 							))
 						)
 
-						(if ac_feature_is_dependent
-							(assign (assoc
-								dependent_queries_list
-									(call !ComputeDependentQueries (assoc
-										context_features react_context_features
-										context_values (unzip case_values_map react_context_features)
-										action_feature value_robust_ac_feature
-									))
-							))
-						)
-
+						;predict and get the diff for each feature now that action is included as a context
 						(declare (assoc
-							with_action_feature_ac_feature_diff
-								(call !InterpolateAndComputeDiffToCase (assoc
-									feature value_robust_ac_feature
-									output_categorical_action_probabilities .true
-									case_feature_value (get case_values_map value_robust_ac_feature)
-
-									feature_is_nominal ac_feature_is_nominal
-									feature_is_non_string_edit_distance ac_feature_is_non_string_edit_distance
-
-									candidate_cases_lists
-										(compute_on_contained_entities
-											(query_not_in_entity_list [(replace case_id)])
-											(if ignore_null_ac_feature (query_not_equals value_robust_ac_feature (null)))
-											(if (size context_condition_filter_query) context_condition_filter_query)
-											dependent_queries_list
-											time_series_filter_query
-											(query_nearest_generalized_distance
-												k_parameter
-												(replace react_context_features)
-												(replace (unzip case_values_map react_context_features))
-												p_parameter
-												feature_weights
-												!queryDistanceTypeMap
-												query_feature_attributes_map
-												feature_deviations
-												(null)
-												dt_parameter
-												(if valid_weight_feature weight_feature)
-												tie_break_random_seed
-												(null) ;radius
-												!numericalPrecision
-												value_robust_ac_feature
-											)
+							with_action_ac_feature_diffs
+								(map
+									(lambda (let
+										(assoc
+											ac_feature (current_value 1)
 										)
-								))
+
+										(declare (assoc
+											dependent_queries_list
+												(if (get ac_feature_is_dependent_map ac_feature)
+													(call !ComputeDependentQueries (assoc
+														context_features react_context_features
+														context_values (unzip case_values_map react_context_features)
+														action_feature ac_feature
+													))
+													;else
+													(null)
+												)
+										))
+
+										(call !InterpolateAndComputeDiffToCase (assoc
+											feature ac_feature
+											case_feature_value (get case_values_map ac_feature)
+											feature_is_nominal (get ac_feature_is_nominal_map ac_feature)
+											feature_is_non_string_edit_distance (get ac_feature_is_non_string_edit_distance_map ac_feature)
+
+											output_categorical_action_probabilities .true
+											candidate_cases_lists
+												(if (= 0 (size react_context_features))
+													[[][][]]
+													(compute_on_contained_entities
+														(query_not_in_entity_list [(replace case_id)])
+														(if (get ignore_null_ac_features_map ac_feature) (query_not_equals ac_feature (null)))
+														(if (size context_condition_filter_query) context_condition_filter_query)
+														dependent_queries_list
+														time_series_filter_query
+														(query_nearest_generalized_distance
+															k_parameter
+															(replace react_context_features)
+															(replace (unzip case_values_map react_context_features))
+															p_parameter
+															feature_weights
+															!queryDistanceTypeMap
+															query_feature_attributes_map
+															feature_deviations
+															(null)
+															dt_parameter
+															(if valid_weight_feature weight_feature)
+															tie_break_random_seed
+															(null) ;radius
+															!numericalPrecision
+															ac_feature
+														)
+													)
+												)
+										))
+									))
+									value_robust_ac_features
+								)
 						))
 
 						(declare (assoc
-							ac_for_action_feature (- without_ac_feature_action_diff with_ac_feature_action_diff)
-							ac_for_ac_feature (- without_action_feature_ac_feature_diff with_action_feature_ac_feature_diff)
+							ac_for_action_feature (- without_ac_features_action_diff with_ac_features_action_diff)
+							acs_for_ac_features
+								(map
+									(lambda (apply "-" (current_value)))
+									without_action_ac_feature_diffs
+									with_action_ac_feature_diffs
+								)
 						))
 						(declare (assoc
 							action_feature_surprisal
@@ -956,25 +1009,33 @@
 									)
 									1.5
 								)
-							ac_feature_surprisal
-								(-
-									(/
-										(call !LK_metric_laplace (assoc
-											difference (max ac_for_ac_feature 0)
-											deviation (get robust_residuals_map value_robust_ac_feature)
-										))
-										(get robust_residuals_map value_robust_ac_feature)
+							ac_feature_surprisals
+								(map
+									(lambda
+										(-
+											(/
+												(call !LK_metric_laplace (assoc
+													difference (max (current_value 1) 0)
+													deviation (get robust_residuals_map (get value_robust_ac_features (current_index 1)))
+												))
+												(get robust_residuals_map (get value_robust_ac_features (current_index)))
+											)
+											1.5
+										)
 									)
-									1.5
+									acs_for_ac_features
 								)
 						))
 
-						(+ 12.3)
-						;output a pair of : [ AC for the feature, values ]
+						(declare (assoc
+							total_ac_feature_surprisal (apply "+" ac_feature_surprisals)
+						))
+						(+ 23.4)
+						;output a pair of : [ surprisal asymmetry for this case, values ]
 						[
 							(-
 								action_feature_surprisal
-								ac_feature_surprisal
+								total_ac_feature_surprisal
 							)
 							(unzip case_values_map value_robust_ac_features)
 						]
