@@ -49,6 +49,17 @@
 			p_parameter (get hyperparam_map "p")
 			dt_parameter (get hyperparam_map "dt")
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+			feature_deviations (get hyperparam_map "featureDeviations")
+			feature_weights (get hyperparam_map "featureWeights")
+
+			;used by pc to do feature weight rebalancing
+			all_feature_weights
+				(if compute_pc
+					(if (= (null) (get hyperparam_map "featureMdaMap"))
+						(get hyperparam_map "featureWeights")
+						(get hyperparam_map "featureMdaMap")
+					)
+				)
 
 			;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
 			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
@@ -57,11 +68,6 @@
 		(declare (assoc
 			enabled_num_features_probability_map (call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features num_features))
 			all_features_map (zip features)
-			feature_deviations (get hyperparam_map "featureDeviations")
-
-			;in order to compute PC for a continuous action feature, it needs interpolation to be separate from computing the diff to the actual value
-			;since diff is output as an absolute value
-			compute_pc_for_continuous (and compute_pc (not (or feature_is_nominal feature_is_edit_distance)))
 		))
 
 		;list of tuples of : [ AC, PC, directional PC, values ]
@@ -74,7 +80,6 @@
 							;map of feature -> value for all the case values
 							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
 							time_series_filter_query (list)
-							feature_weights (get hyperparam_map "featureWeights")
 							context_features context_features
 							categorical_action_probabilities_map (assoc)
 						)
@@ -145,49 +150,77 @@
 								(let
 									(assoc
 										interpolated_value
-											(call !InterpolateOrDeriveActionValues (assoc
-												feature action_feature
-												output_categorical_action_probabilities .true
-												candidate_cases_lists
-													(if (= 0 (size  react_context_features))
-														[[][][]]
-														(compute_on_contained_entities
-															(query_not_in_entity_list [(replace case_id)])
-															(if ignore_null_action_feature (query_not_equals action_feature (null)))
-															(if (size context_condition_filter_query) context_condition_filter_query)
-															dependent_queries_list
-															time_series_filter_query
-															(query_nearest_generalized_distance
-																k_parameter
-																(replace react_context_features)
-																(replace (unzip case_values_map react_context_features))
-																p_parameter
-																feature_weights
-																!queryDistanceTypeMap
-																query_feature_attributes_map
-																feature_deviations
-																(null)
-																dt_parameter
-																(if valid_weight_feature weight_feature)
-																tie_break_random_seed
-																(null) ;radius
-																!numericalPrecision
-																action_feature
+											(if compute_pc
+												(call !InterpolateOrDeriveActionValues (assoc
+													feature action_feature
+													output_categorical_action_probabilities .true
+													candidate_cases_lists
+														(if (= 0 (size  react_context_features))
+															[[][][]]
+															(compute_on_contained_entities
+																(query_not_in_entity_list [(replace case_id)])
+																(if ignore_null_action_feature (query_not_equals action_feature (null)))
+																(if (size context_condition_filter_query) context_condition_filter_query)
+																dependent_queries_list
+																time_series_filter_query
+																(query_nearest_generalized_distance
+																	k_parameter
+																	(replace react_context_features)
+																	(replace (unzip case_values_map react_context_features))
+																	p_parameter
+																	all_feature_weights
+																	!queryDistanceTypeMap
+																	query_feature_attributes_map
+																	feature_deviations
+																	;feature weight rebalancing feature
+																	action_feature
+																	dt_parameter
+																	(if valid_weight_feature weight_feature)
+																	tie_break_random_seed
+																	(null) ;radius
+																	!numericalPrecision
+																	action_feature
+																)
 															)
 														)
-													)
-											))
-									)
-
-									(declare (assoc
-										diff
-											(if (or compute_ac feature_is_nominal feature_is_edit_distance)
-												(call !InterpolateAndComputeDiffToCase (assoc
-													feature action_feature
-													interpolated_value interpolated_value
 												))
 											)
-									))
+										diff
+											(if compute_ac
+												(call !InterpolateAndComputeDiffToCase (assoc
+													feature action_feature
+													output_categorical_action_probabilities .true
+													candidate_cases_lists
+														(if (= 0 (size  react_context_features))
+															[[][][]]
+															(compute_on_contained_entities
+																(query_not_in_entity_list [(replace case_id)])
+																(if ignore_null_action_feature (query_not_equals action_feature (null)))
+																(if (size context_condition_filter_query) context_condition_filter_query)
+																dependent_queries_list
+																time_series_filter_query
+																(query_nearest_generalized_distance
+																	k_parameter
+																	(replace react_context_features)
+																	(replace (unzip case_values_map react_context_features))
+																	p_parameter
+																	feature_weights
+																	!queryDistanceTypeMap
+																	query_feature_attributes_map
+																	feature_deviations
+																	(null)
+																	dt_parameter
+																	(if valid_weight_feature weight_feature)
+																	tie_break_random_seed
+																	(null) ;radius
+																	!numericalPrecision
+																	action_feature
+																)
+															)
+														)
+												))
+											)
+									)
 
 									[
 										diff
@@ -242,46 +275,71 @@
 								(let
 									(assoc
 										interpolated_value
-											(call !InterpolateOrDeriveActionValues (assoc
-												feature action_feature
-												output_categorical_action_probabilities .true
-												candidate_cases_lists
-													(compute_on_contained_entities
-														(query_not_in_entity_list [(replace case_id)])
-														(if ignore_null_action_feature (query_not_equals action_feature (null)))
-														(if (size context_condition_filter_query) context_condition_filter_query)
-														dependent_queries_list
-														time_series_filter_query
-														(query_nearest_generalized_distance
-															k_parameter
-															(replace react_context_features)
-															(replace (unzip case_values_map react_context_features))
-															p_parameter
-															feature_weights
-															!queryDistanceTypeMap
-															query_feature_attributes_map
-															feature_deviations
-															(null)
-															dt_parameter
-															(if valid_weight_feature weight_feature)
-															tie_break_random_seed
-															(null) ;radius
-															!numericalPrecision
-															action_feature
-														)
-													)
-											))
-									)
-
-									(declare (assoc
-										diff
-											(if (or compute_ac feature_is_nominal feature_is_edit_distance)
-												(call !InterpolateAndComputeDiffToCase (assoc
+											(if compute_pc
+												(call !InterpolateOrDeriveActionValues (assoc
 													feature action_feature
-													interpolated_value interpolated_value
+													output_categorical_action_probabilities .true
+													candidate_cases_lists
+														(compute_on_contained_entities
+															(query_not_in_entity_list [(replace case_id)])
+															(if ignore_null_action_feature (query_not_equals action_feature (null)))
+															(if (size context_condition_filter_query) context_condition_filter_query)
+															dependent_queries_list
+															time_series_filter_query
+															(query_nearest_generalized_distance
+																k_parameter
+																(replace react_context_features)
+																(replace (unzip case_values_map react_context_features))
+																p_parameter
+																all_feature_weights
+																!queryDistanceTypeMap
+																query_feature_attributes_map
+																feature_deviations
+																;feature weight rebalancing
+																action_feature
+																dt_parameter
+																(if valid_weight_feature weight_feature)
+																tie_break_random_seed
+																(null) ;radius
+																!numericalPrecision
+																action_feature
+															)
+														)
 												))
 											)
-									))
+										diff
+											(if compute_ac
+												(call !InterpolateAndComputeDiffToCase (assoc
+													feature action_feature
+													output_categorical_action_probabilities .true
+													candidate_cases_lists
+														(compute_on_contained_entities
+															(query_not_in_entity_list [(replace case_id)])
+															(if ignore_null_action_feature (query_not_equals action_feature (null)))
+															(if (size context_condition_filter_query) context_condition_filter_query)
+															dependent_queries_list
+															time_series_filter_query
+															(query_nearest_generalized_distance
+																k_parameter
+																(replace react_context_features)
+																(replace (unzip case_values_map react_context_features))
+																p_parameter
+																feature_weights
+																!queryDistanceTypeMap
+																query_feature_attributes_map
+																feature_deviations
+																(null)
+																dt_parameter
+																(if valid_weight_feature weight_feature)
+																tie_break_random_seed
+																(null) ;radius
+																!numericalPrecision
+																action_feature
+															)
+														)
+												))
+											)
+									)
 
 									[
 										diff
