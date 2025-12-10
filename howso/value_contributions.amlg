@@ -12,7 +12,7 @@
 
 		(declare (assoc
 			context_features (filter (lambda (not (contains_value (append action_feature value_robust_contributions_features) (current_value)))) features)
-			case_features (values (append features (if !tsTimeFeature [".series_index"] [])) .true)
+			case_features (values (append features action_feature value_robust_contributions_features (if !tsTimeFeature [".series_index"] [])) .true)
 		))
 
 		(declare (assoc
@@ -512,19 +512,28 @@
 
 						;matching_ac_pc_tuples will be empty if this feature_values did not appear in the dataset (or no reacts were registered using them),
 						;of so, output null so it can be filtered out later
-						(if (size matching_ac_pc_tuples)
+						(if (>= (size matching_ac_pc_tuples) value_robust_contributions_min_samples)
 							[
 								;output AC for this combination of feature_values
 								(if compute_ac
-									(generalized_mean (map (lambda (first (current_value))) matching_ac_pc_tuples))
+									(*
+										(generalized_mean (map (lambda (first (current_value))) matching_ac_pc_tuples))
+										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+									)
 								)
 								;output PC for this combination of feature_values
 								(if compute_pc
-									(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
+									(*
+										(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
+										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+									)
 								)
 								;output directional PC for this combination of feature_values
 								(if compute_pc
-									(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
+									(*
+										(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
+										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+									)
 								)
 							]
 						)
@@ -1290,67 +1299,79 @@
 					(lambda (let
 						(assoc feature_values (current_value 1))
 
-						;output AC for the feature_values
-						(generalized_mean (map
-							(lambda (first (current_value)))
-							;filter case acs by the unique feature values
-							(if has_multiple_features
-								(filter
-									(lambda
-										(apply "and" (map
-											(lambda (let
-												(assoc ac_feature (get value_robust_contributions_features (current_index 1)) )
-												;nominal must match exactly
-												(if (contains_index !nominalsMap ac_feature)
-													(= (first (current_value)) (last (current_value)))
+						(declare (assoc
+							matching_value_asymmetry_pairs
+								;filter case acs by the unique feature values
+								(if has_multiple_features
+									(filter
+										(lambda
+											(apply "and" (map
+												(lambda (let
+													(assoc ac_feature (get value_robust_contributions_features (current_index 1)) )
+													;nominal must match exactly
+													(if (contains_index !nominalsMap ac_feature)
+														(= (first (current_value)) (last (current_value)))
 
-													;else continuous values will be a pair of [min max] for a value to fall between
-													(and
-														(<=
-															(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 0])
-															(last (current_value))
-														)
-														(>=
-															(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 1])
-															(last (current_value))
+														;else continuous values will be a pair of [min max] for a value to fall between
+														(and
+															(<=
+																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 0])
+																(last (current_value))
+															)
+															(>=
+																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 1])
+																(last (current_value))
+															)
 														)
 													)
-												)
+												))
+												;grab the values to filter by
+												feature_values
+												;grab the values for this case's ac
+												(last (current_value))
 											))
-											;grab the values to filter by
-											feature_values
-											;grab the values for this case's ac
-											(last (current_value))
-										))
-									)
-									case_surprisal_asymmetries
-								)
-
-								;same code but optimized for the one current feature
-								(let
-									(assoc value (first feature_values))
-									(if ac_feature_is_continuous
-										(filter
-											(lambda (and
-												;continuous values will be a pair of [min max] for a value to fall between
-												(<= (get ac_feature_bucket_map [value 0]) (get (current_value) [1 0]) )
-												(>= (get ac_feature_bucket_map [value 1]) (get (current_value) [1 0]) )
-											))
-											case_surprisal_asymmetries
 										)
+										case_surprisal_asymmetries
+									)
 
-										;else if current feature is nominal
-										(filter
-											(lambda
-												;must match current nominal value exactly
-												(= value (get (current_value) [1 0]) )
+									;same code but optimized for the one current feature
+									(let
+										(assoc value (first feature_values))
+										(if ac_feature_is_continuous
+											(filter
+												(lambda (and
+													;continuous values will be a pair of [min max] for a value to fall between
+													(<= (get ac_feature_bucket_map [value 0]) (get (current_value) [1 0]) )
+													(>= (get ac_feature_bucket_map [value 1]) (get (current_value) [1 0]) )
+												))
+												case_surprisal_asymmetries
 											)
-											case_surprisal_asymmetries
+
+											;else if current feature is nominal
+											(filter
+												(lambda
+													;must match current nominal value exactly
+													(= value (get (current_value) [1 0]) )
+												)
+												case_surprisal_asymmetries
+											)
 										)
 									)
 								)
-							)
 						))
+
+						(if (>= (size matching_value_asymmetry_pairs) value_robust_contributions_min_samples)
+							(*
+								(generalized_mean (map
+									(lambda (first (current_value)))
+									matching_value_asymmetry_pairs
+								))
+								(/ (size matching_value_asymmetry_pairs) (size case_surprisal_asymmetries))
+							)
+
+							;else return null if not enough samples
+							(null)
+						)
 					))
 					all_unique_value_combinations
 				)
