@@ -594,18 +594,6 @@
 			pre_reduce_num_cases (call !GetNumTrainingCases)
 		))
 
-		;Also ensure that we have all influence weight entropies and that they are up-to-date
-		(declare (assoc
-			;store a map of case id -> "duplicate"/"too_far_for_removal"/"near_duplicate" for any duplicate cases or cases that should not be removed because they are too far
-			case_duplicate_or_far_map
-				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-					features features
-					weight_feature distribute_weight_feature
-					use_case_weights .true
-					compute_all .true
-				))
-		))
-
 		(if thresholds_enabled
 			(assign (assoc
 				prev_prediction_stats_map
@@ -619,50 +607,145 @@
 					)
 			))
 		)
-
-		;if this dataset has duplicates merge them all here first and recompute weight entropies for their remaining representative non-duplicates
 		(declare (assoc
-			all_duplicate_cases_map (filter (lambda (= "duplicate" (current_value))) case_duplicate_or_far_map)
+			all_cases_neighbors_map
+				||(map
+					(lambda (compute_on_contained_entities
+						(query_not_in_entity_list [(current_index 1)])
+						(query_nearest_generalized_distance
+							closest_k
+							features
+							(current_index)
+							p_parameter
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							feature_deviations
+							(null)
+							dt_parameter
+							(if use_case_weights weight_feature)
+							(rand)
+							(null) ;radius
+							!numericalPrecision
+						)
+					))
+					(zip (call !AllCases))
+				)
 		))
-		(if (size all_duplicate_cases_map)
-			(call !ReduceMergeDuplicateCases)
-		)
+
+		;assoc of case -> num cases referencing the case
+		(declare (assoc
+			reference_influence_map
+				||(map
+					(lambda
+						(size (filter
+							(lambda (contains_index (current_value) (current_index 1)))
+							all_cases_neighbors_map
+						))
+					)
+					all_cases_neighbors_map
+				)
+			end_index (- (size all_cases_neighbors_map) 1)
+
+			; approximate_num_cases_to_keep
+			; 	(if (> !postReduceMaxCases !autoAblationMinNumCases)
+			; 		(/ (+ !postReduceMaxCases !autoAblationMinNumCases) 2)
+			; 		!autoAblationMinNumCases
+			; 	)
+		))
+
+		; (declare (assoc
+		; 	avg_case_influence
+		; 		(quantile
+		; 			reference_influence_map
+		; 			; eg: 0.75'th quantile, if a quarter of cases should remain
+		; 			;round up to the hundredth so .74394 -> .75
+		; 			(/
+		; 				(ceil (*
+		; 					100
+		; 					(/
+		; 						(- (size reference_influence_map) approximate_num_cases_to_keep)
+		; 						(size reference_influence_map)
+		; 					)
+		; 				))
+		; 				100
+		; 			)
+		; 		)
+		; ))
 
 		(declare (assoc
-			cases_too_far_for_removal (indices (filter (lambda (= "too_far_for_removal" (current_value))) case_duplicate_or_far_map))
-			near_duplicate_cases (indices (filter (lambda (= "near_duplicate" (current_value))) case_duplicate_or_far_map))
+			; removable_cases_map
+			; 	(filter
+			; 		(lambda (< (current_value) avg_case_influence))
+			; 		reference_influence_map
+			; 	)
+			random_cases .false
 		))
-		;remove and redistribute the near_duplicate cases' weights
-		(if (size near_duplicate_cases)
-			(call !RemoveCases (assoc
-				cases near_duplicate_cases
-				distribute_weight_feature distribute_weight_feature
-			))
-		)
+		(declare (assoc
+			sorted_removable_cases
+				;sort in descending order of influence
+				; (sort
+				; 	(lambda (> (get removable_cases_map (current_value 1)) (get removable_cases_map (current_value))))
+				; 	(indices removable_cases_map)
+				; )
+
+				(sort
+					(lambda (> (get reference_influence_map (current_value 1)) (get reference_influence_map (current_value))))
+					(indices reference_influence_map)
+				)
+		))
+
+		(print "num removable: " (size sorted_removable_cases) "\n")
 
 		;Begin looping on data removal. The ultimate end condition is if the dataset gets too small
 		; to continue removing cases. Removes cases with relatively high influence weight entropy, i.e., cases with equidistant neighbors.
 		(while (< !autoAblationMinNumCases (call !GetNumTrainingCases))
 			(assign (assoc
-				max_influence_weight_entropy_to_keep
-					(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-						influence_weight_entropy_threshold influence_weight_entropy_threshold
-						weight_feature distribute_weight_feature
-					))
-			))
-			(assign (assoc
 				cases
-					(contained_entities
-						;ignore cases that have been determined to be too far for removal
-						(query_not_in_entity_list cases_too_far_for_removal)
-						(query_greater_or_equal_to !internalLabelInfluenceWeightEntropy max_influence_weight_entropy_to_keep)
-						;grab the largest entropy values of specified batch_size number of cases
-						(query_max !internalLabelInfluenceWeightEntropy
-							(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
-							.true
+					(if (size sorted_removable_cases)
+						;grab the cases with the least influences
+						; (tail
+						; 	sorted_removable_cases
+						; 	(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
+						; )
+						(unzip
+							sorted_removable_cases
+							(range
+								(- end_index (min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases)) -1)
+								end_index
+							)
+						)
+
+						;else select random cases
+						(contained_entities
+							(query_exists distribute_weight_feature)
+							(query_select
+								(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
+								(null)
+								(rand)
+							)
 						)
 					)
 			))
+
+			(if end_index ;(size sorted_removable_cases)
+				(seq
+					; (assign (assoc
+					; 	;remove cases from the end
+					; 	sorted_removable_cases (trunc sorted_removable_cases (- (size cases)))
+					; ))
+					(assign (assoc
+						end_index (- end_index (min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases)))
+					))
+					(print "remaining removable: " (+ 1 end_index) " removing: " (size cases) "\n")
+				)
+
+				;else no more removable cases left, remove random cases
+				(seq
+					(print "Randomly selected: " (size cases) "\n")
+					(assign (assoc random_cases .true))
+				)
+			)
 
 			(if !tsTimeFeature
 				;do not remove first (.series_index == 0) or last (.reverse_series_index == 0) cases for any series
@@ -724,59 +807,9 @@
 				(<= (call !GetNumTrainingCases) !postReduceMaxCases)
 				(conclude)
 
-				;else no cases left to remove even though the desired dataset size has not been reached yet
-				;if the number of these these "too far" cases is bigger than the dataset, some of them must be removed
-				;clear out the list so the next iteration can ignore it
-				(<= (call !GetNumTrainingCases) (size cases_too_far_for_removal))
-				(assign (assoc cases_too_far_for_removal [] ))
-
-				;else recompute all the influence entropies since dataset has been updated
-				(let
-					(assoc
-						;number of cases that were supposed to be removed during this iteration
-						num_cases_to_remove (min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
-					)
-					(assign (assoc
-						case_duplicate_or_far_map
-							(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-								features features
-								weight_feature distribute_weight_feature
-								use_case_weights .true
-								compute_all .true
-							))
-					))
-					(assign (assoc
-						cases_too_far_for_removal (indices (filter (lambda (= "too_far_for_removal" (current_value))) case_duplicate_or_far_map))
-						near_duplicate_cases (indices (filter (lambda (= "near_duplicate" (current_value))) case_duplicate_or_far_map))
-					))
-
-					;remove the new near duplicates here
-					(if (size near_duplicate_cases)
-						;if there were fewer cases that needed to be removed than there are near duplicates, select some near duplicates to remove
-						(if (> (size near_duplicate_cases) num_cases_to_remove)
-							(call !RemoveCases (assoc
-								cases (rand near_duplicate_cases num_cases_to_remove .true)
-								distribute_weight_feature distribute_weight_feature
-							))
-
-							;else remove all near duplicates
-							(call !RemoveCases (assoc
-								cases near_duplicate_cases
-								distribute_weight_feature distribute_weight_feature
-							))
-						)
-
-						;else if the entropy value to keep hasn't changed since the recomputation, nothing has changed, can stop iteration
-						(=
-							max_influence_weight_entropy_to_keep
-							(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-								influence_weight_entropy_threshold influence_weight_entropy_threshold
-								weight_feature distribute_weight_feature
-							))
-						)
-						(conclude)
-					)
-				)
+				;couldn't select any from random cases, stop
+				(and random_cases (= 0 end_index))
+				(conclude)
 			)
 		)
 
