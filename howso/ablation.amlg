@@ -607,107 +607,125 @@
 					)
 			))
 		)
+
+(declare (assoc st (system_time) ))
 		(declare (assoc
+			;assoc of case -> (assoc of neighbor case -> normalized influence )
 			all_cases_neighbors_map
 				||(map
-					(lambda (compute_on_contained_entities
-						(query_not_in_entity_list [(current_index 1)])
-						(query_nearest_generalized_distance
-							closest_k
-							features
-							(current_index)
-							p_parameter
-							feature_weights
-							!queryDistanceTypeMap
-							query_feature_attributes_map
-							feature_deviations
-							(null)
-							dt_parameter
-							(if use_case_weights weight_feature)
-							(rand)
-							(null) ;radius
-							!numericalPrecision
+					(lambda (normalize
+						(compute_on_contained_entities
+							(query_not_in_entity_list [(current_index 1)])
+							(query_nearest_generalized_distance
+								closest_k
+								features
+								(current_index)
+								p_parameter
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								(null)
+								dt_parameter
+								(if use_case_weights weight_feature)
+								(rand)
+								(null) ;radius
+								!numericalPrecision
+							)
 						)
 					))
 					(zip (call !AllCases))
 				)
 		))
-
-		;assoc of case -> num cases referencing the case
+(print "\nquery: " (- (system_time) st) "\n")
+(assign (assoc st (system_time) ))
 		(declare (assoc
-			reference_influence_map
+			all_references_map
 				||(map
 					(lambda
-						(size (filter
-							(lambda (contains_index (current_value) (current_index 1)))
-							all_cases_neighbors_map
-						))
+						(map
+							(lambda (get (current_value) (current_index 1)) )
+							;keep only those cases that reference this case (current_index 1) as one of their nearest
+							(filter
+								(lambda (contains_index (current_value ) (current_index 1)))
+								all_cases_neighbors_map
+							)
+						)
 					)
 					all_cases_neighbors_map
 				)
+		))
+(print "reference map: " (- (system_time) st) "\n")
+
+		(declare (assoc
+			reference_influence_map
+				;assoc of case -> total normalized influence referencing it
+				(map
+					(lambda
+						(or (apply "+" (values (current_value))))
+					)
+					all_references_map
+				)
+
+			;sort from highest to lowest influence, and remove from the end of the list
 			end_index (- (size all_cases_neighbors_map) 1)
 
-			; approximate_num_cases_to_keep
-			; 	(if (> !postReduceMaxCases !autoAblationMinNumCases)
-			; 		(/ (+ !postReduceMaxCases !autoAblationMinNumCases) 2)
-			; 		!autoAblationMinNumCases
-			; 	)
+			approximate_num_cases_to_keep
+				(if (> !postReduceMaxCases !autoAblationMinNumCases)
+					(/ (+ !postReduceMaxCases !autoAblationMinNumCases) 2)
+					!autoAblationMinNumCases
+				)
 		))
 
-		; (declare (assoc
-		; 	avg_case_influence
-		; 		(quantile
-		; 			reference_influence_map
-		; 			; eg: 0.75'th quantile, if a quarter of cases should remain
-		; 			;round up to the hundredth so .74394 -> .75
-		; 			(/
-		; 				(ceil (*
-		; 					100
-		; 					(/
-		; 						(- (size reference_influence_map) approximate_num_cases_to_keep)
-		; 						(size reference_influence_map)
-		; 					)
-		; 				))
-		; 				100
-		; 			)
-		; 		)
-		; ))
-
 		(declare (assoc
-			; removable_cases_map
-			; 	(filter
-			; 		(lambda (< (current_value) avg_case_influence))
-			; 		reference_influence_map
-			; 	)
+			reduction_influence_quantile_cutoff
+				(quantile
+					reference_influence_map
+					; eg: 0.75'th quantile, if a quarter of cases should remain
+					;round up to the hundredth and add one percent so that should be enough cases selected to match the amount necessary
+					; a computed value of  .74394 -> 0.75 + 0.1 = 0.76
+					(/
+						(+ 1
+							(ceil (*
+								100
+								(/
+									(- (size reference_influence_map) approximate_num_cases_to_keep)
+									(size reference_influence_map)
+								)
+							))
+						)
+						100
+					)
+				)
+		))
+		;plan to only remove cases whose total influence is less than reduction_influence_quantile_cutoff
+		;i.e., only the necessary non-popular cases that aren't referenced by others as much,
+		(assign (assoc
+			reference_influence_map
+				(filter
+					(lambda (< (current_value) reduction_influence_quantile_cutoff))
+					reference_influence_map
+				)
+		))
+		(declare (assoc
 			random_cases .false
-		))
-		(declare (assoc
 			sorted_removable_cases
-				;sort in descending order of influence
-				; (sort
-				; 	(lambda (> (get removable_cases_map (current_value 1)) (get removable_cases_map (current_value))))
-				; 	(indices removable_cases_map)
-				; )
-
+				;sort in descending order of influence, and remove from the end of this sorted list
 				(sort
 					(lambda (> (get reference_influence_map (current_value 1)) (get reference_influence_map (current_value))))
 					(indices reference_influence_map)
 				)
 		))
 
-		(print "num removable: " (size sorted_removable_cases) "\n")
+(print "num removable: " (size sorted_removable_cases) "\n")
 
 		;Begin looping on data removal. The ultimate end condition is if the dataset gets too small
 		; to continue removing cases. Removes cases with relatively high influence weight entropy, i.e., cases with equidistant neighbors.
 		(while (< !autoAblationMinNumCases (call !GetNumTrainingCases))
 			(assign (assoc
 				cases
-					(if (size sorted_removable_cases)
-						;grab the cases with the least influences
-						; (tail
-						; 	sorted_removable_cases
-						; 	(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
-						; )
+					(if end_index
+						;grab the cases from the end, with the least influences
 						(unzip
 							sorted_removable_cases
 							(range
@@ -728,23 +746,15 @@
 					)
 			))
 
-			(if end_index ;(size sorted_removable_cases)
+			(if end_index
 				(seq
-					; (assign (assoc
-					; 	;remove cases from the end
-					; 	sorted_removable_cases (trunc sorted_removable_cases (- (size cases)))
-					; ))
-					(assign (assoc
-						end_index (- end_index (min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases)))
-					))
-					(print "remaining removable: " (+ 1 end_index) " removing: " (size cases) "\n")
+					;update end index to account for the cases about to be removed
+					(assign (assoc end_index (- end_index (size cases)) ))
+(print "remaining removable: " (+ 1 end_index) " after removing: " (size cases) "\n")
 				)
 
 				;else no more removable cases left, remove random cases
-				(seq
-					(print "Randomly selected: " (size cases) "\n")
-					(assign (assoc random_cases .true))
-				)
+				(assign (assoc random_cases .true))
 			)
 
 			(if !tsTimeFeature
