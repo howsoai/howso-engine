@@ -610,36 +610,40 @@
 
 (declare (assoc st (system_time) ))
 		(declare (assoc
-			;assoc of case -> (assoc of neighbor case -> normalized influence )
+			;assoc of case -> { neighbor case -> normalized influence }
 			all_cases_neighbors_map
 				||(map
-					(lambda (normalize
-						(compute_on_contained_entities
-							(query_not_in_entity_list [(current_index 1)])
-							(query_nearest_generalized_distance
-								closest_k
-								features
-								(current_index)
-								p_parameter
-								feature_weights
-								!queryDistanceTypeMap
-								query_feature_attributes_map
-								feature_deviations
-								(null)
-								dt_parameter
-								(if use_case_weights weight_feature)
-								(rand)
-								(null) ;radius
-								!numericalPrecision
+					(lambda
+						;normalize the assoc of case -> influence
+						(normalize
+							(compute_on_contained_entities
+								(query_not_in_entity_list [(current_index 1)])
+								(query_nearest_generalized_distance
+									closest_k
+									features
+									(current_index)
+									p_parameter
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									(null)
+									dt_parameter
+									(if use_case_weights weight_feature)
+									(rand)
+									(null) ;radius
+									!numericalPrecision
+								)
 							)
 						)
-					))
+					)
 					(zip (call !AllCases))
 				)
 		))
 (print "\nquery: " (- (system_time) st) "\n")
 (assign (assoc st (system_time) ))
 		(declare (assoc
+			;assoc of case -> { referencing neighbor -> influence of case }
 			all_references_map
 				||(map
 					(lambda
@@ -657,9 +661,10 @@
 		))
 (print "reference map: " (- (system_time) st) "\n")
 
+		;'popularity' is the total referencing normalized influence
 		(declare (assoc
-			reference_influence_map
-				;assoc of case -> total normalized influence referencing it
+			case_popularity_map
+				;assoc of case -> popularity (total normalized influence of all neighbors that referenced it)
 				(map
 					(lambda
 						(or (apply "+" (values (current_value))))
@@ -667,53 +672,56 @@
 					all_references_map
 				)
 
-			;sort from highest to lowest influence, and remove from the end of the list
-			end_index (- (size all_cases_neighbors_map) 1)
-
+			;reduction will stop within batch_size of !postReduceMaxCases, so if the gap between
+			;!postReduceMaxCases and !autoAblationMinNumCases (max and min) cases is larger than batch_size,
+			;the number of cases that need to be kept is approximately: max - batch_size, but can't be less than min.
 			approximate_num_cases_to_keep
-				(if (> !postReduceMaxCases !autoAblationMinNumCases)
-					(/ (+ !postReduceMaxCases !autoAblationMinNumCases) 2)
+				(if (> (- !postReduceMaxCases batch_size) !autoAblationMinNumCases)
+					(- !postReduceMaxCases batch_size)
 					!autoAblationMinNumCases
 				)
+			num_cases (size all_cases_neighbors_map)
 		))
 
+		;cases with a popularity less than this this cutoff value should be removed
 		(declare (assoc
-			reduction_influence_quantile_cutoff
+			reduction_popularity_cutoff
 				(quantile
-					reference_influence_map
-					; eg: 0.75'th quantile, if a quarter of cases should remain
-					;round up to the hundredth and add one percent so that should be enough cases selected to match the amount necessary
-					; a computed value of  .74394 -> 0.75 + 0.1 = 0.76
+					case_popularity_map
+					;example: if the approximate number of cases that should remain is 20000 out of a dataset of 80000, that's a quarter of cases
+					;add one percent so that should be enough cases selected to match the amount needed to be removed
+					; a computed value of .74394 + 0.1 = 0.75395
 					(/
-						(+ 1
-							(ceil (*
+						(+
+							1
+							(*
 								100
-								(/
-									(- (size reference_influence_map) approximate_num_cases_to_keep)
-									(size reference_influence_map)
-								)
-							))
+								(/ (- num_cases approximate_num_cases_to_keep) num_cases)
+							)
 						)
 						100
 					)
 				)
+
+			;list will be sorted from highest to lowest, thus cases removed from the end of the list
+			end_index (- num_cases 1)
 		))
-		;plan to only remove cases whose total influence is less than reduction_influence_quantile_cutoff
-		;i.e., only the necessary non-popular cases that aren't referenced by others as much,
+		;plan to only remove cases whose popularity is less than reduction_popularity_cutoff
+		;i.e., only remove the non-popular cases that aren't referenced by others as much
 		(assign (assoc
-			reference_influence_map
+			case_popularity_map
 				(filter
-					(lambda (< (current_value) reduction_influence_quantile_cutoff))
-					reference_influence_map
+					(lambda (< (current_value) reduction_popularity_cutoff))
+					case_popularity_map
 				)
 		))
 		(declare (assoc
 			random_cases .false
 			sorted_removable_cases
-				;sort in descending order of influence, and remove from the end of this sorted list
+				;sort in descending order, and remove from the end of this sorted list
 				(sort
-					(lambda (> (get reference_influence_map (current_value 1)) (get reference_influence_map (current_value))))
-					(indices reference_influence_map)
+					(lambda (> (get case_popularity_map (current_value 1)) (get case_popularity_map (current_value))))
+					(indices case_popularity_map)
 				)
 		))
 
@@ -725,7 +733,7 @@
 			(assign (assoc
 				cases
 					(if end_index
-						;grab the cases from the end, with the least influences
+						;grab the cases from the end, with the smallest values
 						(unzip
 							sorted_removable_cases
 							(range
@@ -832,15 +840,6 @@
 			))
 		)
 
-		(declare (assoc
-			quantile_value
-				(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-					influence_weight_entropy_threshold influence_weight_entropy_threshold
-					weight_feature distribute_weight_feature
-				))
-		))
-
-		(assign_to_entities (assoc !autoAblationMaxInfluenceWeightEntropy quantile_value ))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return (assoc payload output))
 	)
