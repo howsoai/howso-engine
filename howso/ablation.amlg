@@ -591,7 +591,16 @@
 			feature_weights (get hyperparam_map "featureWeights")
 			feature_deviations (get hyperparam_map "featureDeviations")
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
-			pre_reduce_num_cases (call !GetNumTrainingCases)
+			num_cases (call !GetNumTrainingCases)
+
+			;reduction will stop within batch_size of reduce_max_cases, so if the gap between
+			;reduce_max_cases and !autoAblationMinNumCases (max and min) cases is larger than batch_size,
+			;the number of cases that need to be kept is approximately: max - batch_size, but can't be less than min.
+			approximate_num_cases_to_keep
+				(if (> (- reduce_max_cases batch_size) !autoAblationMinNumCases)
+					(- reduce_max_cases batch_size)
+					!autoAblationMinNumCases
+				)
 		))
 
 		(if thresholds_enabled
@@ -608,144 +617,80 @@
 			))
 		)
 
+		;pair of cases and associated sorted popularities (total normalized influence of all neighbors that referenced it)
 		(declare (assoc
-			;assoc of case -> { neighbor case -> normalized influence }
-			all_cases_normalized_neighbors_map
-				||(map
-					(lambda (let
-						(assoc case_weight (retrieve_from_entity (current_index 1) distribute_weight_feature) )
+			case_popularity_pair
+				(compute_on_contained_entities
+					(query_exists !internalLabelSession)
+					||(query_entity_cumulative_nearest_entity_weights
+						closest_k
+						features
+						(null) ;all cases
+						p_parameter
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						feature_deviations
+						(null)
+						dt_parameter
+						distribute_weight_feature
+						(rand)
+						(null) ;radius
+						!numericalPrecision
+						.true
+					)
+				)
+		))
 
-						(if (> case_weight 1)
-							;multiply the normalized weight by case_weight
-							(map
-								(lambda (* (current_value) case_weight))
-								(normalize (compute_on_contained_entities
-									(query_not_in_entity_list [(current_index 1)])
-									(query_nearest_generalized_distance
-										closest_k
-										features
-										(current_index)
-										p_parameter
-										feature_weights
-										!queryDistanceTypeMap
-										query_feature_attributes_map
-										feature_deviations
-										(null)
-										dt_parameter
-										distribute_weight_feature
-										(rand)
-										(null) ;radius
-										!numericalPrecision
-									)
-								))
-							)
-
-							;normalize the assoc of case -> influence
-							(normalize (compute_on_contained_entities
-								(query_not_in_entity_list [(current_index 1)])
-								(query_nearest_generalized_distance
-									closest_k
-									features
-									(current_index)
-									p_parameter
-									feature_weights
-									!queryDistanceTypeMap
-									query_feature_attributes_map
-									feature_deviations
-									(null)
-									dt_parameter
-									distribute_weight_feature
-									(rand)
-									(null) ;radius
-									!numericalPrecision
-								)
-							))
-						)
-					))
+		;all the cases that were not returned in the pair above have 0 popularity (no other cases reference them)
+		(declare (assoc
+			zero_popularity_neighbors
+				(indices (remove
 					(zip (call !AllCases))
-				)
-		))
-
-		(declare (assoc
-			;assoc of case -> { referencing neighbor -> influence of case }
-			all_references_map
-				||(map
-					(lambda
-						(map
-							(lambda (get (current_value) (current_index 1)) )
-							;keep only those cases that reference this case (current_index 1) as one of their nearest
-							(filter
-								(lambda (contains_index (current_value ) (current_index 1)))
-								all_cases_normalized_neighbors_map
-							)
-						)
-					)
-					all_cases_normalized_neighbors_map
-				)
-		))
-
-		;'popularity' is the total referencing normalized influence
-		(declare (assoc
-			case_popularity_map
-				;assoc of case -> popularity (total normalized influence of all neighbors that referenced it)
-				(map
-					(lambda
-						(or (apply "+" (values (current_value))))
-					)
-					all_references_map
-				)
-
-			;reduction will stop within batch_size of reduce_max_cases, so if the gap between
-			;reduce_max_cases and !autoAblationMinNumCases (max and min) cases is larger than batch_size,
-			;the number of cases that need to be kept is approximately: max - batch_size, but can't be less than min.
-			approximate_num_cases_to_keep
-				(if (> (- reduce_max_cases batch_size) !autoAblationMinNumCases)
-					(- reduce_max_cases batch_size)
-					!autoAblationMinNumCases
-				)
-			num_cases (size all_cases_normalized_neighbors_map)
+					(first case_popularity_pair)
+				))
 		))
 
 		;cases with a popularity less than this this cutoff value should be removed
 		(declare (assoc
 			reduction_popularity_cutoff
 				(quantile
-					case_popularity_map
-					;example: if the approximate number of cases that should remain is 20000 out of a dataset of 80000, that's a quarter of cases
+					(append
+						(last case_popularity_pair)
+						(range 0 1 (size zero_popularity_neighbors) 1)
+					)
+					;example: if the number of cases that should remain is 20000 out of a dataset of 78107, that's approximately a quarter of cases
 					;add one percent so that should be enough cases selected to match the amount needed to be removed
-					; a computed value of .74394 + 0.1 = 0.75395
-					(/
-						(+
-							1
-							(*
-								100
-								(/ (- num_cases approximate_num_cases_to_keep) num_cases)
-							)
-						)
-						100
+					; a computed value of .74394 + 0.01 = 0.75395
+					(+
+						(/ (- num_cases approximate_num_cases_to_keep) num_cases)
+						0.01
 					)
 				)
 		))
 		;plan to only remove cases whose popularity is less than reduction_popularity_cutoff
 		;i.e., only remove the non-popular cases that aren't referenced by others as much
-		(assign (assoc
-			case_popularity_map
-				(filter
+		(declare (assoc
+			num_removal_eligible_cases
+				(size (filter
 					(lambda (< (current_value) reduction_popularity_cutoff))
-					case_popularity_map
-				)
+					(last case_popularity_pair)
+				))
 		))
 		(declare (assoc
-			;list will be sorted from highest to lowest, thus cases removed from the end of the list
-			end_index (- (size case_popularity_map) 1)
-			random_cases .false
-
-			sorted_removable_cases
-				;sort in descending order, and remove from the end of this sorted list
-				(sort
-					(lambda (> (get case_popularity_map (current_value 1)) (get case_popularity_map (current_value))))
-					(indices case_popularity_map)
+			;case ids in order from highest to lowest popularity, lowest popularity at end of list
+			removable_cases
+				(append
+					;only keep the necessary number of lowest popularity eligible cases as well as all zero popularity ones
+					(tail (first case_popularity_pair) num_removal_eligible_cases)
+					zero_popularity_neighbors
 				)
+		))
+
+		(declare (assoc
+			;list will be sorted from highest to lowest, thus cases removed from the end of the list
+			end_index (- (size removable_cases) 1)
+			random_cases .false
 			num_removed_this_batch 0
 		))
 
@@ -759,7 +704,7 @@
 					(if (>= end_index 0)
 						;grab the cases from the end, with the smallest values
 						(unzip
-							sorted_removable_cases
+							removable_cases
 							(range
 								(max 0 (- end_index num_removed_this_batch -1))
 								end_index
@@ -850,7 +795,7 @@
 		)
 
 		;if the number of cases has been reduced by 'e' or more, auto analyze if needed
-		(if (< (call !GetNumTrainingCases) (/ pre_reduce_num_cases 2.718281828459))
+		(if (< (call !GetNumTrainingCases) (/ num_cases 2.718281828459))
 			(call !AutoAnalyzeIfNeeded (assoc
 				skip_auto_analyze skip_auto_analyze
 				;no need to compute entropies for all cases anymore since reduction is complete
