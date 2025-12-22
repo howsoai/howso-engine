@@ -32,6 +32,8 @@
 	; features: list of features the dataset was trained with originally
 	; derived_features: list of features to derive, in the specified order.
 	; case_ids: list of case ids for which to derive features
+	; separate_delta_and_rates: flag, if true will create delta and rate features separately.
+	;							used by migrations in situations where old cases may already have rates but not deltas.
 	#!DeriveTrainFeatures
 	(declare
 		(assoc
@@ -127,21 +129,63 @@
 				)
 		))
 
-		;create all derived_features for each order in one pass, starting with 1st order.
+		;create all derived_features (delta and rates) for each order in one pass, starting with 1st order.
 		(if (size derived_features)
-			(range
-				(lambda (let
-					(assoc order (current_index 1))
-					(call !CreateCustomFeaturesFromCode (assoc
-						features features
-						derived_features
-							(filter
-								(lambda (= order (get !featureAttributes [(current_value 1) "ts_order"])))
+			(if separate_delta_and_rates
+				(seq
+					;deltas first, then rates
+					(range
+						(lambda (let
+							(assoc order (current_index 1))
+							(call !CreateCustomFeaturesFromCode (assoc
+								features features
 								derived_features
-							)
+									(filter
+										(lambda (and
+											(= order (get !featureAttributes [(current_value 1) "ts_order"]))
+											(= "delta" (get !featureAttributes [(current_value 1) "ts_type"]))
+										))
+										derived_features
+									)
+							))
+						))
+						1 max_order 1
+					)
+
+					(range
+						(lambda (let
+							(assoc order (current_index 1))
+							(call !CreateCustomFeaturesFromCode (assoc
+								features features
+								derived_features
+									(filter
+										(lambda  (and
+											(= order (get !featureAttributes [(current_value 1) "ts_order"]))
+											(= "rate" (get !featureAttributes [(current_value 1) "ts_type"]))
+										))
+										derived_features
+									)
+							))
+						))
+						1 max_order 1
+					)
+				)
+
+				;else do both deltas and rates in one pass
+				(range
+					(lambda (let
+						(assoc order (current_index 1))
+						(call !CreateCustomFeaturesFromCode (assoc
+							features features
+							derived_features
+								(filter
+									(lambda (= order (get !featureAttributes [(current_value 1) "ts_order"])))
+									derived_features
+								)
+						))
 					))
-				))
-				1 max_order 1
+					1 max_order 1
+				)
 			)
 		)
 
@@ -180,7 +224,7 @@
 		)
 
 		(if (= (null) derived_feature)
-			(conclude (false))
+			(conclude .false)
 		)
 		(declare (assoc derived_value_index (get feature_index_map derived_feature) ))
 		;pull the max row lag for this derived_feature
@@ -189,7 +233,7 @@
 		;if max value > last_series_index, this feature needs to be generated because it references a row offset
 		;that isn't in this series, return false because this value can't be derived
 		(if (> max_row_lag last_series_index)
-			(conclude (false))
+			(conclude .false)
 		)
 
 		(declare (assoc
@@ -205,7 +249,7 @@
 						feature_index_map feature_index_map
 						!featureDateTimeMap !featureDateTimeMap
 						!ConvertDateToEpoch !ConvertDateToEpoch
-					) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+					) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false)
 				)
 		))
 
@@ -232,7 +276,7 @@
 							feature_index_map feature_index_map
 							!featureDateTimeMap !featureDateTimeMap
 							!ConvertDateToEpoch !ConvertDateToEpoch
-						) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false))
+						) (* (size series_data) !sandboxedComputeLimit) !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false)
 					)
 			))
 		)
@@ -245,7 +289,7 @@
 
 					(get !featureBoundsMap derived_feature)
 				)
-			valid_value (true)
+			valid_value .true
 			is_datetime (contains_index !featureDateTimeMap derived_feature)
 
 		))
@@ -254,8 +298,8 @@
 		(if (size bounds_map)
 			(seq
 				;invalid if generated a null and nulls are not allowed
-				(if (and (= (null) derived_feature_value) (= (get bounds_map "allow_null") (false)))
-					(conclude (assign (assoc valid_value (false))))
+				(if (and (= (null) derived_feature_value) (= (get bounds_map "allow_null") .false))
+					(conclude (assign (assoc valid_value .false)))
 
 					;else this is a nominal that has an allowed list, check if it's in the list
 					(contains_index bounds_map "allowed")
@@ -301,7 +345,7 @@
 
 					(if (get !featureAttributes (list derived_feature "time_series" "time_feature"))
 						;if time feature exceeds the feature boundary max, stop generating the series by setting valid_value to 0
-						;instead of (false), as long as other rows exist (this isn't the first row being generated)
+						;instead of .false, as long as other rows exist (this isn't the first row being generated)
 						(if (and (not valid_value) (> derived_feature_value boundary_max) (> (size series_data) 1))
 							(assign (assoc valid_value (null)))
 						)
@@ -366,7 +410,7 @@
 		))
 
 		;return true upon completion
-		(true)
+		.true
 	)
 
 	;helper method to derive all the lag features for all the series in one pass
@@ -403,7 +447,7 @@
 							)
 						)
 					)
-					(true)
+					.true
 				)
 			ts_series_length_limit (retrieve_from_entity "!tsSeriesLimitLength")
 		))

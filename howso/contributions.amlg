@@ -26,16 +26,16 @@
 		(assoc
 			context_features (list)
 			action_feature (null)
-			robust (false)
+			robust .false
 			case_ids (list)
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
 			num_robust_prediction_contributions_samples_per_case (null)
 			num_robust_prediction_contributions_samples (null)
 			num_samples (null)
-			run_on_local_model (false)
+			run_on_local_model .false
 			context_condition_filter_query (list)
-			derive_action_feature (false)
+			derive_action_feature .false
 		)
 
 		(declare (assoc
@@ -122,7 +122,7 @@
 
 		(declare (assoc
 			context_set (zip context_features)
-			features (values (append context_features action_feature) (true))
+			features (values (append context_features action_feature) .true)
 			;all context features that should get contributions
 			all_context_features context_features
 			all_context_features_indices_map (zip context_features (indices context_features))
@@ -178,7 +178,7 @@
 				(assign (assoc
 					case_ids
 						(if (> (size case_ids) num_cases_to_sample)
-							(rand case_ids num_cases_to_sample (true))
+							(rand case_ids num_cases_to_sample .true)
 
 							;if there aren't enough case_ids, randomly sample the necessary difference from the list to fill it up
 							(< (size case_ids) num_cases_to_sample)
@@ -219,7 +219,7 @@
 
 		;put the inactive features back into output with 0s
 		(if (size excluded_inactive_features_map)
-			(accum (assoc feature_contributions_map excluded_inactive_features_map))
+			(accum (assoc feature_contributions_map (map 0 excluded_inactive_features_map) ))
 		)
 
 		(declare (assoc directional_contributions_map (map (lambda (last (current_value))) feature_contributions_map) ))
@@ -255,18 +255,24 @@
 	;of predicting the action_feature when using vs not using it as a context feature.  Sets feature_contributions_map.
 	#!RunRobustContributions
 	(let
+		(assoc
+			enabled_num_features_probability_map
+				(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size all_context_features) ))
+			num_features (size all_context_features)
+
+		)
 		;iterate over all the local cases, for each case, react multiple times with a different robust context feature set each time
 		;for each react, store the reacted value for features that were used as contexts into each of those features' 'with feature' list
 		;and store that reacted value for feature that were not used into each of their 'without feature' list
 		;Then for each feature, average out all the 'with' and all the 'without' values and take the delta to compute the average delta
 		;repeat for all cases and average those out.
-		(assoc
+		(declare (assoc
 			accrued_cases_delta_lists
 				||(map
 					(lambda (let
 						(assoc
 							case_id (current_value 1)
-							correct_value (retrieve_from_entity (current_value 1) action_feature)
+							correct_value (if action_is_nominal (retrieve_from_entity (current_value 1) action_feature) )
 							case_values_map (zip context_features (retrieve_from_entity (current_value 1) context_features))
 							local_case_reaction_pairs (list)
 							;save an inner version in this scope to update per case for time-series flows
@@ -305,9 +311,6 @@
 								(range
 									(lambda (let
 										(assoc
-											;list of bits for each remaining (non-removed) feature
-											remaining_feature_flags (list)
-											all_flags_set (true)
 											;list of remaining filtered context features
 											filtered_context_features (list)
 											;set of all removed features
@@ -317,42 +320,29 @@
 											reaction (null)
 										)
 
-										;for robust computation we randomly (50/50) decide whether to remove a feature from the context
-										;by creating a random flag list to match each of the context features
-										;ensure that at least one feature is removed
-										;this while statement should only loop in rare edge cases
-										(while all_flags_set
-											(assign (assoc remaining_feature_flags (map (lambda (< (rand) 0.5)) all_context_features) ))
-											(if (< (size context_features) (size all_context_features))
-												;ensure TS filtered features stay false
-												(let
-													(assoc
-														original_indices_for_context_features
-															(unzip all_context_features_indices_map context_features)
-													)
-													;keeps only those flags that match the original indices for remaining context_features
-													(assign (assoc
-														remaining_feature_flags
-															(map
-																(lambda
-																	(if (contains_value original_indices_for_context_features (current_index))
-																		(current_value)
-																		(false)
-																	)
-																)
-																remaining_feature_flags
-															)
-													))
-												)
-											)
-											;shortcut on the all_flags_set logic so that if there is only one context feature, it can be left in the context
-											(assign (assoc all_flags_set (and (!= (size context_features) 1) (apply "and" remaining_feature_flags)) ))
-										)
-										;filter out context features based on the bitmask and also create a set of all the removed features
+										;filter out a random number of context features
 										(assign (assoc
-											filtered_context_features (filter (lambda (get remaining_feature_flags (current_index))) all_context_features)
+											filtered_context_features
+												(rand
+													context_features
+													;number of features to enable is probabilistically weighted
+													(if (and !tsTimeFeature (!= (size context_features) num_features))
+														(rand
+															(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
+														)
+
+														(rand enabled_num_features_probability_map)
+													)
+													;unique random features (not with replacement)
+													.true
+												)
+										))
+
+										;assoc of all removed features to their residual values
+										(assign (assoc
 											without_features_set
-												(zip (filter (lambda (not (get remaining_feature_flags (current_index)) )) all_context_features) )
+													;filter the action features to be those that are not context features, feature/context_features params may overlap
+													(remove (zip all_context_features) filtered_context_features)
 										))
 
 										(if derive_action_feature
@@ -416,18 +406,32 @@
 								(assoc feature_index (current_index 1))
 
 								(declare (assoc
-									;for this feature, pull all the 'with' react values, filtering out nulls
+									;for this feature, pull all the 'with' react values, filtering out nulls if edit distance
 									feature_reactions_with
-										(filter (map
-											(lambda (get (first (current_value)) feature_index) )
-											local_case_reaction_pairs
-										))
-									;for this feature, pull all the 'without' react values, filtering out nulls
+										(if edit_distance_action_feature
+											(filter (map
+												(lambda (get (first (current_value)) feature_index) )
+												local_case_reaction_pairs
+											))
+											;else no need to filter nulls since generalized_mean does it automatically
+											(map
+												(lambda (get (first (current_value)) feature_index) )
+												local_case_reaction_pairs
+											)
+										)
+									;for this feature, pull all the 'without' react values, filtering out nulls if edit distance
 									feature_reactions_without
-										(filter (map
-											(lambda (get (last (current_value)) feature_index) )
-											local_case_reaction_pairs
-										))
+										(if edit_distance_action_feature
+											(filter (map
+												(lambda (get (last (current_value)) feature_index) )
+												local_case_reaction_pairs
+											))
+											;else no need to filter nulls since generalized_mean does it automatically
+											(map
+												(lambda (get (last (current_value)) feature_index) )
+												local_case_reaction_pairs
+											)
+										)
 								))
 
 								(if edit_distance_action_feature
@@ -494,7 +498,7 @@
 					))
 					case_ids
 				)
-		)
+		))
 
 		;compute feature contributions by averaging out each "column" feature delta across all cases, which is in the format of:
 		; (list
@@ -701,8 +705,8 @@
 			context_features context_features
 			context_values (unzip case_values_map context_features)
 			action_features (list action_feature)
-			skip_decoding (true)
-			skip_encoding (true)
+			skip_decoding .true
+			skip_encoding .true
 			;ignore the local case
 			ignore_case case_id
 			details (assoc "categorical_action_probabilities" action_is_nominal)
@@ -721,8 +725,8 @@
 								context_features context_features
 								context_values (unzip case_values_map context_features)
 								action_features features_to_predict_for_derivation
-								skip_decoding (true)
-								skip_encoding (true)
+								skip_decoding .true
+								skip_encoding .true
 								;ignore the local case
 								ignore_case case_id
 								details (assoc "categorical_action_probabilities" action_is_nominal)
@@ -743,7 +747,7 @@
 							value (lambda (if (= lag 0) (get case feature) ) )
 						))
 						{"case" (append case_values_map values_for_derivation_map)}
-						!sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit (false)
+						!sandboxedComputeLimit !sandboxedMemoryLimit !sandboxedOpcodeDepthLimit .false
 					)]
 			}
 		)

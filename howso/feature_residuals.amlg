@@ -12,16 +12,16 @@
 			case_ids (null)
 			focal_case (null)
 			num_samples (null)
-			robust_residuals (false)
+			robust_residuals .false
 			hyperparameter_feature (null)
 			use_case_weights (null)
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
 			confusion_matrix_min_count 15
 			feature_with_nulls (null)
-			compute_null_uncertainties (true)
-			compute_all_statistics (true)
-			use_shared_deviations (false)
+			compute_null_uncertainties .true
+			compute_all_statistics .true
+			use_shared_deviations .false
 		)
 
 		(if (= (null) context_features)
@@ -33,7 +33,7 @@
 			(assign (assoc features context_features))
 		)
 		;if not using case weights, change weight_feature to '.none'
-		(if (= (false) use_case_weights)
+		(if (= .false use_case_weights)
 			(assign (assoc weight_feature ".none"))
 		)
 
@@ -50,7 +50,7 @@
 					custom_hyperparam_map
 				)
 		))
-		(call !UpdateCaseWeightParameters (assoc set_valid_weight_feature (false) ))
+		(call !UpdateCaseWeightParameters (assoc set_valid_weight_feature .false ))
 		(declare (assoc
 			param_path
 				;if the param_path is missing, create it here
@@ -204,7 +204,8 @@
 	; focal_case: optional case id of case for which to compute residuals for  is to be ignored during computation
 	; regional_data_only: flag, default to false. when set to true will only explicitly use the specified case_ids for computation.
 	; robust_residuals: string, default to (null). when "deviations" calculates accurate local residuals, otherwise computes residuals robust with respect to the set of contexts used
-	;		(across the power set of contexts).  when "robust_mda" will only compute and output MDA using robust residuals.
+	;		(across the power set of contexts).  when "robust_mda" will only compute and output MDA using robust residuals. when "missing_information" will compute and average the estimated
+	;		missing information for each feature.
 	; hyperparameter_feature: optional  default (null).  feature whose hyperparameters to use
 	; use_case_weights: flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
 	;   			case weights will be used if the trainee has them.
@@ -236,10 +237,10 @@
 			;the features to be used as context
 			context_features (null)
 			target_residual_feature (null)
-			regional_data_only (false)
+			regional_data_only .false
 			focal_case (null)
 			robust_residuals (null)
-			strict_case_ids (false)
+			strict_case_ids .false
 
 			;ordered by priority for the action set, with the 'case_ids' parameters having the top priority.
 			case_ids (list)
@@ -254,15 +255,15 @@
 			use_case_weights (null)
 			weight_feature ".case_weight"
 			custom_hyperparam_map (null)
-			compute_all_statistics (false)
-			compute_null_uncertainties (true)
+			compute_all_statistics .false
+			compute_null_uncertainties .true
 			confusion_matrix_min_count 15
-			use_shared_deviations (false)
-			expand_confusion_matrices (true)
+			use_shared_deviations .false
+			expand_confusion_matrices .true
 			features_to_derive (list)
 			forecast_window_length (null)
 
-			output_raw_mda (false)
+			output_raw_mda .false
 			mda_action_feature (null)
 			convergence_threshold 0.005
 			convergence_samples_growth_rate  1.05
@@ -285,7 +286,7 @@
 			feature_residuals_lists (list)
 
 			num_training_cases (call !GetNumTrainingCases)
-			valid_weight_feature (false)
+			valid_weight_feature .false
 
 			rmse_map (assoc)
 			r2_map (assoc)
@@ -354,12 +355,15 @@
 
 				;else <= convergence_min_size samples requested, just run them all
 				;leave nulls in results during analyze flow so they can be used to compute feature mda later
-				(call !RunRobustResiduals (assoc leave_nulls_in_results (true) ))
+				(call !RunRobustResiduals (assoc leave_nulls_in_results .true ))
 			)
+
+			(= "missing_information" robust_residuals)
+			(call !RunMissingInformation)
 
 			;else just robust residuals
 			robust_residuals
-			(call !RunRobustResiduals (assoc leave_nulls_in_results (false)  ))
+			(call !RunRobustResiduals (assoc leave_nulls_in_results .false  ))
 
 			;else
 			(if forecast_window_length
@@ -400,7 +404,7 @@
 				)
 
 				;else there are no set shared residuals, ignore shared deviations
-				(assign (assoc use_shared_deviations (false)))
+				(assign (assoc use_shared_deviations .false))
 			)
 		)
 
@@ -511,7 +515,7 @@
 
 		;put excluded inactive features back into residuals_map with 0s
 		(if (size excluded_inactive_features_map)
-			(accum (assoc residuals_map excluded_inactive_features_map ))
+			(accum (assoc residuals_map (map 0 excluded_inactive_features_map) ))
 		)
 
 		;for shared deviations, only one set of deviations are calculated for each group. At the end of the calculations,
@@ -632,142 +636,127 @@
 		)
 
 		;iterate over each continuous feature's list of reacts and compute the MAE, RMSE, R^2, and spearman coefficient
-		(assign (assoc
-			;MAE - mean absolute error = sum(|actual-predicted|) / num_cases
-			residuals_map
+		(declare (assoc
+			continuous_stats_maps
 				(zip
 					continuous_features
-					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
-					(map
-						(lambda (if
-							(size (current_value))
-							(generalized_mean (map (lambda (first (current_value))) (current_value)) )
+					||(map
+						(lambda (assoc
+							;(current_value 1) is a list of react tuples for each feature
 
-							;else if there were no values for this feature, return global feature residual
-							(get hyperparam_map (list "featureResiduals" (get continuous_features (current_index 1))))
+							;MAE - mean absolute error = sum(|actual-predicted|) / num_cases
+							residuals
+								(if (size (current_value 1))
+									(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
+
+									;else if there were no values for this feature, return global feature residual
+									(get hyperparam_map [ "featureResiduals" (get continuous_features (current_index 2)) ] )
+								)
+
+							;RMSE - root mean squared error = sqrt( sum( |actual-predicted|^2 ) / num_cases )
+							rmse
+								(if (size (current_value 1))
+									;generalized mean with p=2 computes root mean squared
+									(generalized_mean
+										(map (lambda (first (current_value)) ) (current_value 1))
+										2
+									)
+								)
 						))
 						(unzip feature_residuals_lists continuous_indices)
 					)
 				)
-			;RMSE - root mean squared error = sqrt( sum( |actual-predicted|^2 ) / num_cases )
-			rmse_map
-				(zip
-					continuous_features
-					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
-					(map
-						(lambda (if
-							(size (current_value))
-							;generalized mean with p=2 computes root mean squared
-							(generalized_mean
-								(map (lambda (first (current_value)) ) (current_value))
-								2
-							)
-						))
-						(unzip feature_residuals_lists continuous_indices)
-					)
-				)
-			;spearman coefficient = 1 - 6 * sum(|actual_rank-predicted_rank|^2) / (num_cases^3 - num_cases)
-			;where actual_rank and predicted_rank are the 1-based sorted rank of values for each
-			spearman_coeff_map
+		))
+
+		(assign (assoc
+			residuals_map (map (lambda (get (current_value) "residuals")) continuous_stats_maps)
+			rmse_map (map (lambda (get (current_value) "rmse")) continuous_stats_maps)
+		))
+
+		(declare (assoc
+			numeric_stats_maps
 				(zip
 					numeric_continuous_features
-					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
-					(map
+					||(map
 						(lambda (if
-							;must have at least 2 values to compute spearman coefficient
-							(> (size (current_value)) 1)
-							(let
-								(assoc
-									actual_ranks_map
-										(call !GetRankMapForValues (assoc
-											values (map (lambda (get (current_value) actual_offset)) (current_value 2))
-										))
-									predicted_ranks_map
-										(call !GetRankMapForValues (assoc
-											values (map (lambda (last (current_value))) (current_value 2))
-										))
-								)
-								(- 1
-									(* 6 (/
-										(apply "+"
-											(map
-												(lambda
-													(pow
-														(-
-															(get actual_ranks_map (get (current_value) actual_offset))
-															(get predicted_ranks_map (last (current_value)))
+							(size (current_value))
+							(assoc
+								;spearman coefficient = 1 - 6 * sum(|actual_rank-predicted_rank|^2) / (num_cases^3 - num_cases)
+								;where actual_rank and predicted_rank are the 1-based sorted rank of values for each
+								spearman_coeff
+									;must have at least 2 values to compute spearman coefficient
+									(if (> (size (current_value 1)) 1)
+										(let
+											(assoc
+												actual_ranks_map
+													(call !GetRankMapForValues (assoc
+														values (map (lambda (get (current_value) actual_offset)) (current_value 3))
+													))
+												predicted_ranks_map
+													(call !GetRankMapForValues (assoc
+														values (map (lambda (last (current_value))) (current_value 3))
+													))
+											)
+											(- 1
+												(* 6 (/
+													(apply "+" (map
+														(lambda
+															(pow
+																(-
+																	(get actual_ranks_map (get (current_value) actual_offset))
+																	(get predicted_ranks_map (last (current_value)))
+																)
+																2
+															)
 														)
-														2
+														(current_value 1)
+													))
+
+													(- (pow (size (current_value 1)) 3) (size (current_value 1)))
+												))
+											)
+										)
+									)
+
+								;R squared = 1 - sum(|actual-predicted|^2) / sum(|actual-mean|^2)
+								r_squared
+									(let
+										(assoc
+											mean_value
+												;average of all actual values
+												(generalized_mean (map (lambda (get (current_value) actual_offset)) (current_value 2)) )
+											sum_res_squared
+												(apply "+" (map (lambda (pow (first (current_value)) 2)) (current_value 2)) )
+											sum_tot_squared 0
+										)
+
+										(assign (assoc
+											sum_tot_squared
+												(apply "+"
+													(map
+														(lambda
+															;(mean - actual)^2
+															(pow (- mean_value (get (current_value) actual_offset)) 2)
+														)
+														(current_value 2)
 													)
 												)
-												(current_value)
-											)
+										))
+
+										;output r^2 value:  1 - SSres / SStot
+										;cap the smallest allowed r2 value to the float min value of -3.4028234663852886e+38
+										(max
+											(- 1 (/ sum_res_squared sum_tot_squared))
+											-340282346638528859811704183484516925440
 										)
+									)
 
-										(- (pow (size (current_value)) 3) (size (current_value)))
-									))
-								)
-							)
-						))
-						(unzip feature_residuals_lists numeric_continuous_indices)
-					)
-				)
-			;R squared = 1 - sum(|actual-predicted|^2) / sum(|actual-mean|^2)
-			r2_map
-				(zip
-					numeric_continuous_features
-					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
-					(map
-						(lambda (if
-							;must have at least 2 values to compute r^2
-							(> (size (current_value)) 1)
-							(let
-								(assoc
-									mean_value
-										;average of all actual values
-										(generalized_mean (map (lambda (get (current_value) actual_offset)) (current_value 1)) )
-									sum_res_squared
-										(apply "+" (map (lambda (pow (first (current_value)) 2)) (current_value 1)) )
-									sum_tot_squared 0
-								)
-
-								(assign (assoc
-									sum_tot_squared
-										(apply "+"
+								;smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100
+								smape
+									(*
+										(generalized_mean
 											(map
-												(lambda
-													;(mean - actual)^2
-													(pow (- mean_value (get (current_value) actual_offset)) 2)
-												)
-												(current_value 1)
-											)
-										)
-								))
-
-								;output r^2 value:  1 - SSres / SStot
-								;cap the smallest allowed r2 value to the float min value of -3.4028234663852886e+38
-								(max
-									(- 1 (/ sum_res_squared sum_tot_squared))
-									-340282346638528859811704183484516925440
-								)
-							)
-						))
-						(unzip feature_residuals_lists numeric_continuous_indices)
-					)
-				)
-			;smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100
-			smape_map
-				(zip
-					numeric_continuous_features
-					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
-					(map
-						(lambda
-							(if (size (current_value))
-								(*
-									(generalized_mean
-										(map
-											(lambda
-												(let
+												(lambda (let
 													(assoc
 														smape_numerator
 															(abs (-
@@ -789,36 +778,23 @@
 														0
 														(/ smape_numerator smape_denominator)
 													)
-												)
+												))
+												(current_value 1)
 											)
-											(current_value)
 										)
+										100
 									)
-									100
-								)
-							)
-						)
-						(unzip feature_residuals_lists numeric_continuous_indices)
-					)
-				)
-			;adjusted_smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100 where min gap / 2 is added to both the actual and predicted values.
-			adjusted_smape_map
-				(zip
-					numeric_continuous_features
-					;iterate over continuous features, where (current_value) is a list of react tuples for each feature
-					(map
-						(lambda
-							(if (size (current_value))
-								(let
-									(assoc
-										half_min_gap
-											(get !cachedFeatureHalfMinGapMap (get numeric_continuous_features (current_index 1)))
-									)
-									(*
-										(generalized_mean
-											(map
-												(lambda
-													(let
+
+								;adjusted_smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100 where min gap / 2 is added to both the actual and predicted values.
+								adjusted_smape
+									(let
+										(assoc
+											half_min_gap (get !cachedFeatureHalfMinGapMap (get numeric_continuous_features (current_index 2)))
+										)
+										(*
+											(generalized_mean
+												(map
+													(lambda (let
 														(assoc
 															adjusted_smape_numerator
 																(abs (-
@@ -840,19 +816,27 @@
 															0
 															(/ adjusted_smape_numerator adjusted_smape_denominator)
 														)
-													)
+													))
+													(current_value 1)
 												)
-												(current_value)
 											)
+											100
 										)
-										100
 									)
-								)
+
 							)
-						)
+						))
 						(unzip feature_residuals_lists numeric_continuous_indices)
 					)
 				)
+		))
+
+		(assign (assoc
+			spearman_coeff_map (map (lambda (get (current_value) "spearman_coeff")) numeric_stats_maps)
+			r2_map (map (lambda (get (current_value) "r_squared")) numeric_stats_maps)
+			smape_map (map (lambda (get (current_value) "smape")) numeric_stats_maps)
+			adjusted_smape_map (map (lambda (get (current_value) "adjusted_smape")) numeric_stats_maps)
+
 		))
 
 		(accum (assoc
@@ -879,7 +863,7 @@
 				(if in_analyze
 					(zip
 						nominal_features
-						(map
+						||(map
 							(lambda
 								(zip
 									(lambda
@@ -903,7 +887,7 @@
 					(zip
 						nominal_features
 						;iterate over nominal features, where (current_value) is a list of react tuples for each feature
-						(map
+						||(map
 							(lambda
 								(map
 									(lambda
@@ -965,217 +949,188 @@
 				)
 		))
 
-		;accuracy is: num correct predictions / all predictions
-		(assign (assoc
-			accuracy_map
-				(map
-					(lambda
-						(let
-							;grab the current action feature's confusion matrix
-							(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
-							(if (size confusion_matrix)
-								(/
-									;correct predictions count
-									(apply "+" (values
-										;get correct prediction count for each class
-										(map
-											(lambda (or (get (current_value) (current_index))))
-											confusion_matrix
+		;accumulate nominal feature stats (accuracy, precision, recall, mcc) in one pass
+		(declare (assoc
+			nominal_stats_maps
+				||(map
+					(lambda (let
+						;grab the current action feature's confusion matrix
+						(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
+						(if (size confusion_matrix)
+							(assoc
+								;accuracy is: num correct predictions / all predictions
+								accuracy
+									(/
+										;correct predictions count
+										(apply "+" (values
+											;get correct prediction count for each class
+											(map
+												(lambda (or (get (current_value) (current_index))))
+												confusion_matrix
+											)
+										))
+										;total predictions count
+										(apply "+" (values
+											;add up all prediction counts for all classes
+											(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
+										))
+									)
+
+								;recall for a single class is = TruePositives / (TruePositives + FalseNegatives)
+								recall
+									;for each row in confusion matrix, average out: correct / total of row
+									(/
+										(apply "+"
+											(values (map
+												(lambda (let
+													(assoc row_total (apply "+" (values (current_value 1))) )
+													;if there were no  predictions at all for this class, prevent divide by zero
+													(if (> row_total 0)
+														(/ (or (get (current_value) (current_index)) 0) row_total)
+														0
+													)
+												))
+												confusion_matrix
+											))
 										)
-									))
-									;total predictions count
-									(apply "+" (values
-										;add up all prediction counts for all classes
-										(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
-									))
-								)
+										;The 'confusion_matrix' may not be a square matrix. Divides by the length of the rows or columns
+										; as if the matrix was square by taking the max of the number of non-empty rows or the number
+										; of uniquely predicted column indices.
+										(max
+											;Number of rows, filter out empty rows
+											(size
+												(filter (lambda (size (current_value))) confusion_matrix)
+											)
+											;Number of unique columns
+											(size (values
+												(apply "append"
+													(map
+														(lambda (indices (current_value)))
+														(values confusion_matrix)
+													)
+												)
+												.true
+											))
+										)
+									)
+
+								;precision for a single class is = TruePositives / (TruePositives + FalsePositives)
+								precision
+									;for each column in confusion matrix, average out: correct / total of column
+									(/
+										;correct predictions count
+										(apply "+"
+											(values (map
+												(lambda (let
+													(assoc
+														class (current_index 1)
+														column_total (null)
+													)
+													(assign (assoc
+														column_total
+															(apply "+"
+																(values (map
+																	(lambda (or (get (current_value) class) 0) )
+																	confusion_matrix
+																))
+															)
+													))
+													;if there were no guesses for this class at all, prevent divide by zero
+													(if (> column_total 0)
+														(/ (or (get (current_value) class) 0) column_total)
+														0
+													)
+												))
+												confusion_matrix
+											))
+										)
+										;The 'confusion_matrix' may not be a square matrix. Divides by the length of the rows or columns
+										; as if the matrix was square by taking the max of the number of non-empty rows or the number
+										; of uniquely predicted column indices.
+										(max
+											;Number of rows, filter out empty rows
+											(size
+												(filter (lambda (size (current_value))) confusion_matrix)
+											)
+											;Number of unique columns
+											(size (values
+												(apply "append"
+													(map
+														(lambda (indices (current_value)))
+														(values confusion_matrix)
+													)
+												)
+												.true
+											))
+										)
+									)
+
+								;generalized multi-class formula for Matthews Correlation Coefficient (mcc) is located https://en.wikipedia.org/wiki/Phi_coefficient#Multiclass_case
+								mcc
+									(let
+										(assoc
+											;get the total correctly predicted counts, variable c in the mcc formula
+											total_predicted_correct
+												(apply "+" (values
+													(map (lambda (or (get (current_value) (current_index))) ) confusion_matrix)
+												))
+											;get the total number of samples, variable s in the mcc formula
+											total_samples
+												(apply "+" (values
+													(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
+												))
+											;get a list containing the true counts of each class, vector t in the mcc formula
+											true_counts
+												(append (values
+													(map
+														(lambda (apply "+" (filter (values (get confusion_matrix (current_index))))))
+														confusion_matrix
+													)
+												))
+											;get a list containing the predicted counts of each class, vector p in the mcc formula
+											predicted_counts
+												(append (values
+													(map
+														(lambda
+															(apply "+" (values (map
+																;current_index 1 is the predicted class that is being aggregated
+																(lambda (or (get (current_value) (current_index 1))) 0)
+																confusion_matrix
+															)))
+														)
+														confusion_matrix
+													)
+												))
+										)
+
+										;calculates the mcc
+										(declare (assoc
+											mcc_numerator
+												(- (* total_predicted_correct total_samples) (dot_product true_counts predicted_counts))
+											mcc_denominator
+												(*
+													(sqrt (- (pow total_samples 2) (dot_product true_counts true_counts)))
+													(sqrt (- (pow total_samples 2) (dot_product predicted_counts predicted_counts)))
+												)
+										))
+
+										(if (or (= mcc_numerator 0) (= mcc_denominator 0))
+											0
+											(/ mcc_numerator mcc_denominator)
+										)
+									)
 							)
 						)
-					)
-					(zip nominal_features)
-				)
-		))
-
-		;recall for a single class is = TruePositives / (TruePositives + FalseNegatives)
-		(assign (assoc
-			recall_map
-				(map
-					(lambda
-						(let
-							;grab the current action feature's confusion matrix
-							(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
-							(if (size confusion_matrix)
-								;for each row in confusion matrix, average out: correct / total of row
-								(/
-									(apply "+"
-										(values (map
-											(lambda (let
-												(assoc row_total (apply "+" (values (current_value 1))) )
-												;if there were no  predictions at all for this class, prevent divide by zero
-												(if (> row_total 0)
-													(/ (or (get (current_value) (current_index)) 0) row_total)
-													0
-												)
-											))
-											confusion_matrix
-										))
-									)
-									;The 'confusion_matrix' may not be a square matrix. Divides by the length of the rows or columns
-									; as if the matrix was square by taking the max of the number of non-empty rows or the number
-									; of uniquely predicted column indices.
-									(max
-										;Number of rows, filter out empty rows
-										(size
-											(filter (lambda (size (current_value))) confusion_matrix)
-										)
-										;Number of unique columns
-										(size (values
-											(apply "append"
-												(map
-													(lambda (indices (current_value)))
-													(values confusion_matrix)
-												)
-											)
-											(true)
-										))
-									)
-								)
-							)
 					))
 					(zip nominal_features)
 				)
 		))
 
-		;precision for a single class is = TruePositives / (TruePositives + FalsePositives)
 		(assign (assoc
-			precision_map
-				(map
-					(lambda
-						(let
-							;grab the current action feature's confusion matrix
-							(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
-							(if (size confusion_matrix)
-								;for each column in confusion matrix, average out: correct / total of column
-								(/
-									;correct predictions count
-									(apply "+"
-										(values (map
-											(lambda (let
-												(assoc
-													class (current_index 1)
-													column_total (null)
-												)
-												(assign (assoc
-													column_total
-														(apply "+"
-															(values (map
-																(lambda (or (get (current_value) class) 0) )
-																confusion_matrix
-															))
-														)
-												))
-												;if there were no guesses for this class at all, prevent divide by zero
-												(if (> column_total 0)
-													(/ (or (get (current_value) class) 0) column_total)
-													0
-												)
-											))
-											confusion_matrix
-										))
-									)
-									;The 'confusion_matrix' may not be a square matrix. Divides by the length of the rows or columns
-									; as if the matrix was square by taking the max of the number of non-empty rows or the number
-									; of uniquely predicted column indices.
-									(max
-										;Number of rows, filter out empty rows
-										(size
-											(filter (lambda (size (current_value))) confusion_matrix)
-										)
-										;Number of unique columns
-										(size (values
-											(apply "append"
-												(map
-													(lambda (indices (current_value)))
-													(values confusion_matrix)
-												)
-											)
-											(true)
-										))
-									)
-								)
-							)
-						)
-					)
-					(zip nominal_features)
-				)
-		))
-
-		; Generalized multi-class formula for Matthews Correlation Coefficient (mcc) is located https://en.wikipedia.org/wiki/Phi_coefficient#Multiclass_case
-		(assign (assoc
-			mcc_map
-				(map
-					(lambda
-						(let
-							;grab the current action feature's confusion matrix
-							(assoc confusion_matrix (get confusion_matrix_map (current_index 1)))
-							(if (size confusion_matrix)
-								(let
-									(assoc
-										;get the total correctly predicted counts, variable c in the mcc formula
-										total_predicted_correct
-											(apply "+" (values
-												(map (lambda (or (get (current_value) (current_index))) ) confusion_matrix)
-											))
-										;get the total number of samples, variable s in the mcc formula
-										total_samples
-											(apply "+" (values
-												(map (lambda (apply "+" (filter (values (current_value))))) confusion_matrix)
-											))
-										;get a list containing the true counts of each class, vector t in the mcc formula
-										true_counts
-											(append (values
-												(map
-													(lambda (apply "+" (filter (values (get confusion_matrix (current_index))))))
-													confusion_matrix
-												)
-											))
-										;get a list containing the predicted counts of each class, vector p in the mcc formula
-										predicted_counts
-											(append (values
-												(map
-													(lambda
-														(apply "+" (values (map
-															;current_index 1 is the predicted class that is being aggregated
-															(lambda (or (get (current_value) (current_index 1))) 0)
-															confusion_matrix
-														)))
-													)
-													confusion_matrix
-												)
-											))
-									)
-
-									;calculates the mcc
-									(declare (assoc
-										mcc_numerator
-											(- (* total_predicted_correct total_samples) (dot_product true_counts predicted_counts))
-										mcc_denominator
-											(*
-												(sqrt (- (pow total_samples 2) (dot_product true_counts true_counts)))
-												(sqrt (- (pow total_samples 2) (dot_product predicted_counts predicted_counts)))
-											)
-									))
-
-									(if (or (= mcc_numerator 0) (= mcc_denominator 0))
-										0
-										(/ mcc_numerator mcc_denominator)
-									)
-								)
-							)
-						)
-					)
-					(zip nominal_features)
-				)
+			accuracy_map (map (lambda (get (current_value) "accuracy")) nominal_stats_maps)
+			precision_map (map (lambda (get (current_value) "precision")) nominal_stats_maps)
+			recall_map (map (lambda (get (current_value) "recall")) nominal_stats_maps)
+			mcc_map (map (lambda (get (current_value) "mcc")) nominal_stats_maps)
 		))
 
 		(if (= (null) param_path)
@@ -1206,7 +1161,6 @@
 					)
 				)
 		))
-
 
 		;copy over all the stats for non-primary shared features
 		(if use_shared_deviations
@@ -1278,7 +1232,7 @@
 					(let
 						(assoc
 							continuous_inactives_1_map (map 1 (remove excluded_inactive_features_map (indices !nominalsMap)) )
-							continuous_inactives_0_map (remove excluded_inactive_features_map (indices !nominalsMap))
+							continuous_inactives_0_map (map 0 (remove excluded_inactive_features_map (indices !nominalsMap)) )
 						)
 						(accum (assoc
 							r2_map continuous_inactives_1_map
@@ -1509,7 +1463,7 @@
 						!featureAttributes
 					))
 				))
-			all_features (values (append features context_features) (true))
+			all_features (values (append features context_features) .true)
 			action_features features
 		))
 
@@ -1586,17 +1540,17 @@
 							(declare (assoc
 								forecast_result
 									(call !ReactSeries (assoc
-										continue_series (true)
-										leave_series_out (true)
+										continue_series .true
+										leave_series_out .true
 										desired_conviction (null)
-										details (assoc categorical_action_probabilities (true))
+										details (assoc categorical_action_probabilities .true)
 										generate_new_cases "no"
 										max_series_length (null)
 										series_stop_map (associate !tsTimeFeature {"max" end_time} )
 										series_id_features series_id_features
 										series_id_values series_id_values
-										include_start_time_case (true)
-										output_new_series_ids (false)
+										include_start_time_case .true
+										output_new_series_ids .false
 
 										output_features all_features
 										action_features series_action_features
@@ -1720,7 +1674,7 @@
 
 											(= "nominal" (get !featureAttributes [feat_to_diff "type"]))
 											(call !ComputeDiffTuple (assoc
-												feature_is_nominal (true)
+												feature_is_nominal .true
 												feature feat_to_diff
 												interpolated_value
 													;interpolated value for forecast

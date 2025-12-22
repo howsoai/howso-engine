@@ -1,0 +1,297 @@
+(seq
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_value_contributions.amlg" retries 1))
+
+	(call_entity "howso" "create_trainee" (assoc trainee "model"))
+
+	(declare (assoc
+		model_data (load "unit_test_data/student_tests.csv")
+	))
+	(declare (assoc
+		data (tail model_data)
+		features (first model_data)
+		result (null)
+	))
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		feature_attributes
+			(assoc
+				"name" (assoc "type" "nominal" "data_type" "string")
+				"subject" (assoc "type" "nominal" "data_type" "string")
+				"is_multiple_choice" (assoc "type" "nominal" "data_type" "string")
+				"num_questions" (assoc "type" "continuous")
+				"minutes" (assoc "type" "continuous")
+				"study_time" (assoc "type" "continuous")
+				"score" (assoc "type" "continuous")
+			)
+	))
+
+	(call_entity "howso" "train" (assoc
+		cases data
+		features features
+		session "session1"
+	))
+
+	(call_entity "howso" "analyze" (assoc convergence_threshold 0 ))
+
+	(print "Robust Accuracy Contributions: ")
+	(declare (assoc
+		ac_map
+			(get
+				(call_entity "howso" "react_aggregate" (assoc
+					details {
+							"feature_robust_accuracy_contributions" .true
+							"feature_robust_prediction_contributions" .true
+						}
+					action_features [ "score"]
+					feature_influences_action_feature "score"
+					convergence_threshold 0
+					num_robust_accuracy_contributions_samples 100000
+				))
+				[1 "payload"]
+			)
+	))
+	(print ac_map "ANALYSIS:\n 'name', 'study_time' and 'subject' predict 'scores' the best\n(study_time is highly correlatedb/c it's derived from score and minutes)\n")
+
+
+	(print "\nValue Robust Accuracy Contributions (long running test)\n---\n")
+	(print "Computing for 'subject': ")
+	(assign (assoc
+	 	result
+			(call_entity "howso" "react_aggregate" (assoc
+				details {
+						"value_robust_accuracy_contributions" .true
+						"value_robust_prediction_contributions" .true
+				}
+				value_robust_contributions_action_feature "score"
+				value_robust_contributions_features [ "subject" ]
+				num_robust_accuracy_contributions_samples 200000
+			))
+	))
+	(call keep_result_payload)
+	(print
+		"ANALYSIS:\n"
+		"	everyone does consistently well in 'math' which also has many examinations, even the poor performers\n\n"
+		"	everyone gets similar very high grades in 'art'\n"
+	)
+	(call assert_same (assoc
+		exp [ ["math"] ["art"] ["science"] ]
+		obs (trunc (get result ["value_robust_contributions" "feature_values"]) 3)
+	))
+
+	(print "'subject' AC matches the sum of the decomposed robust ACs:")
+	(call assert_approximate (assoc
+		obs (apply "+" (get result ["value_robust_contributions" "ac_values"]))
+		exp (get ac_map ["feature_robust_accuracy_contributions" "score" "subject"])
+		thresh 0.2
+	))
+
+	(print "'subject' PC matches the sum of the decomposed robust PCs:")
+	(call assert_approximate (assoc
+		obs (apply "+" (get result ["value_robust_contributions" "pc_values"]))
+		exp (get ac_map ["feature_robust_prediction_contributions" "subject"])
+		thresh 0.3
+	))
+
+	(print "'subject' PC matches the sum of the decomposed robust directional PCs:")
+	(call assert_approximate (assoc
+		obs (apply "+" (get result ["value_robust_contributions" "pc_directional_values"]))
+		exp (get ac_map ["feature_robust_directional_prediction_contributions" "subject"])
+		thresh 0.2
+	))
+	(call exit_if_failures (assoc msg "Values A.C. and P.C. computed correctly for 'subject'."))
+
+	(print "Computing for 'name': ")
+	(assign (assoc
+		result
+			(call_entity "howso" "react_aggregate" (assoc
+				details {
+					"value_robust_accuracy_contributions" .true
+					"value_robust_prediction_contributions" .true
+				}
+				value_robust_contributions_action_feature "score"
+				value_robust_contributions_features [ "name" ]
+				num_robust_accuracy_contributions_samples 200000
+			))
+	))
+	(call keep_result_payload)
+	(print
+		"ANALYSIS:\n"
+		"	'anne' gets perfect 'math' scores and does well overall\n"
+		"	'bill' is consistently in the 90s across the board\n"
+		"	'david' is consistently in the 80s across the board\n"
+		"	'cora's scores vary widely\n\n"
+	)
+	(call assert_same (assoc
+		exp [ ["anne"] ["bill"] ["david"] ]
+		obs (trunc (get result ["value_robust_contributions" "feature_values"]) 3)
+	))
+	(call assert_same (assoc
+		exp ["cora"]
+		obs (last (get result ["value_robust_contributions" "feature_values"]))
+	))
+	(print "'name' AC matches the sum of decomposed robust ACs:")
+	(call assert_approximate (assoc
+		obs (apply "+" (get result ["value_robust_contributions" "ac_values"]))
+		exp (get ac_map ["feature_robust_accuracy_contributions" "score" "name"])
+		percent 0.1
+	))
+	(print "'name' PC matches the sum of decomposed robust PCs:")
+	(call assert_approximate (assoc
+		obs (apply "+" (get result ["value_robust_contributions" "pc_values"]))
+		exp (get ac_map ["feature_robust_prediction_contributions" "name"])
+		thresh 0.5
+	))
+	(print "both computed and sum of  decomposed PC are > 2.5: ")
+	(call assert_true (assoc
+		obs
+			(and
+				(> (get ac_map ["feature_robust_prediction_contributions" "name"])  2.5)
+				(> (apply "+" (get result ["value_robust_contributions" "pc_values"])) 2.5)
+			)
+	))
+
+	(print "'name' directional PC matches the sum of decomposed robust directional PCs: ")
+	(call assert_approximate (assoc
+		obs (apply "+" (get result ["value_robust_contributions" "pc_directional_values"]))
+		exp (get ac_map ["feature_robust_directional_prediction_contributions" "name"])
+		thresh 0.5
+	))
+	(print "both computed and sum of decomposed directional PC are < -0.2: ")
+	(call assert_true (assoc
+		obs
+			(and
+				(< (get ac_map ["feature_robust_directional_prediction_contributions" "name"]) -0.2)
+				(< (apply "+" (get result ["value_robust_contributions" "pc_directional_values"])) -0.2)
+			)
+	))
+
+	(call exit_if_failures (assoc msg "Values A.C. and P.C. computed correctly for 'name'."))
+
+	(print "Computing for 'name' and 'subject': ")
+	(assign (assoc
+	 	result
+			(call_entity "howso" "react_aggregate" (assoc
+				details
+					{
+						"value_robust_accuracy_contributions" .true
+						"value_robust_prediction_contributions" .true
+					}
+				value_robust_contributions_action_feature "score"
+				value_robust_contributions_features [ "name" "subject" ]
+			))
+	))
+ 	(call keep_result_payload)
+	(print
+		"ANALYSIS:\ncombination 'name' and 'subject':\n"
+		"	'anne' gets perfect 'math' (and almost perfect 'history') scores\n"
+		"	'fiona' is a poor student, but does consistently bad at 'science'\n"
+		"	'ed's scores vary, but are usually consistent within each subject\n\n"
+	)
+	(call assert_same (assoc
+		obs (trunc (get result ["value_robust_contributions" "feature_values"]) 2)
+		exp
+			[
+				["anne" "math"]
+				["fiona" "science"]
+			]
+	))
+
+	;top results are fairly consistent
+	(declare (assoc top_6 (trunc (get result ["value_robust_contributions" "feature_values"]) 6) ))
+	(call assert_same (assoc
+		obs
+			;top 6 results consistently contain these 5 combinations
+			(map
+				(lambda (contains_value top_6 (current_value)) )
+				[
+					["anne" "math"]
+					["anne" "history"]
+					["bill" "math"]
+					["fiona" "math"]
+					["fiona" "science"]
+				]
+			)
+		exp (range (lambda .true) 1 5 1)
+	))
+
+
+	(print "'Anne + math' and 'Fiona + science' both have high P.C. because they are so extreme: ")
+	(call assert_approximate (assoc
+		obs (trunc (get result ["value_robust_contributions" "pc_values"]) 2)
+		exp [0.25 0.13125]
+		thresh 0.05
+	))
+	(print
+		"'Anne + math' has very high directional P.C. because she always does so well, while\n"
+		"'Fiona + science' has very low directional P.C. because she always does so poorly: "
+	)
+	(call assert_approximate (assoc
+		obs (trunc (get result ["value_robust_contributions" "pc_directional_values"]) 2)
+		exp [0.25 -0.1]
+		thresh 0.05
+	))
+	(call exit_if_failures (assoc msg "A.C. and P.C. for two features."))
+
+	(print "Computing 'study_time': ")
+	(assign (assoc
+	 	result
+			(call_entity "howso" "react_aggregate" (assoc
+				details { "value_robust_accuracy_contributions" .true}
+				value_robust_contributions_action_feature "score"
+				value_robust_contributions_features [ "study_time" ]
+			))
+	))
+ 	(call keep_result_payload)
+	(print
+		"ANALYSIS:\n 'study_time':\n"
+		"	high study time (e.g., for 'anne') gets consistently excellent scores\n"
+		"	low study time (e.g.. for 'fiona') is consistently low scores, etc.\n\n"
+	)
+	(call assert_same (assoc
+		obs (zip (trunc (get result ["value_robust_contributions" "feature_values"]) 3))
+		exp
+			(zip [
+				[
+					[73.3 79]
+				]
+				[
+					[150.7 153.7]
+				]
+				[
+					[134.2 148.5]
+				]
+			])
+	))
+
+	(print "'study_time' AC approximately matches the sum of decomposed robust ACs:")
+	(call assert_approximate (assoc
+		obs (apply "+" (get result ["value_robust_contributions" "ac_values"]))
+		exp (get ac_map  ["feature_robust_accuracy_contributions" "score" "study_time"])
+		thresh 0.2
+	))
+
+	(print "\nValue Robust Information Asymmetry\n")
+	(assign (assoc
+	 	result
+			(call_entity "howso" "react_aggregate" (assoc
+				details { "value_robust_surprisal_asymmetry" .true}
+				value_robust_contributions_action_feature "score"
+				value_robust_contributions_features [ "name" "subject" ]
+				num_robust_accuracy_contributions_samples 50000
+			))
+	))
+	(call keep_result_payload)
+	(print "Most causal name/subject pairs for score are Anne-Math and Anne-History:")
+	(call assert_same (assoc
+		obs (trunc (get result ["value_robust_surprisal_asymmetry" "feature_values"]) 2)
+		exp
+			[
+				["anne" "math"]
+				["anne" "history"]
+			]
+	))
+
+
+	(call exit_if_failures (assoc msg unit_test_name))
+)

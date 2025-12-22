@@ -6,511 +6,6 @@
 	;all previous trainee labels are accessed via 'import_metadata_map'
 	(seq (print "Version 0.0.0: This code can access and do any operations on contained entity 'trainee'.\n") )
 
-"64.0.0"
-	(let
-		(assoc hp_map (get import_metadata_map "hyperparameterMetadataMap"))
-
-		;rename 'dwe' to 'dt'
-		(assign (assoc
-			hp_map
-				(rewrite
-					(lambda
-						(if (and (= (assoc) (get_type (current_value))) (contains_index (current_value) "dwe") )
-							(let
-								(assoc dt_value (get (current_value 1) "dwe"))
-
-								;remove key 'dwe' and add it back as 'dt'
-								(set
-									(remove (current_value) "dwe")
-									"dt"
-									dt_value
-								)
-							)
-
-							(current_value)
-						)
-					)
-					hp_map
-				)
-		))
-
-		(assign_to_entities (assoc !hyperparameterMetadataMap hp_map ))
-	)
-"65.0.11"
-	(let
-		(assoc old_half_gaps (get import_metadata_map "cachedFeatureMinGapMap") )
-		(assign_to_entities (assoc !cachedFeatureHalfMinGapMap old_half_gaps))
-	)
-"66.2.0"
-	(let
-		(assoc non_string_nominals_map (get import_metadata_map "nonStringNominalFeaturesMap"))
-		(assign_to_entities (assoc !numericNominalFeaturesMap non_string_nominals_map))
-	)
-"67.0.0"
-	(let
-		(assoc
-			default_features (get import_metadata_map "defaultFeatures")
-			hp_map (get import_metadata_map "hyperparameterMetadataMap")
-			residuals_map (get import_metadata_map "residualsMap")
-			prediction_stats_map (get import_metadata_map "featurePredictionStatsMap")
-		)
-
-		(declare (assoc
-			default_features_key (apply "concat" (weave (sort default_features) "."))
-			hp_param_paths (list)
-		))
-
-		;do additional HP nesting
-		(assign (assoc
-			hp_map
-				(map
-					(lambda (associate default_features_key (current_value 1)) )
-					hp_map
-				)
-		))
-
-		;update param path lists
-		(assign (assoc
-			hp_map
-				(rewrite
-					(lambda
-						(if (and (= "list" (get_type_string (current_value))) (= "paramPath" (current_index))  )
-							(list
-								(get (current_value 1) 0)
-								default_features_key
-								(get (current_value 1) 1)
-								(get (current_value 1) 2)
-							)
-
-							;else
-							(current_value)
-						)
-					)
-					hp_map
-				)
-			residuals_map
-				(rewrite
-					(lambda
-						(if (and (= "list" (get_type_string (current_value))) (contains_value ".hyperparam_path" (current_index))  )
-							(list
-								(get (current_value 1) 0)
-								default_features_key
-								(get (current_value 1) 1)
-								(get (current_value 1) 2)
-							)
-
-							;else
-							(current_value)
-						)
-					)
-					residuals_map
-				)
-			prediction_stats_map
-				(rewrite
-					(lambda
-						(if (and (= "list" (get_type_string (current_value))) (contains_value ".hyperparam_path" (current_index))  )
-							(list
-								(get (current_value 1) 0)
-								default_features_key
-								(get (current_value 1) 1)
-								(get (current_value 1) 2)
-							)
-
-							;else
-							(current_value)
-						)
-					)
-					prediction_stats_map
-				)
-		))
-
-		(rewrite
-			(lambda
-				(if (and (= "list" (get_type_string (current_value))) (= "paramPath" (current_index)) )
-					(seq
-						(accum (assoc hp_param_paths (list (current_value 2)) ))
-						(current_value)
-					)
-
-					(current_value)
-				)
-			)
-			hp_map
-		)
-
-		(assign_to_entities (assoc
-			!hyperparameterMetadataMap hp_map
-			!hyperparameterParamPaths hp_param_paths
-			!residualsMap residuals_map
-			!featurePredictionStatsMap prediction_stats_map
-			!defaultFeaturesContextKey default_features_key
-		))
-
-		;update the metadata map for later migrations
-		(accum (assoc
-			import_metadata_map
-				(assoc
-					"defaultFeaturesContextKey" default_features_key
-					"hyperparameterMetadataMap" hp_map
-					"hyperparameterParamPaths" hp_param_paths
-				)
-		))
-	)
-
-;move null uncertainties from featureDomainAttributes into featureDeviations and add !nullUncertainies to hyperparameters
-"71.1.1"
-	(let
-		(assoc
-			param_paths (get import_metadata_map "hyperparameterParamPaths")
-			hp_map (get import_metadata_map "hyperparameterMetadataMap")
-		)
-
-		(map
-			(lambda (let
-				(assoc path (current_value 1))
-				;if previous HP had domain attributes that held null uncertainties, move them over to deviations and nullUncertainties
-				(if (!= (null) (get hp_map (append path "featureDomainAttributes")) )
-					(let
-						(assoc
-							null_uncertainties
-								(filter (map
-									(lambda
-										;old domain attributes are a list, grab the last two values which are the value-null and null-null
-										(if (> (size (current_value)) 1)
-											(tail (current_value) 2)
-										)
-									)
-									(get hp_map (append path "featureDomainAttributes"))
-								))
-						)
-
-						(assign (assoc
-							hp_map
-								(set
-									hp_map
-									(append path "featureDomainAttributes")
-									(map
-										(lambda
-											(if (= (list) (get_type (current_value)))
-												(first (current_value))
-												(current_value)
-											)
-										)
-										(get hp_map (append path "featureDomainAttributes"))
-									)
-
-									;set null uncertainties to be a tuple leading a with a null for the undefined deviation
-									(append path "nullUncertainties")
-									(map
-										(lambda (append (list (null)) (current_value)))
-										null_uncertainties
-									)
-
-									(append path "featureDeviations")
-									(map
-										(lambda
-											;if this feature has null uncertainties, make the deviation value a tuple
-											(if (contains_index null_uncertainties (current_index))
-												(append (list (current_value 1)) (get null_uncertainties (current_index)))
-												;else just output the deviation value as-is
-												(current_value)
-											)
-										)
-										(get hp_map (append path "featureDeviations"))
-									)
-								)
-						))
-					)
-				)
-			))
-			param_paths
-		)
-
-		(assign_to_entities (assoc !hyperparameterMetadataMap hp_map ))
-	)
-;Rename defaultFeatures to trainedFeatures, also defaultFeaturesContextKey to trainedFeaturesContextKey
-"74.1.2"
-	(let
-		(assoc
-			default_features (get import_metadata_map "defaultFeatures")
-			default_features_key (get import_metadata_map "defaultFeaturesContextKey")
-		)
-		(assign_to_entities (assoc
-			!trainedFeatures default_features
-			!trainedFeaturesContextKey default_features_key
-		))
-	)
-
-"79.0.0"
-	(let
-		(assoc labels_to_update (call get_export_attributes) )
-
-		;Do need to import residualsMap for later migration where this key was removed.
-		(accum (assoc labels_to_update ["!residualsMap"] ))
-
-		(declare (assoc
-			updated_model_atributes_map
-				(map
-					(lambda (let
-						(assoc
-							old_label_name
-								;drop the ! from each label since old labels were not private
-								(if (= "!" (first (current_index 1)))
-									(tail (current_index 1))
-									(current_index 1)
-								)
-						)
-						;if old trainee had this label, use the previous value
-						(if (contains_index import_metadata_map old_label_name)
-							(get import_metadata_map old_label_name)
-
-							;else keep current value as-is
-							(retrieve_from_entity (current_index))
-						)
-					))
-					(zip labels_to_update)
-				)
-		))
-
-		(assign_to_entities updated_model_atributes_map)
-		(accum (assoc
-			import_metadata_map updated_model_atributes_map
-		))
-	)
-
-"86.0.0"
-	(let
-		(assoc
-			default_hyperparameter_map (get import_metadata_map "!defaultHyperparameters")
-			hyperparameter_metadata_map (get import_metadata_map "!hyperparameterMetadataMap")
-			hyperparameter_paths (get import_metadata_map "!hyperparameterParamPaths")
-			residuals_map (get import_metadata_map "!residualsMap")
-			all_features_key (get import_metadata_map "!trainedFeaturesContextKey")
-		)
-
-		;need to assign residuals previously stored in the !residualsMap into their corresponding hyperparameter
-		;assocs
-		(map
-			(lambda
-				(let
-					(assoc
-						current_residual_map (current_value 1)
-						param_path
-							(if (= 3 (size (get (current_value 1) ".hyperparam_path")))
-								;if size is 3, it is missing context key
-								[
-									(get (get (current_value 2) ".hyperparam_path") 0)
-									all_features_key
-									(get (get (current_value 2) ".hyperparam_path") 1)
-									(get (get (current_value 2) ".hyperparam_path") 2)
-								]
-
-								;otherwise use the path as it is
-								(get (current_value 1) ".hyperparam_path")
-							)
-					)
-
-					(if (contains_value
-							hyperparameter_paths
-							param_path
-						)
-						(assign (assoc
-							hyperparameter_metadata_map
-								(set
-									hyperparameter_metadata_map
-									(append param_path ["featureResiduals"])
-									(remove current_residual_map [".hyperparam_path" ".robust"])
-								)
-						))
-
-						(= (first param_path) ".default")
-						(accum (assoc
-							default_hyperparameter_map
-								(assoc
-									"featureResiduals" (remove current_residual_map [".hyperparam_path" ".robust"])
-								)
-						))
-					)
-				)
-			)
-			residuals_map
-		)
-
-		(assign_to_entities (assoc
-			!hyperparameterMetadataMap hyperparameter_metadata_map
-			!defaultHyperparameters default_hyperparameter_map
-		))
-	)
-"86.0.7"
-	(let
-		(assoc
-			parent_feature_to_derived_map
-				;keep only the original (non-derived built-in features that start with a '.')
-				(filter
-					(lambda (!= "." (first (current_index))))
-					!sourceToDerivedFeatureMap
-				)
-		)
-
-		(declare (assoc
-			derived_features_map
-				(append
-					(or !derivedFeaturesSet {})
-					;convert into one flat assoc
-					(apply "append"
-						;convert to a list of assocs
-						(apply "append"
-							(values
-								;convert assoc of {parent -> [ derived1 , derived2, etc ]} into:
-								; assoc of { parent -> [{derived1: parent}, {derived2: parent}, etc..] }
-								(map
-									(lambda (let
-										(assoc parent_feature (current_index 1))
-										(map
-											(lambda (associate (current_value 1) parent_feature))
-											(current_value)
-										)
-									))
-									parent_feature_to_derived_map
-								)
-							)
-						)
-					)
-				)
-		))
-
-		(assign_to_entities (assoc !derivedFeaturesMap derived_features_map ))
-	)
-"88.0.0"
-	(let
-		(assoc
-			new_paths
-				(map
-					(lambda
-						;previous format:  [action_feature context_key robust_mode weight_feature]
-						(if (= ".targetless" (first (current_value)))
-							;keep context_key and weight_feature
-							(append "targetless" (unzip (current_value) [1 3]))
-
-							;else targeted, keep action_feature, context_key and weight_feature
-							(append "targeted" (unzip (current_value) [0 1 3]))
-						)
-					)
-					!hyperparameterParamPaths
-				)
-			new_hp_params {}
-		)
-
-		;this change is unnecessary since the hyperparameters are already in the updated format
-		;because they don't have 'full' or 'robust' in their hp paths
-		(if (not (contains_value ["full" "robust"] (get !hyperparameterParamPaths [0 2])))
-			(conclude)
-		)
-
-		;for every old path, create the hyperparameters under the new path
-		(map
-			(lambda (let
-				(assoc
-					new_path (get new_paths (current_index 1))
-					hp_map (get !hyperparameterMetadataMap (current_value 1))
-				)
-				(assign (assoc
-					new_hp_params
-						(set
-							new_hp_params
-							new_path
-							(set hp_map "paramPath" new_path)
-						)
-				))
-			))
-			!hyperparameterParamPaths
-		)
-
-		(assign_to_entities (assoc
-			!hyperparameterParamPaths (values new_paths (true))
-			!hyperparameterMetadataMap new_hp_params
-		))
-	)
-"95.0.0"
-	(let
-		;sessions must include the field ".total_instance_count", default sessions without this field to the
-		;existing ".trained_instance_count" value
-		(assoc
-			session_entities (contained_entities [(query_exists ".replay_steps")])
-		)
-		(map
-			(lambda
-				(if (= (null) (retrieve_from_entity (current_value) ".total_instance_count"))
-					(accum_entity_roots (current_value) (list
-						(set_labels
-							(retrieve_from_entity (current_value 1) ".trained_instance_count")
-							[".total_instance_count"]
-						)
-					))
-				)
-			)
-			session_entities
-		)
-	)
-"97.2.6"
-	(assign_to_entities (assoc
-		!averageCaseEntropyAddition
-			(if (contains_index import_metadata_map "!averageModelCaseEntropyAddition")
-				(get import_metadata_map "!averageModelCaseEntropyAddition")
-				!averageCaseEntropyAddition
-			)
-		!averageCaseEntropyRemoval
-			(if (contains_index import_metadata_map "!averageModelCaseEntropyRemoval")
-				(get import_metadata_map "!averageModelCaseEntropyRemoval")
-				!averageCaseEntropyRemoval
-			)
-		!averageCaseDistanceContribution
-			(if (contains_index import_metadata_map "!averageModelCaseDistanceContribution")
-				(get import_metadata_map "!averageModelCaseDistanceContribution")
-				!averageCaseDistanceContribution
-			)
-		!minAblatementSize
-			(if (contains_index import_metadata_map "!minAblatementModelSize")
-				(get import_metadata_map "!minAblatementModelSize")
-				!minAblatementSize
-			)
-		!tsFeaturesMap
-			(if (contains_index import_metadata_map "!tsModelFeaturesMap")
-				(get import_metadata_map "!tsModelFeaturesMap")
-				!tsFeaturesMap
-			)
-		!regionalMinSize
-			(if (contains_index import_metadata_map "!regionalModelMinSize")
-				(get import_metadata_map "!regionalModelMinSize")
-				"!regionalMinSize"
-			)
-	))
-"97.2.8"
-	(assign_to_entities (assoc
-		!cachedFeatureMaxGapMap
-			(map
-				(lambda
-					(compute_on_contained_entities [
-						(query_max_difference (current_index 1) (get !cyclicFeaturesMap (current_index 1)) )
-					])
-				)
-				;only for continuous features
-				(remove (zip !trainedFeatures) (indices !nominalsMap))
-			)
-	))
-"97.3.1"
-	(assign_to_entities (assoc
-		!ordinalFeaturesSet
-			(if (size (get import_metadata_map "!ordinalFeatures"))
-				(get import_metadata_map "!ordinalFeatures")
-
-				;else recreate it from feature attributes
-				(zip (filter
-					(lambda (= "ordinal" (get !featureAttributes [(current_value 1) "type"])))
-					(indices !featureAttributes)
-				))
-			)
-	))
 "100.1.1"
 	(call !UpdateDefinedFeatures)
 "106.0.0"
@@ -613,24 +108,95 @@
 	)
 "106.0.1"
 	(seq
+		;refactors time series built-in features
 		(if !tsTimeFeature
-			(seq
+			(let
+				(assoc
+					;original trained features are all the non built-in features that don't start with a period
+					features (filter (lambda (!= "." (first (current_value)))) !trainedFeatures)
+				)
 				;re-assign feature attributes to create the synchronous counter feature attributes
 				(call set_feature_attributes (assoc
-					feature_attributes (get (call get_feature_attributes) (list 1 "payload"))
+					feature_attributes
+						(keep
+							(get (call get_feature_attributes) (list 1 "payload"))
+							features
+						)
 				))
 
-				;create the synchronous counter feature and populate its values
-				(call !CreateSynchronousCounterFeature (assoc
-					time_feature !tsTimeFeature
-					time_feature_delta (concat "." !tsTimeFeature "_delta_1")
-					series_ordered_by_features [!tsTimeFeature !internalLabelSessionTrainingIndex]
-					series_id_features (get !tsFeaturesMap "series_id_features")
+				;remove the no-longer used ".series_progress" and ".series_progress_delta" features
+				(assign_to_entities (assoc
+					!trainedFeatures
+						(filter (lambda (not (contains_value [".series_progress" ".series_progress_delta"] (current_value)))) !trainedFeatures)
 				))
+
+				;remove those two features from all cases
+				||(map
+					(lambda (assign_entity_roots
+						(current_value)
+						(filter
+							(lambda
+								(and
+									(!= (current_index) "#.series_progress")
+									(!= (current_index) "#.series_progress_delta")
+									(!= (current_index) "#.series_index")
+									(not (contains_value (get_labels (current_value)) "#.series_progress"))
+									(not (contains_value (get_labels (current_value)) "#.series_progress_delta"))
+									(not (contains_value (get_labels (current_value)) "#.series_index"))
+								)
+							)
+							(retrieve_entity_root (current_value))
+						)
+					))
+					(call !AllCases)
+				)
+
+				(assign_to_entities (assoc
+					!trainedFeatures (sort (values (append !trainedFeatures (indices !featureAttributes)) .true) )
+					!trainedFeaturesContextKey
+						(call !BuildContextFeaturesKey (assoc
+							context_features (values (append !trainedFeatures (indices !featureAttributes)) .true)
+						))
+				))
+				(call !UpdateDefinedFeatures)
+
+				(call !DeriveTrainFeatures (assoc
+					features features
+					derived_features (get !tsFeaturesMap "ts_derived_features")
+					separate_delta_and_rates .true
+				))
+
+				;all old time series datasets should be re-analized due to the new built-in features being added
+				(print "\n===\nWARNING: This Dataset should be re-Analyzed.\n===\n\n")
 			)
 		)
-
-
 	)
+"107.2.0"
+	(seq
+		;must assign .next_trained_index label to each session entity
+		(map
+			(lambda
+				(accum_entity_roots (current_value) (zip_labels
+					[".next_trained_index"] [(retrieve_from_entity (current_value 1) ".total_instance_count")]
+				))
+			)
+			(call !GetSessionIds)
+		)
+	)
+"107.2.3"
+	(seq
+		;remove booleans, leaving only numbers in the map
+		(assign_to_entities (assoc
+			!numericNominalFeaturesMap
+				(filter
+					(lambda (= "number" (current_value)))
+					!numericNominalFeaturesMap
+				)
+		))
+	)
+
+"108.2.1"
+	;updates !inactiveFeaturesMap to store the feature value and not just 0
+	(call !UpdateInactiveFeatures)
 
 ))

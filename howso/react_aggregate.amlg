@@ -2,7 +2,7 @@
 (null
     ;Computes, caches, and returns specified details and feature prediction statistics such as Accuracy Contributions, residuals (accuracy, Mean Absolute Error),
     ; precision, recall, etc. Returns details and feature prediction stats for all features in the format of feature -> assoc stat -> value
-	;{long_running (true) statistically_idempotent (true)}
+	;{long_running .true statistically_idempotent .true}
 	#react_aggregate
 	(declare
 		;returns {ref "ReactAggregateResponse"}
@@ -91,8 +91,9 @@
 			;	Defaults to 300 + 2 * (number of features).
 			num_robust_prediction_contributions_samples_per_case (null)
 			;{type "number" min 0}
-			;Total sample size of dataset to use (using sampling with replacement) for feature_robust_accuracy_contributions and estimated_residual_lower_bound.
-			;	Defaults to the smaller of 150000 or (6321 * num_context_features)
+			;Total sample size of dataset to use (using sampling with replacement) for feature_robust_accuracy_contributions,
+			;estimated_residual_lower_bound and value_robust_accuracy_contributions.
+			;	Defaults to the smaller of 150000 or (6321 * num_context_features), for value robust contribution flows defaults to 100000.
 			num_robust_accuracy_contributions_samples (null)
 			;{type "number" min 0}
 			;Percent threshold used to dynamically limit the number of samples used to determine robust accuracy contributions.
@@ -115,6 +116,25 @@
 			;	a class should have (value of a cell in the matrix) for it to remain in the confusion matrix. If the count is less than this value, it will
 			;	be accumulated into a single value of all insignificant predictions for the class and removed from the confusion matrix.
 			confusion_matrix_min_count 15
+			;{type "list" values "string"}
+			;features for which to determine decompose values into buckets when using any of the "value_*" details which predict the
+			;specified 'value_robust_contributions_action_feature'
+			value_robust_contributions_features (null)
+			;{type "string"}
+			;action feature being predicted whose accuracy and prediction affects should be computed by 'value_robust_contributions_features'
+			;when computing any of the "value_*" details.
+			value_robust_contributions_action_feature (null)
+			;{type "assoc" values {type "list" values {type "list" min_size 2 max_size 2}}}
+			;An assoc mapping continuous feature names to lists of lists defining inclusive ranges to be used as buckets to compute metrics for when using any of the "value_*" details. When undefined,
+			;buckets are automatically determined using the probability masses of the data.
+			value_robust_contributions_buckets (null)
+			;{type "number" exclusive_min 0}
+			;number of maximum buckets to bin continuous values into when using any of the "value_*" details, defaults to 30 when unspecified
+			value_robust_contributions_num_buckets 30
+			;{type "number" exclusive_min 0}
+			;The minimum number of samples necessary to report a metric value for a combination of feature values when computing any of the values
+			;details.
+			value_robust_contributions_min_samples 15
 			;{ref "ReactAggregateDetails"}
 			;assoc, optional. an assoc of flags for which type of audit data to return, and corresponding values to return (if applicable) in the format of:
 			;	(assoc
@@ -123,6 +143,7 @@
 			;				uses leave-one-out for features for computations. Uses full computation.
 			;		estimated_residual_lower_bound: optional, none/true/false.  if true will compute fetaure residuals for each feature in action_features the same
 			;				way as for 'feature_devations' except will also use context feature weights specific for each feature being predicted in order to estimate the lower bound value.
+			;		missing_information: optional, none/true/false.  if true will compute the average estimated missing information in nats for each feature.
 			;		feature_full_residuals: optional, none/true/false. For each context_feature, use the full set of all other context_features to
 			;				predict the feature.  When true, computes, caches, and returns the residuals for all features. Uses full computation.
 			;				When "prediction_stats" in the "details" parameter is true, it will also compute and cache the feature residuals.
@@ -187,6 +208,15 @@
 			;		context_condition_precision: optional string, default is 'exact'. Used only with 'context_condition' parameter, will find exact matches if 'exact' and similar cases if 'similar'.
 			;		context_num_samples: optional, limit on the number of context cases when 'context_condition_precision' is set to 'similar'.
 			;			If null, will be set to k. default is null
+			;		value_robust_accuracy_contributions: optional, none/true/false.
+			;			Perform a focused computation to determine how all the individual values of specified 'value_robust_contributions_features' affect the accuracy of 'value_robust_contributions_action_feature'.
+			;			Outputs under 'value_robust_contributions'
+			;		value_robust_prediction_contributions: optional, none/true/false.
+			;			Perform a focused computation to determine how all the individual values of specified 'value_robust_contributions_features' affect the predictions  of 'value_robust_contributions_action_feature'.
+			;			Outputs under 'value_robust_contributions'
+			;		value_robust_surprisal_asymmetry: optional, none/true/false.
+			;			Perform a focused computation to determine how all the individual values of specified 'value_robust_contributions_features' relationship with 'value_robust_contributions_action_feature'
+			;			vary in terms of AC-surprisal asymmetry.
 			;	)
 			details (null)
 		)
@@ -231,7 +261,7 @@
 							"feature_robust_accuracy_contributions_permutation"
 						]
 					)
-					(true)
+					.true
 				)
 			)
 			(conclude
@@ -260,6 +290,8 @@
 				(get details "feature_robust_residuals")
 				(get details "feature_robust_accuracy_contributions")
 				(get details "feature_robust_accuracy_contributions_permutation")
+				(get details "value_robust_accuracy_contributions")
+				(get details "value_robust_prediction_contributions")
 			)
 			(assign (assoc sample_model_fraction (null)))
 		)
@@ -270,7 +302,7 @@
 				valid_weight_feature (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight"))
 			))
 
-			(= (false) use_case_weights)
+			(= .false use_case_weights)
 			(assign (assoc weight_feature ".none" ))
 
 			;set up case weight parameters appropriately since unspecified
@@ -381,9 +413,14 @@
 			(assign (assoc
 				action_features
 					(if !tsTimeFeature
-						;filter out lags if a time-series trainee
+						;filter out lags and built-ins if a time-series trainee
 						(filter
-							(lambda (!= "lag"  (get !featureAttributes [(current_value 1) "ts_type"]) ))
+							(lambda
+								(and
+									(not (contains_value [".reverse_series_index" ".time_to_horizon" ".synchronous_counter" ".series_index"] (current_value)))
+									(!= "lag"  (get !featureAttributes [(current_value 1) "ts_type"]) )
+								)
+							)
 							context_features
 						)
 
@@ -428,7 +465,7 @@
 								))
 							)
 						))
-						(values (append action_features feature_influences_action_feature) (true))
+						(values (append action_features feature_influences_action_feature) .true)
 					)
 			))
 		)
@@ -599,7 +636,7 @@
 					))
 				)
 			robust_accuracy_contributions_samples
-				(if (or (get details "feature_robust_accuracy_contributions")  (get details "estimated_residual_lower_bound"))
+				(if (or (get details "feature_robust_accuracy_contributions") (get details "estimated_residual_lower_bound"))
 					(call !SampleCases (assoc
 						num
 							(if num_robust_accuracy_contributions_samples
@@ -610,6 +647,27 @@
 							)
 						case_weight_feature (if valid_weight_feature weight_feature)
 						query_conditions action_condition_filter_query
+					))
+				)
+			value_robust_contributions_case_ids
+				(if (or
+						(get details "value_robust_accuracy_contributions")
+						(get details "value_robust_prediction_contributions")
+						(get details "value_robust_surprisal_asymmetry")
+					)
+					(call !SampleCases (assoc
+						num
+							(if num_robust_accuracy_contributions_samples
+								num_robust_accuracy_contributions_samples
+								100000
+							)
+						case_weight_feature (if valid_weight_feature weight_feature)
+						query_conditions
+							(if (= "continuous" (get !featureAttributes [value_robust_contributions_action_feature "type"]))
+								; filter out continuous nulls for value contributions
+								(append action_condition_filter_query (query_not_equals value_robust_contributions_action_feature (null)) )
+								action_condition_filter_query
+							)
 					))
 				)
 		))
@@ -661,6 +719,16 @@
 					(if robust_accuracy_contributions_permutation_samples
 						(call !SampleCasesForGoals (assoc
 							case_ids robust_accuracy_contributions_permutation_samples
+							goal_features_map goal_features_map
+							goal_dependent_features goal_dependent_features
+							query_conditions action_condition_filter_query
+							features context_features
+						))
+					)
+				value_robust_contributions_case_ids
+					(if value_robust_contributions_case_ids
+						(call !SampleCasesForGoals (assoc
+							case_ids value_robust_contributions_case_ids
 							goal_features_map goal_features_map
 							goal_dependent_features goal_dependent_features
 							query_conditions action_condition_filter_query
@@ -721,12 +789,12 @@
 						(call !CalculateFeatureResiduals (assoc
 							features action_features
 							context_features context_features
-							robust_residuals (false)
+							robust_residuals .false
 							hyperparameter_feature prediction_stats_action_feature
 							use_case_weights use_case_weights
 							weight_feature weight_feature
 							custom_hyperparam_map custom_hyperparam_map
-							compute_all_statistics (true)
+							compute_all_statistics .true
 							confusion_matrix_min_count confusion_matrix_min_count
 							context_condition_filter_query context_condition_filter_query
 							case_ids case_ids
@@ -771,12 +839,12 @@
 									features action_features
 									context_features context_features
 									case_ids case_ids
-									robust_residuals (false)
+									robust_residuals .false
 									hyperparameter_feature prediction_stats_action_feature
 									use_case_weights use_case_weights
 									weight_feature weight_feature
 									custom_hyperparam_map custom_hyperparam_map
-									compute_all_statistics (false)
+									compute_all_statistics .false
 									confusion_matrix_min_count confusion_matrix_min_count
 									context_condition_filter_query context_condition_filter_query
 									strict_case_ids (!= 0 (size action_condition_filter_query))
@@ -800,12 +868,12 @@
 										features action_features
 										context_features context_features
 										case_ids robust_residual_case_ids
-										robust_residuals (true)
+										robust_residuals .true
 										hyperparameter_feature prediction_stats_action_feature
 										use_case_weights use_case_weights
 										weight_feature weight_feature
 										custom_hyperparam_map custom_hyperparam_map
-										compute_all_statistics (false)
+										compute_all_statistics .false
 										confusion_matrix_min_count confusion_matrix_min_count
 										context_condition_filter_query context_condition_filter_query
 										strict_case_ids (!= 0 (size action_condition_filter_query))
@@ -832,7 +900,7 @@
 										case_ids case_ids
 										robust_residuals "deviations"
 										custom_hyperparam_map custom_hyperparam_map
-										compute_all_statistics (false)
+										compute_all_statistics .false
 										confusion_matrix_min_count confusion_matrix_min_count
 										context_condition_filter_query context_condition_filter_query
 										weight_feature (if valid_weight_feature weight_feature (null))
@@ -861,6 +929,21 @@
 			))
 		)
 
+		(if (get details "missing_information")
+			(accum (assoc
+				output
+					(assoc
+						"missing_information"
+							(call !ComputeAverageMissingInformation (assoc
+								action_features action_features
+								context_features context_features
+								case_ids robust_accuracy_contributions_samples
+								features_to_derive features_to_derive
+							))
+					)
+			))
+		)
+
 		;doing feature_contributions
 		(if (or
 				(get details "feature_full_prediction_contributions")
@@ -878,7 +961,7 @@
 							(call !CalculateFeaturePredictionContributions (assoc
 								context_features context_features
 								action_feature feature_influences_action_feature
-								robust (false)
+								robust .false
 								case_ids case_ids
 								weight_feature weight_feature
 								custom_hyperparam_map custom_hyperparam_map
@@ -895,7 +978,7 @@
 							(call !CalculateFeaturePredictionContributions (assoc
 								context_features context_features
 								action_feature feature_influences_action_feature
-								robust (true)
+								robust .true
 								case_ids robust_prediction_contributions_case_ids
 								weight_feature weight_feature
 								custom_hyperparam_map custom_hyperparam_map
@@ -930,8 +1013,8 @@
 									(call !CalculateFeatureAccuracyContributions (assoc
 										context_features context_features
 										action_features [feature_influences_action_feature]
-										sensitivity_to_randomization (false)
-										robust (false)
+										sensitivity_to_randomization .false
+										robust .false
 										case_ids case_ids
 										use_case_weights use_case_weights
 										weight_feature weight_feature
@@ -951,8 +1034,8 @@
 									(call !CalculateFeatureAccuracyContributions (assoc
 										context_features context_features
 										action_features (if feature_influences_action_feature [feature_influences_action_feature] action_features)
-										sensitivity_to_randomization (false)
-										robust (true)
+										sensitivity_to_randomization .false
+										robust .true
 										case_ids robust_accuracy_contributions_samples
 										use_case_weights use_case_weights
 										weight_feature weight_feature
@@ -975,8 +1058,8 @@
 									(call !CalculateFeatureAccuracyContributions (assoc
 										context_features context_features
 										action_features [feature_influences_action_feature]
-										sensitivity_to_randomization (true)
-										robust (false)
+										sensitivity_to_randomization .true
+										robust .false
 										case_ids case_ids
 										use_case_weights use_case_weights
 										weight_feature weight_feature
@@ -996,8 +1079,8 @@
 									(call !CalculateFeatureAccuracyContributions (assoc
 										context_features context_features
 										action_features [feature_influences_action_feature]
-										sensitivity_to_randomization (true)
-										robust (true)
+										sensitivity_to_randomization .true
+										robust .true
 										case_ids robust_accuracy_contributions_permutation_samples
 										use_case_weights use_case_weights
 										weight_feature weight_feature
@@ -1028,6 +1111,55 @@
 								weight_feature weight_feature
 								hyperparam_map custom_hyperparam_map
 								context_condition_filter_query context_condition_filter_query
+							))
+					)
+			))
+		)
+
+
+		(if (or (get details "value_robust_accuracy_contributions") (get details "value_robust_prediction_contributions"))
+			(accum (assoc
+				output
+					(assoc
+						"value_robust_contributions"
+							(call !ComputeValueRobustContributions (assoc
+								case_ids value_robust_contributions_case_ids
+								features context_features
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+								hyperparam_map custom_hyperparam_map
+								context_condition_filter_query context_condition_filter_query
+								action_feature value_robust_contributions_action_feature
+								value_robust_contributions_features value_robust_contributions_features
+								max_num_buckets value_robust_contributions_num_buckets
+								value_robust_contributions_buckets value_robust_contributions_buckets
+								value_robust_contributions_min_samples value_robust_contributions_min_samples
+								valid_weight_feature valid_weight_feature
+								compute_ac (get details "value_robust_accuracy_contributions")
+								compute_pc (get details "value_robust_prediction_contributions")
+							))
+					)
+			))
+		)
+
+		(if (get details "value_robust_surprisal_asymmetry")
+			(accum (assoc
+				output
+					(assoc
+						"value_robust_surprisal_asymmetry"
+							(call !ComputeValueRobustSurprisalAsymmetry (assoc
+								case_ids value_robust_contributions_case_ids
+								features context_features
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+								hyperparam_map custom_hyperparam_map
+								context_condition_filter_query context_condition_filter_query
+								action_feature value_robust_contributions_action_feature
+								value_robust_contributions_features value_robust_contributions_features
+								max_num_buckets value_robust_contributions_num_buckets
+								value_robust_contributions_buckets value_robust_contributions_buckets
+								value_robust_contributions_min_samples value_robust_contributions_min_samples
+								valid_weight_feature valid_weight_feature
 							))
 					)
 			))
