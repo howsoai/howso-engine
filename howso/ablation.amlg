@@ -529,7 +529,7 @@
 			features !trainedFeatures
 			;{type "number"}
 			;stores the maximum number of cases that may remain after data is reduced
-			;	default to the value stored within the Trainee, which defaults to 50,000.
+			;	default to the value stored within the Trainee via 'set_auto_ablation_params', which defaults to 50,000.
 			reduce_max_cases !postReduceMaxCases
 			;{ref "AblationThresholdMap"}
 			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
@@ -596,11 +596,7 @@
 			;reduction will stop within batch_size of reduce_max_cases, so if the gap between
 			;reduce_max_cases and !autoAblationMinNumCases (max and min) cases is larger than batch_size,
 			;the number of cases that need to be kept is approximately: max - batch_size, but can't be less than min.
-			approximate_num_cases_to_keep
-				(if (> (- reduce_max_cases batch_size) !autoAblationMinNumCases)
-					(- reduce_max_cases batch_size)
-					!autoAblationMinNumCases
-				)
+			approximate_num_cases_to_keep (max (- reduce_max_cases batch_size) !autoAblationMinNumCases)
 		))
 
 		(if thresholds_enabled
@@ -645,13 +641,15 @@
 		;all the cases that were not returned in the pair above have 0 popularity (no other cases reference them)
 		(declare (assoc
 			zero_popularity_neighbors
-				(indices (remove
-					(zip (call !AllCases))
-					(first case_popularity_pair)
-				))
+				(contained_entities
+					(query_exists !internalLabelSession)
+					(query_not_in_entity_list (first case_popularity_pair))
+				)
 		))
 
-		;cases with a popularity less than this this cutoff value should be removed
+		;determine the cutoff value of the popularity at which all cases with a value less than that should be removed
+		;e.g., if there needs to be a quarter of cases left, this would compute the 0.75 quantile of popularity values,
+		;so that those bottom 75% are removed
 		(declare (assoc
 			reduction_popularity_cutoff
 				(quantile
@@ -659,9 +657,8 @@
 						(last case_popularity_pair)
 						(range 0 1 (size zero_popularity_neighbors) 1)
 					)
-					;example: if the number of cases that should remain is 20000 out of a dataset of 78107, that's approximately a quarter of cases
-					;add one percent so that should be enough cases selected to match the amount needed to be removed
-					; a computed value of .74394 + 0.01 = 0.75394
+					;add one percent to account for enough cases selected to match the amount needed to be removed due to rounding
+					;e.g., if the quantile value was 0.75 from the example above, this bumps it up to 0.76
 					(+
 						(/ (- num_cases approximate_num_cases_to_keep) num_cases)
 						0.01
