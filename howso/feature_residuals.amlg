@@ -548,16 +548,62 @@
 				null_uncertainties_map
 					(map
 						(lambda
+							;(current_index) is the feature
+							;(current_value) is a pair of [ ts lag amount, null uncertainty pair]
 							(if (first (current_value))
-								;if there was a compute null uncertainty, use it as-is
+								;if there was a computed null uncertainty, use a weighted average of the computed uncertainty and the feature residual
 								(if (last (current_value))
-									(last (current_value))
+									(let
+										(assoc
+											;nulls resulting from the explicit nulls in the original data
+											num_natural_nulls
+												(size (contained_entities
+													(query_exists (current_index 1))
+													(query_equals (current_index 1) (null))
+													;time series derived features only consider cases outside the null triangle at the start of a series
+													;e.g., a lag of 2 feature, will only consider nulls from cases with index >= 2
+													(query_greater_or_equal_to ".series_index" (first (current_value 1)) )
+												))
 
-									;else set the uncertainty to the feature residual
+											computed_null_uncertainty_pair (last (current_value 1))
+											expected_uncertainty (get residuals_map (current_index 1))
+										)
+										(declare (assoc
+											;nulls at the start of every series due to lags not having values defined
+											num_triangle_nulls
+												(-
+													(size (contained_entities
+														(query_exists (current_index 1))
+														(query_equals (current_index 1) (null))
+													))
+													num_natural_nulls
+												)
+										))
+
+										(declare (assoc
+											triangle_null_weight (/ num_triangle_nulls (+ num_triangle_nulls num_natural_nulls))
+											natural_null_weight (/ num_natural_nulls (+ num_triangle_nulls num_natural_nulls))
+										))
+
+										;store the uncertainty as a weighted average, reasoning is that the stored uncertainty should more closely
+										;reflect the value of the uncertainties of nulls that are the majority of the dataset
+										[
+											(+
+												(* triangle_null_weight expected_uncertainty)
+												(* natural_null_weight (first computed_null_uncertainty_pair))
+											)
+											(+
+												(* triangle_null_weight expected_uncertainty)
+												(* natural_null_weight (last computed_null_uncertainty_pair))
+											)
+										]
+									)
+
+									;else set the uncertainties to the feature residual
 									[ (get residuals_map (current_index 1)) (get residuals_map (current_index 1)) ]
 								)
 
-								;else not a ts feature with lags
+								;else not a time series feature with lags, keep the computed null uncertainties as-is
 								(last (current_value))
 							)
 						)
