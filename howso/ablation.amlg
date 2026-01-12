@@ -489,6 +489,57 @@
 		)
 	)
 
+
+	#!ComputeDeltaToNeighbors
+	;... of all surprisals : TODO: sum ? avg? max?
+	;(apply "max"
+	(generalized_mean
+		;convert case's feature residuals to surprisals of: case feature residual / dataset feature residual
+		(map
+			(lambda (let
+				(assoc
+					f_surprisal
+						(/
+							(if (= (null) (current_value 1))
+								(let
+									(assoc feature (get features (current_index 2)))
+									(if (contains_index null_uncertainties_map feature)
+										;use null-null uncertainty if case value is null
+										(if (= (null) (get case_values) (current_index 1))
+											(get null_uncertainties_map [feature 2])
+											;else use the null-value uncertainty
+											(get null_uncertainties_map [feature 1])
+										)
+										;else use min residual
+										(get !cachedFeatureMinResidualMap feature)
+									)
+								)
+
+								(current_value 1)
+							)
+							(get dataset_residuals (current_index 1))
+						)
+				)
+				(if (contains_index !nominalsMap (get features (current_index)))
+					(* f_surprisal (get nominal_weight_map [(get features (current_index 1)) (get case_values (current_index 1))]))
+
+					f_surprisal
+				)
+			))
+			;a list of residuals for every feature
+			(call !ComputeCaseDeviations (assoc
+				single_query_per_case .false
+				per_feature_weights .true
+				case_values_map (zip features case_values)
+				features features
+				local_cases_map local_cases_map
+			))
+		)
+	)
+
+
+
+
 	;reduce the trained data by removing cases that match the following criteria:
 	;a) it's an exact duplicate
 	;b) a near-duplicate (very similar to exactly one other case)
@@ -593,12 +644,36 @@
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
 			num_cases (call !GetNumTrainingCases)
 
+			feature_may_have_nulls_map
+				(map
+					(lambda (!= .false (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) ) )
+					(zip features)
+				)
+			dataset_residuals (unzip (get hyperparam_map "featureResiduals") features)
+			null_uncertainties_map (get hyperparam_map "nullUncertainties")
+			nominal_weight_map
+				(map
+					(lambda (let
+						(assoc
+							class_count_map (get !expectedValuesMap [".none" (current_index 2) "class_counts"])
+						)
+						(map
+							(lambda (* (size class_count_map) (current_value)))
+							(normalize (map
+								(lambda (/ 1 (current_value)))
+								(normalize class_count_map)
+							))
+						)
+					))
+					!nominalsMap
+				)
+
 			;reduction will stop within batch_size of reduce_max_cases, so if the gap between
 			;reduce_max_cases and !autoAblationMinNumCases (max and min) cases is larger than batch_size,
 			;the number of cases that need to be kept is approximately: max - batch_size, but can't be less than min.
 			approximate_num_cases_to_keep (max (- reduce_max_cases batch_size) !autoAblationMinNumCases)
 		))
-
+;(print (get !expectedValuesMap [".none" "target" "class_counts"]))
 		(if thresholds_enabled
 			(assign (assoc
 				prev_prediction_stats_map
@@ -613,39 +688,164 @@
 			))
 		)
 
-		;pair of cases and associated sorted popularities (total normalized influence of all neighbors that referenced it)
 		(declare (assoc
-			case_popularity_pair
-				(compute_on_contained_entities
-					(query_exists !internalLabelSession)
-					||(query_entity_cumulative_nearest_entity_weights
-						closest_k
-						features
-						(null) ;all cases
-						p_parameter
-						feature_weights
-						!queryDistanceTypeMap
-						query_feature_attributes_map
-						feature_deviations
-						(null)
-						dt_parameter
-						distribute_weight_feature
-						(rand)
-						(null) ;radius
-						!numericalPrecision
-						.true
+			neighbors_map_plus_one
+				||(map
+					(lambda
+						(compute_on_contained_entities
+							(query_not_in_entity_list [(current_index 1)])
+							(query_nearest_generalized_distance
+								(if (~ 0 closest_k) (+ 1 closest_k) (append closest_k 1))
+								features
+								(current_index)
+								p_parameter
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								(null)
+								dt_parameter
+								distribute_weight_feature
+								(rand)
+								(null) ;radius
+								!numericalPrecision
+							)
+						)
 					)
+					(zip (call !AllCases))
+				)
+		))
+		(declare (assoc
+			neighbors_map
+				(map
+					(lambda (remove (current_value) (index_min (current_value))))
+					neighbors_map_plus_one
+				)
+		))
+		(declare (assoc
+			referencing_cases_map
+				||(map
+					(lambda (let
+						(assoc case (current_index 1))
+						;current_value - assoc of neighbors
+						(indices (filter
+							(lambda (contains_index (current_value) case))
+							neighbors_map
+						))
+					))
+					neighbors_map
 				)
 		))
 
-		;all the cases that were not returned in the pair above have 0 popularity (no other cases reference them)
+		; (declare (assoc
+		; 	low_popularity_cases
+		; 		(indices (filter
+		; 			(lambda (<= (size (current_value)) 1))
+		; 			referencing_cases_map
+		; 		))
+		; ))
+		; (print "low pop: " (size low_popularity_cases) " ")
+
 		(declare (assoc
-			zero_popularity_neighbors
-				(contained_entities
-					(query_exists !internalLabelSession)
-					(query_not_in_entity_list (first case_popularity_pair))
+			case_popularity_map
+				||(map
+					(lambda (let
+						(assoc
+							case (current_index 1)
+							references (current_value 1)
+						)
+
+						(if (= 0 (size references))
+							(conclude 0)
+						)
+
+						;output ... of: deltas without case -  deltas with case
+						(apply "max"
+							(map
+								(lambda (let
+									(assoc
+										case_values (retrieve_from_entity (current_value 1) features)
+										ref_case_id (current_value 1)
+										; assoc of neighbor -> feature values
+										; ref_neighbor_values_map
+										; 	(map
+										; 		(lambda (retrieve_from_entity (current_value 1) features))
+										; 		(get neighbors_map_plus_one (current_value 1))
+										; 	)
+									)
+
+									(declare (assoc
+										ref_neighbors_delta_without_case
+											(call !ComputeDeltaToNeighbors (assoc
+												case_values case_values
+												features features
+												local_cases_map (remove (get neighbors_map_plus_one ref_case_id) case)
+											))
+
+										ref_neighbors_delta_with_case
+											(call !ComputeDeltaToNeighbors (assoc
+												case_values case_values
+												features features
+												local_cases_map (get neighbors_map ref_case_id)
+											))
+									))
+
+									(- ref_neighbors_delta_without_case ref_neighbors_delta_with_case)
+								))
+								references
+							)
+						)
+					))
+					referencing_cases_map
 				)
 		))
+
+		(declare (assoc
+			zero_popularity_neighbors []
+			sorted_case_ids
+				;sort in descending order of delta
+				(sort
+					(lambda (< (get case_popularity_map (current_value)) (get case_popularity_map (current_value 1))) )
+					(indices case_popularity_map)
+				)
+		))
+		(declare (assoc
+			case_popularity_pair [ sorted_case_ids (unzip case_popularity_map sorted_case_ids) ]
+		))
+
+		; ;pair of cases and associated sorted popularities (total normalized influence of all neighbors that referenced it)
+		; (declare (assoc
+		; 	case_popularity_pair
+		; 		(compute_on_contained_entities
+		; 			(query_exists !internalLabelSession)
+		; 			||(query_entity_cumulative_nearest_entity_weights
+		; 				closest_k
+		; 				features
+		; 				(null) ;all cases
+		; 				p_parameter
+		; 				feature_weights
+		; 				!queryDistanceTypeMap
+		; 				query_feature_attributes_map
+		; 				feature_deviations
+		; 				(null)
+		; 				dt_parameter
+		; 				distribute_weight_feature
+		; 				(rand)
+		; 				(null) ;radius
+		; 				!numericalPrecision
+		; 				.true
+		; 			)
+		; 		)
+		; ))
+
+		; ;all the cases that were not returned in the pair above have 0 popularity (no other cases reference them)
+		; (declare (assoc
+		; 	zero_popularity_neighbors
+		; 		(contained_entities
+		; 			(query_exists !internalLabelSession)
+		; 			(query_not_in_entity_list (first case_popularity_pair))
+		; 		)
+		; ))
 
 		;determine the cutoff value of the popularity at which all cases with a value less than that should be removed
 		;e.g., if there needs to be a quarter of cases left, this would compute the 0.75 quantile of popularity values,
@@ -799,7 +999,7 @@
 				in_reduce_data .false
 			))
 		)
-
+;(print (compute_on_contained_entities (query_value_masses "target")))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return (assoc payload output))
 	)
