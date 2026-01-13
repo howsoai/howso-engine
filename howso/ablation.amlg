@@ -687,171 +687,226 @@
 		)
 
 		(declare (assoc
-			neighbors_map_plus_one
-				||(map
-					(lambda
-						(compute_on_contained_entities
-							(query_not_in_entity_list [(current_index 1)])
-							(query_nearest_generalized_distance
-								(if (~ 0 closest_k) (+ 1 closest_k) (append closest_k 1))
-								features
-								(current_index)
-								p_parameter
-								feature_weights
-								!queryDistanceTypeMap
-								query_feature_attributes_map
-								feature_deviations
-								(null)
-								dt_parameter
-								distribute_weight_feature
-								(rand)
-								(null) ;radius
-								!numericalPrecision
-							)
-						)
-					)
-					(zip (call !AllCases))
-				)
-		))
-		(declare (assoc
-			neighbors_map
-				(map
-					(lambda (remove (current_value) (first (index_min (current_value)))) )
-					neighbors_map_plus_one
-				)
-		))
-		(declare (assoc
-			referencing_cases_map
-				||(map
-					(lambda (let
-						(assoc case (current_index 1))
-						;current_value - assoc of neighbors
-						(indices (filter
-							(lambda (contains_index (current_value) case))
-							neighbors_map
-						))
-					))
-					neighbors_map
-				)
-		))
-
-		(declare (assoc
-			case_popularity_map
-				||(map
-					(lambda (let
-						(assoc
-							case (current_index 1)
-							references (current_value 1)
-						)
-
-						(if (= 0 (size references))
-							(conclude 0)
-						)
-
-						;output ... of: deltas without case -  deltas with case
-						(apply "max"
-							(map
-								(lambda (let
-									(assoc
-										case_values (retrieve_from_entity (current_value 1) features)
-										ref_case_id (current_value 1)
-										; assoc of neighbor -> feature values
-										; ref_neighbor_values_map
-										; 	(map
-										; 		(lambda (retrieve_from_entity (current_value 1) features))
-										; 		(get neighbors_map_plus_one (current_value 1))
-										; 	)
-									)
-
-									(declare (assoc
-										ref_neighbors_delta_without_case
-											(call !ComputeDeltaToNeighbors (assoc
-												case_values case_values
-												features features
-												local_cases_map (remove (get neighbors_map_plus_one ref_case_id) case)
-											))
-
-										ref_neighbors_delta_with_case
-											(call !ComputeDeltaToNeighbors (assoc
-												case_values case_values
-												features features
-												local_cases_map (get neighbors_map ref_case_id)
-											))
-									))
-
-									(- ref_neighbors_delta_without_case ref_neighbors_delta_with_case)
-								))
-								references
-							)
-						)
-					))
-					referencing_cases_map
-				)
-		))
-
-		(declare (assoc
-			sorted_case_ids
-				;sort in descending order of delta
-				(sort
-					(lambda (< (get case_popularity_map (current_value)) (get case_popularity_map (current_value 1))) )
-					(indices case_popularity_map)
-				)
-		))
-
-		;determine the cutoff value of the popularity at which all cases with a value less than that should be removed
-		;e.g., if there needs to be a quarter of cases left, this would compute the 0.75 quantile of popularity values,
-		;so that those bottom 75% are removed
-		(declare (assoc
-			reduction_popularity_cutoff
-				(quantile
-					(unzip case_popularity_map sorted_case_ids)
-					;add one percent to account for enough cases selected to match the amount needed to be removed due to rounding
-					;e.g., if the quantile value was 0.75 from the example above, this bumps it up to 0.76
-					(+
-						(/ (- num_cases approximate_num_cases_to_keep) num_cases)
-						0.01
-					)
-				)
-		))
-		;plan to only remove cases whose popularity is less than reduction_popularity_cutoff
-		;i.e., only remove the non-popular cases that aren't referenced by others as much
-		(declare (assoc
-			num_removal_eligible_cases
-				(size (filter
-					(lambda (< (current_value) reduction_popularity_cutoff))
-					(unzip case_popularity_map sorted_case_ids)
-				))
-		))
-		(declare (assoc
-			;case ids in order from highest to lowest popularity, lowest popularity at end of list
-			removable_cases
-					;only keep the necessary number of lowest popularity eligible cases as well as all zero popularity ones
-					(tail sorted_case_ids num_removal_eligible_cases)
-		))
-
-		(declare (assoc
 			;list will be sorted from highest to lowest, thus cases removed from the end of the list
 			end_index (- (size removable_cases) 1)
 			random_cases .false
 			num_removed_this_batch 0
 		))
 
+		;all these variables get assigned to each loop iteration, perhaps better to (let) each iteration and declare instead (TODO?)
+		(declare (assoc
+			case_popularity_pair (null)
+			zero_popularity_neighbors (null)
+			reduction_popularity_cutoff (null)
+			num_removal_eligible_cases (null)
+			removable_cases (null)
+			removable_cases_accuracy_impacts (null)
+			neighbors_map_plus_one (null)
+			neighbors_map (null)
+			referencing_cases_map (null)
+			sorted_removable_cases (null)
+		))
+
 		;Begin looping on data removal. The ultimate end condition is if the dataset gets too small to continue removing cases.
 		(while (< !autoAblationMinNumCases (call !GetNumTrainingCases))
+
+			;REDUCE LOOP START
 			(assign (assoc
 				num_removed_this_batch (min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
 			))
+
+			;pair of cases and associated sorted popularities (total normalized influence of all neighbors that referenced it)
 			(assign (assoc
-				cases
-					(if (>= end_index 0)
-						;grab the cases from the end, with the smallest values
-						(unzip
-							removable_cases
-							(range
-								(max 0 (- end_index num_removed_this_batch -1))
-								end_index
+				case_popularity_pair
+					(compute_on_contained_entities
+						(query_exists !internalLabelSession)
+						||(query_entity_cumulative_nearest_entity_weights
+							closest_k
+							features
+							(null) ;all cases
+							p_parameter
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							feature_deviations
+							(null)
+							dt_parameter
+							distribute_weight_feature
+							(rand)
+							(null) ;radius
+							!numericalPrecision
+							.true
+						)
+					)
+			))
+
+			;all the cases that were not returned in the pair above have 0 popularity (no other cases reference them)
+			(assign (assoc
+				zero_popularity_neighbors
+					(contained_entities
+						(query_exists !internalLabelSession)
+						(query_not_in_entity_list (first case_popularity_pair))
+					)
+			))
+
+			;determine the cutoff value of the popularity at which all cases with a value less than that should be removed
+			;e.g., if there needs to be a quarter of cases left, this would compute the 0.75 quantile of popularity values,
+			;so that those bottom 75% are removed
+			(assign (assoc
+				reduction_popularity_cutoff
+					(quantile
+						(append
+							(last case_popularity_pair)
+							(range 0 1 (size zero_popularity_neighbors) 1)
+						)
+						;add one percent to account for enough cases selected to match the amount needed to be removed due to rounding
+						;e.g., if the quantile value was 0.75 from the example above, this bumps it up to 0.76
+						(+
+							(/ (* 2 num_removed_this_batch) num_cases)
+							0.01
+						)
+					)
+			))
+			;plan to only remove cases whose popularity is less than reduction_popularity_cutoff
+			;i.e., only remove the non-popular cases that aren't referenced by others as much
+			(assign (assoc
+				num_removal_eligible_cases
+					(size (filter
+						(lambda (< (current_value) reduction_popularity_cutoff))
+						(last case_popularity_pair)
+					))
+			))
+			(assign (assoc
+				;case ids in order from highest to lowest popularity, lowest popularity at end of list
+				removable_cases
+					(append
+						;only keep the necessary number of lowest popularity eligible cases as well as all zero popularity ones
+						(tail (first case_popularity_pair) num_removal_eligible_cases)
+						zero_popularity_neighbors
+					)
+			))
+
+			;get all K+1 neighbors and referencing cases for each removable case
+			(assign (assoc
+				neighbors_map_plus_one
+					||(map
+						(lambda
+							(compute_on_contained_entities
+								(query_not_in_entity_list [(current_index 1)])
+								(query_nearest_generalized_distance
+									(if (~ 0 closest_k) (+ 1 closest_k) (append closest_k 1))
+									features
+									(current_index)
+									p_parameter
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									(null)
+									dt_parameter
+									distribute_weight_feature
+									(rand)
+									(null) ;radius
+									!numericalPrecision
+								)
 							)
 						)
+						(zip removable_cases)
+					)
+			))
+			(assign (assoc
+				neighbors_map
+					(map
+						(lambda (remove (current_value) (first (index_min (current_value)))) )
+						neighbors_map_plus_one
+					)
+			))
+			(assign (assoc
+				referencing_cases_map
+					||(map
+						(lambda (let
+							(assoc case (current_index 1))
+							;current_value - assoc of neighbors
+							(indices (filter
+								(lambda (contains_index (current_value) case))
+								neighbors_map
+							))
+						))
+						neighbors_map
+					)
+			))
+
+			(assign (assoc
+				removable_cases_accuracy_impact_map
+					||(map
+						(lambda (let
+							(assoc
+								case (current_index 1)
+								references (current_value 1)
+							)
+
+							(if (= 0 (size references))
+								(conclude 0)
+							)
+
+							;output ... of: deltas without case -  deltas with case
+							(apply "max"
+								(map
+									(lambda (let
+										(assoc
+											case_values (retrieve_from_entity (current_value 1) features)
+											ref_case_id (current_value 1)
+											; assoc of neighbor -> feature values
+											; ref_neighbor_values_map
+											; 	(map
+											; 		(lambda (retrieve_from_entity (current_value 1) features))
+											; 		(get neighbors_map_plus_one (current_value 1))
+											; 	)
+										)
+
+										(declare (assoc
+											ref_neighbors_delta_without_case
+												(call !ComputeDeltaToNeighbors (assoc
+													case_values case_values
+													features features
+													local_cases_map (remove (get neighbors_map_plus_one ref_case_id) case)
+												))
+
+											ref_neighbors_delta_with_case
+												(call !ComputeDeltaToNeighbors (assoc
+													case_values case_values
+													features features
+													local_cases_map (get neighbors_map ref_case_id)
+												))
+										))
+
+										(- ref_neighbors_delta_without_case ref_neighbors_delta_with_case)
+									))
+									references
+								)
+							)
+						))
+						referencing_cases_map
+					)
+			))
+
+			(assign (assoc
+				sorted_removable_cases
+					;sort in descending order of delta
+					(sort
+						(lambda (< (get removable_cases_accuracy_impact_map (current_value)) (get removable_cases_accuracy_impact_map (current_value 1))) )
+						(indices removable_cases_accuracy_impact_map)
+					)
+			))
+
+			(assign (assoc
+				cases_to_remove (tail sorted_removable_cases num_removed_this_batch)
+			))
+
+			(assign (assoc
+				cases
+					(if (size cases_to_remove)
+						cases_to_remove
 
 						;else select random cases
 						(contained_entities
@@ -860,14 +915,6 @@
 						)
 					)
 			))
-
-			(if (>= end_index 0)
-				;update end index to account for the cases about to be removed
-				(assign (assoc end_index (- end_index (size cases)) ))
-
-				;else no more removable cases left, remove random cases
-				(assign (assoc random_cases .true))
-			)
 
 			(if !tsTimeFeature
 				;do not remove first (.series_index == 0) or last (.reverse_series_index == 0) cases for any series
@@ -926,7 +973,6 @@
 				)
 
 				;else couldn't select any from random cases, stop
-				(and random_cases (< end_index 0))
 				(conclude)
 			)
 
@@ -934,6 +980,7 @@
 			(if (<= (call !GetNumTrainingCases) reduce_max_cases)
 				(conclude)
 			)
+			;REDUCE LOOP END
 		)
 
 		;if the number of cases has been reduced by 'e' or more, auto analyze if needed
