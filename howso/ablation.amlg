@@ -615,115 +615,66 @@
 
 		;randomize the order
 		(assign (assoc
-			removable_cases (rand removable_cases (size removable_cases) .true)
+			cases (rand removable_cases (size removable_cases) .true)
 		))
 
-		(declare (assoc
-			;list will be sorted from highest to lowest, thus cases removed from the end of the list
-			end_index (- (size removable_cases) 1)
-			random_cases .false
-			num_removed_this_batch 0
-		))
-
-		;Begin looping on data removal. The ultimate end condition is if the dataset gets too small to continue removing cases.
-		(while (< !autoAblationMinNumCases (call !GetNumTrainingCases))
-			(assign (assoc
-				num_removed_this_batch (min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
-			))
+		(if !tsTimeFeature
+			;do not remove first (.series_index == 0) or last (.reverse_series_index == 0) cases for any series
 			(assign (assoc
 				cases
-					(if (>= end_index 0)
-						;grab the cases from the end, with the smallest values
-						(unzip
-							removable_cases
-							(range
-								(max 0 (- end_index num_removed_this_batch -1))
-								end_index
-							)
-						)
-
-						;else select random cases
-						(contained_entities
-							(query_exists distribute_weight_feature)
-							(query_select num_removed_this_batch (null) (rand) )
-						)
+					(contained_entities
+						(query_in_entity_list cases)
+						(query_not_equals ".reverse_series_index" 0)
+						(query_not_equals ".series_index" 0)
 					)
 			))
+		)
 
-			(if (>= end_index 0)
-				;update end index to account for the cases about to be removed
-				(assign (assoc end_index (- end_index (size cases)) ))
-
-				;else no more removable cases left, remove random cases
-				(assign (assoc random_cases .true))
-			)
-
-			(if !tsTimeFeature
-				;do not remove first (.series_index == 0) or last (.reverse_series_index == 0) cases for any series
-				(assign (assoc
-					cases
-						(contained_entities
-							(query_in_entity_list cases)
-							(query_not_equals ".reverse_series_index" 0)
-							(query_not_equals ".series_index" 0)
-						)
+		(if (size cases)
+			(seq
+				(call !RemoveCases (assoc
+					cases cases
+					distribute_weight_feature distribute_weight_feature
 				))
-			)
 
-			(if (size cases)
-				(seq
-					(call !RemoveCases (assoc
-						cases cases
-						distribute_weight_feature distribute_weight_feature
-					))
-
-					(if thresholds_enabled
-						(let
-							(assoc
-								batch_threshold_info (null)
-								new_prediction_stats_map
-									(get
-										(call !CalculateFeatureResiduals (assoc
-											weight_feature distribute_weight_feature
-											use_case_weights .true
-											compute_all_statistics .true
-										))
-										"prediction_stats"
-									)
+				(if thresholds_enabled
+					(let
+						(assoc
+							batch_threshold_info (null)
+							new_prediction_stats_map
+								(get
+									(call !CalculateFeatureResiduals (assoc
+										weight_feature distribute_weight_feature
+										use_case_weights .true
+										compute_all_statistics .true
+									))
+									"prediction_stats"
+								)
+						)
+						(assign (assoc
+							batch_threshold_info
+								(call !CheckThresholds (assoc
+									abs_threshold_map abs_threshold_map
+									delta_threshold_map delta_threshold_map
+									rel_threshold_map rel_threshold_map
+									prev_prediction_stats_map prev_prediction_stats_map
+									new_prediction_stats_map new_prediction_stats_map
+								))
+						))
+						(if (apply "or" (values batch_threshold_info))
+							(seq
+								(accum "output" ["threshold_info"] batch_threshold_info)
+								(conclude)
 							)
 							(assign (assoc
-								batch_threshold_info
-									(call !CheckThresholds (assoc
-										abs_threshold_map abs_threshold_map
-										delta_threshold_map delta_threshold_map
-										rel_threshold_map rel_threshold_map
-										prev_prediction_stats_map prev_prediction_stats_map
-										new_prediction_stats_map new_prediction_stats_map
-									))
+								prev_prediction_stats_map new_prediction_stats_map
 							))
-							(if (apply "or" (values batch_threshold_info))
-								(seq
-									(accum "output" ["threshold_info"] batch_threshold_info)
-									(conclude)
-								)
-								(assign (assoc
-									prev_prediction_stats_map new_prediction_stats_map
-								))
-							)
 						)
 					)
 				)
-
-				;else couldn't select any from random cases, stop
-				(and random_cases (< end_index 0))
-				(conclude)
-			)
-
-			;enough cases have been removed, can stop removing
-			(if (<= (call !GetNumTrainingCases) reduce_max_cases)
-				(conclude)
 			)
 		)
+
 
 		;if the number of cases has been reduced by 'e' or more, auto analyze if needed
 		(if (< (call !GetNumTrainingCases) (/ num_cases 2.718281828459))
