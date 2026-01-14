@@ -605,17 +605,173 @@
 			))
 		)
 
+		;START facility something algo
+		;approximate_num_cases_to_keep is the amount of cases to select
+
 		(declare (assoc
-			removable_cases
-				(contained_entities
-					(query_exists !internalLabelSession)
-					(query_select (- num_cases approximate_num_cases_to_keep) (null) (rand) )
+			hyperparam_map (call !GetHyperparameters (assoc weight_feature distribute_weight_feature))
+		))
+
+		(declare (assoc
+			k_parameter (get hyperparam_map "k")
+			p_parameter (get hyperparam_map "p")
+			feature_weights (get hyperparam_map "featureWeights")
+			dt_parameter (get hyperparam_map "dt")
+			feature_deviations (get hyperparam_map "featureDeviations")
+			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
+		))
+
+		(declare (assoc
+			all_case_ids (call !AllCases)
+		)
+
+		(declare (assoc
+			best_sim
+				;best similarity of all cases to the chosen set of cases to keep
+				(map 0 all_case_ids)
+		))
+
+		(declare (assoc
+			similarity_matrix
+				||(map
+					(lambda
+						(unzip
+							(compute_on_contained_entities
+								(query_in_entity_list all_case_ids)
+								(query_within_generalized_distance
+									.infinity ;distance
+									features
+									(retrieve_from_entity (current_value) features)
+									p_parameter
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									(null)
+									dt_parameter
+									(if valid_weight_feature weight_feature (null))
+									"fixed rand seed"
+									(null) ;radius
+									!numericalPrecision
+								)
+							)
+							all_case_ids
+						)
+					)
+					all_case_ids
 				)
 		))
 
-		;randomize the order
+		(declare (assoc
+			initial_gain
+				(map
+					(lambda (apply "+" (current_value)) )
+					similarity_matrix
+				)
+			done .false
+		))
+
+		(declare (assoc
+			heap (zip all_case_ids initial_gain)
+		))
+
+		(declare (assoc
+			cases_to_keep
+				(while (not done)
+					(let
+						(assoc
+							current_cases_to_keep
+								(if (= (current_index 1) 0)
+									(list)
+
+									(previous_result 1)
+								)
+						)
+
+						;neg_gain, idx, stale = heapq.heappop(heap)
+						(declare (assoc
+							most_similar_case (first (index_max heap))
+						))
+						(declare (assoc
+							most_similar_case_index
+								(first (filter
+									(lambda (= (get all_case_ids (current_value)) most_similar_case )
+									(indices all_case_ids)
+								))
+						))
+						(declare (assoc
+							gain (get heap most_similar_case)
+						))
+						(assign (assoc
+							heap (remove heap [most_similar_case])
+						))
+
+						(declare (assoc
+							update_best_sim
+								(map
+									(lambda (apply "max" (current_value)))
+									best_sim
+									;similarity[:, idx]
+									(map
+										(lambda (get (current_value) most_similar_case_index))
+										similarity_matrix
+									)
+								)
+						))
+
+						;true_gain = (np.maximum(best_sim, similarity[:, idx])).sum() - best_sim.sum()
+						(declare (assoc
+							true_gain
+								(-
+									(apply "+" updated_best_sim)
+									(apply "+" best_sim)
+								)
+						))
+
+						(if (!= gain true_gain)
+							(seq
+								;update heap with true gain
+								;"heapq.heappush(heap, (-true_gain, idx, best_sim[idx]))"
+								(assign (assoc
+									heap
+										(append
+											heap
+											(associate most_similar_case true_gain)
+										)
+								))
+
+								;keep current set
+								current_cases_to_keep
+							)
+
+							(seq
+								; # update best_sim for all points
+								; best_sim = np.maximum(best_sim, similarity[:, idx])
+								(assign (assoc
+									best_sim updated_best_sim
+								))
+
+								(if (> (size current_cases_to_keep_set) !autoAblationMinNumCases)
+									(assign (assoc done .true ))
+								)
+
+								; # otherwise the gain is current → accept this point
+								; selected.append(idx)
+								(append current_cases_to_keep most_similar_case)
+							)
+						)
+					)
+				)
+		))
+
+
+
+
+		;END facility something algo
+
 		(assign (assoc
-			cases (rand removable_cases (size removable_cases) .true)
+			;the list of case ids to be removed
+			cases (null)
 		))
 
 		(if !tsTimeFeature
