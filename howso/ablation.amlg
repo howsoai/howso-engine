@@ -623,148 +623,129 @@
 
 		(declare (assoc
 			all_case_ids (call !AllCases)
-		))
-
-		(declare (assoc
-			best_sim
-				;best similarity of all cases to the chosen set of cases to keep
-				(map 0 all_case_ids)
-		))
-
-		(declare (assoc
-			similarity_matrix
-				||(map
-					(lambda
-						(unzip
-							(compute_on_contained_entities
-								(query_in_entity_list all_case_ids)
-								(query_within_generalized_distance
-									.infinity ;distance
-									features
-									(retrieve_from_entity (current_value) features)
-									p_parameter
-									feature_weights
-									!queryDistanceTypeMap
-									query_feature_attributes_map
-									feature_deviations
-									(null)
-									dt_parameter
-									(if valid_weight_feature weight_feature (null))
-									"fixed rand seed"
-									(null) ;radius
-									!numericalPrecision
-								)
-							)
-							all_case_ids
-						)
-					)
-					all_case_ids
-				)
-		))
-
-		(declare (assoc
-			initial_gain
-				(map
-					(lambda (apply "+" (current_value)) )
-					similarity_matrix
-				)
 			done .false
 		))
 
-		(declare (assoc
-			heap (zip all_case_ids initial_gain)
-		))
+		(map
+			(lambda
+				(accum_entity_roots (current_value) (zip_labels
+					["keeping"] [.false]
+				))
+			)
+			all_case_ids
+		)
 
-		(declare (assoc
-			cases_to_keep
-				(while (not done)
-					(let
-						(assoc
-							current_cases_to_keep
-								(if (= (current_index 1) 0)
-									(list)
 
-									(previous_result 1)
-								)
+		#!ReduceComputeDCs
+		(let
+			(assoc
+				case_to_dc_map
+					(compute_on_contained_entities
+						(query_equals "keeping" .false)
+						||(query_entity_distance_contributions
+							k_parameter
+							features
+							(contained_entities (query_exists !internalLabelSession) (query_equals "keeping" .false))
+							p_parameter
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							feature_deviations
+							(null)
+							(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
+							distribute_weight_feature
+							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+							"fixed rand seed"
+							(null) ;radius
+							!numericalPrecision
 						)
+					)
+			)
 
-						;neg_gain, idx, stale = heapq.heappop(heap)
-						(declare (assoc
-							most_similar_case (first (index_max heap))
-						))
-						(declare (assoc
-							most_similar_case_index
-								(first (filter
-									(lambda (= (get all_case_ids (current_value)) most_similar_case ) )
-									(indices all_case_ids)
-								))
-						))
-						(declare (assoc
-							gain (get heap most_similar_case)
-						))
-						(assign (assoc
-							heap (remove heap [most_similar_case])
-						))
+			(call !StoreCaseValues (assoc
+				case_values_map case_to_dc_map
+				label_name ".reduce_dc_val"
+			))
+		)
 
-						(declare (assoc
-							updated_best_sim
-								(map
-									(lambda (apply "max" (current_value)))
-									best_sim
-									;similarity[:, idx]
-									(map
-										(lambda (get (current_value) most_similar_case_index))
-										similarity_matrix
-									)
+		(while (not done)
+			(let
+				(assoc
+					case_to_add
+						(if (= (current_index 1) 0)
+							;on first iteration, just take lowest DC case
+							(first (contained_entities
+								(query_exists !internalLabelSession)
+								(query_equals "keeping" .false)
+								(query_min ".reduce_dc_val" 1 .true)
+							))
+
+							;otherwise need case with low DC that is far from its most similar case in current_cases_to_keep
+							(let
+								(assoc
+									lowest_dc_cases
+										(contained_entities
+											(query_exists !internalLabelSession)
+											(query_equals "keeping" .false)
+											(query_min ".reduce_dc_val" 5 .true)
+										)
 								)
-						))
 
-						;true_gain = (np.maximum(best_sim, similarity[:, idx])).sum() - best_sim.sum()
-						(declare (assoc
-							true_gain
-								(-
-									(apply "+" updated_best_sim)
-									(apply "+" best_sim)
-								)
-						))
-
-						(if (!= gain true_gain)
-							(seq
-								;update heap with true gain
-								;"heapq.heappush(heap, (-true_gain, idx, best_sim[idx]))"
-								(assign (assoc
-									heap
-										(append
-											heap
-											(associate most_similar_case true_gain)
+								;for each low-DC case, get its distance to its closest case that we ARE KEEPING
+								(declare (assoc
+									lowest_dc_closest_distance_to_selected_map
+										(map
+											(lambda
+												(first (compute_on_contained_entities
+													(query_equals "keeping" .true)
+													(query_distance_contributions
+														1
+														features
+														[(retrieve_from_entity (current_index 1) features)]
+														p_parameter
+														feature_weights
+														!queryDistanceTypeMap
+														query_feature_attributes_map
+														feature_deviations
+														(null)
+														(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
+														distribute_weight_feature
+														;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+														"fixed rand seed"
+														(null) ;radius
+														!numericalPrecision
+													)
+												))
+											)
+											(zip lowest_dc_cases)
 										)
 								))
 
-								;keep current set
-								current_cases_to_keep
-							)
 
-							(seq
-								; # update best_sim for all points
-								; best_sim = np.maximum(best_sim, similarity[:, idx])
-								(assign (assoc
-									best_sim updated_best_sim
-								))
-
-								(if (> (size current_cases_to_keep) !autoAblationMinNumCases)
-									(assign (assoc done .true ))
-								)
-
-								; # otherwise the gain is current → accept this point
-								; selected.append(idx)
-								(append current_cases_to_keep most_similar_case)
+								(first (index_max lowest_dc_closest_distance_to_selected_map))
 							)
 						)
+				)
+
+				(assign_to_entities case_to_add (assoc
+					keeping .true
+				))
+
+				(if (>=
+						(size (contained_entities
+							(query_exists !internalLabelSession)
+							(query_equals "keeping" .true)
+						))
+						!autoAblationMinNumCases
+					)
+					(assign (assoc done .true))
+
+					(if (= (mod (current_index) 50) 0)
+						(call !ReduceComputeDCs)
 					)
 				)
-		))
-
-
+			)
+		)
 
 
 		;END facility something algo
@@ -774,7 +755,7 @@
 			cases
 				(contained_entities
 					(query_exists !internalLabelSession)
-					(query_not_in_entity_list cases_to_keep)
+					(query_equals "keeping" .false)
 				)
 		))
 
