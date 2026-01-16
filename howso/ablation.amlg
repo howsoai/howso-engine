@@ -655,15 +655,71 @@
 		))
 
 		;blur weights among neighbors
-		(call !DistributeCaseInfluenceWeights (assoc
-			case_ids all_case_ids
-			redistribute_weights_map neighbors_map
-			has_rebalance_features .false
+		(declare (assoc
+			duplicates
+				(call !DistributeCaseInfluenceWeights (assoc
+					case_ids all_case_ids
+					redistribute_weights_map neighbors_map
+					has_rebalance_features .false
+				))
 		))
+
+		;merge duplicates if any exist
+		(if (size duplicates)
+			(call !ReduceMergeDuplicateCases (assoc
+				all_duplicate_cases_map (zip duplicates)
+			))
+		)
+
+		(declare (assoc zero_weight_cases (contained_entities (query_equals distribute_weight_feature 0)) ))
+		;remove zero-weight cases
+		(if (size zero_weight_cases)
+			(call !RemoveCases (assoc
+				cases zero_weight_cases
+				;weight has already been distributed above during the first blur stop, don't do it again
+				distribute_weight_feature (null)
+			))
+		)
+
+		;dataset has been modified due to removal of dupes and zero weight cases
+		(if (or (size zero_weight_cases) (size duplicates))
+			(seq
+				(assign (assoc all_case_ids (call !AllCases) ))
+
+				(assign (assoc
+					neighbors_map
+						||(map
+							(lambda
+								(compute_on_contained_entities
+									(query_not_in_entity_list [(current_index 1)])
+									(query_nearest_generalized_distance
+										k_parameter
+										features
+										(current_index)
+										p_parameter
+										feature_weights
+										!queryDistanceTypeMap
+										query_feature_attributes_map
+										feature_deviations
+										(null)
+										dt_parameter
+										distribute_weight_feature ;TODO: should this be taken into account?
+										(rand)
+										(null) ;radius
+										!numericalPrecision
+									)
+								)
+							)
+							(zip all_case_ids)
+						)
+				))
+			)
+		)
+
 		;second pass
 		(call !DistributeCaseInfluenceWeights (assoc
 			case_ids all_case_ids
-			redistribute_weights_map neighbors_map ;TODO: does this need to be recomputed after each blur pass?
+			redistribute_weights_map neighbors_map
 			has_rebalance_features .false
 		))
 
@@ -1000,22 +1056,6 @@
 				))
 			))
 			duplicate_neighbors_map
-		)
-
-		;recompute influence weight entropy for the remaining no-longer duplicates
-		(declare (assoc
-			cases_too_far_map
-				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-					features features
-					weight_feature distribute_weight_feature
-					use_case_weights .true
-					compute_all .true
-					specific_case_ids (indices duplicate_neighbors_map)
-				))
-		))
-
-		(if (size cases_too_far_map)
-			(accum (assoc case_duplicate_or_far_map cases_too_far_map))
 		)
 	)
 
