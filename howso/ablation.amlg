@@ -626,6 +626,7 @@
 			done .false
 		))
 
+		;mark each case as not being kept at first
 		(map
 			(lambda
 				(accum_entity_roots (current_value) (zip_labels
@@ -641,7 +642,7 @@
 			(assoc
 				case_to_dc_map
 					(compute_on_contained_entities
-						(query_equals "keeping" .false)
+						(query_equals "keeping" .false) ;maybe not appropriate? TODO
 						||(query_entity_distance_contributions
 							k_parameter
 							features
@@ -668,68 +669,110 @@
 			))
 		)
 
+		;experimental params
+		(declare (assoc
+			;the amount of low DC cases to consider for keeping
+			lowest_dc_trunc_n 15
+
+			;number of cases to select for keeping per iteration
+			cases_to_keep_per_iter 5
+
+			;how many iterations between each DC recomputation
+			dc_recompute_cycles 10
+		))
+
 		(while (not done)
 			(let
 				(assoc
-					case_to_add
+					cases_to_add
 						(if (= (current_index 1) 0)
 							;on first iteration, just take lowest DC case
-							(first (contained_entities
+							(contained_entities
 								(query_exists !internalLabelSession)
 								(query_equals "keeping" .false)
 								(query_min ".reduce_dc_val" 1 .true)
-							))
+							)
 
-							;otherwise need case with low DC that is far from its most similar case in current_cases_to_keep
+							;otherwise need cases with low DC that is far from its most similar case in current_cases_to_keep
 							(let
 								(assoc
 									lowest_dc_cases
 										(contained_entities
 											(query_exists !internalLabelSession)
 											(query_equals "keeping" .false)
-											(query_min ".reduce_dc_val" 5 .true)
+											(query_min ".reduce_dc_val" lowest_dc_trunc_n .true)
 										)
 								)
 
 								;for each low-DC case, get its distance to its closest case that we ARE KEEPING
 								(declare (assoc
 									lowest_dc_closest_distance_to_selected_map
+										(compute_on_contained_entities
+											(query_equals "keeping" .true)
+											||(query_entity_distance_contributions
+												1 ;k
+												features
+												lowest_dc_cases
+												p_parameter
+												feature_weights
+												!queryDistanceTypeMap
+												query_feature_attributes_map
+												feature_deviations
+												(null)
+												(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
+												distribute_weight_feature
+												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+												"fixed rand seed"
+												(null) ;radius
+												!numericalPrecision
+											)
+										)
+								))
+
+								(declare (assoc
+									low_dc_case_scores
 										(map
 											(lambda
-												(first (compute_on_contained_entities
-													(query_equals "keeping" .true)
-													(query_distance_contributions
-														1
-														features
-														[(retrieve_from_entity (current_index 1) features)]
-														p_parameter
-														feature_weights
-														!queryDistanceTypeMap
-														query_feature_attributes_map
-														feature_deviations
-														(null)
-														(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
-														distribute_weight_feature
-														;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-														"fixed rand seed"
-														(null) ;radius
-														!numericalPrecision
-													)
-												))
+												;divide distance to closest selected case by distance contribution
+												;more distance to closest selected case = good
+												;lower distance contribution = good
+												(/
+													(current_value)
+													(retrieve_from_entity (current_index) ".reduce_dc_val")
+												)
 											)
-											(zip lowest_dc_cases)
+											lowest_dc_closest_distance_to_selected_map
+										)
+								))
+
+								(declare (assoc
+									;sorting low dc cases by *decreasing* "score"
+									sorted_lowest_dc_cases
+										(sort
+											(lambda
+												(-
+													(get low_dc_case_scores (current_value 1))
+													(get low_dc_case_scores (current_value))
+												)
+											)
+											lowest_dc_cases
 										)
 								))
 
 
-								(first (index_max lowest_dc_closest_distance_to_selected_map))
+								(trunc sorted_lowest_dc_cases cases_to_keep_per_iter)
 							)
 						)
 				)
 
-				(assign_to_entities case_to_add (assoc
-					keeping .true
-				))
+				(map
+					(lambda
+						(assign_to_entities (current_value) (assoc
+							keeping .true
+						))
+					)
+					cases_to_add
+				)
 
 				(if (>=
 						(size (contained_entities
@@ -740,7 +783,7 @@
 					)
 					(assign (assoc done .true))
 
-					(if (= (mod (current_index) 50) 0)
+					(if (and (current_index) (= (mod (current_index) dc_recompute_cycles) 0) )
 						(call !ReduceComputeDCs)
 					)
 				)
