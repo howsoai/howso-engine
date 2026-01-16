@@ -637,14 +637,13 @@
 		)
 
 
-		#!ReduceComputeDCs
+		#!ReduceComputeNeighborSurprisals
 		(let
 			(assoc
-				case_to_dc_map
+				case_neighbor_surprisal_map
 					(compute_on_contained_entities
-						(query_equals "keeping" .false) ;maybe not appropriate? TODO
 						||(query_entity_distance_contributions
-							k_parameter
+							1
 							features
 							(contained_entities (query_exists !internalLabelSession) (query_equals "keeping" .false))
 							p_parameter
@@ -664,21 +663,19 @@
 			)
 
 			(call !StoreCaseValues (assoc
-				case_values_map case_to_dc_map
-				label_name ".reduce_dc_val"
+				case_values_map case_neighbor_surprisal_map
+				label_name ".neighbor_surprisal"
 			))
 		)
 
 		;experimental params
 		(declare (assoc
-			;the amount of low DC cases to consider for keeping
-			lowest_dc_trunc_n 15
+			;the amount of lowest smallest-surprisal cases to consider for keeping
+			;CAN BE NULLED
+			lowest_ns_cases_trunc_n (null)
 
 			;number of cases to select for keeping per iteration
-			cases_to_keep_per_iter 5
-
-			;how many iterations between each DC recomputation
-			dc_recompute_cycles 10
+			cases_to_keep_per_iter 1
 		))
 
 		(while (not done)
@@ -690,77 +687,88 @@
 							(contained_entities
 								(query_exists !internalLabelSession)
 								(query_equals "keeping" .false)
-								(query_min ".reduce_dc_val" 1 .true)
+								(query_min ".neighbor_surprisal" 1 .true)
 							)
 
-							;otherwise need cases with low DC that is far from its most similar case in current_cases_to_keep
+							;otherwise need cases with low neighbor surprisal (ns) that is far from its most similar case in current_cases_to_keep
 							(let
 								(assoc
-									lowest_dc_cases
+									lowest_ns_cases
 										(contained_entities
 											(query_exists !internalLabelSession)
 											(query_equals "keeping" .false)
-											(query_min ".reduce_dc_val" lowest_dc_trunc_n .true)
+											(if lowest_ns_cases_trunc_n
+												(query_min ".neighbor_surprisal" lowest_ns_cases_trunc_n .true)
+											)
 										)
 								)
 
-								;for each low-DC case, get its distance to its closest case that we ARE KEEPING
+								;for each low-ns case, get its core-set surprisal (css)
 								(declare (assoc
-									lowest_dc_closest_distance_to_selected_map
-										(compute_on_contained_entities
-											(query_equals "keeping" .true)
-											||(query_entity_distance_contributions
-												1 ;k
-												features
-												lowest_dc_cases
-												p_parameter
-												feature_weights
-												!queryDistanceTypeMap
-												query_feature_attributes_map
-												feature_deviations
-												(null)
-												(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
-												distribute_weight_feature
-												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-												"fixed rand seed"
-												(null) ;radius
-												!numericalPrecision
-											)
-										)
-								))
-
-								(declare (assoc
-									low_dc_case_scores
+									lowest_ns_css_map
 										(map
 											(lambda
-												;divide distance to closest selected case by distance contribution
-												;more distance to closest selected case = good
-												;lower distance contribution = good
-												(/
-													(current_value)
-													(retrieve_from_entity (current_index) ".reduce_dc_val")
-												)
+												;find the max distance between each low-ns-case and any of the selected cases
+												(apply "max" (values
+													(compute_on_contained_entities
+														(query_equals "keeping" .true)
+														(query_within_generalized_distance
+															.infinity ;distance
+															features
+															(retrieve_from_entity (current_index) features)
+															p_parameter
+															feature_weights
+															!queryDistanceTypeMap
+															query_feature_attributes_map
+															feature_deviations
+															(null)
+															(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+															distribute_weight_feature
+															"fixed rand seed"
+															(null) ;radius
+															!numericalPrecision
+														)
+													)
+												))
 											)
-											lowest_dc_closest_distance_to_selected_map
+											(zip lowest_ns_cases)
 										)
 								))
 
 								(declare (assoc
-									;sorting low dc cases by *decreasing* "score"
-									sorted_lowest_dc_cases
+									low_ns_case_scores
+										(map
+											(lambda
+												;divide neighbor surprisal by coreset surprisal
+
+												;I think the LLM desc was wrong, so I flipped it to be coreset surprisal / neighbor surprisal
+												(/
+													(current_value)
+													(retrieve_from_entity (current_index) ".neighbor_surprisal")
+												)
+											)
+											lowest_ns_css_map
+										)
+								))
+
+
+								;sorting low dc cases by *decreasing* "score" and return the right amount
+								(trunc
+									(if (= 1 cases_to_keep_per_iter)
+										(index_max low_ns_case_scores)
+
 										(sort
 											(lambda
 												(-
-													(get low_dc_case_scores (current_value 1))
-													(get low_dc_case_scores (current_value))
+													(get low_ns_case_scores (current_value 1))
+													(get low_ns_case_scores (current_value))
 												)
 											)
-											lowest_dc_cases
+											lowest_ns_cases
 										)
-								))
-
-
-								(trunc sorted_lowest_dc_cases cases_to_keep_per_iter)
+									)
+									cases_to_keep_per_iter
+								)
 							)
 						)
 				)
@@ -783,9 +791,7 @@
 					)
 					(assign (assoc done .true))
 
-					(if (and (current_index) (= (mod (current_index) dc_recompute_cycles) 0) )
-						(call !ReduceComputeDCs)
-					)
+					; (call !ReduceComputeSmallestSurprisals)
 				)
 			)
 		)
