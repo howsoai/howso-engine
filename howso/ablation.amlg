@@ -623,6 +623,48 @@
 			done .false
 		))
 
+		(declare (assoc
+			neighbors_map
+				||(map
+					(lambda
+						(compute_on_contained_entities
+							(query_not_in_entity_list [(current_index 1)])
+							(query_nearest_generalized_distance
+								k_parameter
+								features
+								(current_index)
+								p_parameter
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								(null)
+								dt_parameter
+								distribute_weight_feature
+								(rand)
+								(null) ;radius
+								!numericalPrecision
+							)
+						)
+					)
+					(zip (call !AllCases))
+				)
+		))
+		(declare (assoc
+			referencing_cases_map
+				||(map
+					(lambda (let
+						(assoc case (current_index 1))
+						;current_value - assoc of neighbors
+						(indices (filter
+							(lambda (contains_index (current_value) case))
+							neighbors_map
+						))
+					))
+					neighbors_map
+				)
+		))
+
 		;cache surprisals to the nearest 100 for each case
 		;any cases that aren't in their most similar 100 can be considered to be 'too far away'
 		(declare (assoc
@@ -707,7 +749,7 @@
 			lowest_ns_cases_trunc_n (null)
 
 			;number of cases to select for keeping per iteration
-			cases_to_keep_per_iter 5
+			cases_to_keep_per_iter 30
 		))
 
 		(while (not done)
@@ -831,75 +873,77 @@
 			cases (contained_entities (query_equals "keeping" .false) )
 		))
 
-			(if !tsTimeFeature
-				(let
-					(assoc
-						entire_series_removal_id_queries
-							;select those series identifiers where there will be less than 3 cases remaining after this removal pass
-							;because these entire series should be removed at that point
-							(filter
+		(if !tsTimeFeature
+			(let
+				(assoc
+					entire_series_removal_id_queries
+						;select those series identifiers where there will be less than 3 cases remaining after this removal pass
+						;because these entire series should be removed at that point
+						(filter
+							(lambda
+								(<
+									(size (contained_entities
+										(query_not_in_entity_list cases)
+										;(current_value) is in the format of (list (query_equals "series_feature_id" value) ... ) for all affected series ids
+										(current_value)
+									))
+									3
+								)
+							)
+							;a list of affected series identifier queries for this batch of 'cases'
+							(call !GenerateUniqueSeriesQueries (assoc
+								series_id_features (get !tsFeaturesMap "series_id_features")
+								case_ids
+									;of the selected cases, only keep those that were either the first or last case from a series
+									(append
+										(contained_entities
+											(query_in_entity_list cases)
+											(query_equals ".reverse_series_index" 0)
+										)
+										(contained_entities
+											(query_in_entity_list cases)
+											(query_equals ".series_index" 0)
+										)
+									)
+							))
+						)
+				)
+
+				;do not remove first (.series_index == 0) or last (.reverse_series_index == 0) cases for any series
+				(assign (assoc
+					cases
+						(contained_entities
+							(query_in_entity_list cases)
+							(query_not_equals ".reverse_series_index" 0)
+							(query_not_equals ".series_index" 0)
+						)
+				))
+
+				;there were series that will need to be entirely removed, add all those series cases for removal
+				(if (size entire_series_removal_id_queries)
+					(accum (assoc
+						cases
+							(apply "append" (map
 								(lambda
-									(<
-										(size (contained_entities
-											(query_not_in_entity_list cases)
-											;(current_value) is in the format of (list (query_equals "series_feature_id" value) ... ) for all affected series ids
-											(current_value)
-										))
-										3
+									(contained_entities
+										(query_not_in_entity_list cases)
+										(current_value)
 									)
 								)
-								;a list of affected series identifier queries for this batch of 'cases'
-								(call !GenerateUniqueSeriesQueries (assoc
-									series_id_features (get !tsFeaturesMap "series_id_features")
-									case_ids
-										;of the selected cases, only keep those that were either the first or last case from a series
-										(append
-											(contained_entities
-												(query_in_entity_list cases)
-												(query_equals ".reverse_series_index" 0)
-											)
-											(contained_entities
-												(query_in_entity_list cases)
-												(query_equals ".series_index" 0)
-											)
-										)
-								))
-							)
-					)
-
-					;do not remove first (.series_index == 0) or last (.reverse_series_index == 0) cases for any series
-					(assign (assoc
-						cases
-							(contained_entities
-								(query_in_entity_list cases)
-								(query_not_equals ".reverse_series_index" 0)
-								(query_not_equals ".series_index" 0)
-							)
+								entire_series_removal_id_queries
+							))
 					))
-
-					;there were series that will need to be entirely removed, add all those series cases for removal
-					(if (size entire_series_removal_id_queries)
-						(accum (assoc
-							cases
-								(apply "append" (map
-									(lambda
-										(contained_entities
-											(query_not_in_entity_list cases)
-											(current_value)
-										)
-									)
-									entire_series_removal_id_queries
-								))
-						))
-					)
 				)
 			)
+		)
 
 		(if (size cases)
 			(seq
 				(call !RemoveCases (assoc
 					cases cases
 					distribute_weight_feature distribute_weight_feature
+					referencing_cases_map referencing_cases_map
+					neighbors_map neighbors_map
 				))
 
 				(if thresholds_enabled
