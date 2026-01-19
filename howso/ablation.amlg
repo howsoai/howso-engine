@@ -623,103 +623,6 @@
 			done .false
 		))
 
-		; (declare (assoc
-		; 	neighbors_map
-		; 		||(map
-		; 			(lambda
-		; 				(compute_on_contained_entities
-		; 					(query_not_in_entity_list [(current_index 1)])
-		; 					(query_nearest_generalized_distance
-		; 						k_parameter
-		; 						features
-		; 						(current_index)
-		; 						p_parameter
-		; 						feature_weights
-		; 						!queryDistanceTypeMap
-		; 						query_feature_attributes_map
-		; 						feature_deviations
-		; 						(null)
-		; 						dt_parameter
-		; 						distribute_weight_feature
-		; 						(rand)
-		; 						(null) ;radius
-		; 						!numericalPrecision
-		; 					)
-		; 				)
-		; 			)
-		; 			(zip all_case_ids)
-		; 		)
-		; ))
-
-		; ;blur weights among neighbors
-		; (declare (assoc
-		; 	duplicates
-		; 		(call !DistributeCaseInfluenceWeights (assoc
-		; 			case_ids all_case_ids
-		; 			redistribute_weights_map neighbors_map
-		; 			has_rebalance_features .false
-		; 		))
-		; ))
-
-		; ;merge duplicates if any exist
-		; (if (size duplicates)
-		; 	(call !ReduceMergeDuplicateCases (assoc
-		; 		all_duplicate_cases_map (zip duplicates)
-		; 	))
-		; )
-
-		; (declare (assoc zero_weight_cases (contained_entities (query_equals distribute_weight_feature 0)) ))
-		; ;remove zero-weight cases
-		; (if (size zero_weight_cases)
-		; 	(call !RemoveCases (assoc
-		; 		cases zero_weight_cases
-		; 		;weight has already been distributed above during the first blur stop, don't do it again
-		; 		distribute_weight_feature (null)
-		; 	))
-		; )
-
-		; ;dataset has been modified due to removal of dupes and zero weight cases
-		; (if (or (size zero_weight_cases) (size duplicates))
-		; 	(seq
-		; 		(assign (assoc all_case_ids (call !AllCases) ))
-
-		; 		(assign (assoc
-		; 			neighbors_map
-		; 				||(map
-		; 					(lambda
-		; 						(compute_on_contained_entities
-		; 							(query_not_in_entity_list [(current_index 1)])
-		; 							(query_nearest_generalized_distance
-		; 								k_parameter
-		; 								features
-		; 								(current_index)
-		; 								p_parameter
-		; 								feature_weights
-		; 								!queryDistanceTypeMap
-		; 								query_feature_attributes_map
-		; 								feature_deviations
-		; 								(null)
-		; 								dt_parameter
-		; 								distribute_weight_feature ;TODO: should this be taken into account?
-		; 								(rand)
-		; 								(null) ;radius
-		; 								!numericalPrecision
-		; 							)
-		; 						)
-		; 					)
-		; 					(zip all_case_ids)
-		; 				)
-		; 		))
-		; 	)
-		; )
-
-		; ;second pass
-		; (call !DistributeCaseInfluenceWeights (assoc
-		; 	case_ids all_case_ids
-		; 	redistribute_weights_map neighbors_map
-		; 	has_rebalance_features .false
-		; ))
-
 		;cache surprisals to the nearest 100 for each case
 		;any cases that aren't in their most similar 100 can be considered to be 'too far away'
 		(declare (assoc
@@ -738,7 +641,7 @@
 								query_feature_attributes_map
 								feature_deviations
 								(null)
-								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+								"surprisal_to_prob" ;;(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
 								distribute_weight_feature
 								(rand)
 								(null) ;radius
@@ -775,7 +678,7 @@
 							query_feature_attributes_map
 							feature_deviations
 							(null)
-							(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
+							"suprisal_to_prob" ;(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
 							distribute_weight_feature
 							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
 							"fixed rand seed"
@@ -792,8 +695,8 @@
 		)
 
 		(declare (assoc
-			;map of case to its core-set surprisal (the max surprisal to any case in the coreset for all cases)
-			case_to_css_map (map .infinity (zip all_case_ids))
+			;map of case to its core-set surprisal (the min probability to any case in the coreset for all cases)
+			case_to_css_map (map 0 (zip all_case_ids))
 		))
 
 		;experimental params
@@ -811,10 +714,10 @@
 				(assoc
 					cases_to_add
 						(if (= (current_index 1) 0)
-							;on first iteration, just take lowest DC case
+							;on first iteration, just take max probability case
 							(contained_entities
 								(query_equals "keeping" .false)
-								(query_min ".neighbor_surprisal" 1 .true)
+								(query_max ".neighbor_surprisal" 1 .true)
 							)
 
 							;otherwise need cases with low neighbor surprisal (ns) that is far from its most similar case in current_cases_to_keep
@@ -824,7 +727,7 @@
 										(contained_entities
 											(query_equals "keeping" .false)
 											(if lowest_ns_cases_trunc_n
-												(query_min ".neighbor_surprisal" lowest_ns_cases_trunc_n .true)
+												(query_max ".neighbor_surprisal" lowest_ns_cases_trunc_n .true)
 											)
 										)
 								)
@@ -833,12 +736,10 @@
 									low_ns_case_scores
 										(map
 											(lambda
-												;divide neighbor surprisal by coreset surprisal
-
-												;I think the LLM desc was wrong, so I flipped it to be coreset surprisal / neighbor surprisal
+												;divide neighbor probability by coreset probability
 												(/
-													(get case_to_css_map (current_index))
 													(retrieve_from_entity (current_index) ".neighbor_surprisal")
+													(get case_to_css_map (current_index))
 												)
 											)
 											(zip lowest_ns_cases)
@@ -881,16 +782,16 @@
 						||(map
 							(lambda
 								(or
-									;get the case's min surprisal to any of the cases_to_add, and if they are all too far away,
-									;just output an exetremely large value
-									(apply "min" (values
+									;get the case's max probability to any of the cases_to_add, and if they are all too far away,
+									;just output an exetremely tiny value
+									(apply "max" (values
 										(unzip
 											(get neighbor_surprisals_map (current_index))
 											cases_to_add
 										)
 									))
-									;extremeley large value
-									10e10
+									;extremeley tiny value
+									1e-15
 								)
 							)
 							;all non-coreset cases
@@ -900,10 +801,10 @@
 
 				(assign (assoc
 					case_to_css_map
-						;take min of new min css and old min css
+						;take max probability of new min css and old min css
 						(map
 							(lambda
-								(min (current_value) (get case_to_css_map (current_index)))
+								(max (current_value) (get case_to_css_map (current_index)))
 							)
 							new_case_css_map
 						)
