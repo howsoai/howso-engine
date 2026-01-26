@@ -341,6 +341,29 @@
 				;(current_value) is in the format of (list (query_equals "series_feature_name" value) ... ) for all series_feature_name
 				(assoc series_case_ids (contained_entities (current_value 1)) )
 
+				(if has_reduced
+					(seq
+						(declare (assoc
+							num_cases_trained
+								(+
+									1
+									(retrieve_from_entity
+										(first (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_equals ".reverse_series_index" 0)
+										))
+										".series_index"
+									)
+								)
+						))
+
+
+						(declare (assoc
+							is_missing_cases (!= (size series_case_ids) num_cases_trained)
+						))
+					)
+				)
+
 				;series_data is all the necessary_features's values along with the training index and case_id appended as the last two columns
 				;when the data is sorted, ties will be broken by the training index to assist with consistency
 				(declare (assoc
@@ -362,11 +385,30 @@
 				(if (size series_ordered_by_features)
 					(assign (assoc
 						series_data
-							(call !MultiSortList (assoc
-								data series_data
-								column_order_indices
-									(unzip necessary_feature_index_map series_ordered_by_features)
-							))
+							(if is_missing_cases
+								;cases have been removed from the series at some point, we must sort by series index, leaving nulls where appropriate
+								(let
+									(assoc
+										series_index_to_data_map
+											(zip
+												(map (lambda (retrieve_from_entity (current_value) ".series_index")) series_case_ids)
+												series_data
+											)
+									)
+
+									(unzip
+										series_index_to_data_map
+										(range 0 (- num_cases_trained 1) 1)
+									)
+								)
+
+								;just sort by the sorting features
+								(call !MultiSortList (assoc
+									data series_data
+									column_order_indices
+										(unzip necessary_feature_index_map series_ordered_by_features)
+								))
+							)
 					))
 				)
 
@@ -447,6 +489,12 @@
 						)
 				))
 
+				(if (and has_reduced is_missing_cases)
+					(declare (assoc
+						new_series_case_id_set (keep (zip series_case_ids) new_case_ids)
+					))
+				)
+
 				(map
 					(lambda (let
 						(assoc
@@ -456,6 +504,12 @@
 								(if (> (current_index 1) 0)
 									(get synchronous_counter_values (- (current_index 1) 1))
 								)
+						)
+
+						(if (and has_reduced is_missing_cases (not (contains_index new_series_case_id_set case_id)) )
+							;if the Trainee has reduced this series previously, should only update values for new cases.
+							;so skip cases that are not new
+							(conclude)
 						)
 
 						(if (contains_label case_id !tsSynchronousCounterFeature)
@@ -481,7 +535,11 @@
 			))
 
 			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
-			(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+			;NOTE: this will only return queries for series that have had new cases trained.
+			(call !GenerateUniqueSeriesQueries (assoc
+				series_id_features series_id_features
+				case_ids new_case_ids
+			))
 		)
 
 
