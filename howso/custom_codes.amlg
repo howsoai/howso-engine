@@ -12,6 +12,7 @@
 			features (list)
 			derived_features (list)
 			feature_attribute_map (null)
+			new_case_ids (list)
 		)
 
 		(declare (assoc
@@ -80,6 +81,54 @@
 					(assign (assoc ts_series_length_limit (* 2.718281828459 (size series_case_ids)) ))
 				)
 
+				(if has_reduced
+					(seq
+						(declare (assoc
+							num_cases_prev_trained
+								(+
+									1
+									(retrieve_from_entity
+										(first (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_not_in_entity_list new_case_ids)
+											(query_max ".series_index" 1 .true)
+										))
+										".series_index"
+									)
+								)
+							num_cases_trained
+								(+
+									1
+									(retrieve_from_entity
+										(first (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_equals ".reverse_series_index" 0 .true)
+										))
+										".series_index"
+									)
+								)
+						))
+
+
+						(declare (assoc
+							is_missing_cases
+								;if the number of old series cases is less
+								;than indicated by the largest series index of an old series case
+								(and
+									;this value will be null if there are no previous cases trained before this derivation
+									num_cases_prev_trained
+									(!=
+										(size (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_not_in_entity_list new_case_ids)
+										))
+										num_cases_prev_trained
+									)
+								)
+						))
+					)
+				)
+
 				;series_data is all the necessary_features's values along with the training index and case_id appended as the last two columns
 				;when the data is sorted, ties will be broken by the training index to assist with consistency
 				(declare (assoc
@@ -100,15 +149,34 @@
 				(if (size series_ordered_by_features)
 					(assign (assoc
 						series_data
-							(call !MultiSortList (assoc
-								data series_data
-								;specify indices for series_ordered_by_features and the index of !internalLabelSessionTrainingIndex
-								column_order_indices
-									(append
-										(unzip (zip necessary_features (indices necessary_features)) series_ordered_by_features)
-										(size necessary_features)
+							;cases have been removed from the series at some point, we must sort by series index, leaving nulls where appropriate
+							(if is_missing_cases
+								(let
+									(assoc
+										series_index_to_data_map
+											(zip
+												(map (lambda (retrieve_from_entity (current_value) ".series_index")) series_case_ids)
+												series_data
+											)
 									)
-							))
+
+									(unzip
+										series_index_to_data_map
+										(range 0 (- num_cases_trained 1) 1)
+									)
+								)
+
+								;sort by sorting features
+								(call !MultiSortList (assoc
+									data series_data
+									;specify indices for series_ordered_by_features and the index of !internalLabelSessionTrainingIndex
+									column_order_indices
+										(append
+											(unzip (zip necessary_features (indices necessary_features)) series_ordered_by_features)
+											(size necessary_features)
+										)
+								))
+							)
 					))
 				)
 
@@ -120,6 +188,21 @@
 							series_data
 						)
 				))
+
+				(if is_missing_cases
+					(seq
+						(declare (assoc
+							case_id_to_idx_map
+								(zip
+									series_case_ids
+									(indices series_case_ids)
+								)
+						))
+						(declare (assoc
+							new_series_case_ids (indices (keep case_id_to_idx_map new_case_ids))
+						))
+					)
+				)
 
 				(assign (assoc
 					series_data
@@ -159,31 +242,52 @@
 							)
 						)
 					))
-					(zip
-						series_case_ids
+					(if if_missing_cases
+						(map
+							(lambda
+								(if is_stationary_feature
+									;all values are same, store as-is
+									(first (last series_data))
 
-						;if this is a series stationary feature, set all values for this feature to the 'current' (last case) value
-						(if is_stationary_feature
-							 ;all values are same, store as-is
-							(if (apply "=" (apply "append" series_data))
-								series_data
-
-								;else set the entire series to the value of the 'current' case
-								(let
-									(assoc stationary_value (first (last series_data)))
-									(map (lambda [stationary_value]) series_data)
+									;else get the row, given the index for this new case
+									(get series_data (current_value))
 								)
-							)
 
-							;else non series stationary data, store as-is
-							series_data
+							)
+							(keep case_id_to_idx_map new_series_case_ids)
+						)
+
+
+						;can do for all cases
+						(zip
+							series_case_ids
+
+							;if this is a series stationary feature, set all values for this feature to the 'current' (last case) value
+							(if is_stationary_feature
+								;all values are same, store as-is
+								(if (apply "=" (apply "append" series_data))
+									series_data
+
+									;else set the entire series to the value of the 'current' case
+									(let
+										(assoc stationary_value (first (last series_data)))
+										(map (lambda [stationary_value]) series_data)
+									)
+								)
+
+								;else non series stationary data, store as-is
+								series_data
+							)
 						)
 					)
 				)
 			))
 
 			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
-			(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+			(call !GenerateUniqueSeriesQueries (assoc
+				series_id_features series_id_features
+				case_ids new_case_ids
+			))
 		)
 
 		;list of derived_features that were inactive
@@ -243,6 +347,7 @@
 			time_feature_delta (null)
 			series_ordered_by_features (null)
 			series_id_features (null)
+			new_case_ids (list)
 		)
 
 		(declare (assoc
@@ -265,6 +370,54 @@
 				;(current_value) is in the format of (list (query_equals "series_feature_name" value) ... ) for all series_feature_name
 				(assoc series_case_ids (contained_entities (current_value 1)) )
 
+				(if has_reduced
+					(seq
+						(declare (assoc
+							num_cases_prev_trained
+								(+
+									1
+									(retrieve_from_entity
+										(first (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_not_in_entity_list new_case_ids)
+											(query_max ".series_index" 1 .true)
+										))
+										".series_index"
+									)
+								)
+							num_cases_trained
+								(+
+									1
+									(retrieve_from_entity
+										(first (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_equals ".reverse_series_index" 0 .true)
+										))
+										".series_index"
+									)
+								)
+						))
+
+
+						(declare (assoc
+							is_missing_cases
+								;if the number of old series cases is less
+								;than indicated by the largest series index of an old series case
+								(and
+									;this value will be null if there are no previous cases trained before this derivation
+									num_cases_prev_trained
+									(!=
+										(size (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_not_in_entity_list new_case_ids)
+										))
+										num_cases_prev_trained
+									)
+								)
+						))
+					)
+				)
+
 				;series_data is all the necessary_features's values along with the training index and case_id appended as the last two columns
 				;when the data is sorted, ties will be broken by the training index to assist with consistency
 				(declare (assoc
@@ -286,11 +439,30 @@
 				(if (size series_ordered_by_features)
 					(assign (assoc
 						series_data
-							(call !MultiSortList (assoc
-								data series_data
-								column_order_indices
-									(unzip necessary_feature_index_map series_ordered_by_features)
-							))
+							(if is_missing_cases
+								;cases have been removed from the series at some point, we must sort by series index, leaving nulls where appropriate
+								(let
+									(assoc
+										series_index_to_data_map
+											(zip
+												(map (lambda (retrieve_from_entity (current_value) ".series_index")) series_case_ids)
+												series_data
+											)
+									)
+
+									(unzip
+										series_index_to_data_map
+										(range 0 (- num_cases_trained 1) 1)
+									)
+								)
+
+								;just sort by the sorting features
+								(call !MultiSortList (assoc
+									data series_data
+									column_order_indices
+										(unzip necessary_feature_index_map series_ordered_by_features)
+								))
+							)
 					))
 				)
 
@@ -371,6 +543,12 @@
 						)
 				))
 
+				(if (and has_reduced is_missing_cases)
+					(declare (assoc
+						new_series_case_id_set (keep (zip series_case_ids) new_case_ids)
+					))
+				)
+
 				(map
 					(lambda (let
 						(assoc
@@ -380,6 +558,12 @@
 								(if (> (current_index 1) 0)
 									(get synchronous_counter_values (- (current_index 1) 1))
 								)
+						)
+
+						(if (and has_reduced is_missing_cases (not (contains_index new_series_case_id_set case_id)) )
+							;if the Trainee has reduced this series previously, should only update values for new cases.
+							;so skip cases that are not new
+							(conclude)
 						)
 
 						(if (contains_label case_id !tsSynchronousCounterFeature)
@@ -405,7 +589,11 @@
 			))
 
 			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
-			(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+			;NOTE: this will only return queries for series that have had new cases trained.
+			(call !GenerateUniqueSeriesQueries (assoc
+				series_id_features series_id_features
+				case_ids new_case_ids
+			))
 		)
 
 
