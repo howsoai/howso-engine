@@ -96,6 +96,196 @@
 			all_features_map (zip features)
 		))
 
+		;a index map to match index of feature to value
+		(declare (assoc
+			contribution_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
+		))
+
+		;map of all sampled cases to assocs of needed features to values
+		(declare (assoc
+			case_to_values_map
+				(compute_on_contained_entities
+					(query_in_entity_list case_ids)
+					(map
+						(lambda (query_exists (current_value)))
+						case_features
+					)
+				)
+		))
+
+		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
+		(declare (assoc
+			continuous_feature_buckets_map
+				(map
+					(lambda
+						(if (contains_index value_robust_contributions_buckets (current_index))
+							(zip
+								(range 1 (size (get value_robust_contributions_buckets (current_index))))
+								(get value_robust_contributions_buckets (current_index))
+							)
+
+							;determine buckets automatically
+							(let
+								(assoc ac_feature_index (get contribution_feature_index_map (current_index 1)) )
+								(call !BinValuesByQuantiles (assoc
+									max_num_buckets max_num_buckets
+									sorted_unique_values
+										;sort is descending order
+										(sort
+											(lambda (< (current_value) (current_value 1)) )
+											(values
+												(map (lambda (get (current_value) (current_index 2))) case_to_values_map)
+												.true
+											)
+										)
+								))
+							)
+						)
+					)
+					(zip (filter
+						(lambda (not (contains_index !nominalsMap (current_value))))
+						value_robust_contributions_features
+					))
+				)
+		))
+
+		;create an assoc of feature -> all unique values (classes or buckets)
+		(declare (assoc
+			feature_value_lists_map
+				(zip
+					value_robust_contributions_features
+					(map
+						(lambda
+							(if (contains_index !nominalsMap (current_value))
+								;all unique classes
+								(values (map (lambda (get (current_value) (current_value 1))) case_to_values_map) .true)
+
+								;all unique buckets
+								(indices (get continuous_feature_buckets_map (current_value)))
+							)
+						)
+						value_robust_contributions_features
+					)
+				)
+		))
+
+		(if (> value_robust_contributions_min_cases 1)
+			;helper macro for values details to filter down case_ids and feature_values_lists_map based on marginal mass
+			#!FilterCasesAndValuesByMarginalCounts
+			(seq
+				(declare (assoc
+					;this is a parameter to react_aggregate, should be non-null if this label is called
+					num_required_cases value_robust_contributions_min_cases
+				))
+
+				;define if marginal values are significant enough to continue on with .true if value is significant, .false otherwise
+				(declare (assoc
+					marginal_feature_value_skip_map
+						(map
+							(lambda
+								||(map
+									(lambda
+										;(current_index 1) = feature name
+										;(current_index) = feature value or bucket index
+										(>
+											(if (contains_index !nominalsMap (current_index 1))
+												;num cases matching this class
+												(size (contained_entities
+													(query_in_entity_list case_ids)
+													(query_equals (current_index 1) (current_index))
+												))
+
+												;num cases in this bucket
+												(size (contained_entities
+													(query_in_entity_list case_ids)
+													(query_between
+														(current_index 1)
+														(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+														(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+													)
+												))
+											)
+											num_required_cases
+										)
+									)
+									;current value here is a list of unique values (classes or buckets)
+									(zip (current_value))
+								)
+							)
+							feature_value_lists_map
+						)
+				))
+
+				;only do the filtering if there is at least one marginally insignificant class or bucket
+				(if (contains_value
+						(apply "append" (map
+							(lambda (values (current_value)))
+							(values marginal_feature_value_skip_map)
+						))
+						.false
+					)
+					(assign (assoc
+						;filter feature_value_lists_map to remove the "insignificant values"
+						;this will skip them in the later filter bits as well
+						feature_value_lists_map
+							(map
+								(lambda
+									(filter
+										(lambda
+											(get marginal_feature_value_skip_map [(current_index 2) (current_value 1)])
+										)
+										(current_value)
+									)
+								)
+								feature_value_lists_map
+							)
+						;filter case ids based on marginal value skip map
+						case_ids
+							||(filter
+								(lambda
+									;if *any* of the marginal skip flags for the case's values are false, then remove this case from the list
+									(apply "and"
+										;map of significance flag values for each decomposition feature
+										(map
+											(lambda
+												;(current_index) is the decomposition feature
+												;(current_value) is the decomposition feature value for the case
+												(if (contains_index !nominalsMap (current_index))
+													;if nominal, can just check flag for that nominal value
+													(get marginal_feature_value_skip_map [(current_index 1) (current_value 1)])
+
+													;if continuous, need to find the bucket it belongs to, then grab the corresponding flag.
+													(while (< (current_index) (size (get marginal_feature_value_skip_map (current_index 1) )) )
+														;if the feature value is greater than the lower bound and less than the upper bound, then this is the correct bucket
+														(if (and
+																(>=
+																	(current_value 1)
+																	(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+																)
+																(<=
+																	(current_value 1)
+																	(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+																)
+															)
+															;get the flag for this bucket index
+															(conclude
+																(get marginal_feature_value_skip_map [(current_index 2) (current_index 1)])
+															)
+														)
+													)
+												)
+											)
+											(keep (get case_to_values_map (current_value)) value_robust_contributions_features)
+										)
+									)
+								)
+								case_ids
+							)
+					))
+				)
+			)
+		)
+
 		;list of tuples of : [ AC, PC, directional PC, values ]
 		(declare (assoc
 			case_ac_pc_tuples
@@ -104,7 +294,7 @@
 						(assoc
 							case_id (current_value 1)
 							;map of feature -> value for all the case values
-							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+							case_values_map (get case_to_values_map (current_value 1))
 							time_series_filter_query (list)
 							context_features context_features
 							categorical_action_probabilities_map (assoc)
@@ -393,68 +583,6 @@
 				)
 		))
 
-		;a index map to match index of feature to value
-		(declare (assoc
-			contribution_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
-		))
-
-		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
-		(declare (assoc
-			continuous_feature_buckets_map
-				(map
-					(lambda
-						(if (contains_index value_robust_contributions_buckets (current_index))
-							(zip
-								(range 1 (size (get value_robust_contributions_buckets (current_index))))
-								(get value_robust_contributions_buckets (current_index))
-							)
-
-							;determine buckets automatically
-							(let
-								(assoc ac_feature_index (get contribution_feature_index_map (current_index 1)) )
-								(call !BinValuesByQuantiles (assoc
-									max_num_buckets max_num_buckets
-									sorted_unique_values
-										;sort is descending order
-										(sort
-											(lambda (< (current_value) (current_value 1)) )
-											(values
-												(map (lambda (get (current_value) [3 ac_feature_index])) case_ac_pc_tuples)
-												.true
-											)
-										)
-								))
-							)
-						)
-					)
-					(zip (filter
-						(lambda (not (contains_index !nominalsMap (current_value))))
-						value_robust_contributions_features
-					))
-				)
-		))
-
-		;create an assoc of feature -> all unique values (classes or buckets)
-		(declare (assoc
-			feature_value_lists_map
-				(zip
-					value_robust_contributions_features
-					(map
-						(lambda (let
-							(assoc f_idx (current_index 1))
-							(if (contains_index !nominalsMap (current_value))
-								;all unique classes
-								(values (map (lambda (get (current_value) [3 f_idx]) ) case_ac_pc_tuples) .true)
-
-								;all unique buckets
-								(indices (get continuous_feature_buckets_map (current_value)))
-							)
-
-						))
-						value_robust_contributions_features
-					)
-				)
-		))
 
 		;create a list of all possible value combinations for the value_robust_contributions_features
 		(declare (assoc
@@ -858,6 +986,85 @@
 				)
 		))
 
+		;a index map to match index of feature to value
+		(declare (assoc
+			ac_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
+		))
+
+		;map of all sampled cases to assocs of needed features to values
+		(declare (assoc
+			case_to_values_map
+				(compute_on_contained_entities
+					(query_in_entity_list case_ids)
+					(map
+						(lambda (query_exists (current_value)))
+						case_features
+					)
+				)
+		))
+
+		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
+		(declare (assoc
+			continuous_feature_buckets_map
+				(map
+					(lambda
+						(if (contains_index value_robust_contributions_buckets (current_index))
+							(zip
+								(range 1 (size (get value_robust_contributions_buckets (current_index))))
+								(get value_robust_contributions_buckets (current_index))
+							)
+
+							;otherwise automatically determine buckets
+							(let
+								(assoc ac_feature_index (get ac_feature_index_map (current_index 1)) )
+								(call !BinValuesByQuantiles (assoc
+									max_num_buckets max_num_buckets
+									sorted_unique_values
+										;sort is descending order
+										(sort
+											(lambda (< (current_value) (current_value 1)) )
+											(values
+												(map (lambda (get (current_value) (current_index 2))) case_to_values_map)
+												.true
+											)
+										)
+								))
+							)
+						)
+					)
+					(zip (filter
+						(lambda (not (contains_index !nominalsMap (current_value))))
+						value_robust_contributions_features
+					))
+				)
+		))
+
+		;create an assoc of feature -> all unique values (classes or buckets)
+		(declare (assoc
+			feature_value_lists_map
+				(zip
+					value_robust_contributions_features
+					(map
+						(lambda
+							(if (contains_index !nominalsMap (current_value))
+								;all unique classes
+								(values (map (lambda (get (current_value) (current_value 1))) case_to_values_map) .true)
+
+								;all unique buckets
+								(indices (get continuous_feature_buckets_map (current_value)))
+							)
+						)
+						value_robust_contributions_features
+					)
+				)
+		))
+
+		(if (> value_robust_contributions_min_cases 1)
+			;call the macro to filter down feature_value_lists_map and case_ids to remove entries that
+			;correspond to feature values of insignificant mass
+			(call !FilterCasesAndValuesByMarginalCounts)
+		)
+
 		(declare (assoc
 			case_surprisal_asymmetries
 				||(map
@@ -865,7 +1072,7 @@
 						(assoc
 							case_id (current_value 1)
 							;map of feature -> value for all the case values
-							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+							case_values_map (get case_to_values_map (current_value 1))
 							time_series_filter_query (list)
 							feature_weights (get hyperparam_map "featureWeights")
 							context_features context_features
@@ -1251,69 +1458,6 @@
 						]
 					))
 					case_ids
-				)
-		))
-
-		;a index map to match index of feature to value
-		(declare (assoc
-			ac_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
-		))
-
-		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
-		(declare (assoc
-			continuous_feature_buckets_map
-				(map
-					(lambda
-						(if (contains_index value_robust_contributions_buckets (current_index))
-							(zip
-								(range 1 (size (get value_robust_contributions_buckets (current_index))))
-								(get value_robust_contributions_buckets (current_index))
-							)
-
-							;otherwise automatically determine buckets
-							(let
-								(assoc ac_feature_index (get ac_feature_index_map (current_index 1)) )
-								(call !BinValuesByQuantiles (assoc
-									max_num_buckets max_num_buckets
-									sorted_unique_values
-										;sort is descending order
-										(sort
-											(lambda (< (current_value) (current_value 1)) )
-											(values
-												(map (lambda (get (current_value) [1 ac_feature_index])) case_surprisal_asymmetries)
-												.true
-											)
-										)
-								))
-							)
-						)
-					)
-					(zip (filter
-						(lambda (not (contains_index !nominalsMap (current_value))))
-						value_robust_contributions_features
-					))
-				)
-		))
-
-		;create an assoc of feature -> all unique values (classes or buckets)
-		(declare (assoc
-			feature_value_lists_map
-				(zip
-					value_robust_contributions_features
-					(map
-						(lambda (let
-							(assoc f_idx (current_index 1))
-							(if (contains_index !nominalsMap (current_value))
-								;all unique classes
-								(values (map (lambda (get (current_value) [1 f_idx]) ) case_surprisal_asymmetries) .true)
-
-								;all unique buckets
-								(indices (get continuous_feature_buckets_map (current_value)))
-							)
-
-						))
-						value_robust_contributions_features
-					)
 				)
 		))
 
