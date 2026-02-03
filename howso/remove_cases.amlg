@@ -186,31 +186,6 @@
 
 		(if (= 0 (size cases)) (conclude))
 
-		;list of session ids, one per case
-		(declare (assoc
-			sessions (map (lambda (retrieve_from_entity (current_value) !internalLabelSession)) cases)
-			train_indices (map (lambda (retrieve_from_entity (current_value) !internalLabelSessionTrainingIndex)) cases)
-		))
-
-		(declare (assoc
-			;map of session -> list of removed case ids. If a session only has one case id, it will be by itself and not in a list.
-			sessions_map
-				(zip
-					(lambda (append (current_value 1) (current_value)))
-					;indices are sessions, which when clobbered will append the case id to the growing list of ids for each session
-					sessions
-					cases
-				)
-			;map of session -> list of removed case training indices
-			session_train_indices_map
-				(zip
-					(lambda (append (current_value 1) (current_value)))
-					;indices are sessions, which when clobbered will append the train_index to the growing list of train_indices for each session
-					sessions
-					train_indices
-				)
-		))
-
 		;need to distribute the weight feature values from these removed cases to neighbors
 		(if distribute_weight_feature
 			(let
@@ -270,24 +245,28 @@
 			)
 		)
 
-		;remove all the cases
-		(apply "destroy_entities" cases)
-
 		;iterate over every session, cleaning up its replay steps and updating its cases' training indices
-		(assign (assoc
+		(declare (assoc
 			sessions_map
 				(filter
 					(lambda (let
 						(assoc
 							session (current_index 1)
 							replay_steps (retrieve_from_entity (current_index 1) ".replay_steps")
-							removed_cases_map
-								;if there's only one case for this session, it'll be a string, wrap it in a list prior to zipping
-								(if (~ "" (current_value 1))
-									(zip [ (current_value 2) ] )
-									(zip (current_value 1))
-								)
 						)
+
+						(declare (assoc
+							removed_cases_index_map
+								;assoc of case id -> training index
+								(map
+									(lambda (first (current_value)))
+									(compute_on_contained_entities
+										(query_in_entity_list cases)
+										(query_equals !internalLabelSession session)
+										(query_exists !internalLabelSessionTrainingIndex)
+									)
+								)
+						))
 
 						;leave this session since it can be removed because it has no cases left
 						(if (>= (size removed_cases_map) (size replay_steps))
@@ -296,7 +275,7 @@
 
 						;filter cases from replay steps, leave only those cases that have not been removed
 						(assign (assoc
-							replay_steps (filter (lambda (not (contains_index removed_cases_map (current_value)))) replay_steps)
+							replay_steps (filter (lambda (not (contains_index removed_cases_index_map (current_value)))) replay_steps)
 						))
 
 						(assign_to_entities session (assoc
@@ -305,14 +284,21 @@
 								;.indices_map is an assoc of train_index->case_id, so we can just simply delete all the removed training_indices with one delete call
 								(remove
 									(retrieve_from_entity session ".indices_map")
-									(get session_train_indices_map session)
+									(values removed_cases_index_map)
 								)
 						))
 
 						;don't remove this session because it has cases left
 						.false
 					))
-					sessions_map
+					;assoc/set of unique session ids.
+					(zip (values
+						;assoc of each case -> session id
+						(map
+							(lambda (first (current_value)))
+							(compute_on_contained_entities (query_in_entity_list cases) (query_exists !internalLabelSession))
+						)
+					))
 				)
 		))
 
@@ -320,6 +306,11 @@
 		(if (size sessions_map)
 			(apply "destroy_entities" (indices sessions_map))
 		)
+
+		;remove all the cases after clearing the query caches
+		(reclaim_resources (null) .false .true)
+		(apply "destroy_entities" cases)
+
 
 		;dataset has changed so clear out these cached value
 		(call !ClearCachedCountsAndEntropies)
