@@ -285,26 +285,6 @@
 			)
 		)
 
-		;create a list of all possible value combinations for the value_robust_contributions_features
-		(declare (assoc
-			all_unique_value_combinations
-				(apply "append"
-					(call !RecurseAccumulateFeatureValues (assoc
-						features value_robust_contributions_features
-						values []
-					))
-				)
-			has_multiple_features (> (size value_robust_contributions_features) 1)
-			has_null_results .false
-		))
-
-		(if (not has_multiple_features)
-			(declare (assoc
-				ac_feature_bucket_map (get continuous_feature_buckets_map (first value_robust_contributions_features))
-				ac_feature_is_continuous (not (contains_index !nominalsMap (first value_robust_contributions_features)))
-			))
-		)
-
 		;list of tuples of : [ AC, PC, directional PC, values ]
 		(declare (assoc
 			case_ac_pc_tuples
@@ -647,6 +627,18 @@
 					))
 					case_ids
 				)
+		))
+
+		;create a list of all possible value combinations for the value_robust_contributions_features
+		(declare (assoc
+			all_unique_value_combinations
+				(apply "append"
+					(call !RecurseAccumulateFeatureValues (assoc
+						features value_robust_contributions_features
+						values []
+					))
+				)
+			has_null_results .false
 		))
 
 		;given all possible value combinations, compute the ac/pc for each combination
@@ -1504,14 +1496,42 @@
 
 						(declare (assoc
 							total_ac_feature_surprisal (apply "+" ac_feature_surprisals)
+							unique_value_combo
+								(map
+									(lambda
+										(if (contains_index !nominalsMap (current_value))
+											(get case_values_map (current_value))
+
+											;find the bucket containing this continuous value
+											(let
+												(assoc
+													feature_bucket_map (get continuous_feature_buckets_map (current_value 1))
+													value (get case_values_map (current_value 1))
+												)
+												;iterate over the 0-based ordered indices of the bucket map, where each bucket is a pair of [low high]
+												;if it matches the bucket, output the index of the bucket
+												(while (< (current_index) (size feature_bucket_map))
+													(if (and
+															(>= value (get feature_bucket_map [(current_index 1) 0]) )
+															(<= value (get feature_bucket_map [(current_index 1) 1]) )
+														)
+														(conclude (current_index))
+													)
+												)
+											)
+										)
+									)
+									value_robust_contributions_features
+								)
 						))
-						;output a pair of : [ surprisal asymmetry for this case, values ]
+
+						;output a pair of : [ surprisal asymmetry for this case, values_combination ]
 						[
 							(-
 								action_feature_surprisal
 								total_ac_feature_surprisal
 							)
-							(unzip case_values_map value_robust_contributions_features)
+							unique_value_combo
 						]
 					))
 					case_ids
@@ -1527,84 +1547,25 @@
 						values []
 					))
 				)
-			has_multiple_features (> (size value_robust_contributions_features) 1)
 			has_null_results .false
 		))
-
-		(if (not has_multiple_features)
-			(declare (assoc
-				ac_feature_bucket_map (get continuous_feature_buckets_map (first value_robust_contributions_features))
-				ac_feature_is_continuous (not (contains_index !nominalsMap (first value_robust_contributions_features)))
-			))
-		)
 
 		;given all possible value combinations, compute the mean surprisal asymmetry for each combination
 		(declare (assoc
 			corresponding_asymmetries
 				||(map
 					(lambda (let
-						(assoc feature_values (current_value 1))
-
-						(declare (assoc
+						(assoc
+							;filter all the asymmetrie tuples by the unique feature values to leave only those that were used to predict
+							;this exact feature value(s) combination that's represented as (current_value 2) inside the filter
 							matching_value_asymmetry_pairs
-								;filter case acs by the unique feature values
-								(if has_multiple_features
-									(filter
-										(lambda
-											(apply "and" (map
-												(lambda (let
-													(assoc ac_feature (get value_robust_contributions_features (current_index 1)) )
-													;nominal must match exactly
-													(if (contains_index !nominalsMap ac_feature)
-														(= (first (current_value)) (last (current_value)))
-
-														;else continuous values will be a pair of [min max] for a value to fall between
-														(and
-															(<=
-																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 0])
-																(last (current_value))
-															)
-															(>=
-																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 1])
-																(last (current_value))
-															)
-														)
-													)
-												))
-												;grab the values to filter by
-												feature_values
-												;grab the values for this case's ac
-												(last (current_value))
-											))
-										)
-										case_surprisal_asymmetries
+								(filter
+									(lambda
+										(= (current_value 2) (last (current_value)))
 									)
-
-									;same code but optimized for the one current feature
-									(let
-										(assoc value (first feature_values))
-										(if ac_feature_is_continuous
-											(filter
-												(lambda (and
-													;continuous values will be a pair of [min max] for a value to fall between
-													(<= (get ac_feature_bucket_map [value 0]) (get (current_value) [1 0]) )
-													(>= (get ac_feature_bucket_map [value 1]) (get (current_value) [1 0]) )
-												))
-												case_surprisal_asymmetries
-											)
-
-											;else if current feature is nominal
-											(filter
-												(lambda
-													;must match current nominal value exactly
-													(= value (get (current_value) [1 0]) )
-												)
-												case_surprisal_asymmetries
-											)
-										)
-									)
+									case_surprisal_asymmetries
 								)
-						))
+						)
 
 						(if (>= (size matching_value_asymmetry_pairs) value_robust_contributions_min_samples)
 							(*
