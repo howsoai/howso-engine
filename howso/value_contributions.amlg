@@ -286,6 +286,26 @@
 			)
 		)
 
+		;create a list of all possible value combinations for the value_robust_contributions_features
+		(declare (assoc
+			all_unique_value_combinations
+				(apply "append"
+					(call !RecurseAccumulateFeatureValues (assoc
+						features value_robust_contributions_features
+						values []
+					))
+				)
+			has_multiple_features (> (size value_robust_contributions_features) 1)
+			ac_pc_map {}
+		))
+
+		(if (not has_multiple_features)
+			(declare (assoc
+				ac_feature_bucket_map (get continuous_feature_buckets_map (first value_robust_contributions_features))
+				ac_feature_is_continuous (not (contains_index !nominalsMap (first value_robust_contributions_features)))
+			))
+		)
+
 		;list of tuples of : [ AC, PC, directional PC, values ]
 		(declare (assoc
 			case_ac_pc_tuples
@@ -580,6 +600,36 @@
 								)
 						))
 
+						(declare (assoc
+							unique_value_combo
+								(map
+									(lambda
+										(if (contains_index !nominalsMap (current_value))
+											(get case_values_map (current_value))
+
+											;find the bucket containing this continuous value
+											(let
+												(assoc
+													feature_bucket_map (get continuous_feature_buckets_map (current_value 1))
+													value (get case_values_map (current_value 1))
+												)
+												;iterate over the 0-based ordered indices of the bucket map, where each bucket is a pair of [low high]
+												;if it matches the bucket, output the index of the bucket
+												(while (< (current_index) (size feature_bucket_map))
+													(if (and
+															(>= value (get feature_bucket_map [(current_index 1) 0]) )
+															(<= value (get feature_bucket_map [(current_index 1) 1]) )
+														)
+														(conclude (current_index))
+													)
+												)
+											)
+										)
+									)
+									value_robust_contributions_features
+								)
+						))
+
 						;output a tuple of : [ AC, PC, directional PC, values ]
 						[
 							(if compute_ac
@@ -592,33 +642,13 @@
 							(if compute_pc
 								(- (last with_ac_features_action_pair) (last without_ac_features_action_pair))
 							)
-							;case values
-							(unzip case_values_map value_robust_contributions_features)
+							;unique value combination for this case as a tuple
+							unique_value_combo
 						]
 					))
 					case_ids
 				)
 		))
-
-
-		;create a list of all possible value combinations for the value_robust_contributions_features
-		(declare (assoc
-			all_unique_value_combinations
-				(apply "append"
-					(call !RecurseAccumulateFeatureValues (assoc
-						features value_robust_contributions_features
-						values []
-					))
-				)
-			has_multiple_features (> (size value_robust_contributions_features) 1)
-		))
-
-		(if (not has_multiple_features)
-			(declare (assoc
-				ac_feature_bucket_map (get continuous_feature_buckets_map (first value_robust_contributions_features))
-				ac_feature_is_continuous (not (contains_index !nominalsMap (first value_robust_contributions_features)))
-			))
-		)
 
 		;given all possible value combinations, compute the ac/pc for each combination
 		;list of tuples of: [ AC, PC, directional PC]
@@ -626,88 +656,37 @@
 			corresponding_contribution_tuples
 				||(map
 					(lambda (let
-						(assoc feature_values (current_value 1))
-
-						;filter all the ac_pc tuples by the unique feature values to leave only those that were used to predict this exact feature value(s) combination
-						(declare (assoc
-							matching_ac_pc_tuples
-								(if has_multiple_features
-									(filter
-										(lambda
-											(apply "and" (map
-												(lambda (let
-													(assoc ac_feature (get value_robust_contributions_features (current_index 1)) )
-													;nominal must match exactly
-													(if (contains_index !nominalsMap ac_feature)
-														(= (first (current_value)) (last (current_value)))
-
-														;else continuous values will be a pair of [min max] for a value to fall between
-														(and
-															(<=
-																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 0])
-																(last (current_value))
-															)
-															(>=
-																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 1])
-																(last (current_value))
-															)
-														)
-													)
-												))
-												;grab the values to filter by
-												feature_values
-												;grab the values for this case's ac
-												(last (current_value))
-											))
-										)
-										case_ac_pc_tuples
+						(assoc
+							;filter all the ac_pc tuples by the unique feature values to leave only those that were used to predict
+							;this exact feature value(s) combination that's represented as (current_value 2) inside the filter
+						 	matching_ac_pc_tuples
+								(filter
+									(lambda
+										(= (current_value 2) (last (current_value)))
 									)
-
-									;same code but optimized for the one current feature (index of 0)
-									(let
-										(assoc value (first feature_values))
-										(if ac_feature_is_continuous
-											(filter
-												(lambda (and
-													;continuous values will be a pair of [min max] for a value to fall between
-													(<= (get ac_feature_bucket_map [value 0]) (get (current_value) [3 0]) )
-													(>= (get ac_feature_bucket_map [value 1]) (get (current_value) [3 0]) )
-												))
-												case_ac_pc_tuples
-											)
-
-											;else if current feature is nominal
-											(filter
-												(lambda
-													;must match current nominal value exactly
-													(= value (get (current_value) [3 0]) )
-												)
-												case_ac_pc_tuples
-											)
-										)
-									)
+									case_ac_pc_tuples
 								)
-						))
+						)
 
-						;matching_ac_pc_tuples will be empty if this feature_values did not appear in the dataset (or no reacts were registered using them),
+						;matching_ac_pc_tuples will be empty if this unique values combination did not appear in the dataset (or no reacts were registered using them),
 						;of so, output null so it can be filtered out later
 						(if (>= (size matching_ac_pc_tuples) value_robust_contributions_min_samples)
 							[
-								;output AC for this combination of feature_values
+								;output AC for this combination of unique values combination
 								(if compute_ac
 									(*
 										(generalized_mean (map (lambda (first (current_value))) matching_ac_pc_tuples))
 										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
 									)
 								)
-								;output PC for this combination of feature_values
+								;output PC for this combination of unique values combination
 								(if compute_pc
 									(*
 										(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
 										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
 									)
 								)
-								;output directional PC for this combination of feature_values
+								;output directional PC for this combination of unique values combination
 								(if compute_pc
 									(*
 										(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
@@ -720,7 +699,6 @@
 					all_unique_value_combinations
 				)
 		))
-
 
 		;remove combinations that did not appear in the dataset and don't have an AC value
 		(if (contains_value corresponding_contribution_tuples (null))
