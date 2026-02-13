@@ -7,18 +7,20 @@
 	; series_id_features: list of feature names that specify the series id for which to derive this feature.
 	;		If more than one specified, a unique 'series id' is then the conjuction of the specified ids.
 	;		E.g., if 'sender' and 'reciever' are specified, a 'series id' is then each unique pair of sender-reciever.
+	; new_case_ids: the list of new case entity ids
 	; time_feature: name of series id's time feature which to use to determine the start or end flag
 	#!CreateSeriesIndexFeatures
 	(declare
 		(assoc
 			series_id_features (list)
+			new_case_ids (list)
 
 			;not parameters
 			series_time_feature !tsTimeFeature
 			is_universal !tsTimeFeatureUniversal
 		)
 
-		;list of assocs of cases for each series, where each assoc of cases is : case id -> time_feature -> value
+		;list of assocs of cases for each series that has had new cases trained, where each assoc of cases is : case id -> time_feature -> value
 		(declare (assoc
 			series_cases_groups
 				(map
@@ -32,7 +34,11 @@
 					)
 
 					;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
-					(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+					;NOTE: this only gets the unique series queries for series with new cases trained
+					(call !GenerateUniqueSeriesQueries (assoc
+						series_id_features series_id_features
+						case_id new_case_ids
+					))
 				)
 		))
 
@@ -63,48 +69,163 @@
 								series_size (size (current_value 1))
 							)
 
-							;convert assoc of case_id > time_feature -> value to assoc of case_id -> value
-							(assign (assoc
-								series_cases_map (map (lambda (first (values (current_value)))) series_cases_map)
-							))
+							;if the trainee has reduced or ablated, series must be checked to see if any cases were removed.
+							;this can be done by comparing the series_index of the last derived case to the number of derived cases
+							(if has_reduced
+								(seq
+									(declare (assoc
+										previously_derived_cases (contained_entities (query_in_entity_list (indices series_cases_map)) (query_exists ".series_index"))
+									))
 
-							;sort case ids in ascending datetime order (smallest to largest time value)
-							(assign (assoc
-								sorted_case_ids
-									(sort
-										(lambda
-											(>
-												(get series_cases_map (current_value))
-												(get series_cases_map (current_value 1))
+									(if (size previously_derived_cases)
+										(declare (assoc
+											num_cases_prev_trained
+												(+
+													1
+													(retrieve_from_entity
+														(first (contained_entities
+															(query_in_entity_list previously_derived_cases)
+															(query_equals ".reverse_series_index" 0)
+														))
+														".series_index"
+													)
+												)
+										))
+									)
+								)
+							)
+
+							;if this Trainee has gone through any reduction and the series index of the last case
+							;doesn't correctly indicate the amount of cases still present for that series,
+							;then some timesteps within the series must have been removed.
+							(if (and
+									has_reduced
+									(size previously_derived_cases)
+									(!=
+										(size previously_derived_cases)
+										num_cases_prev_trained
+									)
+								)
+								;special path for when some series cases have been ablated/reduced
+								(seq
+									;convert assoc of case_id > time_feature -> value to assoc of case_id -> value
+									;but only do this for the newly trained cases of the series
+									(assign (assoc
+										series_cases_map
+											(map (lambda (first (values (current_value)))) (remove series_cases_map previously_derived_cases))
+									))
+
+									;actual series_size is the amount of previously derived cases + number of new cases
+									(assign (assoc
+										series_size (+ num_cases_prev_trained (size series_cases_map))
+									))
+
+									;sort the new case ids in ascending datetime order (smallest to largest time value)
+									(assign (assoc
+										sorted_case_ids
+											(sort
+												(lambda
+													(>
+														(get series_cases_map (current_value))
+														(get series_cases_map (current_value 1))
+													)
+												)
+												(indices series_cases_map)
+											)
+									))
+
+									(declare (assoc time_to_horizon (- max_time_value (get series_cases_map (last sorted_case_ids)) ) ))
+
+									;create an assoc of case_id -> assoc of feature name to values for the indices and time-to-horizon if necessary
+									(append
+										;new cases need both indices and time-to-horizon
+										(zip
+											sorted_case_ids
+											(map
+												(lambda
+													(if is_universal
+														(assoc
+															".series_index" (current_value 1)
+															".reverse_series_index" (- series_size (current_value 1) 1)
+															".time_to_horizon" time_to_horizon
+														)
+
+														(assoc
+															".series_index" (current_value 1)
+															".reverse_series_index" (- series_size (current_value 1) 1)
+														)
+													)
+												)
+												(range num_cases_prev_trained (+ -1 num_cases_prev_trained (size sorted_case_ids)) 1)
 											)
 										)
-										(indices series_cases_map)
-									)
-							))
+										;old cases need their reverse index and time-to-horizon updated
+										(zip
+											previously_derived_cases
+											(map
+												(lambda
+													(if is_universal
+														(assoc
+															".reverse_series_index" (- series_size (retrieve_from_entity (current_value 1) ".series_index") 1)
+															".time_to_horizon" time_to_horizon
+														)
 
-							(declare (assoc sorted_time_values (unzip series_cases_map sorted_case_ids) ))
-							(declare (assoc time_to_horizon (- max_time_value (last sorted_time_values)) ))
-
-							;create an assoc of case_id -> [ index,  reverse-index, time-to-horizon (if universal time feature) ]
-							(zip
-								sorted_case_ids
-								(map
-									(lambda
-										;output the tuple
-										(if is_universal
-											[
-												(current_index 1) ;index
-												(- (size sorted_case_ids) (current_index 1) 1) ;reverse index
-												time_to_horizon ;time-to-horizon
-											]
-
-											[
-												(current_index 1) ;index
-												(- (size sorted_case_ids) (current_index 1) 1) ;reverse index
-											]
+														(assoc
+															".reverse_series_index" (- series_size (retrieve_from_entity (current_value 1) ".series_index") 1)
+														)
+													)
+												)
+												previously_derived_cases
+											)
 										)
 									)
-									sorted_time_values
+								)
+
+								;all series cases are present
+								(seq
+									;convert assoc of case_id > time_feature -> value to assoc of case_id -> value
+									(assign (assoc
+										series_cases_map (map (lambda (first (values (current_value)))) series_cases_map)
+									))
+
+									;sort case ids in ascending datetime order (smallest to largest time value)
+									(assign (assoc
+										sorted_case_ids
+											(sort
+												(lambda
+													(>
+														(get series_cases_map (current_value))
+														(get series_cases_map (current_value 1))
+													)
+												)
+												(indices series_cases_map)
+											)
+									))
+
+									(declare (assoc time_to_horizon (- max_time_value (get series_cases_map (last sorted_case_ids)) ) ))
+
+									;create an assoc of case_id -> assoc of feature name to values for the indices and time-to-horizon if necessary
+									(zip
+										sorted_case_ids
+										(map
+											(lambda
+												;output the tuple
+												(if is_universal
+													(associate
+														".series_index" (current_index 1)
+														".reverse_series_index" (- (size sorted_case_ids) (current_index 1) 1)
+														".time_to_horizon" time_to_horizon
+													)
+
+													(associate
+														".series_index" (current_index 1)
+														".reverse_series_index" (- (size sorted_case_ids) (current_index 1) 1)
+													)
+												)
+											)
+											sorted_case_ids
+										)
+									)
 								)
 							)
 						))
@@ -117,39 +238,14 @@
 		;by iterating over assoc of:case_id -> [ index,  reverse-index, time-to-horizon ]
 		(map
 			(lambda
-				;see whether the entity has the label
+				;see whether the entity has the labels
 				(if (contains_label (current_index) ".series_index")
-					(assign_to_entities
-						(current_index)
-						(if is_universal
-							(associate
-								".series_index" (get (current_value 1) 0)
-								".reverse_series_index" (get (current_value 1) 1)
-								".time_to_horizon" (get (current_value 1) 2)
-							)
+					(assign_to_entities (current_index) (current_value) )
 
-							(associate
-								".series_index" (get (current_value 1) 0)
-								".reverse_series_index" (get (current_value 1) 1)
-							)
-						)
-					)
-
-					;else need to append the label to the entity
+					;else need to append the labels to the entity
 					(accum_entity_roots
 						(current_index)
-						(if is_universal
-							(list
-								(set_labels (get (current_value 1) 0) (list ".series_index"))
-								(set_labels (get (current_value 1) 1) (list ".reverse_series_index"))
-								(set_labels (get (current_value 1) 2) (list ".time_to_horizon"))
-							)
-
-							(list
-								(set_labels (get (current_value 1) 0) (list ".series_index"))
-								(set_labels (get (current_value 1) 1) (list ".reverse_series_index"))
-							)
-						)
+						(zip_labels (indices (current_value)) (values (current_value)) )
 					)
 			))
 			series_cases_group_map
@@ -339,6 +435,33 @@
 			id_features id_features
 			time_feature !tsTimeFeature
 		))
+
+		;if there are non-derived stationary features, then update the duplicatedFeaturesMap with that information
+		(let
+			(assoc
+				stationary_features
+					(indices (filter
+						(lambda (and
+							(not (= "." (first (current_index))))
+							(not (contains_index (current_value) "time_series"))
+							(not (contains_index !fanoutFeaturesMap (current_index))) ;some may already be in here from the Feature Attribute
+							(not (contains_value (get !tsFeaturesMap "series_id_features") (current_index)))
+						))
+						!featureAttributes
+					))
+			)
+
+			(if (size stationary_features)
+				;each stationary feature is mapped to the series_id_features
+				(accum_to_entities (assoc
+					!fanoutFeaturesMap
+						(map
+							(lambda (get !tsFeaturesMap "series_id_features") )
+							(zip stationary_features)
+						)
+				))
+			)
+		)
 	)
 
 	;Generate a feature derivation code string using `derivation_type`, for automtically derived/created time series features

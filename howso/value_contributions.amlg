@@ -30,7 +30,12 @@
 			feature_is_nominal (contains_index !nominalsMap action_feature)
 			feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
 			feature_is_dependent (contains_index !dependentFeatureMap action_feature)
+			feature_is_non_string_edit_distance .false
 		))
+		(if (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap action_feature)) )
+			(assign (assoc feature_is_non_string_edit_distance .true))
+		)
+
 		(if (= (null) hyperparam_map)
 			(assign (assoc
 				hyperparam_map
@@ -91,6 +96,195 @@
 			all_features_map (zip features)
 		))
 
+		;a index map to match index of feature to value
+		(declare (assoc
+			contribution_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
+		))
+
+		;map of all sampled cases to assocs of needed features to values
+		(declare (assoc
+			case_to_values_map
+				(compute_on_contained_entities
+					(query_in_entity_list case_ids)
+					(map
+						(lambda (query_exists (current_value)))
+						case_features
+					)
+				)
+		))
+
+		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
+		(declare (assoc
+			continuous_feature_buckets_map
+				(map
+					(lambda
+						(if (contains_index value_robust_contributions_buckets (current_index))
+							(zip
+								(range 1 (size (get value_robust_contributions_buckets (current_index))))
+								(get value_robust_contributions_buckets (current_index))
+							)
+
+							;determine buckets automatically
+							(let
+								(assoc ac_feature_index (get contribution_feature_index_map (current_index 1)) )
+								(call !BinValuesByQuantiles (assoc
+									max_num_buckets max_num_buckets
+									sorted_unique_values
+										;sort is descending order
+										(sort
+											(lambda (< (current_value) (current_value 1)) )
+											(values
+												(map (lambda (get (current_value) (current_index 2))) case_to_values_map)
+												.true
+											)
+										)
+								))
+							)
+						)
+					)
+					(zip (filter
+						(lambda (not (contains_index !nominalsMap (current_value))))
+						value_robust_contributions_features
+					))
+				)
+		))
+
+		;create an assoc of feature -> all unique values (classes or buckets)
+		(declare (assoc
+			feature_value_lists_map
+				(zip
+					value_robust_contributions_features
+					(map
+						(lambda
+							(if (contains_index !nominalsMap (current_value))
+								;all unique classes
+								(values (map (lambda (get (current_value) (current_value 1))) case_to_values_map) .true)
+
+								;all unique buckets
+								(indices (get continuous_feature_buckets_map (current_value)))
+							)
+						)
+						value_robust_contributions_features
+					)
+				)
+		))
+
+		(if (or (~ value_robust_contributions_min_cases {}) (> value_robust_contributions_min_cases 1))
+			;helper macro for values details to filter down case_ids and feature_values_lists_map based on marginal mass
+			#!FilterCasesAndValuesByMarginalCounts
+			(seq
+				;define if marginal values are significant enough to continue on with .true if value is significant, .false otherwise
+				(declare (assoc
+					marginal_feature_value_skip_map
+						(map
+							(lambda
+								||(map
+									(lambda
+										;(current_index 1) = feature name
+										;(current_index) = feature value or bucket index
+										(>
+											(if (contains_index !nominalsMap (current_index 1))
+												;num cases matching this class
+												(size (contained_entities
+													(query_in_entity_list case_ids)
+													(query_equals (current_index 1) (current_index))
+												))
+
+												;num cases in this bucket
+												(size (contained_entities
+													(query_in_entity_list case_ids)
+													(query_between
+														(current_index 1)
+														(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+														(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+													)
+												))
+											)
+											(if (~ value_robust_contributions_min_cases {})
+												;if an assoc, get the value for this feature (default to 15 if the feature is missing from the assoc)
+												(or (get value_robust_contributions_min_cases (current_index 1)) 15)
+												value_robust_contributions_min_cases
+											)
+										)
+									)
+									;current value here is a list of unique values (classes or buckets)
+									(zip (current_value))
+								)
+							)
+							feature_value_lists_map
+						)
+				))
+
+				;only do the filtering if there is at least one marginally insignificant class or bucket
+				(if (contains_value
+						(apply "append" (map
+							(lambda (values (current_value)))
+							(values marginal_feature_value_skip_map)
+						))
+						.false
+					)
+					(assign (assoc
+						;filter feature_value_lists_map to remove the "insignificant values"
+						;this will skip them in the later filter bits as well
+						feature_value_lists_map
+							(map
+								(lambda
+									(filter
+										(lambda
+											(get marginal_feature_value_skip_map [(current_index 2) (current_value 1)])
+										)
+										(current_value)
+									)
+								)
+								feature_value_lists_map
+							)
+						;filter case ids based on marginal value skip map
+						case_ids
+							||(filter
+								(lambda
+									;if *any* of the marginal skip flags for the case's values are false, then remove this case from the list
+									(apply "and"
+										;map of significance flag values for each decomposition feature
+										(map
+											(lambda
+												;(current_index) is the decomposition feature
+												;(current_value) is the decomposition feature value for the case
+												(if (contains_index !nominalsMap (current_index))
+													;if nominal, can just check flag for that nominal value
+													(get marginal_feature_value_skip_map [(current_index 1) (current_value 1)])
+
+													;if continuous, need to find the bucket it belongs to, then grab the corresponding flag.
+													(while (< (current_index) (size (get marginal_feature_value_skip_map (current_index 1) )) )
+														;if the feature value is greater than the lower bound and less than the upper bound, then this is the correct bucket
+														(if (and
+																(>=
+																	(current_value 1)
+																	(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+																)
+																(<=
+																	(current_value 1)
+																	(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+																)
+															)
+															;get the flag for this bucket index
+															(conclude
+																(get marginal_feature_value_skip_map [(current_index 2) (current_index 1)])
+															)
+														)
+													)
+												)
+											)
+											(keep (get case_to_values_map (current_value)) value_robust_contributions_features)
+										)
+									)
+								)
+								case_ids
+							)
+					))
+				)
+			)
+		)
+
 		;list of tuples of : [ AC, PC, directional PC, values ]
 		(declare (assoc
 			case_ac_pc_tuples
@@ -99,10 +293,12 @@
 						(assoc
 							case_id (current_value 1)
 							;map of feature -> value for all the case values
-							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
-							time_series_filter_query (list)
+							case_values_map (get case_to_values_map (current_value 1))
 							context_features context_features
 							categorical_action_probabilities_map (assoc)
+							time_series_filter_query (list)
+							dependent_queries_list (null)
+							fanout_features_queries (null)
 						)
 						(declare (assoc case_feature_value (get case_values_map action_feature) ))
 
@@ -153,12 +349,22 @@
 						)
 
 						(if feature_is_dependent
-							(declare (assoc
+							(assign (assoc
 								dependent_queries_list
 									(call !ComputeDependentQueries (assoc
 										context_features react_context_features
 										context_values (unzip case_values_map react_context_features)
 										action_feature action_feature
+									))
+							))
+						)
+
+						(if filter_fanout_values
+							(assign (assoc
+								fanout_features_queries
+									(call !ConstructFanoutFeaturesQueries (assoc
+										predicting_features [action_feature]
+										case_id case_id
 									))
 							))
 						)
@@ -175,11 +381,13 @@
 													candidate_cases_lists
 														(if (= 0 (size  react_context_features))
 															[[][][]]
+
 															(compute_on_contained_entities
 																(query_not_in_entity_list [(replace case_id)])
 																(if ignore_null_action_feature (query_not_equals action_feature (null)))
 																(if (size context_condition_filter_query) context_condition_filter_query)
 																dependent_queries_list
+																fanout_features_queries
 																time_series_filter_query
 																(query_nearest_generalized_distance
 																	k_parameter
@@ -217,6 +425,7 @@
 																(if (size context_condition_filter_query) context_condition_filter_query)
 																dependent_queries_list
 																time_series_filter_query
+																fanout_features_queries
 																(query_nearest_generalized_distance
 																	k_parameter
 																	(replace react_context_features)
@@ -300,6 +509,7 @@
 															(if ignore_null_action_feature (query_not_equals action_feature (null)))
 															(if (size context_condition_filter_query) context_condition_filter_query)
 															dependent_queries_list
+															fanout_features_queries
 															time_series_filter_query
 															(query_nearest_generalized_distance
 																k_parameter
@@ -333,6 +543,7 @@
 															(if ignore_null_action_feature (query_not_equals action_feature (null)))
 															(if (size context_condition_filter_query) context_condition_filter_query)
 															dependent_queries_list
+															fanout_features_queries
 															time_series_filter_query
 															(query_nearest_generalized_distance
 																k_parameter
@@ -368,6 +579,36 @@
 								)
 						))
 
+						(declare (assoc
+							unique_value_combo
+								(map
+									(lambda
+										(if (contains_index !nominalsMap (current_value))
+											(get case_values_map (current_value))
+
+											;find the bucket containing this continuous value
+											(let
+												(assoc
+													feature_bucket_map (get continuous_feature_buckets_map (current_value 1))
+													value (get case_values_map (current_value 1))
+												)
+												;iterate over the 0-based ordered indices of the bucket map, where each bucket is a pair of [low high]
+												;if it matches the bucket, output the index of the bucket
+												(while (< (current_index) (size feature_bucket_map))
+													(if (and
+															(>= value (get feature_bucket_map [(current_index 1) 0]) )
+															(<= value (get feature_bucket_map [(current_index 1) 1]) )
+														)
+														(conclude (current_index))
+													)
+												)
+											)
+										)
+									)
+									value_robust_contributions_features
+								)
+						))
+
 						;output a tuple of : [ AC, PC, directional PC, values ]
 						[
 							(if compute_ac
@@ -380,74 +621,11 @@
 							(if compute_pc
 								(- (last with_ac_features_action_pair) (last without_ac_features_action_pair))
 							)
-							;case values
-							(unzip case_values_map value_robust_contributions_features)
+							;unique value combination for this case as a tuple
+							unique_value_combo
 						]
 					))
 					case_ids
-				)
-		))
-
-		;a index map to match index of feature to value
-		(declare (assoc
-			contribution_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
-		))
-
-		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
-		(declare (assoc
-			continuous_feature_buckets_map
-				(map
-					(lambda
-						(if (contains_index value_robust_contributions_buckets (current_index))
-							(zip
-								(range 1 (size (get value_robust_contributions_buckets (current_index))))
-								(get value_robust_contributions_buckets (current_index))
-							)
-
-							;determine buckets automatically
-							(let
-								(assoc ac_feature_index (get contribution_feature_index_map (current_index 1)) )
-								(call !BinValuesByQuantiles (assoc
-									max_num_buckets max_num_buckets
-									sorted_unique_values
-										;sort is descending order
-										(sort
-											(lambda (< (current_value) (current_value 1)) )
-											(values
-												(map (lambda (get (current_value) [3 ac_feature_index])) case_ac_pc_tuples)
-												.true
-											)
-										)
-								))
-							)
-						)
-					)
-					(zip (filter
-						(lambda (not (contains_index !nominalsMap (current_value))))
-						value_robust_contributions_features
-					))
-				)
-		))
-
-		;create an assoc of feature -> all unique values (classes or buckets)
-		(declare (assoc
-			feature_value_lists_map
-				(zip
-					value_robust_contributions_features
-					(map
-						(lambda (let
-							(assoc f_idx (current_index 1))
-							(if (contains_index !nominalsMap (current_value))
-								;all unique classes
-								(values (map (lambda (get (current_value) [3 f_idx]) ) case_ac_pc_tuples) .true)
-
-								;all unique buckets
-								(indices (get continuous_feature_buckets_map (current_value)))
-							)
-
-						))
-						value_robust_contributions_features
-					)
 				)
 		))
 
@@ -460,15 +638,8 @@
 						values []
 					))
 				)
-			has_multiple_features (> (size value_robust_contributions_features) 1)
+			has_null_results .false
 		))
-
-		(if (not has_multiple_features)
-			(declare (assoc
-				ac_feature_bucket_map (get continuous_feature_buckets_map (first value_robust_contributions_features))
-				ac_feature_is_continuous (not (contains_index !nominalsMap (first value_robust_contributions_features)))
-			))
-		)
 
 		;given all possible value combinations, compute the ac/pc for each combination
 		;list of tuples of: [ AC, PC, directional PC]
@@ -476,88 +647,37 @@
 			corresponding_contribution_tuples
 				||(map
 					(lambda (let
-						(assoc feature_values (current_value 1))
-
-						;filter all the ac_pc tuples by the unique feature values to leave only those that were used to predict this exact feature value(s) combination
-						(declare (assoc
-							matching_ac_pc_tuples
-								(if has_multiple_features
-									(filter
-										(lambda
-											(apply "and" (map
-												(lambda (let
-													(assoc ac_feature (get value_robust_contributions_features (current_index 1)) )
-													;nominal must match exactly
-													(if (contains_index !nominalsMap ac_feature)
-														(= (first (current_value)) (last (current_value)))
-
-														;else continuous values will be a pair of [min max] for a value to fall between
-														(and
-															(<=
-																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 0])
-																(last (current_value))
-															)
-															(>=
-																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 1])
-																(last (current_value))
-															)
-														)
-													)
-												))
-												;grab the values to filter by
-												feature_values
-												;grab the values for this case's ac
-												(last (current_value))
-											))
-										)
-										case_ac_pc_tuples
+						(assoc
+							;filter all the ac_pc tuples by the unique feature values to leave only those that were used to predict
+							;this exact feature value(s) combination that's represented as (current_value 2) inside the filter
+						 	matching_ac_pc_tuples
+								(filter
+									(lambda
+										(= (current_value 2) (last (current_value)))
 									)
-
-									;same code but optimized for the one current feature (index of 0)
-									(let
-										(assoc value (first feature_values))
-										(if ac_feature_is_continuous
-											(filter
-												(lambda (and
-													;continuous values will be a pair of [min max] for a value to fall between
-													(<= (get ac_feature_bucket_map [value 0]) (get (current_value) [3 0]) )
-													(>= (get ac_feature_bucket_map [value 1]) (get (current_value) [3 0]) )
-												))
-												case_ac_pc_tuples
-											)
-
-											;else if current feature is nominal
-											(filter
-												(lambda
-													;must match current nominal value exactly
-													(= value (get (current_value) [3 0]) )
-												)
-												case_ac_pc_tuples
-											)
-										)
-									)
+									case_ac_pc_tuples
 								)
-						))
+						)
 
-						;matching_ac_pc_tuples will be empty if this feature_values did not appear in the dataset (or no reacts were registered using them),
+						;matching_ac_pc_tuples will be empty if this unique values combination did not appear in the dataset (or no reacts were registered using them),
 						;of so, output null so it can be filtered out later
 						(if (>= (size matching_ac_pc_tuples) value_robust_contributions_min_samples)
 							[
-								;output AC for this combination of feature_values
+								;output AC for this combination of unique values combination
 								(if compute_ac
 									(*
 										(generalized_mean (map (lambda (first (current_value))) matching_ac_pc_tuples))
 										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
 									)
 								)
-								;output PC for this combination of feature_values
+								;output PC for this combination of unique values combination
 								(if compute_pc
 									(*
 										(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
 										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
 									)
 								)
-								;output directional PC for this combination of feature_values
+								;output directional PC for this combination of unique values combination
 								(if compute_pc
 									(*
 										(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
@@ -571,9 +691,11 @@
 				)
 		))
 
-
 		;remove combinations that did not appear in the dataset and don't have an AC value
-		(if (contains_value corresponding_contribution_tuples (null))
+		(if (and
+				(= value_robust_contributions_buckets (null))
+				(contains_value corresponding_contribution_tuples (null))
+			)
 			(let
 				(assoc
 					null_indices
@@ -588,6 +710,9 @@
 					all_unique_value_combinations (remove all_unique_value_combinations null_indices)
 				))
 			)
+
+			;need to know if nulls may remain before sorting
+			(assign (assoc has_null_results (contains_value corresponding_contribution_tuples (null)) ))
 		)
 
 		;sort from highest to lowest, by AC if computing AC, otherwise by PC
@@ -595,16 +720,36 @@
 			sorted_indices
 				(if compute_ac
 					(sort
-						(lambda
-							(<= (get corresponding_contribution_tuples [(current_value 1) 0]) (get corresponding_contribution_tuples [(current_value 2) 0] ) )
+						(if has_null_results
+							(lambda
+								;if there are nulls, wrap the (get)s in an (or) to assign low value for (null)s while sorting
+								(<=
+									(or (get corresponding_contribution_tuples [(current_value 1) 0]) -.infinity)
+									(or (get corresponding_contribution_tuples [(current_value 2) 0]) -.infinity)
+								)
+							)
+
+							(lambda
+								(<= (get corresponding_contribution_tuples [(current_value 1) 0]) (get corresponding_contribution_tuples [(current_value 2) 0] ) )
+							)
 						)
 						(indices corresponding_contribution_tuples)
 					)
 
 					;else sort by PC
 					(sort
-						(lambda
-							(<= (get corresponding_contribution_tuples [(current_value 1) 1]) (get corresponding_contribution_tuples [(current_value 2) 1] ) )
+						(if has_null_results
+							(lambda
+								;if there are nulls, wrap the (get)s in an (or) to assign low value for (null)s while sorting
+								(<=
+									(or (get corresponding_contribution_tuples [(current_value 1) 1]) -.infinity)
+									(or (get corresponding_contribution_tuples [(current_value 2) 1]) -.infinity)
+								)
+							)
+
+							(lambda
+								(<= (get corresponding_contribution_tuples [(current_value 1) 1]) (get corresponding_contribution_tuples [(current_value 2) 1] ) )
+							)
 						)
 						(indices corresponding_contribution_tuples)
 					)
@@ -853,6 +998,85 @@
 				)
 		))
 
+		;a index map to match index of feature to value
+		(declare (assoc
+			ac_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
+		))
+
+		;map of all sampled cases to assocs of needed features to values
+		(declare (assoc
+			case_to_values_map
+				(compute_on_contained_entities
+					(query_in_entity_list case_ids)
+					(map
+						(lambda (query_exists (current_value)))
+						case_features
+					)
+				)
+		))
+
+		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
+		(declare (assoc
+			continuous_feature_buckets_map
+				(map
+					(lambda
+						(if (contains_index value_robust_contributions_buckets (current_index))
+							(zip
+								(range 1 (size (get value_robust_contributions_buckets (current_index))))
+								(get value_robust_contributions_buckets (current_index))
+							)
+
+							;otherwise automatically determine buckets
+							(let
+								(assoc ac_feature_index (get ac_feature_index_map (current_index 1)) )
+								(call !BinValuesByQuantiles (assoc
+									max_num_buckets max_num_buckets
+									sorted_unique_values
+										;sort is descending order
+										(sort
+											(lambda (< (current_value) (current_value 1)) )
+											(values
+												(map (lambda (get (current_value) (current_index 2))) case_to_values_map)
+												.true
+											)
+										)
+								))
+							)
+						)
+					)
+					(zip (filter
+						(lambda (not (contains_index !nominalsMap (current_value))))
+						value_robust_contributions_features
+					))
+				)
+		))
+
+		;create an assoc of feature -> all unique values (classes or buckets)
+		(declare (assoc
+			feature_value_lists_map
+				(zip
+					value_robust_contributions_features
+					(map
+						(lambda
+							(if (contains_index !nominalsMap (current_value))
+								;all unique classes
+								(values (map (lambda (get (current_value) (current_value 1))) case_to_values_map) .true)
+
+								;all unique buckets
+								(indices (get continuous_feature_buckets_map (current_value)))
+							)
+						)
+						value_robust_contributions_features
+					)
+				)
+		))
+
+		(if (> value_robust_contributions_min_cases 1)
+			;call the macro to filter down feature_value_lists_map and case_ids to remove entries that
+			;correspond to feature values of insignificant mass
+			(call !FilterCasesAndValuesByMarginalCounts)
+		)
+
 		(declare (assoc
 			case_surprisal_asymmetries
 				||(map
@@ -860,12 +1084,13 @@
 						(assoc
 							case_id (current_value 1)
 							;map of feature -> value for all the case values
-							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+							case_values_map (get case_to_values_map (current_value 1))
 							time_series_filter_query (list)
 							feature_weights (get hyperparam_map "featureWeights")
 							context_features context_features
 							categorical_action_probabilities_map (assoc)
 							dependent_queries_list (list)
+							fanout_features_queries (null)
 						)
 
 						(if !tsTimeFeature
@@ -928,6 +1153,16 @@
 							))
 						)
 
+						(if filter_fanout_values
+							(assign (assoc
+								fanout_features_queries
+									(call !ConstructFanoutFeaturesQueries (assoc
+										predicting_features [action_feature]
+										case_id case_id
+									))
+							))
+						)
+
 						;predict action_feature without value_robust_contributions_features
 						(declare (assoc
 							without_ac_features_action_diff
@@ -947,6 +1182,7 @@
 												(if ignore_null_action_feature (query_not_equals action_feature (null)))
 												(if (size context_condition_filter_query) context_condition_filter_query)
 												dependent_queries_list
+												fanout_features_queries
 												time_series_filter_query
 												(query_nearest_generalized_distance
 													k_parameter
@@ -970,6 +1206,8 @@
 								))
 						))
 
+
+
 						;now predict each of value_robust_contributions_features without action_feature as a context
 						(declare (assoc
 							without_action_ac_feature_diffs
@@ -977,20 +1215,30 @@
 									(lambda (let
 										(assoc
 											ac_feature (current_value 1)
+											dependent_queries_list (null)
+											ac_feature_fanout_features_queries (null)
 										)
 
-										(declare (assoc
-											dependent_queries_list
-												(if (get ac_feature_is_dependent_map ac_feature)
+										(if (get ac_feature_is_dependent_map ac_feature)
+											(assign (assoc
+												dependent_queries_list
 													(call !ComputeDependentQueries (assoc
 														context_features react_context_features
 														context_values (unzip case_values_map react_context_features)
 														action_feature ac_feature
 													))
-													;else
-													(null)
-												)
-										))
+											))
+										)
+
+										(if filter_fanout_values
+											(assign (assoc
+												ac_feature_fanout_features_queries
+													(call !ConstructFanoutFeaturesQueries (assoc
+														predicting_features [ac_feature]
+														case_id case_id
+													))
+											))
+										)
 
 										(call !InterpolateAndComputeDiffToCase (assoc
 											feature ac_feature
@@ -1007,6 +1255,7 @@
 														(if (get ignore_null_ac_features_map ac_feature) (query_not_equals ac_feature (null)))
 														(if (size context_condition_filter_query) context_condition_filter_query)
 														dependent_queries_list
+														ac_feature_fanout_features_queries
 														time_series_filter_query
 														(query_nearest_generalized_distance
 															k_parameter
@@ -1085,6 +1334,7 @@
 											(if ignore_null_action_feature (query_not_equals action_feature (null)))
 											(if (size context_condition_filter_query) context_condition_filter_query)
 											dependent_queries_list
+											fanout_features_queries
 											time_series_filter_query
 											(query_nearest_generalized_distance
 												k_parameter
@@ -1138,20 +1388,30 @@
 									(lambda (let
 										(assoc
 											ac_feature (current_value 1)
+											dependent_queries_list (null)
+											ac_feature_fanout_features_queries (null)
 										)
 
-										(declare (assoc
-											dependent_queries_list
-												(if (get ac_feature_is_dependent_map ac_feature)
+										(if (get ac_feature_is_dependent_map ac_feature)
+											(assign (assoc
+												dependent_queries_list
 													(call !ComputeDependentQueries (assoc
 														context_features react_context_features
 														context_values (unzip case_values_map react_context_features)
 														action_feature ac_feature
 													))
-													;else
-													(null)
-												)
-										))
+											))
+										)
+
+										(if filter_fanout_values
+											(assign (assoc
+												ac_feature_fanout_features_queries
+													(call !ConstructFanoutFeaturesQueries (assoc
+														predicting_features [ac_feature]
+														case_id case_id
+													))
+											))
+										)
 
 										(call !InterpolateAndComputeDiffToCase (assoc
 											feature ac_feature
@@ -1168,6 +1428,7 @@
 														(if (get ignore_null_ac_features_map ac_feature) (query_not_equals ac_feature (null)))
 														(if (size context_condition_filter_query) context_condition_filter_query)
 														dependent_queries_list
+														ac_feature_fanout_features_queries
 														time_series_filter_query
 														(query_nearest_generalized_distance
 															k_parameter
@@ -1235,80 +1496,45 @@
 
 						(declare (assoc
 							total_ac_feature_surprisal (apply "+" ac_feature_surprisals)
+							unique_value_combo
+								(map
+									(lambda
+										(if (contains_index !nominalsMap (current_value))
+											(get case_values_map (current_value))
+
+											;find the bucket containing this continuous value
+											(let
+												(assoc
+													feature_bucket_map (get continuous_feature_buckets_map (current_value 1))
+													value (get case_values_map (current_value 1))
+												)
+												;iterate over the 0-based ordered indices of the bucket map, where each bucket is a pair of [low high]
+												;if it matches the bucket, output the index of the bucket
+												(while (< (current_index) (size feature_bucket_map))
+													(if (and
+															(>= value (get feature_bucket_map [(current_index 1) 0]) )
+															(<= value (get feature_bucket_map [(current_index 1) 1]) )
+														)
+														(conclude (current_index))
+													)
+												)
+											)
+										)
+									)
+									value_robust_contributions_features
+								)
 						))
-						;output a pair of : [ surprisal asymmetry for this case, values ]
+
+						;output a pair of : [ surprisal asymmetry for this case, values_combination ]
 						[
 							(-
 								action_feature_surprisal
 								total_ac_feature_surprisal
 							)
-							(unzip case_values_map value_robust_contributions_features)
+							unique_value_combo
 						]
 					))
 					case_ids
-				)
-		))
-
-		;a index map to match index of feature to value
-		(declare (assoc
-			ac_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
-		))
-
-		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
-		(declare (assoc
-			continuous_feature_buckets_map
-				(map
-					(lambda
-						(if (contains_index value_robust_contributions_buckets (current_index))
-							(zip
-								(range 1 (size (get value_robust_contributions_buckets (current_index))))
-								(get value_robust_contributions_buckets (current_index))
-							)
-
-							;otherwise automatically determine buckets
-							(let
-								(assoc ac_feature_index (get ac_feature_index_map (current_index 1)) )
-								(call !BinValuesByQuantiles (assoc
-									max_num_buckets max_num_buckets
-									sorted_unique_values
-										;sort is descending order
-										(sort
-											(lambda (< (current_value) (current_value 1)) )
-											(values
-												(map (lambda (get (current_value) [1 ac_feature_index])) case_surprisal_asymmetries)
-												.true
-											)
-										)
-								))
-							)
-						)
-					)
-					(zip (filter
-						(lambda (not (contains_index !nominalsMap (current_value))))
-						value_robust_contributions_features
-					))
-				)
-		))
-
-		;create an assoc of feature -> all unique values (classes or buckets)
-		(declare (assoc
-			feature_value_lists_map
-				(zip
-					value_robust_contributions_features
-					(map
-						(lambda (let
-							(assoc f_idx (current_index 1))
-							(if (contains_index !nominalsMap (current_value))
-								;all unique classes
-								(values (map (lambda (get (current_value) [1 f_idx]) ) case_surprisal_asymmetries) .true)
-
-								;all unique buckets
-								(indices (get continuous_feature_buckets_map (current_value)))
-							)
-
-						))
-						value_robust_contributions_features
-					)
 				)
 		))
 
@@ -1321,83 +1547,25 @@
 						values []
 					))
 				)
-			has_multiple_features (> (size value_robust_contributions_features) 1)
+			has_null_results .false
 		))
-
-		(if (not has_multiple_features)
-			(declare (assoc
-				ac_feature_bucket_map (get continuous_feature_buckets_map (first value_robust_contributions_features))
-				ac_feature_is_continuous (not (contains_index !nominalsMap (first value_robust_contributions_features)))
-			))
-		)
 
 		;given all possible value combinations, compute the mean surprisal asymmetry for each combination
 		(declare (assoc
 			corresponding_asymmetries
 				||(map
 					(lambda (let
-						(assoc feature_values (current_value 1))
-
-						(declare (assoc
+						(assoc
+							;filter all the asymmetrie tuples by the unique feature values to leave only those that were used to predict
+							;this exact feature value(s) combination that's represented as (current_value 2) inside the filter
 							matching_value_asymmetry_pairs
-								;filter case acs by the unique feature values
-								(if has_multiple_features
-									(filter
-										(lambda
-											(apply "and" (map
-												(lambda (let
-													(assoc ac_feature (get value_robust_contributions_features (current_index 1)) )
-													;nominal must match exactly
-													(if (contains_index !nominalsMap ac_feature)
-														(= (first (current_value)) (last (current_value)))
-
-														;else continuous values will be a pair of [min max] for a value to fall between
-														(and
-															(<=
-																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 0])
-																(last (current_value))
-															)
-															(>=
-																(get continuous_feature_buckets_map [ac_feature (first (current_value 1)) 1])
-																(last (current_value))
-															)
-														)
-													)
-												))
-												;grab the values to filter by
-												feature_values
-												;grab the values for this case's ac
-												(last (current_value))
-											))
-										)
-										case_surprisal_asymmetries
+								(filter
+									(lambda
+										(= (current_value 2) (last (current_value)))
 									)
-
-									;same code but optimized for the one current feature
-									(let
-										(assoc value (first feature_values))
-										(if ac_feature_is_continuous
-											(filter
-												(lambda (and
-													;continuous values will be a pair of [min max] for a value to fall between
-													(<= (get ac_feature_bucket_map [value 0]) (get (current_value) [1 0]) )
-													(>= (get ac_feature_bucket_map [value 1]) (get (current_value) [1 0]) )
-												))
-												case_surprisal_asymmetries
-											)
-
-											;else if current feature is nominal
-											(filter
-												(lambda
-													;must match current nominal value exactly
-													(= value (get (current_value) [1 0]) )
-												)
-												case_surprisal_asymmetries
-											)
-										)
-									)
+									case_surprisal_asymmetries
 								)
-						))
+						)
 
 						(if (>= (size matching_value_asymmetry_pairs) value_robust_contributions_min_samples)
 							(*
@@ -1417,7 +1585,10 @@
 		))
 
 		;remove combinations that did not appear in the dataset and don't have a value
-		(if (contains_value corresponding_asymmetries (null))
+		(if (and
+				(= value_robust_contributions_buckets (null))
+				(contains_value corresponding_asymmetries (null))
+			)
 			(let
 				(assoc
 					null_indices
@@ -1432,14 +1603,27 @@
 					all_unique_value_combinations (remove all_unique_value_combinations null_indices)
 				))
 			)
+
+			;need to know if nulls may remain before sorting
+			(assign (assoc has_null_results (contains_value corresponding_asymmetries (null)) ))
 		)
 
 		;sort from highest to lowest
 		(declare (assoc
 			sorted_indices
 				(sort
-					(lambda
-						(<= (get corresponding_asymmetries (current_value)) (get corresponding_asymmetries (current_value 1)) )
+					(if has_null_results
+						;if there are nulls, wrap the (get)s in an (or) to assign low value for (null)s while sorting
+						(lambda
+							(<=
+								(or (get corresponding_asymmetries (current_value)) -.infinity)
+								(or (get corresponding_asymmetries (current_value 1)) -.infinity)
+							)
+						)
+
+						(lambda
+							(<= (get corresponding_asymmetries (current_value)) (get corresponding_asymmetries (current_value 1)) )
+						)
 					)
 					(indices corresponding_asymmetries)
 				)

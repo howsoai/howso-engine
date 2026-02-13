@@ -197,6 +197,26 @@
 		)
 	)
 
+	;helper method for set_feature_attributes that grabs all of the "fanout_on" attributes for each feature they
+	;are defined for.
+	#!ComposeFanoutFeaturesMap
+	(apply "assoc"
+		(weave
+			(lambda
+				(if (!= (null) (get (last (current_value)) "fanout_on" ))
+					(list
+						(replace (first (current_value 1)))
+						(replace (get (last (current_value 1)) "fanout_on"))
+					)
+					;else don't output anything, map-filtering out any values that don't have dependent features
+					(list)
+				)
+			)
+			(indices feature_attributes)
+			(values feature_attributes)
+		)
+	)
+
 	#!ComposeDependentsMap
 	(let
 		(assoc
@@ -571,6 +591,53 @@
 		)
 	)
 
+	;helper method executed on any non number continuous feature, ie code features, string and string_mixable
+	#!ComposeCodeFeatureDomainAttributesMap
+	(map
+		(lambda
+			;code features have an explicit feature domain assoc specified, for use in queries and opcodes
+			(if (contains_value ["json" "yaml" "amalgam"] (current_value))
+				{
+					"types_must_match"
+						;default to true
+						(if (= (null) (get feature_attributes [(current_index 2) "types_must_match"]))
+							.true
+							(get feature_attributes [(current_index 2) "types_must_match"])
+						)
+					"nominal_numbers"
+						;default to false
+						(if (= (null) (get feature_attributes [(current_index 2) "nominal_numbers"]))
+							.false
+							(get feature_attributes [(current_index 2) "nominal_numbers"])
+						)
+					"nominal_strings"
+						;default to true
+						(if (= (null) (get feature_attributes [(current_index 2) "nominal_strings"]))
+							.true
+							(get feature_attributes [(current_index 2) "nominal_strings"])
+						)
+					"recursive_matching"
+						;parameter wasn't specified, default to .false for json/yaml and .true for amalgam
+						(if (= (null) (get feature_attributes [(current_index 2) "recursive_matching"]))
+							(= "amalgam" (current_value 1))
+
+							;else use the explicitly specified value
+							(get feature_attributes [(current_index 2) "recursive_matching"])
+						)
+					"similar_mix_chance" 0
+					"use_string_edit_distance" .false
+				}
+
+				;else any non-code features (string or string_mixable) set recursive_matching to false and use string edit distance
+				{
+					"recursive_matching" .false
+					"use_string_edit_distance" .true
+				}
+			)
+		)
+		code_features_map
+	)
+
 	#!ComposeNovelSubstitionFeatureSet
 	;map-filter weave
 	(apply "assoc"
@@ -773,7 +840,7 @@
 	)
 
 	;Helper method to creata  map of feature -> limits, based on the type of feature it is and limits specified in boundaries map
-	#!ComposeFeatureLimitsMap
+	#!ComposeFeatureDomainAttributesMap
 	(map
 		(lambda (let
 			(assoc feature (current_index 1))
@@ -789,15 +856,20 @@
 				;max string length
 				(and
 					(= "continuous" (get (current_value) "type"))
-					(= "string" (get (current_value) "data_type"))
+					(or
+						(= "string" (get (current_value) "data_type"))
+						(= "string_mixable" (get (current_value) "data_type"))
+					)
 				)
 				(replace (get !featureBoundsMap (list feature "max")))
 
-				;max code size
-				(= "code" (get (current_value) "type"))
-				(replace (get !featureBoundsMap (list feature "max")))
+				;else "continuous":
 
-				;else "continuous", and min or max are specified, provide as a delta of max - min
+				;code features use an assoc of properties as their feature domain attributes/limits
+				(contains_value ["yaml" "json" "amalgam"] (get (current_value) "data_type"))
+				(get !codeFeatureDomainAttributesMap feature)
+
+				;if min or max are specified, provide as a delta of max - min
 				(if
 					(and
 						(!= (null) (get !featureBoundsMap (list feature "min")) )

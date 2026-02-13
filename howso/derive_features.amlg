@@ -52,40 +52,53 @@
 					derived_features
 				)
 			time_feature_delta (concat "." !tsTimeFeature "_delta_1")
+
+			has_reduced (size (contained_entities (query_not_equals !autoAblationWeightFeature 1.0)))
 		))
 
-		;derive all the lag features in one pass
-		(call !DeriveLagFeatures (assoc
-			features features
-			lag_features lag_features
-		))
+		(if !tsTimeFeature
+			(seq
+				;create series index features
+				(call !CreateSeriesIndexFeatures (assoc
+					series_id_features (get !tsFeaturesMap "series_id_features")
+					new_case_ids case_ids
+				))
+
+				;derive all the lag features in one pass
+				(call !DeriveLagFeatures (assoc
+					features features
+					lag_features lag_features
+					new_case_ids case_ids
+				))
+			)
+		)
 
 		;derive all the non-lag features below:
 		(assign (assoc
 			derived_features (filter (lambda (not (contains_value lag_features (current_value)))) derived_features)
 		))
 
-		;create series index features
-		(call !CreateSeriesIndexFeatures (assoc
-			series_id_features (get !tsFeaturesMap "series_id_features")
-		))
 
 		;derive time feature delta before any of the other derived features
 		(if (contains_value derived_features time_feature_delta)
 			(call !CreateCustomFeaturesFromCode (assoc
 				features features
 				derived_features [time_feature_delta]
+				new_case_ids case_ids
 			))
 		)
 
-		;In datasets with no synchonous cases, this method will early-out and store
-		;zeros for all cases' synchronous counters (making it a inactive feature)
-		(call !CreateSynchronousCounterFeature (assoc
-			time_feature !tsTimeFeature
-			time_feature_delta time_feature_delta
-			series_ordered_by_features [!tsTimeFeature !internalLabelSessionTrainingIndex]
-			series_id_features (get !tsFeaturesMap "series_id_features")
-		))
+		(if !tsTimeFeature
+			;In datasets with no synchonous cases, this method will early-out and store
+			;zeros for all cases' synchronous counters (making it a inactive feature)
+			(call !CreateSynchronousCounterFeature (assoc
+				time_feature !tsTimeFeature
+				time_feature_delta time_feature_delta
+				series_ordered_by_features [!tsTimeFeature !internalLabelSessionTrainingIndex]
+				series_id_features (get !tsFeaturesMap "series_id_features")
+				new_case_ids case_ids
+			))
+		)
 
 		;keep only features that have a custom derivation specified and aren't time_feature_delta which was derived above
 		(assign (assoc
@@ -147,6 +160,7 @@
 										))
 										derived_features
 									)
+								new_case_ids case_ids
 							))
 						))
 						1 max_order 1
@@ -165,6 +179,7 @@
 										))
 										derived_features
 									)
+								new_case_ids case_ids
 							))
 						))
 						1 max_order 1
@@ -182,6 +197,7 @@
 									(lambda (= order (get !featureAttributes [(current_value 1) "ts_order"])))
 									derived_features
 								)
+							new_case_ids case_ids
 						))
 					))
 					1 max_order 1
@@ -422,6 +438,7 @@
 		(assoc
 			features (list)
 			lag_features (list)
+			new_case_ids (list)
 		)
 
 		(if (= 0 (size lag_features))
@@ -464,6 +481,54 @@
 					(assign (assoc ts_series_length_limit (* 2.718281828459 (size series_case_ids)) ))
 				)
 
+				(if has_reduced
+					(seq
+						(declare (assoc
+							num_cases_prev_trained
+								(+
+									1
+									(retrieve_from_entity
+										(first (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_not_in_entity_list new_case_ids)
+											(query_max ".series_index" 1 .true)
+										))
+										".series_index"
+									)
+								)
+							num_cases_trained
+								(+
+									1
+									(retrieve_from_entity
+										(first (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_equals ".reverse_series_index" 0 .true)
+										))
+										".series_index"
+									)
+								)
+						))
+
+
+						(declare (assoc
+							is_missing_cases
+								;if the number of old series cases is less
+								;than indicated by the largest series index of an old series case
+								(and
+									;this value will be null if there are no previous cases trained before this derivation
+									num_cases_prev_trained
+									(!=
+										(size (contained_entities
+											(query_in_entity_list series_case_ids)
+											(query_not_in_entity_list new_case_ids)
+										))
+										num_cases_prev_trained
+									)
+								)
+						))
+					)
+				)
+
 				(declare (assoc
 					;series_data is all the necessary_features's values along with the case_id appended as the last column
 					series_data
@@ -477,10 +542,29 @@
 				(if (size series_ordered_by_features)
 					(assign (assoc
 						series_data
-							(call !MultiSortList (assoc
-								data series_data
-								column_order_indices (unzip (zip necessary_features (indices necessary_features)) series_ordered_by_features)
-							))
+							(if is_missing_cases
+								;cases have been removed from the series at some point, we must sort by series index, leaving nulls where appropriate
+								(let
+									(assoc
+										series_index_to_data_map
+											(zip
+												(map (lambda (retrieve_from_entity (current_value) ".series_index")) series_case_ids)
+												series_data
+											)
+									)
+
+									(unzip
+										series_index_to_data_map
+										(range 0 (- num_cases_trained 1) 1)
+									)
+								)
+
+								;just sort by the sorting features
+								(call !MultiSortList (assoc
+									data series_data
+									column_order_indices (unzip (zip necessary_features (indices necessary_features)) series_ordered_by_features)
+								))
+							)
 					))
 				)
 
@@ -492,6 +576,21 @@
 							series_data
 						)
 				))
+
+				(if is_missing_cases
+					(seq
+						(declare (assoc
+							case_id_to_idx_map
+								(zip
+									series_case_ids
+									(indices series_case_ids)
+								)
+						))
+						(declare (assoc
+							new_series_case_ids (indices (keep case_id_to_idx_map new_case_ids))
+						))
+					)
+				)
 
 				;remove the case_id column from series_data
 				(assign (assoc
@@ -532,13 +631,27 @@
 							)
 						)
 					))
-					(zip series_case_ids series_data)
+					(if is_missing_cases
+						;only update the values for the new cases
+						(map
+							(lambda (get series_data (current_value)) )
+							(keep case_id_to_idx_map new_series_case_ids)
+						)
+
+						;can do all series cases
+						(zip series_case_ids series_data)
+					)
 				)
 			))
 
 			;generates a list of queries for each unique series id (where each series id may be a conjuction of several features)
-			(call !GenerateUniqueSeriesQueries (assoc series_id_features series_id_features ))
+			;NOTE: this will only return queries for series that have had new cases trained.
+			(call !GenerateUniqueSeriesQueries (assoc
+				series_id_features series_id_features
+				case_ids new_case_ids
+			))
 		)
+
 		;if ts_series_length_limit has been been updated to a larger value in the loop above, update the dataset with this new value
 		(if (> ts_series_length_limit !tsSeriesLimitLength)
 			(assign_to_entities (assoc !tsSeriesLimitLength ts_series_length_limit ))

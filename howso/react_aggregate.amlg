@@ -126,15 +126,24 @@
 			value_robust_contributions_action_feature (null)
 			;{type "assoc" values {type "list" values {type "list" min_size 2 max_size 2}}}
 			;An assoc mapping continuous feature names to lists of lists defining inclusive ranges to be used as buckets to compute metrics for when using any of the "value_*" details. When undefined,
-			;buckets are automatically determined using the probability masses of the data.
+			;buckets are automatically determined using the probability masses of the data. If specified, then value combinations with insignificant
+			;numbers of samples will have their values returned as (null) rather than filtered out of the returned results.
 			value_robust_contributions_buckets (null)
 			;{type "number" exclusive_min 0}
-			;number of maximum buckets to bin continuous values into when using any of the "value_*" details, defaults to 30 when unspecified
-			value_robust_contributions_num_buckets 30
+			;number of maximum buckets to bin continuous values into when using any of the "value_*" details, defaults to 12 when unspecified
+			value_robust_contributions_num_buckets 12
 			;{type "number" exclusive_min 0}
 			;The minimum number of samples necessary to report a metric value for a combination of feature values when computing any of the values
 			;details.
 			value_robust_contributions_min_samples 15
+			;{any_of [{type "number" exclusive_min 0} {type "assoc" additional_indices "number"}]}
+			;The minimum number of unique cases for a given nominal class or continuous bucket to be used as a possible feature value when collecting
+			;all combinations of feature values in the data to report metrics over. Can be specified as single value to apply to all features or
+			;an assoc with thresholds defined for each feature (and undefined features will use a threshold of 15). If unspecified, there is no filtering based on number of unique cases.
+			value_robust_contributions_min_cases 15
+			;{type "boolean"}
+			;flag, if true will filter out cases with duplicate values to the case being reacted to.
+			filter_fanout_values .false
 			;{ref "ReactAggregateDetails"}
 			;assoc, optional. an assoc of flags for which type of audit data to return, and corresponding values to return (if applicable) in the format of:
 			;	(assoc
@@ -151,9 +160,10 @@
 			;				(power set/permutations) set of all other context_features to predict the feature. Uses robust computation.
 			;		feature_full_prediction_contributions: optional, none/true/false. For each context_feature, use the full set of all other context_features to compute the
 			;				mean absolute delta between prediction of feature_influences_action_feature with and without the context_feature in the dataset. Uses full computation.
+			;				Note: not recommended for semi-structured data action features due to weak signal caused by its high dimensionality, accuracy contributions should be computed instead.
 			;		feature_robust_prediction_contributions: optional, none/true/false. For each context_feature, use the robust (power set/permutation) set of all other context_features
 			;				to compute the mean absolute delta between prediction of feature_influences_action_feature with and without the context_feature in the dataset. Uses robust computation.
-			;				Uses robust computation.
+			;				Uses robust computation. Note: not recommended for semi-structured data action features due to weak signal caused by its high dimensionality, accuracy contributions should be computed instead.
 			;		feature_deviations: optional, none/true/false. if true will compute feature deviations for each feature in action_features. The feature deviation is the mean absolute
 			;				error of predicting the feature using all the context features as well as value of the feature being predicted as the context for each prediction.
 			;		feature_full_accuracy_contributions: optional, none/true/false. if true will compute Accuracy Contributions for each context feature at predicting feature_influences_action_feature.
@@ -223,6 +233,37 @@
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
 		(call !ValidateGoalFeaturesMap)
+		(if value_robust_contributions_action_feature
+			(call !SingleFeatureCheck (assoc
+				param_name "value_robust_contributions_action_feature"
+				given_feature_name value_robust_contributions_action_feature
+			))
+		)
+		(if feature_influences_action_feature
+			(call !SingleFeatureCheck (assoc
+				param_name "feature_influences_action_feature"
+				given_feature_name feature_influences_action_feature
+			))
+		)
+		(if prediction_stats_action_feature
+			(call !SingleFeatureCheck (assoc
+				param_name "feature_influences_action_feature"
+				given_feature_name prediction_stats_action_feature
+			))
+		)
+		(if value_robust_contributions_features
+			(call !MultipleFeatureCheck (assoc
+				param_name "feature_influences_action_feature"
+				given_feature_names value_robust_contributions_features
+			))
+		)
+		(if (~ {} value_robust_contributions_min_cases)
+			;if this is an assoc, check that the indices are valid features.
+			(call !MultipleFeatureCheck (assoc
+				param_name "value_robust_contributions_min_cases"
+				given_feature_names (indices value_robust_contributions_min_cases)
+			))
+		)
 
 		(declare (assoc
 			output (assoc)
@@ -953,6 +994,16 @@
 				(assoc
 					;make sure context_features doesnt have the specified action feature by filtering it out
 					context_features (filter (lambda (!= feature_influences_action_feature (current_value))) context_features)
+				)
+
+				(if (contains_index !codeFeatureDomainAttributesMap feature_influences_action_feature)
+					(accum (assoc
+						warnings
+							(associate
+								"Computing prediction contributions for semi-structured data action features may result "
+								"in a weak signal caused by high dimensionality, consider accuracy contributions instead."
+							)
+					))
 				)
 
 				(if (get details "feature_full_prediction_contributions")

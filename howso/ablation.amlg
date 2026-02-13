@@ -528,33 +528,12 @@
 			;list of features to use when computing influence weight entropies, defaults to all trained features
 			features !trainedFeatures
 			;{type "number"}
-			;numeric maximum threshold for influence weight entropy of cases to keep, defaults to the value
-			; influence weight entropy threshold stored within the Trainee
-			influence_weight_entropy_threshold !reduceDataInfluenceWeightEntropyThreshold
-			;{ref "AblationThresholdMap"}
-			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
-			; absolute thresholds will cause data reduction to stop when any of the measure values for any of
-			; the features for which a threshold is defined go above the threshold (in the case of rmse and
-			; mae) or below the threshold (otherwise).
-			abs_threshold_map (assoc)
-			;{ref "AblationThresholdMap"}
-			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
-			; delta thresholds will cause data reduction to stop when the delta between any of the measure values
-			; for any of the features for which a threshold is defined and its previous value go above the threshold
-			; (in the case of rmse and mae) or below the threshold (otherwise).
-			delta_threshold_map (assoc)
-			;{ref "AblationThresholdMap"}
-			;a map of measure names (any of the prediction stats) to a map of feature names to threshold value.
-			; relative thresholds will cause data reduction to stop when the relative change between any of the
-			; measure values for any of the features for which a threshold is defined and its previous value go
-			; above the threshold (in the case of rmse and mae) or below the threshold (otherwise).
-			rel_threshold_map (assoc)
+			;stores the maximum number of cases that may remain after data is reduced
+			;	default to the value stored within the Trainee via 'set_auto_ablation_params', which defaults to 50,000.
+			reduce_max_cases !postReduceMaxCases
 			;{type "boolean"}
 			;skip auto analyzing as cases are removed
 			skip_auto_analyze .false
-			;{type "number"}
-			;the number of cases to ablate between analyses and influence weight entropy recalculation
-			batch_size !ablationBatchSize
 		)
 		(call !ValidateParameters)
 
@@ -563,12 +542,11 @@
 
 		;Declare variables for internal use.
 		(declare (assoc
-			max_influence_weight_entropy_to_keep .infinity
-			cases (list)
-			prev_prediction_stats_map (assoc)
-			thresholds_enabled (or (size abs_threshold_map) (size delta_threshold_map) (size rel_threshold_map) )
 			output (assoc)
 		))
+
+		;ensure it's an integer
+		(assign (assoc reduce_max_cases (floor reduce_max_cases) ))
 
 		;Ensure that ablation is initialized before we begin.
 		(if (not !hasPopulatedCaseWeight)
@@ -576,212 +554,274 @@
 				weight_feature distribute_weight_feature
 			))
 		)
+		(declare (assoc num_cases (call !GetNumTrainingCases) ))
 
-		(declare  (assoc
-			hyperparam_map
-				(call !GetHyperparameters (assoc
-					context_features features
-					weight_feature distribute_weight_feature
-				))
-		))
+		;nothing needed to reduce since the dataset is already small enough
+		(if (>= (max reduce_max_cases !autoAblationMinNumCases) num_cases)
+			(conclude
+				(call !Return (assoc payload output))
+			)
+		)
+
 		(declare (assoc
-			closest_k (get hyperparam_map "k")
+			hyperparam_map (call !GetHyperparameters (assoc weight_feature distribute_weight_feature))
+		))
+
+		(declare (assoc
+			k_parameter (get hyperparam_map "k")
 			p_parameter (get hyperparam_map "p")
-			dt_parameter (get hyperparam_map "dt")
 			feature_weights (get hyperparam_map "featureWeights")
+			dt_parameter (get hyperparam_map "dt")
 			feature_deviations (get hyperparam_map "featureDeviations")
 			query_feature_attributes_map (get hyperparam_map "featureDomainAttributes")
-			pre_reduce_num_cases (call !GetNumTrainingCases)
+
+			all_case_ids (call !AllCases)
+			done .false
 		))
 
-		;Also ensure that we have all influence weight entropies and that they are up-to-date
+		;cache surprisals to the nearest 100 for each case
+		;any cases that aren't in their most similar 100 can be considered to be 'too far away'
 		(declare (assoc
-			;store a map of case id -> "duplicate"/"too_far_for_removal"/"near_duplicate" for any duplicate cases or cases that should not be removed because they are too far
-			case_duplicate_or_far_map
-				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-					features features
-					weight_feature distribute_weight_feature
-					use_case_weights .true
-					compute_all .true
-				))
-		))
-
-		(if thresholds_enabled
-			(assign (assoc
-				prev_prediction_stats_map
-					(get
-						(call !CalculateFeatureResiduals (assoc
-							weight_feature distribute_weight_feature
-							use_case_weights .true
-							compute_all_statistics .true
-						))
-						"prediction_stats"
+			neighbor_surprisals_map
+				||(map
+					(lambda
+						(compute_on_contained_entities
+							(query_not_in_entity_list [(current_index 1)])
+							(query_nearest_generalized_distance
+								100
+								features
+								(current_index)
+								p_parameter
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								(null)
+								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+								distribute_weight_feature
+								(rand)
+								(null) ;radius
+								!numericalPrecision
+							)
+						)
 					)
-			))
+					(zip all_case_ids)
+				)
+		))
+
+		;mark each case as not being kept at first
+		(if (= (size (contained_entities (query_exists ".keeping"))) 0)
+			;create the label because it doesn't exist yet
+			(map
+				(lambda
+					(accum_entity_roots (current_value) (zip_labels
+						[".keeping"] [(null)]
+					))
+				)
+				all_case_ids
+			)
 		)
 
-		;if this dataset has duplicates merge them all here first and recompute weight entropies for their remaining representative non-duplicates
 		(declare (assoc
-			all_duplicate_cases_map (filter (lambda (= "duplicate" (current_value))) case_duplicate_or_far_map)
+			min_neighbor_surprisals
+				(map
+					(lambda (apply "min" (values (current_value))))
+					neighbor_surprisals_map
+				)
 		))
-		(if (size all_duplicate_cases_map)
-			(call !ReduceMergeDuplicateCases)
-		)
+
+		;store the surprisal to each cases's most similar neighbor
+		(call !StoreCaseValues (assoc
+			case_values_map min_neighbor_surprisals
+			label_name ".neighbor_surprisal"
+		))
 
 		(declare (assoc
-			cases_too_far_for_removal (indices (filter (lambda (= "too_far_for_removal" (current_value))) case_duplicate_or_far_map))
-			near_duplicate_cases (indices (filter (lambda (= "near_duplicate" (current_value))) case_duplicate_or_far_map))
+			;map of case to its core-set surprisal (the min surprisal to any case in the coreset for all cases)
+			;set it to an extremely large value
+			case_to_css_map (map 10e13 (zip all_case_ids))
+
+			;Experimental parameter: the amount of lowest neighbor-surprisal cases to consider for keeping
+			;CAN BE NULLED
+			lowest_ns_cases_trunc_n (null)
+
+			;maximum number of cases to select for keeping per iteration
+			max_cases_to_keep_per_iter
+				(min
+					30
+					(ceil (/ reduce_max_cases 100))
+				)
+
+			;numeric value for the coreset-surprisal to neighbor-surprisal ratio
+			;if the maximum ratio among non core-set features is lower than this value and
+			;enough cases have already been selected, then selection is ended.
+			ratio_cutoff_value 5.0
 		))
-		;remove and redistribute the near_duplicate cases' weights
-		(if (size near_duplicate_cases)
+
+		(while (not done)
+			(let
+				(assoc
+					cases_to_add
+						(if (= (current_index 1) 0)
+							;on first iteration, just take lowest DC case
+							(contained_entities
+								(query_equals ".keeping" (null))
+								(query_min ".neighbor_surprisal" 1 .true)
+							)
+
+							;otherwise need cases with low neighbor surprisal (ns) that is far from its most similar case in current_cases_to_keep
+							(let
+								(assoc
+									low_ns_case_scores_map
+										(map
+											(lambda
+												;coreset surprisal / neighbor surprisal, the smaller the neighbor surprisal the larger this score
+												(/
+													(get case_to_css_map (current_index))
+													(get min_neighbor_surprisals (current_index))
+												)
+											)
+											(compute_on_contained_entities
+												(query_equals ".keeping" (null) )
+												(if lowest_ns_cases_trunc_n
+													(query_min ".neighbor_surprisal" lowest_ns_cases_trunc_n .true)
+												)
+											)
+										)
+								)
+
+								(declare (assoc
+									coreset_size
+										(if lowest_ns_cases_trunc_n
+											(size (contained_entities (query_not_equals ".keeping" (null) )))
+											(- num_cases (size low_ns_case_scores_map))
+										)
+								))
+
+								(declare (assoc
+									num_cases_to_keep
+										(min
+											;grow coreset in relation to its current size.
+											(max
+												1
+												(floor (/ coreset_size 10))
+											)
+											;or use the maximum number of cases per iteration
+											max_cases_to_keep_per_iter
+											;if approaching max size, select as many cases needed to reach limit.
+											(- reduce_max_cases coreset_size)
+										)
+								))
+
+								;if enough cases have been selected, and ratios have fallen below the cutoff, then end case selection
+								;after this iteration.
+								(if (and
+										(>= coreset_size !autoAblationMinNumCases)
+										(<
+											(apply "max" (values low_ns_case_scores_map))
+											ratio_cutoff_value
+										)
+									)
+									(assign (assoc done .true))
+								)
+
+								;sorting low dc cases by *decreasing* "score" and return the right amount
+								(if (= 1 num_cases_to_keep)
+									(trunc (index_max low_ns_case_scores_map) 1)
+
+									(sort
+										(lambda
+											(-
+												(get low_ns_case_scores_map (current_value 1))
+												(get low_ns_case_scores_map (current_value))
+											)
+										)
+										(indices low_ns_case_scores_map)
+										num_cases_to_keep
+									)
+								)
+							)
+						)
+					iteration (current_index 1)
+				)
+
+				;mark new cases to keep by setting the iteration value when these cases were selected into the core set
+				(map
+					(lambda
+						(assign_to_entities (current_value) (assoc ".keeping" iteration))
+					)
+					cases_to_add
+				)
+
+				(assign (assoc
+					case_to_css_map
+						;for every non-coreset case, store min of newly computed min css and old min css
+						||(map
+							(lambda
+								(min
+									;for each non-coreset case, determine surprisal to its closest case in the coreset
+									(or
+										;get the case's min surprisal to any of the cases_to_add, and if they are all too far away,
+										;just output an exetremely large value
+										(apply "min" (values
+											(unzip
+												(get neighbor_surprisals_map (current_index))
+												cases_to_add
+											)
+										))
+										;extremeley large value
+										10e13
+									)
+									(get case_to_css_map (current_index))
+								)
+							)
+							;all non-coreset cases
+							(compute_on_contained_entities (query_equals ".keeping" (null)) )
+						)
+				))
+
+				(if (>=
+						(size (contained_entities (query_not_equals ".keeping" (null)) ))
+						reduce_max_cases
+					)
+					(assign (assoc done .true))
+				)
+			)
+		)
+
+		;the list of case ids to be removed are those that did not have an iteration value assigned to ".keeping"
+		(declare (assoc
+			cases_to_remove (contained_entities (query_equals ".keeping" (null)) )
+		))
+
+		(if !tsTimeFeature
+			(call !FilterCasesToRemoveForTimeSeries (assoc ensure_enough_to_remove .true))
+		)
+
+
+		(if (size cases_to_remove)
 			(call !RemoveCases (assoc
-				cases near_duplicate_cases
+				cases cases_to_remove
 				distribute_weight_feature distribute_weight_feature
 			))
+
+			;else no cases to remove, clear caches for these added features so they can be cleared out quickly
+			(reclaim_resources (null) .false [".keeping" ".neighbor_surprisal"])
 		)
 
-		;Begin looping on data removal. The ultimate end condition is if the dataset gets too small
-		; to continue removing cases. Removes cases with relatively high influence weight entropy, i.e., cases with equidistant neighbors.
-		(while (< !autoAblationMinNumCases (call !GetNumTrainingCases))
-			(assign (assoc
-				max_influence_weight_entropy_to_keep
-					(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-						influence_weight_entropy_threshold influence_weight_entropy_threshold
-						weight_feature distribute_weight_feature
-					))
-			))
-			(assign (assoc
-				cases
-					(contained_entities
-						;ignore cases that have been determined to be too far for removal
-						(query_not_in_entity_list cases_too_far_for_removal)
-						(query_greater_or_equal_to !internalLabelInfluenceWeightEntropy max_influence_weight_entropy_to_keep)
-						;grab the largest entropy values of specified batch_size number of cases
-						(query_max !internalLabelInfluenceWeightEntropy
-							(min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
-							.true
-						)
-					)
-			))
-
-			(if !tsTimeFeature
-				;do not remove first (.series_index == 0) or last (.reverse_series_index == 0) cases for any series
-				(assign (assoc
-					cases
-						(contained_entities
-							(query_in_entity_list cases)
-							(query_not_equals ".reverse_series_index" 0)
-							(query_not_equals ".series_index" 0)
-						)
+		;null out added features, TODO: 24296 - remove these labels/indices from entities altogether
+		(map
+			(lambda
+				(assign_to_entities (current_value) (assoc
+					".keeping" (null)
+					".neighbor_surprisal" (null)
 				))
 			)
-
-			(if (size cases)
-				(seq
-					(call !RemoveCases (assoc
-						cases cases
-						distribute_weight_feature distribute_weight_feature
-					))
-
-					(if thresholds_enabled
-						(let
-							(assoc
-								batch_threshold_info (null)
-								new_prediction_stats_map
-									(get
-										(call !CalculateFeatureResiduals (assoc
-											weight_feature distribute_weight_feature
-											use_case_weights .true
-											compute_all_statistics .true
-										))
-										"prediction_stats"
-									)
-							)
-							(assign (assoc
-								batch_threshold_info
-									(call !CheckThresholds (assoc
-										abs_threshold_map abs_threshold_map
-										delta_threshold_map delta_threshold_map
-										rel_threshold_map rel_threshold_map
-										prev_prediction_stats_map prev_prediction_stats_map
-										new_prediction_stats_map new_prediction_stats_map
-									))
-							))
-							(if (apply "or" (values batch_threshold_info))
-								(seq
-									(accum "output" ["threshold_info"] batch_threshold_info)
-									(conclude)
-								)
-								(assign (assoc
-									prev_prediction_stats_map new_prediction_stats_map
-								))
-							)
-						)
-					)
-				)
-
-				;enough cases have been removed, can stop removing
-				(<= (call !GetNumTrainingCases) !postReduceMaxCases)
-				(conclude)
-
-				;else no cases left to remove even though the desired dataset size has not been reached yet
-				;if the number of these these "too far" cases is bigger than the dataset, some of them must be removed
-				;clear out the list so the next iteration can ignore it
-				(<= (call !GetNumTrainingCases) (size cases_too_far_for_removal))
-				(assign (assoc cases_too_far_for_removal [] ))
-
-				;else recompute all the influence entropies since dataset has been updated
-				(let
-					(assoc
-						;number of cases that were supposed to be removed during this iteration
-						num_cases_to_remove (min batch_size (- (call !GetNumTrainingCases) !autoAblationMinNumCases))
-					)
-					(assign (assoc
-						case_duplicate_or_far_map
-							(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-								features features
-								weight_feature distribute_weight_feature
-								use_case_weights .true
-								compute_all .true
-							))
-					))
-					(assign (assoc
-						cases_too_far_for_removal (indices (filter (lambda (= "too_far_for_removal" (current_value))) case_duplicate_or_far_map))
-						near_duplicate_cases (indices (filter (lambda (= "near_duplicate" (current_value))) case_duplicate_or_far_map))
-					))
-
-					;remove the new near duplicates here
-					(if (size near_duplicate_cases)
-						;if there were fewer cases that needed to be removed than there are near duplicates, select some near duplicates to remove
-						(if (> (size near_duplicate_cases) num_cases_to_remove)
-							(call !RemoveCases (assoc
-								cases (rand near_duplicate_cases num_cases_to_remove .true)
-								distribute_weight_feature distribute_weight_feature
-							))
-
-							;else remove all near duplicates
-							(call !RemoveCases (assoc
-								cases near_duplicate_cases
-								distribute_weight_feature distribute_weight_feature
-							))
-						)
-
-						;else if the entropy value to keep hasn't changed since the recomputation, nothing has changed, can stop iteration
-						(=
-							max_influence_weight_entropy_to_keep
-							(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-								influence_weight_entropy_threshold influence_weight_entropy_threshold
-								weight_feature distribute_weight_feature
-							))
-						)
-						(conclude)
-					)
-				)
-			)
+			(call !AllCases)
 		)
 
 		;if the number of cases has been reduced by 'e' or more, auto analyze if needed
-		(if (< (call !GetNumTrainingCases) (/ pre_reduce_num_cases 2.718281828459))
+		(if (< (call !GetNumTrainingCases) (/ num_cases 2.718281828459))
 			(call !AutoAnalyzeIfNeeded (assoc
 				skip_auto_analyze skip_auto_analyze
 				;no need to compute entropies for all cases anymore since reduction is complete
@@ -789,17 +829,111 @@
 			))
 		)
 
-		(declare (assoc
-			quantile_value
-				(call !RecomputeAndCacheMaxInfluenceWeightEntropy (assoc
-					influence_weight_entropy_threshold influence_weight_entropy_threshold
-					weight_feature distribute_weight_feature
-				))
-		))
-
-		(assign_to_entities (assoc !autoAblationMaxInfluenceWeightEntropy quantile_value ))
 		(accum_to_entities (assoc !revision 1))
 		(call !Return (assoc payload output))
+	)
+
+	;Helper method in reduce_data used to modify 'cases_to_remove' for time series datasets by
+	;removing all series edge (first and last in a series) cases from 'cases_to_remove',
+	;unless a remaining series will have less than 3 cases after removal, then this will instead
+	;add the remainder case(s) to 'cases_to_remove' so the entire series is removed.
+	;
+	;parameters:
+	; ensure_enough_to_remove: flag, if true checks whether enough 'cases_to_remove' have been selected (within 5% of desired amount),
+	;							and if not, pads them from the core set and reruns this method
+	#!FilterCasesToRemoveForTimeSeries
+	(let
+		(assoc
+			entire_series_removal_id_queries
+				;select those series identifiers where there will be less than 3 cases remaining after this removal pass
+				;because these entire series should be removed at that point
+				(filter
+					(lambda
+						(<
+							(size (contained_entities
+								(query_not_in_entity_list cases_to_remove)
+								;(current_value) is in the format of (list (query_equals "series_feature_id" value) ... ) for all affected series ids
+								(current_value)
+							))
+							3
+						)
+					)
+					;a list of affected series identifier queries for this batch of 'cases'
+					(call !GenerateUniqueSeriesQueries (assoc
+						series_id_features (get !tsFeaturesMap "series_id_features")
+						case_ids
+							;of the selected cases, only keep those that were either the first or last case from a series
+							(append
+								(contained_entities
+									(query_in_entity_list cases_to_remove)
+									(query_equals ".reverse_series_index" 0)
+								)
+								(contained_entities
+									(query_in_entity_list cases_to_remove)
+									(query_equals ".series_index" 0)
+								)
+							)
+					))
+				)
+		)
+
+		(declare (assoc num_cases_to_remove (size cases_to_remove) ))
+
+		;do not remove first (.series_index == 0) or last (.reverse_series_index == 0) cases for any series
+		(assign (assoc
+			cases_to_remove
+				(contained_entities
+					(query_in_entity_list cases_to_remove)
+					(query_not_equals ".reverse_series_index" 0)
+					(query_not_equals ".series_index" 0)
+				)
+		))
+
+		;there were series that will need to be entirely removed, add all those series cases for removal
+		(if (size entire_series_removal_id_queries)
+			(accum (assoc
+				cases_to_remove
+					(apply "append" (map
+						(lambda
+							(contained_entities
+								(query_not_in_entity_list cases_to_remove)
+								(current_value)
+							)
+						)
+						entire_series_removal_id_queries
+					))
+			))
+		)
+
+		;if the number of cases to remove has gone down by more than 5%, use the latest cases added to the core set to pad cases_to_remove
+		(if ensure_enough_to_remove
+			(let
+				(assoc
+					percent_edge_cases_filtered_out (/ (- num_cases_to_remove (size cases_to_remove)) num_cases_to_remove)
+				)
+
+				(if (> percent_edge_cases_filtered_out 0.05)
+					(seq
+
+						(accum (assoc
+							cases_to_remove
+								(contained_entities
+									;find the latest cases added to the core set, those with the highest iteration values
+									(query_max
+										".keeping"
+										;pad cases_to_remove with the extra 'percent_edge_cases_filtered_out', assuming that,
+										;on average, that many will be filtered out again from these padded cases
+										(* (- num_cases_to_remove (size cases_to_remove)) (+ 1 percent_edge_cases_filtered_out))
+									)
+								)
+						))
+
+						;rerun the filter, but prevent getting stuck in a loop by only doing it once more
+						(call !FilterCasesToRemoveForTimeSeries (assoc ensure_enough_to_remove .false))
+					)
+				)
+			)
+		)
 	)
 
 
@@ -866,22 +1000,6 @@
 				))
 			))
 			duplicate_neighbors_map
-		)
-
-		;recompute influence weight entropy for the remaining no-longer duplicates
-		(declare (assoc
-			cases_too_far_map
-				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
-					features features
-					weight_feature distribute_weight_feature
-					use_case_weights .true
-					compute_all .true
-					specific_case_ids (indices duplicate_neighbors_map)
-				))
-		))
-
-		(if (size cases_too_far_map)
-			(accum (assoc case_duplicate_or_far_map cases_too_far_map))
 		)
 	)
 

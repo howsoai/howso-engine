@@ -49,6 +49,22 @@
 			;				'string_mixable', 'formatted_time' and 'formatted_date_time' are valid only when type is continuous
 			;				'boolean' is valid only when type is nominal
 			;
+			;	'recursive_matching': boolean, only applicable to code features (when 'data_type' is one of json/yaml/amalgam).
+			;				If unspecified, defaults to false for 'json' and 'yaml' features and true for 'amalgam' features.
+			;				When true, operatations will work recursively on feature values. When false, will operate on positional
+			;				matches without considering recursion, which will yield better and faster results if the schema of the
+			;				semistructured data is not recursive.
+			;
+			;	'types_must_match': boolean, defaults to true, applicable to code features (when 'data_type' is one of json/yaml/amalgam).
+			;				If true, only considers nodes common if their types match.
+			;
+			;	'nominal_numbers': boolean, defaults to false, applicable to code features (when 'data_type' is one of json/yaml/amalgam).
+			;				If true, will assume that all numbers will match only if identical; if false, it will compare similarity of values.
+			;
+			;	'nominal_strings': boolean, defaults to true,  applicable to code features (when 'data_type' is one of json/yaml/amalgam).
+			;				If true, will assume that all strings will match only if identical;
+			;				if false uses string edit distance to compare similarity.
+			;
 			;	'id_feature': boolean, Set to true only for nominal features containing nominal IDs to specify that this
 			;				feature should be used to compute case weights for id based privacy. For time series,
 			;				this feature will be used as the id for each time series generation. Default is false
@@ -64,6 +80,9 @@
 			;						possible while maintaining the dependency. As a rule of thumb, sets of features that have
 			;						dependency relationships should generally not include more than 1 continuous feature, unless
 			;						the continuous features have a small number of values that are commonly used.
+			;
+			;	'fanout_on': list of other features whose values can be used to identify other trained cases that have had the same value
+			;					for this feature fanned out.
 			;
 			;	'null_is_dependent': boolean, modifies how dependent features with nulls are treated during a react, specifically
 			;						when they use null as a context value. Only applicable to dependent features. When false, the
@@ -110,7 +129,8 @@
 			;
 			;	'subtype': string, the type used in novel nominal substitution.
 			;
-			;	'original_type': string, original data type details. Used by clients to determine how to serialize and deserialize  feature data.
+			;	'original_type': string, original data type details. Used by clients to determine how to serialize and deserialize feature data.
+			;					Note: 'json' features with original_type of 'tokenizable_string' won't be mutated during generative reacts.
 			;
 			;	'original_format': string, original data formats used by clients. Automatically populated by clients
 			;					to store client language specific context about features.
@@ -210,6 +230,7 @@
 			ordinal_string_to_ordinal_map (assoc)
 			ordinal_ordinal_to_string_map (assoc)
 			non_number_continuous_features_map (assoc)
+			code_feature_domain_attributes_map (assoc)
 			numeric_nominal_features_map (assoc)
 			string_nominal_features_set (assoc)
 			feature_rounding_map (assoc)
@@ -299,6 +320,13 @@
 					))
 				))
 			)
+		)
+
+		(if (size non_number_continuous_features_map)
+			(assign (assoc
+				code_feature_domain_attributes_map
+					(call !ComposeCodeFeatureDomainAttributesMap (assoc code_features_map non_number_continuous_features_map))
+			))
 		)
 
 		;check that ordinal features are either numbers or have a valid ordered list of allowed values
@@ -585,6 +613,7 @@
 			!ordinalStringToOrdinalMap ordinal_string_to_ordinal_map
 			!ordinalOrdinalToStringMap ordinal_ordinal_to_string_map
 			!editDistanceFeatureTypesMap non_number_continuous_features_map
+			!codeFeatureDomainAttributesMap code_feature_domain_attributes_map
 			!numericNominalFeaturesMap numeric_nominal_features_map
 			!stringNominalFeaturesSet string_nominal_features_set
 			!novelSubstitionFeatureSet novel_substition_feature_set
@@ -609,7 +638,7 @@
 		(call !SetNominalFeatures (assoc nominal_features nominals))
 		(call !SetCyclicFeatures (assoc feature_attributes cyclics_map))
 
-		(declare (assoc feature_limits_map (call !ComposeFeatureLimitsMap) ))
+		(declare (assoc feature_limits_map (call !ComposeFeatureDomainAttributesMap) ))
 		(declare (assoc
 			updated_hp_map (call !UpdateHyperparametersWithFeatureDomainAttributes (assoc hp_map !hyperparameterMetadataMap))
 			updated_default_hp_map (call !UpdateHyperparametersWithFeatureDomainAttributes (assoc hp_map !defaultHyperparameters))
@@ -633,6 +662,18 @@
 			(call !CreateTimeSeriesFeatures)
 
 			(accum_to_entities (assoc !revision 1))
+		)
+
+		;this is strictly after !CreateTimeSeriesFeatures, so that the filtering logic
+		;will prioritize the assigned "fanout_on" key features rather than series IDs for features
+		;that are both stationary and joined from another table.
+		(declare (assoc
+			fanout_features_map (call !ComposeFanoutFeaturesMap)
+		))
+		(if (size fanout_features_map)
+			(accum_to_entities (assoc
+				!fanoutFeaturesMap fanout_features_map
+			))
 		)
 
 		;compose dependents after TS features are made so that TS features can be made dependent as necessary

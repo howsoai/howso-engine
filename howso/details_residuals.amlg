@@ -259,12 +259,35 @@
 			inactive_features_zeros_map (assoc)
 		))
 
+		(if (and
+				!tsTimeFeature
+				(contains_index context_map ".series_index")
+			)
+			(declare (assoc
+				undefined_ts_features
+					(let
+						(assoc
+							ts_feature_lag_amount_map (call !BuildTSFeatureLagAmountMap)
+						)
+
+						;list of features that are undefined for this case because of the series index (lags greater than series index, deltas/rates on not first case)
+						(filter
+							(lambda (and
+								(contains_index ts_feature_lag_amount_map (current_value))
+								(> (get ts_feature_lag_amount_map (current_value)) (get context_map ".series_index"))
+							))
+							action_features
+						)
+					)
+			))
+		)
+
 		;remove any inactive features from all features lists so they are ignored during compute
-		;and create an assoc of inactive feature -> 0 for all of them to add to output of all residual computations
+		;and create an assoc of inactive feature -> 0 for requested action_features to add to output of all residual computations
 		(if !inactiveFeaturesMap
 			(assign (assoc
 				features (filter (lambda (not (contains_index !inactiveFeaturesMap (current_value)))) features)
-				inactive_features_zeros_map (map 0 !inactiveFeaturesMap)
+				inactive_features_zeros_map (map 0 (keep !inactiveFeaturesMap action_features))
 			))
 		)
 
@@ -391,6 +414,14 @@
 								action_is_nominal (contains_index !nominalsMap (current_index 1))
 							)
 
+							(if (and
+									!tsTimeFeature
+									(contains_value undefined_ts_features action_feature)
+								)
+								;predicted value is null and residual is zero for all undefined TS features
+								(conclude [(null) 0])
+							)
+
 							(let
 								(assoc
 									reaction
@@ -475,7 +506,7 @@
 						(indices (filter (lambda (= (null) (current_value))) case_residuals_map))
 				)
 
-				;iterate over all the null features and populate a map of feature -> [ residual value, local_non_null_ratio, global_non_null_ratio ]
+				;iterate over all the null features and populate a map of feature -> adjusted residual value
 				(declare (assoc
 					null_case_residuals_map
 						(map
@@ -487,6 +518,14 @@
 									num_local_cases (size regional_cases_influence_map)
 									;list of all non null values for this null_feature in this regional data
 									non_null_local_values (list)
+								)
+
+								(if (and
+										!tsTimeFeature
+										(contains_value undefined_ts_features null_feature)
+									)
+									;residual should be zero for undefined TS features
+									(conclude 0)
 								)
 
 								(declare (assoc
@@ -585,11 +624,18 @@
 												num_unique_local_values (size (values non_null_local_values .true ))
 											)
 
-											;if entire local data is null or only has 1 non-null value, use the global null residual
+											;if entire local data is null or only has 1 non-null value, use the global null-value uncertainty
 											(if (<= num_unique_local_values 1)
-												(/
+												;use the null-value uncertainty for the feature if one exists
+												(if (and
+														(~ [] (get feature_deviations null_feature))
+														(!= (null) (get feature_deviations [null_feature 1]))
+													)
+													;feature deviation is a tuple of: [deviation, null-value, null-null]
+													(get feature_deviations [null_feature 1])
+
+													;else use the cached maximum null-null range as defined for the feature
 													(get !featureNullRatiosMap (list null_feature "null_residual"))
-													local_non_null_influence
 												)
 
 												;else there are enough local values to compute local null residual
@@ -641,39 +687,47 @@
 					(lambda
 						;current_index is the feature
 						;current_value is a list of residuals [local, case]
-
-						;conviction is: local / case residual, prevent divide by 0 by using the minimum residual instead if necesssary
-						; conviction is expected surprisal E(I) divided by observed surprisal, I
-						; C = E(I) / I
-						; The expected surprisal E(I) is the dataset residual divided by the dataset residual: MR / MR = 1.0
-						; The observed surprisal I is the observed residual divded by the dataset residual: OR / MR
-						; So, E(I) / I = (MR / MR) / (OR / MR) = MR / OR
-						; In this way, we can directly divide the dataset (global or local) residual by the observed residual to get conviction
-						(if (= 0 (last (current_value)) )
-							(/
-								(call !LK_metric_exp (assoc
-									difference (first (current_value 1))
-									deviation (or (get global_residuals_map (current_index 1)) 0)
-								))
-								(call !LK_metric_exp (assoc
-									difference (get !cachedFeatureMinResidualMap (current_index 1))
-									deviation (or (get global_residuals_map (current_index 1)) 0)
-								))
+						(if (and
+								!tsTimeFeature
+								(contains_value undefined_ts_features (current_index))
 							)
+							;if an undefined TS feature (in the triangle/shadow), conviction should just be 1.0
+							1.0
 
-							;prevent nan from divide by null, output null as-is when nulls are allowed
-							(= (null) (last (current_value)))
-							(null)
+							;otherwise do proper logic:
+							;conviction is: local / case residual, prevent divide by 0 by using the minimum residual instead if necesssary
+							; conviction is expected surprisal E(I) divided by observed surprisal, I
+							; C = E(I) / I
+							; The expected surprisal E(I) is the dataset residual divided by the dataset residual: MR / MR = 1.0
+							; The observed surprisal I is the observed residual divded by the dataset residual: OR / MR
+							; So, E(I) / I = (MR / MR) / (OR / MR) = MR / OR
+							; In this way, we can directly divide the dataset (global or local) residual by the observed residual to get conviction
+							(if (= 0 (last (current_value)) )
+								(/
+									(call !LK_metric_exp (assoc
+										difference (first (current_value 1))
+										deviation (or (get global_residuals_map (current_index 1)) 0)
+									))
+									(call !LK_metric_exp (assoc
+										difference (get !cachedFeatureMinResidualMap (current_index 1))
+										deviation (or (get global_residuals_map (current_index 1)) 0)
+									))
+								)
 
-							(/
-								(call !LK_metric_exp (assoc
-									difference (first (current_value 1))
-									deviation (or (get global_residuals_map (current_index 1)) 0)
-								))
-								(call !LK_metric_exp (assoc
-									difference (last (current_value 1))
-									deviation (or (get global_residuals_map (current_index 1)) 0)
-								))
+								;prevent nan from divide by null, output null as-is when nulls are allowed
+								(= (null) (last (current_value)))
+								(null)
+
+								(/
+									(call !LK_metric_exp (assoc
+										difference (first (current_value 1))
+										deviation (or (get global_residuals_map (current_index 1)) 0)
+									))
+									(call !LK_metric_exp (assoc
+										difference (last (current_value 1))
+										deviation (or (get global_residuals_map (current_index 1)) 0)
+									))
+								)
 							)
 						)
 					)
