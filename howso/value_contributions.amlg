@@ -16,10 +16,8 @@
 		))
 
 		(declare (assoc
-			;flag, set to true for continuous action_feature if it has any null values that way all cases with nulls for action feature are filtered out
-			ignore_null_action_feature
+			action_feature_has_nulls
 				(and
-					(not (contains_index !nominalsMap action_feature))
 					(!= .false (get !featureNullRatiosMap (list action_feature "has_nulls")) )
 					(not (contains_index !inactiveFeaturesMap action_feature) )
 				)
@@ -34,6 +32,11 @@
 		))
 		(if (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap action_feature)) )
 			(assign (assoc feature_is_non_string_edit_distance .true))
+		)
+
+		;continuous feature with nulls overwrites action_feature_has_nulls with the MAD
+		(if (and action_feature_has_nulls (not feature_is_nominal))
+			(assign (assoc action_feature_has_nulls (call !ComputeFeatureMAD (assoc feature feature)) ))
 		)
 
 		(if (= (null) hyperparam_map)
@@ -378,13 +381,12 @@
 												(call !InterpolateAndComputeDiffToCase (assoc
 													feature action_feature
 													output_categorical_action_probabilities .true
-													null_output_cap_diff feature_is_nominal
+													null_output_cap_diff action_feature_has_nulls
 													candidate_cases_lists
 														(if (= 0 (size  react_context_features))
 															[[][][]]
 															(compute_on_contained_entities
 																(query_not_in_entity_list [(replace case_id)])
-																(if ignore_null_action_feature (query_not_equals action_feature (null)))
 																(if (size context_condition_filter_query) context_condition_filter_query)
 																dependent_queries_list
 																time_series_filter_query
@@ -428,7 +430,6 @@
 
 															(compute_on_contained_entities
 																(query_not_in_entity_list [(replace case_id)])
-																(if ignore_null_action_feature (query_not_equals action_feature (null)))
 																(if (size context_condition_filter_query) context_condition_filter_query)
 																dependent_queries_list
 																fanout_features_queries
@@ -511,11 +512,10 @@
 												(call !InterpolateAndComputeDiffToCase (assoc
 													feature action_feature
 													output_categorical_action_probabilities .true
-													null_output_cap_diff feature_is_nominal
+													null_output_cap_diff action_feature_has_nulls
 													candidate_cases_lists
 														(compute_on_contained_entities
 															(query_not_in_entity_list [(replace case_id)])
-															(if ignore_null_action_feature (query_not_equals action_feature (null)))
 															(if (size context_condition_filter_query) context_condition_filter_query)
 															dependent_queries_list
 															fanout_features_queries
@@ -555,7 +555,6 @@
 													candidate_cases_lists
 														(compute_on_contained_entities
 															(query_not_in_entity_list [(replace case_id)])
-															(if ignore_null_action_feature (query_not_equals action_feature (null)))
 															(if (size context_condition_filter_query) context_condition_filter_query)
 															dependent_queries_list
 															fanout_features_queries
@@ -935,23 +934,33 @@
 		))
 
 		(declare (assoc
-			;flag, set to true if the action_feature has any null values that way there's no need to explicitly filter nulls out
-			;when querying for a feature that no nulls or if it's inactive
-			ignore_null_action_feature
+			action_feature_has_nulls
 				(and
-					(not (contains_index !nominalsMap action_feature))
 					(!= .false (get !featureNullRatiosMap (list action_feature "has_nulls")) )
 					(not (contains_index !inactiveFeaturesMap action_feature) )
 				)
 			ignore_null_ac_features_map
 				(map
-					(lambda
-						(and
-							(not (contains_index !nominalsMap (current_index)))
-							(!= .false (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) )
-							(not (contains_index !inactiveFeaturesMap (current_index)) )
+					(lambda (let
+						(assoc
+							has_nulls
+								(and
+									(!= .false (get !featureNullRatiosMap (list (current_index 2) "has_nulls")) )
+									(not (contains_index !inactiveFeaturesMap (current_index 1)) )
+								)
 						)
-					)
+
+						(if (contains_index !nominalsMap (current_index))
+							has_nulls
+
+							;continuous features output the mean absolute deviation for the feature
+							(if has_nulls
+								(call !ComputeFeatureMAD (assoc feature (current_index 1) ))
+
+								.false
+							)
+						)
+					))
 					(zip value_robust_contributions_features)
 				)
 			;create a backup of context_features for time series flows
@@ -978,6 +987,12 @@
 					(zip value_robust_contributions_features)
 				)
 		))
+
+		;continuous features with nulls overwrites action_feature_has_nulls with the MAD
+		(if (and action_feature_has_nulls (not action_feature_is_nominal))
+			(assign (assoc action_feature_has_nulls (call !ComputeFeatureMAD (assoc feature action_feature)) ))
+		)
+
 		(if (= (null) hyperparam_map)
 			(assign (assoc
 				hyperparam_map
@@ -1189,7 +1204,7 @@
 									case_feature_value (get case_values_map action_feature)
 									feature_is_nominal action_feature_is_nominal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
-									null_output_cap_diff action_feature_is_nominal
+									null_output_cap_diff action_feature_has_nulls
 									output_categorical_action_probabilities .true
 									candidate_cases_lists
 										(if (= 0 (size react_context_features))
@@ -1197,7 +1212,6 @@
 											;else
 											(compute_on_contained_entities
 												(query_not_in_entity_list [(replace case_id)])
-												(if ignore_null_action_feature (query_not_equals action_feature (null)))
 												(if (size context_condition_filter_query) context_condition_filter_query)
 												dependent_queries_list
 												fanout_features_queries
@@ -1266,14 +1280,13 @@
 											case_feature_value (get case_values_map ac_feature)
 											feature_is_nominal (get ac_feature_is_nominal_map ac_feature)
 											feature_is_non_string_edit_distance (get ac_feature_is_non_string_edit_distance_map ac_feature)
-											null_output_cap_diff (get ac_feature_is_nominal_map ac_feature)
+											null_output_cap_diff (get ignore_null_ac_features_map ac_feature)
 											output_categorical_action_probabilities .true
 											candidate_cases_lists
 												(if (= 0 (size react_context_features))
 													[[][][]]
 													(compute_on_contained_entities
 														(query_not_in_entity_list [(replace case_id)])
-														(if (get ignore_null_ac_features_map ac_feature) (query_not_equals ac_feature (null)))
 														(if (size context_condition_filter_query) context_condition_filter_query)
 														dependent_queries_list
 														ac_feature_fanout_features_queries
@@ -1345,14 +1358,13 @@
 									feature action_feature
 									output_categorical_action_probabilities .true
 									case_feature_value (get case_values_map action_feature)
-									null_output_cap_diff action_feature_is_nominal
+									null_output_cap_diff action_feature_has_nulls
 									feature_is_nominal action_feature_is_nominal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
 
 									candidate_cases_lists
 										(compute_on_contained_entities
 											(query_not_in_entity_list [(replace case_id)])
-											(if ignore_null_action_feature (query_not_equals action_feature (null)))
 											(if (size context_condition_filter_query) context_condition_filter_query)
 											dependent_queries_list
 											fanout_features_queries
@@ -1440,14 +1452,13 @@
 											case_feature_value (get case_values_map ac_feature)
 											feature_is_nominal (get ac_feature_is_nominal_map ac_feature)
 											feature_is_non_string_edit_distance (get ac_feature_is_non_string_edit_distance_map ac_feature)
-											null_output_cap_diff (get ac_feature_is_nominal_map ac_feature)
+											null_output_cap_diff (get ignore_null_ac_features_map ac_feature)
 											output_categorical_action_probabilities .true
 											candidate_cases_lists
 												(if (= 0 (size react_context_features))
 													[[][][]]
 													(compute_on_contained_entities
 														(query_not_in_entity_list [(replace case_id)])
-														(if (get ignore_null_ac_features_map ac_feature) (query_not_equals ac_feature (null)))
 														(if (size context_condition_filter_query) context_condition_filter_query)
 														dependent_queries_list
 														ac_feature_fanout_features_queries
