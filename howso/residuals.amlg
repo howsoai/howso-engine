@@ -796,9 +796,6 @@
 									(lambda (let
 										(assoc
 											feature (current_index 1)
-											case_feature_value (get case_values_map (current_index 1))
-											feature_is_nominal (contains_index !nominalsMap (current_index 1))
-											output_categorical_action_probabilities .true
 											categorical_action_probabilities_map (assoc)
 											feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_index 1))
 											feature_is_non_string_edit_distance .false
@@ -809,7 +806,11 @@
 										)
 
 										(call !InterpolateAndComputeDiffToCase (assoc
-											null_output_cap_diff (get feature_may_have_nulls_map feature)
+											feature_mad (get feature_may_have_nulls_map feature)
+											feature_is_ordinal (contains_index !ordinalFeaturesSet feature)
+											case_feature_value (get case_values_map feature)
+											feature_is_nominal (contains_index !nominalsMap feature)
+											output_categorical_action_probabilities .true
 											candidate_cases_lists
 												;create the feature-specific candidate_cases_lists tuple for interpolation
 												(if (!= (null) local_cases_map)
@@ -990,6 +991,7 @@
 						(assoc
 							feature (get_value (current_value 1))
 							feature_is_nominal (contains_index !nominalsMap (current_value 1))
+							feature_is_ordinal (contains_index !ordinalFeaturesSet (current_value 1))
 							react_context_features (indices (remove context_features_map (current_value 1)))
 							feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_value 1))
 							feature_is_non_string_edit_distance .false
@@ -1116,7 +1118,7 @@
 									)
 
 									(call !InterpolateAndComputeDiffToCase (assoc
-										null_output_cap_diff action_feature_has_nulls
+										feature_mad action_feature_has_nulls
 										candidate_cases_lists
 											(compute_on_contained_entities
 												(if focal_case
@@ -1293,13 +1295,16 @@
 		(if compute_all_statistics
 			(if feature_is_nominal
 				;output [diff, cap, actual, predicted] for computing MAE, accuracy, precision, recall
-				(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
+				(call !ComputeFeatureMAEDiff)
 
 				;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
 				(if feature_is_non_string_edit_distance
-					(append (call !ComputeFeatureMAEDiff) (list case_feature_value) (list interpolated_value))
+					[ (call !ComputeFeatureMAEDiff) [case_feature_value] [interpolated_value] ]
 
+					feature_is_ordinal
 					(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
+
+					[ (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value ]
 				)
 			)
 
@@ -1309,20 +1314,15 @@
 				(assoc
 					diff
 						(if (= (null) case_feature_value)
-							;nominal action features that should output the delta to the CAP should just output that
-							(if null_output_cap_diff
-								(if feature_is_nominal
-									(- 1 (or (get categorical_action_probabilities_map [feature (null)]) ) )
+							;nominal action features should output the delta to the CAP
+							(if feature_is_nominal
+								(- 1 (or (get categorical_action_probabilities_map [feature (null)]) ) )
 
-									;else continuous features, multiply by null_output_cap_diff (the MAD for the feature)
-									(*
-										null_output_cap_diff
-										(- 1 (or (get categorical_action_probabilities_map feature) ) )
-									)
+								;else continuous features, multiply by feature_mad (the mean absolute deviation for the feature)
+								(*
+									feature_mad
+									(- 1 (or (get categorical_action_probabilities_map feature) ) )
 								)
-
-								;else explicitly output a null
-								(null)
 							)
 
 							;else case value is not null
@@ -1358,40 +1358,62 @@
 				(if (= (null) diff)
 					(if feature_is_nominal
 						(if compute_all_statistics
-							[1 (filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))]
+							[
+								1
+								(filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))
+								case_feature_value
+								interpolated_value
+							]
+
 							1
 						)
 
-						;else continuous, diff is null when interpolated to null but case_feature_value was not null, output the MAD * null mass
-						(if null_output_cap_diff
-							(*
-								null_output_cap_diff
-								(or (get categorical_action_probabilities_map feature) )
+						;else continuous, diff is null when interpolated to null but case_feature_value was not null, diff = MAD * null mass
+						(if feature_is_ordinal
+							(if computing_mda
+								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+
+								;otherwise output the tuple for residual aggregation flows
+								[
+									(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+									(/
+										(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+										(get !ordinalFeaturesRangesMap feature
+									)
+								]
 							)
+
+							;else regular non-ordinal continuous
+							(* feature_mad (or (get categorical_action_probabilities_map feature)) )
 						)
 					)
 
+					feature_is_nominal
+					(if compute_all_statistics
+						[
+							diff
+							(filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))
+							case_feature_value
+							interpolated_value
+						]
+
+						diff
+					)
+
 					;else for ordinals, output tuple [diff, ordinal_diff], and just diff for computing mda flows
-					(contains_index ordinal_features_map feature)
+					feature_is_ordinal
 					(if computing_mda
 						diff
 
 						;otherwise output the tuple for residual aggregation flows
 						[
 							diff
-							(if diff
-								(/ diff (get !ordinalFeaturesRangesMap feature))
-								0
-							)
+							(/ diff (get !ordinalFeaturesRangesMap feature)
 						]
 					)
 
 					;else output it as-is
-					(if (and feature_is_nominal compute_all_statistics)
-						[diff (filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))]
-
-						diff
-					)
+					diff
 				)
 			)
 		)
