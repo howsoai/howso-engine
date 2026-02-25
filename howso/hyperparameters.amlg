@@ -823,12 +823,13 @@
 			;the factor by which to increase the analyze threshold every time the dataset grows to the current threshold size
 			;	default of using the universal scaling factor e^2
 			analyze_growth_factor 7.3890561
+
 			;{type "list" values "string"}
 			;the features to use as contexts in the analysis
-			context_features (null)
+			context_features (list)
 			;{type "list" values "string"}
 			;the features that the analysis should target
-			action_features (null)
+			action_features (list)
 			;{type "number" min 1}
 			;number of cross validation folds to do. value of 1 does hold-one-out instead of k-fold
 			k_folds 1
@@ -849,7 +850,7 @@
 			;{type "number" min 2}
 			;number of cases to use to approximate deviations and residuals for both targetless and targeted flows.
 			;defaults to 1000 if unspecified.
-			num_deviation_samples (null)
+			num_deviation_samples 1000
 			;{type "number" min 2}
 			;number of samples to use to compute feature probabilities, only applies to targetless flow.
 			;If unspecified will be dynamically set based on number features and data characteristics.
@@ -875,7 +876,7 @@
 			;   "single_targeted" = analyze hyperparameters for the specified action_features
 			;   "omni_targeted" = analyze hyperparameters for each action feature, using all other features as context_features. if action_features aren't specified, uses all context_features.
 			;   "targetless" = analyze hyperparameters for all context features as possible action features, ignores action_features parameter
-			targeted_model (null)
+			targeted_model "single_targeted"
 			;{type "string"}
 			;name of feature whose values to use as case weights
 			weight_feature ".case_weight"
@@ -890,15 +891,22 @@
 			;when true, the default, will compute and use a sparse deviation matrix (SDM) for each nominal feature in all similarity queries.
 			;Enabling SDM will typically incur a small to moderate penalty on speed when using nominal features in inference in exchange for
 			;yielding higher quality inference. The magnitude of the changes are dependent on relationships among the data and the task at hand.
-			use_sdm (null)
+			use_sdm .true
+			;{type "boolean"}
+			;when true, a subtrainee will be created that will be used during queries to approximate deviations of the data around the query.
+			; This incurs a penalty in speed, but can improve performance in long tailed data, especially when using targetless parameters.
+			use_dynamic_deviations .false
+			;{type "number" min 2}
+			;the number of cases to store within the subtrainee that is used to the deviations of the data around predictions
+			dynamic_deviations_subtrainee_size 500
 			;{type "number" min 0}
 			;Percent threshold used to dynamically limit the number of samples used to determine feature probabilities, defaults to 0.5%
 			;When set to 0 will use all num_feature_probability_samples
-			convergence_threshold (null)
+			convergence_threshold 0.005
 			;{type "number" min 1}
 			;Rate of increasing the size of each subsequent sample used to dynamically limit the total number of samples used to determine feature probabilities.
 			;defaults to a rate of 1.05, increasing by 5% until the delta between residuals is less than 'convergence_threshold'.
-			convergence_samples_growth_rate (null)
+			convergence_samples_growth_rate 1.05
 			;{type "number" min 1}
 			;The minimum size of the first batch of cases used when dynamically sampling robust residuals used to determine feature probabilities
 			;	Default of 5000
@@ -908,6 +916,8 @@
 			reduce_only .false
 		)
 		(call !ValidateParameters)
+		(call !ValidateFeatures)
+
 
 		(if (and
 				(size action_features)
@@ -946,76 +956,38 @@
 			!autoAnalyzeGrowthFactorAmount analyze_growth_factor
 		))
 
-		;if any parameters are specified, store them
-		(if (or
-				context_features
-				action_features
-				(!= 1 k_folds)
-				bypass_hyperparameter_analysis
-				bypass_calculate_feature_residuals
-				bypass_calculate_feature_weights
-				use_deviations
-				num_deviation_samples
-				k_values
-				p_values
-				dt_values
-				targeted_model
-				num_analysis_samples
-				num_feature_probability_samples
-				analysis_sub_model_size
-				(!= ".case_weight" weight_feature)
-				use_case_weights
-				rebalance_features
-				(!= (null) use_sdm)
-				(!= (null) convergence_threshold)
-				convergence_samples_growth_rate
-				(!= 5000 convergence_min_size)
-				reduce_only
-			)
-			(seq
-				(if (= (null) targeted_model)
-					(assign (assoc
-						targeted_model
-							(if (= 0 (size action_features))
-								"targetless"
+		(call !UpdateAnalyzeParameterDefaults)
 
-								(= 1 (size action_features))
-								"single_targeted"
-
-								"omni_targeted"
-							)
-					))
+		(assign_to_entities (assoc
+			!savedAnalyzeParameterMap
+				(assoc
+					"context_features" context_features
+					"action_features" action_features
+					"k_folds" k_folds
+					"bypass_hyperparameter_analysis" bypass_hyperparameter_analysis
+					"bypass_calculate_feature_residuals" bypass_calculate_feature_residuals
+					"bypass_calculate_feature_weights" bypass_calculate_feature_weights
+					"use_deviations" use_deviations
+					"num_deviation_samples" num_deviation_samples
+					"k_values" k_values
+					"p_values" p_values
+					"dt_values" dt_values
+					"targeted_model" targeted_model
+					"num_analysis_samples" num_analysis_samples
+					"num_feature_probability_samples" num_feature_probability_samples
+					"analysis_sub_model_size" analysis_sub_model_size
+					"use_case_weights" use_case_weights
+					"weight_feature" weight_feature
+					"rebalance_features" rebalance_features
+					"use_sdm" use_sdm
+					"use_dynamic_deviations" use_dynamic_deviations
+					"dynamic_deviations_subtrainee_size" dynamic_deviations_subtrainee_size
+					"convergence_threshold" convergence_threshold
+					"convergence_samples_growth_rate" convergence_samples_growth_rate
+					"convergence_min_size" convergence_min_size
+					"reduce_only" reduce_only
 				)
-				(assign_to_entities (assoc
-					!savedAnalyzeParameterMap
-						(filter (assoc
-							"context_features" (if context_features context_features [])
-							"action_features" (if action_features action_features [])
-							"k_folds" k_folds
-							"bypass_hyperparameter_analysis" bypass_hyperparameter_analysis
-							"bypass_calculate_feature_residuals" bypass_calculate_feature_residuals
-							"bypass_calculate_feature_weights" bypass_calculate_feature_weights
-							"use_deviations" use_deviations
-							"num_deviation_samples" (if (> num_deviation_samples 0) num_deviation_samples 1000)
-							"k_values" k_values
-							"p_values" p_values
-							"dt_values" dt_values
-							"targeted_model" targeted_model
-							"num_analysis_samples" num_analysis_samples
-							"num_feature_probability_samples" num_feature_probability_samples
-							"analysis_sub_model_size" analysis_sub_model_size
-							"weight_feature" weight_feature
-							"use_case_weights" use_case_weights
-							"rebalance_features" rebalance_features
-							"use_sdm" use_sdm
-							"convergence_threshold" (if (!= (null) convergence_threshold) convergence_threshold 0.005)
-							"convergence_samples_growth_rate" (if convergence_samples_growth_rate convergence_samples_growth_rate 1.05)
-							"convergence_min_size" convergence_min_size
-							"reduce_only" reduce_only
-						))
-				))
-			)
-		)
+		))
 
 		(accum_to_entities (assoc !revision 1))
 
