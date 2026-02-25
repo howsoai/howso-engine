@@ -11,10 +11,10 @@
 			(assign (assoc features (list target_residual_feature) ))
 		)
 
-		;create a map of feature -> flag, set to true if the feature has any null values, and if feature is continuous will be set to the MAD of that feature
+		;create a map of feature -> MAD, used for continuous features that have null values
 		(declare (assoc
-			feature_may_have_nulls_map
-				(call !ConstructFeatureHasNullsMap (assoc
+			feature_mad_map
+				(call !ConstructFeatureMADMap (assoc
 					features (if target_residual_feature [target_residual_feature] features)
 				))
 			series_id_features (if !tsTimeFeature (get !tsFeaturesMap "series_id_features") )
@@ -71,7 +71,6 @@
 		)
 
 		;iterate over each case and accumulate residuals for all the feature(s)
-		#!AccumulateLocalFeatureDeviations
 		(assign (assoc
 			case_residuals_lists
 				||(map
@@ -271,7 +270,7 @@
 								)
 
 								(call !InterpolateAndComputeDiffToCase (assoc
-									null_output_cap_diff (get feature_may_have_nulls_map feature)
+									feature_mad (get feature_mad_map feature)
 									candidate_cases_lists
 										;create the feature-specific candidate_cases_lists tuple for intepolation
 										(if (!= (null) local_cases_map)
@@ -299,69 +298,7 @@
 		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
 		(assign (assoc
 			feature_residuals_lists (call !TransposeResidualLists)
-			;need to have at least 2.5% (that's a value of 50 using default sample of 2000) non-null values for a feature
-			min_value_count (ceil (* 0.025 (size case_ids)))
 		))
-
-		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
-		;applicable only to global data
-		(if (and
-				(!= .true regional_data_only)
-				(not strict_case_ids)
-			)
-			(let
-				(assoc
-					num_valid_values_per_feature_map
-						(filter
-							(lambda (< (current_value) min_value_count) )
-							(zip
-								features
-								(map (lambda (size (current_value))) feature_residuals_lists)
-							)
-						)
-				)
-
-				;some features did not have 50 values, accrue case_ids, then call the main method agan
-				(if (size num_valid_values_per_feature_map)
-					(let
-						;create the resampled case_ids list that contains cases with enough necessary non-null feature values
-						(assoc
-							case_ids_without_nulls
-								;append all the lists of cases ids for each feature into one list
-								(apply "append"
-									;for each (current_index) feature, need to find 50 - (current_value) cases to have enough values for those features
-									(values (map
-										(lambda
-											(contained_entities
-												(query_not_equals (current_index) (null))
-
-												(if valid_weight_feature
-													(query_sample (- min_value_count (current_value)) weight_feature (rand))
-													(query_sample (- min_value_count (current_value)) (null) (rand))
-												)
-											)
-										)
-										num_valid_values_per_feature_map
-									))
-								)
-						)
-
-						;re-compute residuals on these case_ids, store into case_residuals_lists
-						(call !AccumulateLocalFeatureDeviations (assoc case_ids case_ids_without_nulls))
-
-						;transpose case_residuals_lists into a list the length of features and append the results into feature_residuals_lists
-						(assign (assoc
-							feature_residuals_lists
-								(map
-									(lambda (append (first (current_value)) (last (current_value))))
-									feature_residuals_lists
-									(call !TransposeResidualLists)
-								)
-						))
-					)
-				)
-			)
-		)
 	)
 
 	;helper method to compute MDA matrix given a list of features and the corresponding feature_residuals_lists
@@ -815,19 +752,8 @@
 			(assign (assoc features (list target_residual_feature) ))
 		)
 
-		;create a map of feature -> flag, set to true if the feature has any null values
-		;that way there's no need to explicitly filter nulls out when querying for a feature that no nulls
+
 		(declare (assoc
-			feature_may_have_nulls_map
-				(map
-					(lambda (!= .false (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) ) )
-					(zip
-						(if target_residual_feature
-							(list target_residual_feature)
-							features
-						)
-					)
-				)
 			series_id_features (if !tsTimeFeature (get !tsFeaturesMap "series_id_features") )
 			;this variable is used in the derivation logic branch of InterpolateAndComputeDiff
 			react_context_features context_features
@@ -1004,12 +930,14 @@
 														(call !InterpolateOrDerive (assoc
 															candidate_cases_lists full_candidate_cases_lists
 															react_context_features full_context_features
+															allow_nulls .false
 														))
 
 													superfull_predicted_value
 														(call !InterpolateOrDerive (assoc
 															candidate_cases_lists superfull_candidate_cases_lists
 															react_context_features superfull_context_features
+															allow_nulls .false
 														))
 													feature_deviation (get orig_hyperparam_map ["featureResiduals" feature])
 												)
