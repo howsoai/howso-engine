@@ -1208,82 +1208,88 @@
 				)
 		)
 
-		;small wrapper around ComputeFeatureMAEDiff, but possibly wrapped in extra information
-		;for other prediction stats
+		;output the difference between case_feature_value and interpolated_value
+		;note: this block of code is run often, so it's organized for performance with multiple repeated patterns of code instead of using calls
 		#!ComputeDiffTuple
-		(if compute_all_statistics
-			(if feature_is_nominal
-				;output [diff, cap, actual, predicted] for computing MAE, accuracy, precision, recall
-				[
-					(call !ComputeFeatureMAEDiff)
-					(filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))
-					case_feature_value
-					interpolated_value
-				]
+		(let
+			(assoc
+				diff
+					(if (= (null) case_feature_value)
+						;nominal action features should output the delta to the CAP
+						(if feature_is_nominal
+							(- 1 (or (get categorical_action_probabilities_map [feature (null)]) ) )
 
-				;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
-				feature_is_non_string_edit_distance
-				[ (call !ComputeFeatureMAEDiff) [case_feature_value] [interpolated_value] ]
-
-				feature_is_ordinal
-				(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
-
-				[ (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value ]
-			)
-
-			;else just output diff (Mean Absolute Error)
-			#!ComputeFeatureMAEDiff
-			(declare
-				(assoc
-					diff
-						(if (= (null) case_feature_value)
-							;nominal action features should output the delta to the CAP
-							(if feature_is_nominal
-								(- 1 (or (get categorical_action_probabilities_map [feature (null)]) ) )
-
-								;edit distance features handle nulls like any other value
-								feature_is_edit_distance
-								(edit_distance case_feature_value interpolated_value (get !codeFeatureDomainAttributesMap feature) )
-
-								;else continuous features, multiply by feature_mad (the mean absolute deviation for the feature)
-								(*
-									feature_mad
-									(- 1 (or (get categorical_action_probabilities_map feature) ) )
-								)
-							)
-
-							;else case value is not null
-							feature_is_nominal
-							(- 1
-								(if (size categorical_action_probabilities_map)
-									(get categorical_action_probabilities_map (list feature case_feature_value))
-
-									;else return expected value
-									(get
-										(call !ComputeNominalClassProbabilities (assoc feature feature))
-										case_feature_value
-									)
-								)
-							)
-
+							;edit distance features handle nulls like any other value
 							feature_is_edit_distance
 							(edit_distance case_feature_value interpolated_value (get !codeFeatureDomainAttributesMap feature) )
 
-							(abs (- case_feature_value interpolated_value))
+							;else continuous features, multiply by feature_mad (the mean absolute deviation for the feature)
+							(*
+								feature_mad
+								(- 1 (or (get categorical_action_probabilities_map feature) ) )
+							)
 						)
-				)
 
-				;output the residual. if it's (null), output null for non-nominals, and 1 (or case weight) for nominals
-				(if (= (null) diff)
-					(if feature_is_nominal
+						;else case value is not null
+						feature_is_nominal
+						(- 1
+							(if (size categorical_action_probabilities_map)
+								(get categorical_action_probabilities_map (list feature case_feature_value))
+
+								;else return expected value
+								(get
+									(call !ComputeNominalClassProbabilities (assoc feature feature))
+									case_feature_value
+								)
+							)
+						)
+
+						feature_is_edit_distance
+						(edit_distance case_feature_value interpolated_value (get !codeFeatureDomainAttributesMap feature) )
+
+						(abs (- case_feature_value interpolated_value))
+					)
+			)
+
+			;output the residual. if it's (null), output null for non-nominals, and 1 (or case weight) for nominals
+			(if (= (null) diff)
+				(if feature_is_nominal
+					(if compute_all_statistics
+						[
+							1
+							(filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))
+							case_feature_value
+							interpolated_value
+						]
+
 						1
+					)
 
-						;else continuous, diff is null when interpolated to null but case_feature_value was not null, diff = MAD * null mass
-						feature_is_ordinal
-						(if computing_mda
+					;else continuous, diff is null when interpolated to null but case_feature_value was not null, diff = MAD * null mass
+					feature_is_ordinal
+					(if computing_mda
+						(if compute_all_statistics
+							[
+								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+								case_feature_value
+								interpolated_value
+							]
+
 							(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+						)
 
-							;otherwise output the tuple for residual aggregation flows
+						;otherwise output the tuple for residual aggregation flows
+						(if compute_all_statistics
+							[
+								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+								(/
+									(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+									(get !ordinalFeaturesRangesMap feature)
+								)
+								case_feature_value
+								interpolated_value
+							]
+
 							[
 								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
 								(/
@@ -1292,30 +1298,65 @@
 								)
 							]
 						)
-
-						;else regular non-ordinal continuous
-						(* feature_mad (or (get categorical_action_probabilities_map feature)) )
 					)
 
-					;output diff if feature is nominal
-					feature_is_nominal
-					diff
+					;else regular non-ordinal continuous
+					compute_all_statistics
+					[
+						(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+						case_feature_value
+						interpolated_value
+					]
 
-					;else for ordinals, output tuple [diff, ordinal_diff], and just diff for computing mda flows
-					feature_is_ordinal
-					(if computing_mda
+					(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+				)
+
+				;output diff if feature is nominal
+				feature_is_nominal
+				(if compute_all_statistics
+					[
 						diff
+						(filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))
+						case_feature_value
+						interpolated_value
+					]
 
-						;otherwise output the tuple for residual aggregation flows
+					diff
+				)
+
+				;else for ordinals, output tuple [diff, ordinal_diff], and just diff for computing mda flows
+				feature_is_ordinal
+				(if computing_mda
+					(if compute_all_statistics
+						[ diff case_feature_value interpolated_value ]
+						diff
+					)
+
+					;otherwise output a tuple for residual aggregation flows
+					(if compute_all_statistics
+						[
+							diff
+							(/ diff (get !ordinalFeaturesRangesMap feature))
+							case_feature_value
+							interpolated_value
+						]
+
 						[
 							diff
 							(/ diff (get !ordinalFeaturesRangesMap feature))
 						]
 					)
-
-					;else output it as-is
-					diff
 				)
+
+				compute_all_statistics
+				(if feature_is_non_string_edit_distance
+					;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
+					[ diff [case_feature_value] [interpolated_value] ]
+
+					[ diff case_feature_value interpolated_value ]
+				)
+
+				diff
 			)
 		)
 	)
