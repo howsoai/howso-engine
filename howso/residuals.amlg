@@ -188,27 +188,45 @@
 	;					i.e.: { "residual_map" : { "featureA" : 3.4... } }
 	; using_shared_deviations: boolean, default (null). If true, will only use parent features and expand according to the shared deviations groups
 	#!ExpandResidualValuesToUncertainty
-	(set
-		feature_residuals_map
-		"residual_map"
-		(let (assoc
-			temp_residual_map
-				(map
+	(declare
+		(assoc
+			has_shared_deviations (and using_shared_deviations (size !sharedDeviationsMap))
+		)
+
+		;check if any feature residuals need to be modified
+		(declare (assoc
+			need_modification_residuals_map
+				(filter (map
 					(lambda
 						;inactive features are bound to min residual
 						(if (contains_index !inactiveFeaturesMap (current_index))
 							(get !cachedFeatureMinResidualMap (current_index))
 
-							;set upper bound to nominals to be max nominal deviation, accounting for imbalanced classes
+							;if residual is too small, replace it with the minimim allowed
+							(<
+								(current_value)
+								(max
+									(get !cachedFeatureMinResidualMap (current_index))
+									(get !userSpecifiedFeatureErrorsMap (current_index))
+								)
+							)
+							(max
+								(get !cachedFeatureMinResidualMap (current_index))
+								(get !userSpecifiedFeatureErrorsMap (current_index))
+							)
+
+							(= (null) (current_value))
+							(max (get !cachedFeatureMinResidualMap (current_index)) (get !userSpecifiedFeatureErrorsMap (current_index)) )
+
+							;else nominal may need to set upper bound, accounting for imbalanced classes
 							(contains_index !nominalsMap (current_index))
 							(let
 								(assoc
 									;map of class -> count
 									feature_grouping
-										(if (size !sharedDeviationsMap)
+										(if has_shared_deviations
 											(call !GetSharedDeviationGrouping (assoc feature_group_to_retrieve (current_index 2)))
 										)
-									current_feature (current_index 1)
 								)
 								(declare (assoc
 									class_counts_map
@@ -229,69 +247,47 @@
 												;list of each feature's class count assocs
 												(map
 													(lambda
-														(compute_on_contained_entities
-															(query_value_masses (current_value) (null))
-														)
+														(compute_on_contained_entities (query_value_masses (current_value) (null)) )
 													)
 													feature_grouping
 												)
 											)
-
-											(compute_on_contained_entities
-												(query_value_masses current_feature (null))
-											)
+											;else a map of class -> count
+											(compute_on_contained_entities (query_value_masses (current_index 1) (null)) )
 										)
+
 								))
 
-								;do not max cap nominal deviations if less than 2 classes have been trained
-								(if (<= (size class_counts_map) 1)
-									(max
-										(get !cachedFeatureMinResidualMap (current_index))
-										(current_value)
-										(get !userSpecifiedFeatureErrorsMap (current_index))
-									)
-
-									;else cap the max nominal deviation
+								;only need to cap max nominal deviations if 2 or more classes have been trained
+								(if (> (size class_counts_map) 1)
 									(let
-										(assoc total_count (apply "+" (values class_counts_map)) )
-
-										(min
+										(assoc
+											total_count (apply "+" (values class_counts_map))
+										)
+										(declare (assoc
 											;nominal max deviation is the sum of: each class's probability multiplied by probability of getting it wrong
-											(apply "+"
-												(map
-													(lambda (let
-														(assoc class_prob (* (/ (current_value 1) total_count)) )
-														(* class_prob (- 1 class_prob))
-													))
-													(values class_counts_map)
+											nominal_max_deviation
+												(apply "+"
+													(map
+														(lambda (let
+															(assoc class_prob (/ (current_value 1) total_count) )
+															(* class_prob (- 1 class_prob))
+														))
+														(values class_counts_map)
+													)
 												)
-											)
-
-											(max
-												(get !cachedFeatureMinResidualMap (current_index))
-												(current_value)
-												(get !userSpecifiedFeatureErrorsMap (current_index))
-											)
+										))
+										(if (> (current_value) nominal_max_deviation)
+											nominal_max_deviation
 										)
 									)
 								)
 							)
-
-							;else continuous value don't have upper bounds, set the lower bound
-							(max
-								(get !cachedFeatureMinResidualMap (current_index))
-								(current_value)
-								(get !userSpecifiedFeatureErrorsMap (current_index))
-							)
 						)
 					)
-
 					;if using shared deviations, map over a reduced residuals map with only features that are not
 					; in a shared deviations group or are the primary keys of a shared deviations group
-					(if (and
-							using_shared_deviations
-							(size !sharedDeviationsMap)
-						)
+					(if has_shared_deviations
 						(remove
 							(get feature_residuals_map "residual_map")
 							!sharedDeviationsNonPrimaryFeatures
@@ -299,18 +295,50 @@
 
 						(get feature_residuals_map "residual_map")
 					)
+				))
+		))
+
+		(if has_shared_deviations
+			(set
+				feature_residuals_map
+				"residual_map"
+				(call !ExpandForSharedDeviations (assoc
+					compressed_values
+						(if (size need_modification_residuals_map)
+							;iterate over the residual map and use the values from need_modification_residuals_map where those values are defined
+							(map
+								(lambda
+									(if (!= (null) (last (current_value))) (last (current_value)) (first (current_value)) )
+								)
+								(remove (get feature_residuals_map "residual_map") !sharedDeviationsNonPrimaryFeatures)
+								need_modification_residuals_map
+							)
+
+							(remove (get feature_residuals_map "residual_map") !sharedDeviationsNonPrimaryFeatures)
+						)
+				))
+			)
+
+			;else output the modified residuals
+			(size need_modification_residuals_map)
+			(set
+				feature_residuals_map
+				"residual_map"
+				;iterate over the residual map and use the values from need_modification_residuals_map where those values are defined
+				(map
+					(lambda
+						(if (!= (null) (last (current_value))) (last (current_value)) (first (current_value)) )
+					)
+					(get feature_residuals_map "residual_map")
+					need_modification_residuals_map
 				)
 			)
 
-			(if (and
-					using_shared_deviations
-					(size !sharedDeviationsMap)
-				)
-				(call !ExpandForSharedDeviations (assoc compressed_values temp_residual_map))
-				temp_residual_map
-			)
+			;else output unmodified residuals
+			feature_residuals_map
 		)
 	)
+
 
 	;helper method to sample cases from the dataset, outputs a list of case ids
 	;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
@@ -571,23 +599,12 @@
 			))
 		)
 
-		;create a map of feature -> flag, set to true if the feature has any null values
-		;that way there's no need to explicitly filter nulls out when querying for a feature that no nulls
-		;or if it's inactive
+		;create a map of feature -> MAD, used for continuous features that have null values
 		(declare (assoc
-			feature_may_have_nulls_map
-				(map
-					(lambda (and
-						(!= .false (get !featureNullRatiosMap (list (current_index 1) "has_nulls")) )
-						(not (contains_index !inactiveFeaturesMap (current_index)) )
-					))
-					(zip
-						(if target_residual_feature
-							(list target_residual_feature)
-							features
-						)
-					)
-				)
+			feature_mad_map
+				(call !ConstructFeatureMADMap (assoc
+					features (if target_residual_feature [target_residual_feature] features)
+				))
 			;create a backup of context_features for time series flows
 			original_context_features (if !tsTimeFeature (replace context_features))
 			num_features (size context_features)
@@ -630,7 +647,6 @@
 		))
 
 		;iterate over each case and accumulate residuals for all the feature(s)
-		#!AccumulateFeatureResiduals
 		(assign (assoc
 			case_residuals_lists
 				||(map
@@ -642,6 +658,8 @@
 							time_series_filter_query (list)
 							feature_weights (get hyperparam_map "featureWeights")
 							context_features context_features
+							dependent_queries_list (null)
+							fanout_features_queries (null)
 						)
 
 						(if !tsTimeFeature
@@ -701,11 +719,11 @@
 							))
 						)
 
-						(declare (assoc
-							dependent_queries_list
-								;if any of the features being predicted are dependent to any of the contexts, then
-								;append all the dependencies together for the query
-								(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
+						(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
+							(assign (assoc
+								dependent_queries_list
+									;if any of the features being predicted are dependent to any of the contexts, then
+									;append all the dependencies together for the query
 									(apply "append" (map
 										(lambda
 											(call !ComputeDependentQueries (assoc
@@ -717,8 +735,18 @@
 										;just the features to be predicted that have dependencies defined
 										(indices (keep !dependentFeatureMap (indices removed_features_map)))
 									))
-								)
-						))
+							))
+						)
+
+						(if filter_fanout_values
+							(assign (assoc
+								fanout_features_queries
+									(call !ConstructFanoutFeaturesQueries (assoc
+										predicting_features (indices removed_features_map)
+										case_id case_id
+									))
+							))
+						)
 
 						(declare (assoc
 							local_cases_map
@@ -738,6 +766,7 @@
 										)
 										dependent_queries_list
 										time_series_filter_query
+										fanout_features_queries
 										(query_nearest_generalized_distance
 											k_parameter
 											(replace react_context_features)
@@ -749,7 +778,7 @@
 											feature_deviations
 											(null)
 											dt_parameter
-											(if valid_weight_feature weight_feature(null))
+											(if valid_weight_feature weight_feature)
 											tie_break_random_seed
 											(null) ;radius
 											!numericalPrecision
@@ -766,9 +795,6 @@
 									(lambda (let
 										(assoc
 											feature (current_index 1)
-											case_feature_value (get case_values_map (current_index 1))
-											feature_is_nominal (contains_index !nominalsMap (current_index 1))
-											output_categorical_action_probabilities .true
 											categorical_action_probabilities_map (assoc)
 											feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_index 1))
 											feature_is_non_string_edit_distance .false
@@ -779,40 +805,18 @@
 										)
 
 										(call !InterpolateAndComputeDiffToCase (assoc
+											feature_mad (get feature_mad_map feature)
+											feature_is_ordinal (contains_index !ordinalFeaturesSet feature)
+											case_feature_value (get case_values_map feature)
+											feature_is_nominal (contains_index !nominalsMap feature)
+											output_categorical_action_probabilities .true
 											candidate_cases_lists
 												;create the feature-specific candidate_cases_lists tuple for interpolation
 												(if (!= (null) local_cases_map)
-													(if (get feature_may_have_nulls_map feature)
-														(let
-															(assoc
-																filtered_local_cases_maps
-																	(compute_on_contained_entities
-																		(query_in_entity_list (indices local_cases_map))
-																		(query_not_equals feature (null))
-																		(query_exists feature)
-																	)
-															)
-
-															(if (size filtered_local_cases_maps)
-																[
-																	(indices filtered_local_cases_maps)
-																	(unzip local_cases_map (indices filtered_local_cases_maps))
-																	(map (lambda (first (current_value))) (values filtered_local_cases_maps))
-																]
-
-																(list
-																	[(first (indices local_cases_map))]
-																	[(first (values local_cases_map))]
-																	[(null)]
-																)
-															)
-														)
-
-														(list
-															(indices local_cases_map)
-															(values local_cases_map)
-															(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
-														)
+													(list
+														(indices local_cases_map)
+														(values local_cases_map)
+														(map (lambda (retrieve_from_entity (current_value) feature)) (indices local_cases_map))
 													)
 												)
 										))
@@ -892,77 +896,6 @@
 		(declare (assoc
 			feature_index_map (zip features (indices features))
 		))
-
-		;determine if any of the lists in feature_residuals_lists are too short (< 50 values), if so keep feature as needing to be resampled
-		;applicable only to global data (i.e. not regional_data_only)
-		(if (not regional_data_only)
-			(let
-				(assoc
-					num_valid_values_per_feature_map
-						(filter
-							(lambda (< (current_value) min_value_count) )
-							(zip
-								features
-								(map
-									(lambda (size
-										(if leave_nulls_in_results
-											;need to have nulls removed for this part and they weren't if leave_nulls_in_results was true
-											;(current_value) is a list of pairs of [with diff], this checks that the diff isn't null
-											(if estimating_residual_lower_bound
-												(filter (lambda (last (current_value))) (current_value) )
-												(filter (current_value))
-											)
-											;else this is already a filtered list of values
-											(current_value)
-										)
-									))
-									feature_residuals_lists
-								)
-							)
-						)
-				)
-
-				;some features did not have 50 values, accrue case_ids, then call !the main method agan
-				(if (size num_valid_values_per_feature_map)
-					(let
-						;create the resampled case_ids list that contains cases with enough necessary non-null feature values
-						(assoc
-							case_ids_without_nulls
-								;append all the lists of cases ids for each feature into one list
-								(apply "append"
-									;for each (current_index) feature, need to find 50 - (current_value) cases to have enough values for those features
-									(values (map
-										(lambda
-											(contained_entities
-												(query_not_equals (current_index) (null))
-
-												(if valid_weight_feature
-													(query_sample (- min_value_count (current_value)) weight_feature (rand))
-													(query_sample (- min_value_count (current_value)) (null) (rand))
-												)
-											)
-										)
-										num_valid_values_per_feature_map
-									))
-								)
-						)
-
-						;re-compute residuals on these case_ids, store into case_residuals_lists
-						(call !AccumulateFeatureResiduals (assoc case_ids case_ids_without_nulls))
-
-						;transpose case_residuals_lists into a list the length of features and append the results into feature_residuals_lists
-						(assign (assoc
-							feature_residuals_lists
-								(map
-									(lambda (append (first (current_value)) (last (current_value))))
-									feature_residuals_lists
-									(call !TransposeResidualLists)
-								)
-						))
-					)
-				)
-			)
-		)
 	)
 
 	;helper method for CalculateFeatureResiduals to calculate full residuals
@@ -977,6 +910,7 @@
 						(assoc
 							feature (get_value (current_value 1))
 							feature_is_nominal (contains_index !nominalsMap (current_value 1))
+							feature_is_ordinal (contains_index !ordinalFeaturesSet (current_value 1))
 							react_context_features (indices (remove context_features_map (current_value 1)))
 							feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_value 1))
 							feature_is_non_string_edit_distance .false
@@ -1012,11 +946,15 @@
 						)
 
 						(declare (assoc
-							;if feature has no nulls, no need to ignore it, if it has nulls or nulls are unknown, explicitly ignore nulls in the query
-							ignore_null_action_feature
-								(and
-									(!= .false (get !featureNullRatiosMap (list feature "has_nulls")))
-									(not (contains_index !inactiveFeaturesMap feature) )
+							;continuous features with nulls need their MAD computed
+							action_feature_mad
+								(if (and
+										(not feature_is_nominal)
+										(!= .false (get !featureNullRatiosMap (list feature "has_nulls")))
+										(not feature_is_edit_distance)
+										(not (contains_index !inactiveFeaturesMap feature) )
+									)
+									(call !ComputeFeatureMAD (assoc feature feature))
 								)
 							has_time_series_filter_query (and !tsTimeFeature (contains_value react_context_features !tsTimeFeature) )
 							time_series_filter_query (list)
@@ -1037,6 +975,8 @@
 
 										output_categorical_action_probabilities .true
 										categorical_action_probabilities_map (assoc)
+										dependent_queries_list (null)
+										fanout_features_queries (null)
 									)
 
 									(if !tsTimeFeature
@@ -1073,29 +1013,36 @@
 										))
 									)
 
-									(declare (assoc
-										dependent_queries_list
-											(if feature_is_dependent
+									(if feature_is_dependent
+										(assign (assoc
+											dependent_queries_list
 												(call !ComputeDependentQueries (assoc
 													context_features react_context_features
 													context_values (unzip case_values_map react_context_features)
 													action_feature feature
 												))
-											)
-									))
+										))
+									)
 
 									(declare (assoc case_feature_value (get case_values_map feature) ))
 
+									(if filter_fanout_values
+										(assign (assoc
+											fanout_features_queries
+												(call !ConstructFanoutFeaturesQueries (assoc
+													predicting_features [feature]
+													case_id case_id
+												))
+										))
+									)
+
 									(call !InterpolateAndComputeDiffToCase (assoc
+										feature_mad action_feature_mad
 										candidate_cases_lists
 											(compute_on_contained_entities
 												(if focal_case
 													(query_not_in_entity_list (list case_id focal_case))
 													(query_not_in_entity_list (list case_id))
-												)
-												(if ignore_null_action_feature
-													(query_not_equals feature (null))
-													(list)
 												)
 												(if (size context_condition_filter_query)
 													context_condition_filter_query
@@ -1103,6 +1050,7 @@
 												)
 												time_series_filter_query
 												dependent_queries_list
+												fanout_features_queries
 												(query_nearest_generalized_distance
 													k_parameter
 													react_context_features
@@ -1114,7 +1062,7 @@
 													feature_deviations
 													feature ;weight selection
 													dt_parameter
-													(if valid_weight_feature weight_feature (null))
+													(if valid_weight_feature weight_feature)
 													tie_break_random_seed
 													(null) ;radius
 													!numericalPrecision
@@ -1220,7 +1168,7 @@
 			candidate_case_ids (first candidate_cases_lists)
 			candidate_case_weights (get candidate_cases_lists 1)
 			candidate_case_values (last candidate_cases_lists)
-			allow_nulls .false
+			allow_nulls allow_nulls
 			output_influence_weights .false
 		))
 	)
@@ -1228,10 +1176,11 @@
 
 	;helper method for RunRobustResiduals, RunFullResiduals, and ComputeDeviations to compute difference between interpolated value and actual case value
 	#!InterpolateAndComputeDiffToCase
-	(let
+	(declare
 		(assoc
 			interpolated_value
 				;no candidate cases means we use expected feature value
+				#!InterpolateOrDeriveActionValues
 				(if (= 0 (size (first candidate_cases_lists)))
 					;global nominal probabilities will pulled below
 					(if feature_is_nominal
@@ -1245,110 +1194,169 @@
 
 					;else interpolate the feature value from the local data (or derive if appropriate)
 					(if (size features_for_derivation_map)
-						(call !InterpolateOrDerive)
+						(call !InterpolateOrDerive (assoc allow_nulls .true))
 
 						(call !InterpolateActionValues (assoc
 							action_feature feature
 							candidate_case_ids (first candidate_cases_lists)
 							candidate_case_weights (get candidate_cases_lists 1)
 							candidate_case_values (last candidate_cases_lists)
-							allow_nulls .false
+							allow_nulls .true
 							output_influence_weights .false
 						))
 					)
 				)
 		)
 
-		;small wrapper around ComputeFeatureMAEDiff, but possibly wrapped in extra information
-		;for other prediction stats
+		;output the difference between case_feature_value and interpolated_value
+		;note: this block of code is run often, so it's organized for performance with multiple repeated patterns of code instead of using calls
 		#!ComputeDiffTuple
-		(if (= (null) case_feature_value)
-			(null)
+		(let
+			(assoc
+				diff
+					(if (= (null) case_feature_value)
+						;nominal action features should output the delta to the CAP
+						(if feature_is_nominal
+							(- 1 (or (get categorical_action_probabilities_map [feature (null)]) ) )
 
-			compute_all_statistics
-			(if feature_is_nominal
-				;output [diff, cap, actual, predicted] for computing MAE, accuracy, precision, recall
-				(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
+							;edit distance features handle nulls like any other value
+							feature_is_edit_distance
+							(edit_distance case_feature_value interpolated_value (get !codeFeatureDomainAttributesMap feature) )
 
-				;else continuous, output [diff, ordinal_diff, actual, predicted] for computing MAE, RSME, R^2
-				(and
-					(= (null) (- case_feature_value interpolated_value))
-					(not feature_is_edit_distance)
-				)
-				(null)
+							;else continuous features, multiply by feature_mad (the mean absolute deviation for the feature)
+							(*
+								feature_mad
+								(- 1 (or (get categorical_action_probabilities_map feature) ) )
+							)
+						)
 
-				;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
-				(if feature_is_non_string_edit_distance
-					(append (call !ComputeFeatureMAEDiff) (list case_feature_value) (list interpolated_value))
+						;else case value is not null
+						feature_is_nominal
+						(- 1
+							(if (size categorical_action_probabilities_map)
+								(get categorical_action_probabilities_map (list feature case_feature_value))
 
-					(append (call !ComputeFeatureMAEDiff) case_feature_value interpolated_value)
-				)
+								;else return expected value
+								(get
+									(call !ComputeNominalClassProbabilities (assoc feature feature))
+									case_feature_value
+								)
+							)
+						)
+
+						feature_is_edit_distance
+						(edit_distance case_feature_value interpolated_value (get !codeFeatureDomainAttributesMap feature) )
+
+						(abs (- case_feature_value interpolated_value))
+					)
 			)
 
-			;else just output diff (Mean Absolute Error)
-			#!ComputeFeatureMAEDiff
-			(declare
-				(assoc
-					diff
-						(if feature_is_nominal
-							(- 1
-								(if (size (first candidate_cases_lists))
-									(get categorical_action_probabilities_map (list feature case_feature_value))
-
-									;else return expected value
-									(get
-										(call !ComputeNominalClassProbabilities (assoc feature feature))
-										case_feature_value
-									)
-								)
-							)
-
-							;else continuous
-							(if feature_is_edit_distance
-								;use string edit distance only if it's a string
-								(edit_distance case_feature_value interpolated_value
-									(or
-										(= "string" (get !editDistanceFeatureTypesMap  feature))
-										(= "string_mixable" (get !editDistanceFeatureTypesMap  feature))
-									)
-								)
-
-								(abs (- case_feature_value interpolated_value))
-							)
-						)
-				)
-
-				;output the residual. if it's (null), output null for non-nominals, and 1 (or case weight) for nominals
-				(if (= (null) diff)
-					(if feature_is_nominal
-						(if compute_all_statistics
-							[1 (filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))]
+			;output the residual. if it's (null), output null for non-nominals, and 1 (or case weight) for nominals
+			(if (= (null) diff)
+				(if feature_is_nominal
+					(if compute_all_statistics
+						[
 							1
-						)
+							(filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))
+							case_feature_value
+							interpolated_value
+						]
+
+						1
 					)
 
-					;else for ordinals, output tuple [diff, ordinal_diff], and just diff for computing mda flows
-					(contains_index ordinal_features_map feature)
+					;else continuous, diff is null when interpolated to null but case_feature_value was not null, diff = MAD * null mass
+					feature_is_ordinal
 					(if computing_mda
-						diff
+						(if compute_all_statistics
+							[
+								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+								case_feature_value
+								interpolated_value
+							]
+
+							(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+						)
 
 						;otherwise output the tuple for residual aggregation flows
-						[
-							diff
-							(if diff
-								(/ diff (get !ordinalFeaturesRangesMap feature))
-								0
-							)
-						]
+						(if compute_all_statistics
+							[
+								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+								(/
+									(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+									(get !ordinalFeaturesRangesMap feature)
+								)
+								case_feature_value
+								interpolated_value
+							]
+
+							[
+								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+								(/
+									(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+									(get !ordinalFeaturesRangesMap feature)
+								)
+							]
+						)
 					)
 
-					;else output it as-is
-					(if (and feature_is_nominal compute_all_statistics)
-						[diff (filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))]
+					;else regular non-ordinal continuous
+					compute_all_statistics
+					[
+						(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+						case_feature_value
+						interpolated_value
+					]
 
+					(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+				)
+
+				;output diff if feature is nominal
+				feature_is_nominal
+				(if compute_all_statistics
+					[
+						diff
+						(filter (lambda (> (current_value) 0.01)) (get categorical_action_probabilities_map feature))
+						case_feature_value
+						interpolated_value
+					]
+
+					diff
+				)
+
+				;else for ordinals, output tuple [diff, ordinal_diff], and just diff for computing mda flows
+				feature_is_ordinal
+				(if computing_mda
+					(if compute_all_statistics
+						[ diff case_feature_value interpolated_value ]
 						diff
 					)
+
+					;otherwise output a tuple for residual aggregation flows
+					(if compute_all_statistics
+						[
+							diff
+							(/ diff (get !ordinalFeaturesRangesMap feature))
+							case_feature_value
+							interpolated_value
+						]
+
+						[
+							diff
+							(/ diff (get !ordinalFeaturesRangesMap feature))
+						]
+					)
 				)
+
+				compute_all_statistics
+				(if feature_is_non_string_edit_distance
+					;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
+					[ diff [case_feature_value] [interpolated_value] ]
+
+					[ diff case_feature_value interpolated_value ]
+				)
+
+				diff
 			)
 		)
 	)
@@ -1464,6 +1472,7 @@
 											;otherwise use the whole set
 											all_react_context_features
 										)
+									fanout_features_queries (null)
 								)
 
 								(if (and
@@ -1478,6 +1487,16 @@
 									))
 								)
 
+								(if filter_fanout_values
+									(assign (assoc
+										fanout_features_queries
+											(call !ConstructFanoutFeaturesQueries (assoc
+												predicting_features [feature]
+												case_id case_id
+											))
+									))
+								)
+
 								(declare (assoc
 									candidate_cases_lists
 										(compute_on_contained_entities
@@ -1486,6 +1505,7 @@
 												(query_not_in_entity_list (list case_id))
 											)
 											(or time_series_filter_query [])
+											fanout_features_queries
 											(query_nearest_generalized_distance
 												(replace (get hyperparam_map "k"))
 												(replace react_context_features)
