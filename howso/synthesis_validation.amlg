@@ -58,137 +58,7 @@
 			;increase the generate counter
 			(accum (assoc generate_attempt 1))
 
-			#!FindClosestCasesForUniquenessCheck ;;;inline
-			(let
-				(assoc has_novel_substitions (and exclude_novel_nominals_from_uniqueness_check (size !novelSubstitionFeatureSet)) )
-
-				(assign (assoc
-					context_numeric_values
-						;output of generative retries are decoded, non-substituted string nominals
-						;so encode them here
-						(if (and !hasFeaturesNeedEncodingFromInput (> generate_attempt 1))
-							(call !ConvertFromInput (assoc
-								feature_values context_values
-								features context_features
-							))
-
-							;else just use original encoded values
-							context_values
-						)
-				))
-
-				;post_process feature attributes must be applied before rounding and uniqueness check
-				(if !hasPostProcessing
-					(assign (assoc
-						;map over context values and apply any post_process that may exist
-						context_numeric_values
-							(map
-								(lambda (let
-									(assoc
-										feature (get context_features (current_index 1))
-										original_value (current_value 1)
-									)
-									(if (contains_index !postProcessMap feature)
-										(let
-											(assoc
-												parsed_code
-													(call !ParseDerivedFeatureCode (assoc
-														code_string (get !postProcessMap feature)
-														value (lambda (if (and (= lag 0) (= original_feature feature)) original_value ) )
-													))
-											)
-											(call_sandboxed parsed_code
-												(append
-													(zip post_process_features post_process_values)
-													(assoc
-														original_value original_value
-														original_feature feature
-													)
-												)
-												!sandboxedComputeLimit
-												!sandboxedMemoryLimit
-												!sandboxedOpcodeDepthLimit
-												.false
-											)
-										)
-
-										;else return original value
-										original_value
-									)
-								))
-								context_numeric_values
-							)
-					))
-				)
-
-				;do rounding prior to checking for uniqueness so the values being compared are the 'actual' generated values
-				(if !hasRoundedFeatures
-					(assign (assoc
-						context_numeric_values
-							(call !RoundContinuousFeatures (assoc
-								features context_features
-								feature_values context_numeric_values
-							))
-					))
-				)
-
-				;datetime features need to be converted to datetime and back to numeric for proper rounding
-				;e.g., drop the hours/min/seconds if it's only a date prior to the uniqueness check
-				(if !hasDateTimeFeatures
-					(assign (assoc
-						context_numeric_values
-							(call !RoundDatetimeFeatures (assoc
-								features context_features
-								feature_values context_numeric_values
-							))
-					))
-				)
-
-				(if has_novel_substitions
-					(seq
-						(assign (assoc
-							non_novel_context_features (filter (lambda (not (contains_index !novelSubstitionFeatureSet (current_value)))) context_features)
-						))
-						(assign (assoc
-							non_novel_context_values (unzip (zip context_features context_numeric_values) non_novel_context_features)
-						))
-					)
-				)
-
-				;find the closest case
-				(assign (assoc
-					local_data_cases_tuple
-						(compute_on_contained_entities
-							(if ignore_case
-								(query_not_in_entity_list (list ignore_case))
-								(list)
-							)
-							(query_nearest_generalized_distance
-								;limit the number of considered nearby neighbors by limiting the bandwidth of local minimum distance
-								;comparison for density-based anonymity preservation, for performance reasons.
-								;add one extra case to check whether the k'th case is equidistant to others
-								(if (~ 0 k_parameter) (min 15 (+ k_parameter 1)) (append k_parameter 1))
-								(if has_novel_substitions non_novel_context_features context_features)
-								(if has_novel_substitions non_novel_context_values context_numeric_values)
-								p_parameter
-								feature_weights
-								!queryDistanceTypeMap
-								query_feature_attributes_map
-								;Feature deviations are not used in order to ensure that privacy is maximally preserved when using distance
-								;If feature deviations are used, duplicate cases may be deemed private.
-								(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
-								(null)
-								;dt = 1 means return computed distance to each case
-								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-								(null) ;weight
-								(rand)
-								(null) ;radius
-								"precise"
-								.true ;output sorted list
-							)
-						)
-				))
-			)
+			(call !FindClosestCasesForUniquenessCheck)
 
 			;set closest case to be the one with the smallest distance
 			(assign (assoc
@@ -266,70 +136,8 @@
 
 					;if found one feature different enough, verify that the case itself is as far as any closest case in the local data
 					(if (not has_dupes)
-						#!SynthCaseDistanceRatioCheck ;;;inline
-						(let
-							(assoc
-								extra_equidistant_cases
-									;look for extra equidistance cases only if the distance between last two cases are the same (within dbl_precision_epsilon)
-									(if (<=
-											(-
-												(last (last local_data_cases_tuple))
-												(get (last local_data_cases_tuple) (- (size (last local_data_cases_tuple)) 2))
-											)
-											dbl_precision_epsilon
-										)
-										(contained_entities
-											(if ignore_case
-												(query_not_in_entity_list (list ignore_case))
-												(null)
-											)
-											;find any cases that are within dbl_precision_epsilon of the farthest case in the local space,
-											;ignoring the cases that have alraedy been found
-											(query_not_in_entity_list (first local_data_cases_tuple))
-											(query_within_generalized_distance
-												;dbl_precision_epsilon for defining whether two values are equal within acceptable precision
-												(+ (* dbl_precision_epsilon (last (last local_data_cases_tuple)) ) (last (last local_data_cases_tuple)) )
-												(if has_novel_substitions non_novel_context_features context_features)
-												(if has_novel_substitions non_novel_context_values context_numeric_values)
-												p_parameter
-												feature_weights
-												!queryDistanceTypeMap
-												query_feature_attributes_map
-												(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
-												(null)
-												(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-												(null) ;weight
-												(rand)
-												(null) ;radius
-												"precise"
-											)
-										)
-									)
-							)
-
-							;generated case fails unique test if dist to closest case is less than the
-							;minimum entity distance contribution between neighbors.
-							(if
-								(<
-									dist_to_closest_case
-									;multiply the local min distance by new_case_min_distance_ratio
-									(*
-										new_case_min_distance_ratio
-										(call !QueryLocalDataMinDistance (assoc
-											feature_labels (if has_novel_substitions non_novel_context_features context_features)
-											entity_ids_to_compute
-												(if extra_equidistant_cases
-													(append (first local_data_cases_tuple) extra_equidistant_cases)
-													(trunc (first local_data_cases_tuple))
-												)
-											use_feature_deviations .false
-											dbl_precision_epsilon dbl_precision_epsilon
-										))
-									)
-								)
-								(assign (assoc has_dupes .true))
-							)
-						)
+						;inline the call to !SynthCaseDistanceRatioCheck, it sets the has_dupes variable
+						@(target .true "!SynthCaseDistanceRatioCheck")
 					)
 				)
 			)
@@ -437,6 +245,207 @@
 		)
 	)
 
+	;helper method to find the closest cases to the generated values and sets local_data_cases_tuple to the result of that query
+	#!FindClosestCasesForUniquenessCheck
+	!FindClosestCasesForUniquenessCheck
+	(let
+		(assoc has_novel_substitions (and exclude_novel_nominals_from_uniqueness_check (size !novelSubstitionFeatureSet)) )
+
+		(assign (assoc
+			context_numeric_values
+				;output of generative retries are decoded, non-substituted string nominals
+				;so encode them here
+				(if (and !hasFeaturesNeedEncodingFromInput (> generate_attempt 1))
+					(call !ConvertFromInput (assoc
+						feature_values context_values
+						features context_features
+					))
+
+					;else just use original encoded values
+					context_values
+				)
+		))
+
+		;post_process feature attributes must be applied before rounding and uniqueness check
+		(if !hasPostProcessing
+			(assign (assoc
+				;map over context values and apply any post_process that may exist
+				context_numeric_values
+					(map
+						(lambda (let
+							(assoc
+								feature (get context_features (current_index 1))
+								original_value (current_value 1)
+							)
+							(if (contains_index !postProcessMap feature)
+								(let
+									(assoc
+										parsed_code
+											(call !ParseDerivedFeatureCode (assoc
+												code_string (get !postProcessMap feature)
+												value (lambda (if (and (= lag 0) (= original_feature feature)) original_value ) )
+											))
+									)
+									(call_sandboxed parsed_code
+										(append
+											(zip post_process_features post_process_values)
+											(assoc
+												original_value original_value
+												original_feature feature
+											)
+										)
+										!sandboxedComputeLimit
+										!sandboxedMemoryLimit
+										!sandboxedOpcodeDepthLimit
+										.false
+									)
+								)
+
+								;else return original value
+								original_value
+							)
+						))
+						context_numeric_values
+					)
+			))
+		)
+
+		;do rounding prior to checking for uniqueness so the values being compared are the 'actual' generated values
+		(if !hasRoundedFeatures
+			(assign (assoc
+				context_numeric_values
+					(call !RoundContinuousFeatures (assoc
+						features context_features
+						feature_values context_numeric_values
+					))
+			))
+		)
+
+		;datetime features need to be converted to datetime and back to numeric for proper rounding
+		;e.g., drop the hours/min/seconds if it's only a date prior to the uniqueness check
+		(if !hasDateTimeFeatures
+			(assign (assoc
+				context_numeric_values
+					(call !RoundDatetimeFeatures (assoc
+						features context_features
+						feature_values context_numeric_values
+					))
+			))
+		)
+
+		(if has_novel_substitions
+			(seq
+				(assign (assoc
+					non_novel_context_features (filter (lambda (not (contains_index !novelSubstitionFeatureSet (current_value)))) context_features)
+				))
+				(assign (assoc
+					non_novel_context_values (unzip (zip context_features context_numeric_values) non_novel_context_features)
+				))
+			)
+		)
+
+		;find the closest case
+		(assign (assoc
+			local_data_cases_tuple
+				(compute_on_contained_entities
+					(if ignore_case
+						(query_not_in_entity_list (list ignore_case))
+						(list)
+					)
+					(query_nearest_generalized_distance
+						;limit the number of considered nearby neighbors by limiting the bandwidth of local minimum distance
+						;comparison for density-based anonymity preservation, for performance reasons.
+						;add one extra case to check whether the k'th case is equidistant to others
+						(if (~ 0 k_parameter) (min 15 (+ k_parameter 1)) (append k_parameter 1))
+						(if has_novel_substitions non_novel_context_features context_features)
+						(if has_novel_substitions non_novel_context_values context_numeric_values)
+						p_parameter
+						feature_weights
+						!queryDistanceTypeMap
+						query_feature_attributes_map
+						;Feature deviations are not used in order to ensure that privacy is maximally preserved when using distance
+						;If feature deviations are used, duplicate cases may be deemed private.
+						(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+						(null)
+						;dt = 1 means return computed distance to each case
+						(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+						(null) ;weight
+						(rand)
+						(null) ;radius
+						"precise"
+						.true ;output sorted list
+					)
+				)
+		))
+	)
+
+	;helper macro to run the distance ratio check and will set has_dupes to true if the check fails (when case is too close to others)
+	#!SynthCaseDistanceRatioCheck
+	!SynthCaseDistanceRatioCheck
+	(let
+		(assoc
+			extra_equidistant_cases
+				;look for extra equidistance cases only if the distance between last two cases are the same (within dbl_precision_epsilon)
+				(if (<=
+						(-
+							(last (last local_data_cases_tuple))
+							(get (last local_data_cases_tuple) (- (size (last local_data_cases_tuple)) 2))
+						)
+						dbl_precision_epsilon
+					)
+					(contained_entities
+						(if ignore_case
+							(query_not_in_entity_list (list ignore_case))
+							(null)
+						)
+						;find any cases that are within dbl_precision_epsilon of the farthest case in the local space,
+						;ignoring the cases that have alraedy been found
+						(query_not_in_entity_list (first local_data_cases_tuple))
+						(query_within_generalized_distance
+							;dbl_precision_epsilon for defining whether two values are equal within acceptable precision
+							(+ (* dbl_precision_epsilon (last (last local_data_cases_tuple)) ) (last (last local_data_cases_tuple)) )
+							(if has_novel_substitions non_novel_context_features context_features)
+							(if has_novel_substitions non_novel_context_values context_numeric_values)
+							p_parameter
+							feature_weights
+							!queryDistanceTypeMap
+							query_feature_attributes_map
+							(if (= "surprisal_to_prob" dt_parameter) feature_deviations (null) )
+							(null)
+							(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+							(null) ;weight
+							(rand)
+							(null) ;radius
+							"precise"
+						)
+					)
+				)
+		)
+
+		;generated case fails unique test if dist to closest case is less than the
+		;minimum entity distance contribution between neighbors.
+		(if
+			(<
+				dist_to_closest_case
+				;multiply the local min distance by new_case_min_distance_ratio
+				(*
+					new_case_min_distance_ratio
+					(call !QueryLocalDataMinDistance (assoc
+						feature_labels (if has_novel_substitions non_novel_context_features context_features)
+						entity_ids_to_compute
+							(if extra_equidistant_cases
+								(append (first local_data_cases_tuple) extra_equidistant_cases)
+								(trunc (first local_data_cases_tuple))
+							)
+						use_feature_deviations .false
+						dbl_precision_epsilon dbl_precision_epsilon
+					))
+				)
+			)
+			(assign (assoc has_dupes .true))
+		)
+	)
+
 	;Helper method to check test if series case is unique, runs the same validation as generate cases
 	;output true if duplicate
 	;output false if case is unique
@@ -480,7 +489,8 @@
 			has_dupes .false
 		))
 
-		(call !SynthCaseDistanceRatioCheck)
+		;inline the call to !SynthCaseDistanceRatioCheck, it sets the has_dupes variable
+		@(target .true "!SynthCaseDistanceRatioCheck")
 
 		;if distance ratio check failed, has_dupes will be true, otherwise it'll return false - not a duplicate
 		has_dupes

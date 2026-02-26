@@ -70,21 +70,7 @@
 		;create the training session if it does not already exist
 		(if (not (contains_entity session))
 			;overwrite the session variable in case creating a new session without a name
-			(assign (assoc
-				session
-					(first (create_entities session (lambda
-						(assoc
-							".replay_steps" []
-							".indices_map" {}
-							;total count of cases trained
-							".trained_instance_count" 0
-							;total count of cases observed (incl ablated, trained as weights, etc)
-							".total_instance_count" 0
-							".next_trained_index" 0
-							".metadata" {}
-						)
-					)))
-			))
+			(call !CreateEmptySession)
 		)
 
 		(declare (assoc
@@ -389,66 +375,9 @@
 			))
 		)
 
+
 		;set values if there were cases that were trained on
-		#!UpdateSessionAndFeaturesAfterTrain ;;;inline
-		(if (> (size new_case_ids ) 0)
-			(let
-				(assoc
-					new_features (remove (zip features) !trainedFeatures)
-					dataset_size (+ num_cases (size new_case_ids))
-				)
-
-				(accum (assoc trained_instance_count (size new_case_ids)))
-
-				;add action to the existing replay data
-				(accum_to_entities session (assoc
-					".replay_steps" new_case_ids
-					".trained_instance_count" (size new_case_ids)
-					".indices_map"
-						(zip
-							(range next_trained_index (+ next_trained_index (size new_case_ids) -1))
-							new_case_ids
-						)
-				))
-
-
-				;if any of the trained features are not defined in feature attributes, add them as continuous_numeric with default attributes
-				(if (size new_features)
-					(seq
-						(accum (assoc
-							warnings
-								(associate (concat
-									"The following features trained were previously undefined: "
-									(apply "concat" (trunc (weave (indices new_features) ", "))) ". "
-									"They have been trained and assumed to be numeric and continuous. "
-									"Please update the feature attributes if they are known."
-								))
-						))
-						(accum_to_entities (assoc
-							!featureAttributes
-								(map
-									(lambda (assoc "type" "continuous" "bounds" (assoc "allow_null" .true) ))
-									new_features
-								)
-							!queryDistanceTypeMap (map (lambda "continuous_number") new_features)
-						))
-						(assign_to_entities (assoc
-							!trainedFeatures (sort (values (append !trainedFeatures (indices !featureAttributes)) .true) )
-							!trainedFeaturesContextKey
-								(call !BuildContextFeaturesKey (assoc
-									context_features (values (append !trainedFeatures (indices !featureAttributes)) .true)
-								))
-						))
-						(call !UpdateDefinedFeatures)
-					)
-				)
-
-				(call !UpdateRegionalMinSize)
-
-				;update cached data properties such as has_nulls, null ratios, marginal stats, average dataset case entropies, etc
-				(call !ClearCachedDataProperties)
-			)
-		)
+		(call !UpdateSessionAndFeaturesAfterTrain)
 
 		(if (and skip_ablation (> (size new_case_ids ) 0) )
 			;update !dataMassChangeSinceLastAnalyze to the already computed new_possible_data_mass
@@ -500,59 +429,7 @@
 		)
 
 		(if !hasDependentFeatures
-			#!UpdateDependentFeaturesMaps ;;;inline
-			(let
-				(assoc
-					dependents_boundary_map (assoc)
-					dependent_values_combinations_map (assoc)
-					unique_nominals_set (list)
-				)
-
-				(if (size !continuousToNominalDependenciesMap)
-					(seq
-						(map
-							(lambda (let
-								(assoc
-									dependent_nominals (current_value 1)
-									continuous_feature (current_index 1)
-								)
-
-								;creates a nested map of:  value -> (optional nested layers values) -> valid ranges, for each unique combination
-								(declare (assoc
-									dependents_combinations_map
-										(call !ComputeDependentBoundaries (assoc
-											nominals dependent_nominals
-											value_feature continuous_feature
-											value_feature_nulls_are_dependent (get !featureAttributes [continuous_feature "null_is_dependent"])
-										))
-								))
-
-								;creates a list of all unique valid nominal value combinations, e.g., [ ['heartrate' 'bpm'] ['xray' 'mSv'] ... ]
-								(declare (assoc
-									dependent_values_combinations
-										(apply "append" (values
-											(call !AccumulateDependentValuesCombinations (assoc
-												nested_value_combinations_map dependents_combinations_map
-												values_lists []
-											))
-										))
-								))
-
-								(accum (assoc
-									dependents_boundary_map (associate continuous_feature dependents_combinations_map)
-									dependent_values_combinations_map (associate continuous_feature dependent_values_combinations)
-								))
-							))
-							!continuousToNominalDependenciesMap
-						)
-
-						(assign_to_entities (assoc
-							!dependentsBoundaryMap dependents_boundary_map
-							!dependentValuesCombinationsMap dependent_values_combinations_map
-						))
-					)
-				)
-			)
+			(call !UpdateDependentFeaturesMaps)
 		)
 
 		;if there are features that have nulls, check if they still have nulls next time we react or analyze

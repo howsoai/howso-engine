@@ -288,6 +288,82 @@
 		)
 	)
 
+	#!ComputeInitialResiduals
+	ComputeInitialResiduals
+	(map
+		(lambda
+			;for nominals, random chance of getting a prediction wrong is: 1 - 1/num_classes
+			;set initial value to (1 - 1/num_classes) / 2
+			(if (contains_index !nominalsMap (current_index))
+				(-
+					0.5
+					;pull number of classes for this feature corresponding to the weight_feature being used during this analyze
+					(/ 0.5 (or (size (get !nominalClassProbabilitiesMap [weight_feature (current_index 1)]))) 2)
+				)
+
+				;else continuous values
+				(let
+					(assoc
+						max_gap
+							;edit distance features, use max length: size for strings, or total_size for code
+							(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
+								(let
+									(assoc edit_dist_feature (current_index 2) )
+									(declare (assoc
+										feature_values
+											(filter (map
+												(lambda (retrieve_from_entity (current_value) edit_dist_feature))
+												(call !AllCases)
+											))
+									))
+
+									(if (or
+											(= "string" (get !editDistanceFeatureTypesMap edit_dist_feature))
+											(= "string_mixable" (get !editDistanceFeatureTypesMap edit_dist_feature))
+										)
+										(apply "max" (map (lambda (size (current_value))) feature_values))
+
+										(apply "max" (map (lambda (total_size (current_value))) feature_values))
+									)
+								)
+
+								;else normal continuous feature, pull cached max gap
+								(get !cachedFeatureMaxGapMap (current_index 1))
+							)
+						min_gap
+							(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
+								0
+
+								(compute_on_contained_entities
+									(query_min_difference (current_index 1) (get !cyclicFeaturesMap (current_index 1)) )
+								)
+							)
+						;pull from cached marginal stats
+						num_buckets (get !featureMarginalStatsMap [weight_feature (current_index 2) "uniques"])
+						num_values (get !featureMarginalStatsMap [weight_feature (current_index 2) "count"])
+					)
+
+					;infinity means there was no gap, and nan means all values are null and can't compute gap
+					(if (or (= (null) min_gap) (= .infinity min_gap) (= .infinity max_gap))
+						1
+
+						;use the smaller of of max_gap * (1 - 1/num_buckets) or
+						;(average of max_gap/2 and min_gap/2) * sqrt(avg_num_values_per_bucket)
+						(min
+							(* max_gap (- 1 (/ 1 num_buckets)) )
+							(*
+								(sqrt (/ num_values num_buckets))
+								(/ (+ (/ max_gap 2) (/ min_gap 2)) 2)
+							)
+						)
+					)
+				)
+			)
+
+		)
+		(zip features)
+	)
+
 	;updates analyzed_hp_map
 	;run multiple iterations of grid search and residuals
 	#!ConvergeTargetless
@@ -324,81 +400,7 @@
 		;when calculating IRW and LK deviations, compute the initial residual values if necessary
 		(if (= (null) initial_residual_values_map)
 			(assign (assoc
-				initial_residual_values_map
-					#!ComputeInitialResiduals ;;;inline
-					(map
-						(lambda
-							;for nominals, random chance of getting a prediction wrong is: 1 - 1/num_classes
-							;set initial value to (1 - 1/num_classes) / 2
-							(if (contains_index !nominalsMap (current_index))
-								(-
-									0.5
-									;pull number of classes for this feature corresponding to the weight_feature being used during this analyze
-									(/ 0.5 (or (size (get !nominalClassProbabilitiesMap [weight_feature (current_index 1)]))) 2)
-								)
-
-								;else continuous values
-								(let
-									(assoc
-										max_gap
-											;edit distance features, use max length: size for strings, or total_size for code
-											(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
-												(let
-													(assoc edit_dist_feature (current_index 2) )
-													(declare (assoc
-														feature_values
-															(filter (map
-																(lambda (retrieve_from_entity (current_value) edit_dist_feature))
-																(call !AllCases)
-															))
-													))
-
-													(if (or
-															(= "string" (get !editDistanceFeatureTypesMap edit_dist_feature))
-															(= "string_mixable" (get !editDistanceFeatureTypesMap edit_dist_feature))
-														)
-														(apply "max" (map (lambda (size (current_value))) feature_values))
-
-														(apply "max" (map (lambda (total_size (current_value))) feature_values))
-													)
-												)
-
-												;else normal continuous feature, pull cached max gap
-												(get !cachedFeatureMaxGapMap (current_index 1))
-											)
-										min_gap
-											(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
-												0
-
-												(compute_on_contained_entities
-													(query_min_difference (current_index 1) (get !cyclicFeaturesMap (current_index 1)) )
-												)
-											)
-										;pull from cached marginal stats
-										num_buckets (get !featureMarginalStatsMap [weight_feature (current_index 2) "uniques"])
-										num_values (get !featureMarginalStatsMap [weight_feature (current_index 2) "count"])
-									)
-
-									;infinity means there was no gap, and nan means all values are null and can't compute gap
-									(if (or (= (null) min_gap) (= .infinity min_gap) (= .infinity max_gap))
-										1
-
-										;use the smaller of of max_gap * (1 - 1/num_buckets) or
-										;(average of max_gap/2 and min_gap/2) * sqrt(avg_num_values_per_bucket)
-										(min
-											(* max_gap (- 1 (/ 1 num_buckets)) )
-											(*
-												(sqrt (/ num_values num_buckets))
-												(/ (+ (/ max_gap 2) (/ min_gap 2)) 2)
-											)
-										)
-									)
-								)
-							)
-
-						)
-						(zip features)
-					)
+				initial_residual_values_map (call !ComputeInitialResiduals)
 			))
 		)
 

@@ -450,34 +450,7 @@
 			)
 		)
 
-		#!CheckForIncompletePreservedActionFeatures ;;;inline
-		(if (and
-				(= (null) desired_conviction)
-				(size preserve_feature_values)
-				(size action_features)
-			)
-			(let
-				(assoc
-					preserved_action_features_map (intersect (zip preserve_feature_values) (zip action_features))
-				)
-
-				(if (and
-						(size preserved_action_features_map)
-						(!= preserved_action_features_map (zip action_features))
-					)
-					(conclude
-						(call !Return (assoc
-							errors
-								[(concat
-									"When doing a discriminative react, if any action features are being preserved from a "
-									"trained case using `preserve_feature_values`, "
-									"then all action features should be included in `preserve_feature_values`."
-								)]
-						))
-					)
-				)
-			)
-		)
+		(call !CheckForIncompletePreservedActionFeatures)
 
 		(declare (assoc
 			;if any of these are length of 1, the index will be 0 to pull the values and apply to all reacts
@@ -895,22 +868,8 @@
 
 		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
 
-		;if both action_features and derived_action_features are specified,
-		;ensure that derived_action_features are a subset of action_features, then separate the two into distinct lists
-		#!ValidateDerivedActionFeaturesIsSubset ;;;inline
-		(if (and (size action_features) (size derived_action_features))
-			;if derived_action_features isn't a subset of action_features, error out
-			(if (> (size (remove (zip derived_action_features) action_features)) 0)
-				(conclude
-					(call !Return (assoc errors (list "Specified 'derived_action_features' must be a subset of 'action_features'.") ))
-				)
+		(call !ValidateDerivedActionFeaturesIsSubset)
 
-				;else separate  derived_action_features from action_features
-				(assign (assoc
-					action_features (filter (lambda (not (contains_value derived_action_features (current_value)))) action_features)
-				))
-			)
-		)
 		(call !CheckForIncompletePreservedActionFeatures)
 
 		(declare (assoc
@@ -1596,48 +1555,10 @@
 				)
 		))
 
+		;;;TODO: check if it's faster to just inline the code as well as have the method separately
 		(declare (assoc
-			local_data_cases_tuple
-				#!ReactionQuery ;;;inline
-				(compute_on_contained_entities
-					not_null_features_queries
-					;if ignoring null action feature, query for cases where action feature is not null
-					(if ignore_null_action_feature
-						(query_not_equals (first action_features) (null))
-						(null)
-					)
-					dependent_queries_list
-					user_specified_constraints_query
-					fanout_features_queries
-					(if (size custom_extra_filtering_queries)
-						custom_extra_filtering_queries
-						(null)
-					)
-					(if ignore_case
-						(if focal_case
-							(query_not_in_entity_list (list ignore_case focal_case))
-							(query_not_in_entity_list (list ignore_case))
-						)
-						(null)
-					)
-					(query_nearest_generalized_distance
-						k_parameter
-						context_features
-						context_values
-						(get hyperparam_map "p")
-						feature_weights
-						!queryDistanceTypeMap
-						(get hyperparam_map "featureDomainAttributes")
-						feature_deviations
-						(first action_features) ;used to select the feature weights
-						(get hyperparam_map "dt")
-						(if valid_weight_feature weight_feature (null))
-						tie_break_random_seed
-						(null) ;radius
-						!numericalPrecision
-						(first action_features)
-					)
-				)
+			;inline the call to !ReactionQuery
+			local_data_cases_tuple @(target .true "!ReactionQuery")
 		))
 
 		(if goal_features
@@ -1701,6 +1622,49 @@
 				candidate_case_values (last local_data_cases_tuple)
 				allow_nulls allow_nulls
 			))
+		)
+	)
+
+	;macro for the react query used by !GenerateReaction
+	#!ReactionQuery
+	!ReactionQuery
+	(compute_on_contained_entities
+		not_null_features_queries
+		;if ignoring null action feature, query for cases where action feature is not null
+		(if ignore_null_action_feature
+			(query_not_equals (first action_features) (null))
+			(null)
+		)
+		dependent_queries_list
+		user_specified_constraints_query
+		fanout_features_queries
+		(if (size custom_extra_filtering_queries)
+			custom_extra_filtering_queries
+			(null)
+		)
+		(if ignore_case
+			(if focal_case
+				(query_not_in_entity_list (list ignore_case focal_case))
+				(query_not_in_entity_list (list ignore_case))
+			)
+			(null)
+		)
+		(query_nearest_generalized_distance
+			k_parameter
+			context_features
+			context_values
+			(get hyperparam_map "p")
+			feature_weights
+			!queryDistanceTypeMap
+			(get hyperparam_map "featureDomainAttributes")
+			feature_deviations
+			(first action_features) ;used to select the feature weights
+			(get hyperparam_map "dt")
+			(if valid_weight_feature weight_feature (null))
+			tie_break_random_seed
+			(null) ;radius
+			!numericalPrecision
+			(first action_features)
 		)
 	)
 
@@ -1774,32 +1738,35 @@
 				!tsTimeFeatureUniversal
 				(not (get !tsFeaturesMap "minimum_time_bound"))
 			)
-			;update "minimum_time_bound" which is the stored minimum time value that can be used as an upper bound
-			;in queries when the time feature is universal
-			;needs "hyperparam_map"
-			#!UpdateMinimumTimeBound ;;;inline
-			(assign_to_entities (assoc
-				!tsFeaturesMap
-					(set
-						!tsFeaturesMap
-						["minimum_time_bound"]
-						(retrieve_from_entity
-							(last
-								(contained_entities
-									(query_exists !tsTimeFeature)
-									(query_min
-										!tsTimeFeature
-										(if (~ 0 (get hyperparam_map "k"))
-											(get hyperparam_map "k")
-											(get hyperparam_map ["k" 1])
-										)
-									)
-								)
-							)
-							!tsTimeFeature
-						)
-					)
-			))
+			(call !UpdateMinimumTimeBound)
 		)
 	)
+
+	;update "minimum_time_bound" which is the stored minimum time value that can be used as an upper bound
+	;in queries when the time feature is universal
+	;needs "hyperparam_map"
+	#!UpdateMinimumTimeBound
+	!UpdateMinimumTimeBound
+	(assign_to_entities (assoc
+		!tsFeaturesMap
+			(set
+				!tsFeaturesMap
+				["minimum_time_bound"]
+				(retrieve_from_entity
+					(last
+						(contained_entities
+							(query_exists !tsTimeFeature)
+							(query_min
+								!tsTimeFeature
+								(if (~ 0 (get hyperparam_map "k"))
+									(get hyperparam_map "k")
+									(get hyperparam_map ["k" 1])
+								)
+							)
+						)
+					)
+					!tsTimeFeature
+				)
+			)
+	))
 }

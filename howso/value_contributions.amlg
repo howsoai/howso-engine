@@ -75,24 +75,7 @@
 			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
 		))
 
-		#!FilterValuesCaseIDsForLaggedFeatures ;;;inline
-		(if (size (keep ts_feature_lag_amount_map value_robust_contributions_features))
-			(let
-				(assoc
-					max_needed_lag (apply "max" (unzip ts_feature_lag_amount_map value_robust_contributions_features))
-				)
-
-				(assign (assoc
-					case_ids
-						(filter
-							(lambda
-								(>= (retrieve_from_entity (current_value) ".series_index") max_needed_lag)
-							)
-							case_ids
-						)
-				))
-			)
-		)
+		(if !tsTimeFeature (call !FilterValuesCaseIDsForLaggedFeatures))
 
 		(declare (assoc
 			;!ComputeNumEnabledFeaturesProbabilitiesMap only creates probabilities up to num_features - 1,
@@ -175,119 +158,9 @@
 		))
 
 		(if (or (~ value_robust_contributions_min_cases {}) (> value_robust_contributions_min_cases 1))
-			;helper macro for values details to filter down case_ids and feature_values_lists_map based on marginal mass
-			#!FilterCasesAndValuesByMarginalCounts ;;;inline
-			(seq
-				;define if marginal values are significant enough to continue on with .true if value is significant, .false otherwise
-				(declare (assoc
-					marginal_feature_value_skip_map
-						(map
-							(lambda
-								||(map
-									(lambda
-										;(current_index 1) = feature name
-										;(current_index) = feature value or bucket index
-										(>
-											(if (contains_index !nominalsMap (current_index 1))
-												;num cases matching this class
-												(size (contained_entities
-													(query_in_entity_list case_ids)
-													(query_equals (current_index 1) (current_index))
-												))
-
-												;num cases in this bucket
-												(size (contained_entities
-													(query_in_entity_list case_ids)
-													(query_between
-														(current_index 1)
-														(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
-														(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
-													)
-												))
-											)
-											(if (~ value_robust_contributions_min_cases {})
-												;if an assoc, get the value for this feature (default to 15 if the feature is missing from the assoc)
-												(or (get value_robust_contributions_min_cases (current_index 1)) 15)
-												value_robust_contributions_min_cases
-											)
-										)
-									)
-									;current value here is a list of unique values (classes or buckets)
-									(zip (current_value))
-								)
-							)
-							feature_value_lists_map
-						)
-				))
-
-				;only do the filtering if there is at least one marginally insignificant class or bucket
-				(if (contains_value
-						(apply "append" (map
-							(lambda (values (current_value)))
-							(values marginal_feature_value_skip_map)
-						))
-						.false
-					)
-					(assign (assoc
-						;filter feature_value_lists_map to remove the "insignificant values"
-						;this will skip them in the later filter bits as well
-						feature_value_lists_map
-							(map
-								(lambda
-									(filter
-										(lambda
-											(get marginal_feature_value_skip_map [(current_index 2) (current_value 1)])
-										)
-										(current_value)
-									)
-								)
-								feature_value_lists_map
-							)
-						;filter case ids based on marginal value skip map
-						case_ids
-							||(filter
-								(lambda
-									;if *any* of the marginal skip flags for the case's values are false, then remove this case from the list
-									(apply "and"
-										;map of significance flag values for each decomposition feature
-										(map
-											(lambda
-												;(current_index) is the decomposition feature
-												;(current_value) is the decomposition feature value for the case
-												(if (contains_index !nominalsMap (current_index))
-													;if nominal, can just check flag for that nominal value
-													(get marginal_feature_value_skip_map [(current_index 1) (current_value 1)])
-
-													;if continuous, need to find the bucket it belongs to, then grab the corresponding flag.
-													(while (< (current_index) (size (get marginal_feature_value_skip_map (current_index 1) )) )
-														;if the feature value is greater than the lower bound and less than the upper bound, then this is the correct bucket
-														(if (and
-																(>=
-																	(current_value 1)
-																	(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
-																)
-																(<=
-																	(current_value 1)
-																	(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
-																)
-															)
-															;get the flag for this bucket index
-															(conclude
-																(get marginal_feature_value_skip_map [(current_index 2) (current_index 1)])
-															)
-														)
-													)
-												)
-											)
-											(keep (get case_to_values_map (current_value)) value_robust_contributions_features)
-										)
-									)
-								)
-								case_ids
-							)
-					))
-				)
-			)
+			;call the macro to filter down feature_value_lists_map and case_ids to remove entries that
+			;correspond to feature values of insignificant mass
+			(call !FilterCasesAndValuesByMarginalCounts)
 		)
 
 		;list of tuples of : [ AC, PC, directional PC, values ]
@@ -826,6 +699,26 @@
 		)
 	)
 
+	#!FilterValuesCaseIDsForLaggedFeatures
+	!FilterValuesCaseIDsForLaggedFeatures
+	(if (size (keep ts_feature_lag_amount_map value_robust_contributions_features))
+		(let
+			(assoc
+				max_needed_lag (apply "max" (unzip ts_feature_lag_amount_map value_robust_contributions_features))
+			)
+
+			(assign (assoc
+				case_ids
+					(filter
+						(lambda
+							(>= (retrieve_from_entity (current_value) ".series_index") max_needed_lag)
+						)
+						case_ids
+					)
+			))
+		)
+	)
+
 	;given a case_ac_pc_tuples for a continuous feature, bin them into buckets by quantiles
 	;outputs map of bucket -> values pair of: [ min, max]
 	;
@@ -890,6 +783,122 @@
 			)
 		)
 		(get feature_value_lists_map (first features))
+	)
+
+
+	;helper macro for values details to filter down case_ids and feature_values_lists_map based on marginal mass
+	#!FilterCasesAndValuesByMarginalCounts
+	!FilterCasesAndValuesByMarginalCounts
+	(seq
+		;define if marginal values are significant enough to continue on with .true if value is significant, .false otherwise
+		(declare (assoc
+			marginal_feature_value_skip_map
+				(map
+					(lambda
+						||(map
+							(lambda
+								;(current_index 1) = feature name
+								;(current_index) = feature value or bucket index
+								(>
+									(if (contains_index !nominalsMap (current_index 1))
+										;num cases matching this class
+										(size (contained_entities
+											(query_in_entity_list case_ids)
+											(query_equals (current_index 1) (current_index))
+										))
+
+										;num cases in this bucket
+										(size (contained_entities
+											(query_in_entity_list case_ids)
+											(query_between
+												(current_index 1)
+												(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+												(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+											)
+										))
+									)
+									(if (~ value_robust_contributions_min_cases {})
+										;if an assoc, get the value for this feature (default to 15 if the feature is missing from the assoc)
+										(or (get value_robust_contributions_min_cases (current_index 1)) 15)
+										value_robust_contributions_min_cases
+									)
+								)
+							)
+							;current value here is a list of unique values (classes or buckets)
+							(zip (current_value))
+						)
+					)
+					feature_value_lists_map
+				)
+		))
+
+		;only do the filtering if there is at least one marginally insignificant class or bucket
+		(if (contains_value
+				(apply "append" (map
+					(lambda (values (current_value)))
+					(values marginal_feature_value_skip_map)
+				))
+				.false
+			)
+			(assign (assoc
+				;filter feature_value_lists_map to remove the "insignificant values"
+				;this will skip them in the later filter bits as well
+				feature_value_lists_map
+					(map
+						(lambda
+							(filter
+								(lambda
+									(get marginal_feature_value_skip_map [(current_index 2) (current_value 1)])
+								)
+								(current_value)
+							)
+						)
+						feature_value_lists_map
+					)
+				;filter case ids based on marginal value skip map
+				case_ids
+					||(filter
+						(lambda
+							;if *any* of the marginal skip flags for the case's values are false, then remove this case from the list
+							(apply "and"
+								;map of significance flag values for each decomposition feature
+								(map
+									(lambda
+										;(current_index) is the decomposition feature
+										;(current_value) is the decomposition feature value for the case
+										(if (contains_index !nominalsMap (current_index))
+											;if nominal, can just check flag for that nominal value
+											(get marginal_feature_value_skip_map [(current_index 1) (current_value 1)])
+
+											;if continuous, need to find the bucket it belongs to, then grab the corresponding flag.
+											(while (< (current_index) (size (get marginal_feature_value_skip_map (current_index 1) )) )
+												;if the feature value is greater than the lower bound and less than the upper bound, then this is the correct bucket
+												(if (and
+														(>=
+															(current_value 1)
+															(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+														)
+														(<=
+															(current_value 1)
+															(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+														)
+													)
+													;get the flag for this bucket index
+													(conclude
+														(get marginal_feature_value_skip_map [(current_index 2) (current_index 1)])
+													)
+												)
+											)
+										)
+									)
+									(keep (get case_to_values_map (current_value)) value_robust_contributions_features)
+								)
+							)
+						)
+						case_ids
+					)
+			))
+		)
 	)
 
 	;Measure the average AC-Surprisal asymmetry among buckets of values for value_robust_ac_feature when predicting action_feature

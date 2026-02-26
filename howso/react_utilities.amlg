@@ -1186,4 +1186,101 @@
 		)
 		(zip features)
 	)
+
+	;if both action_features and derived_action_features are specified,
+	;ensure that derived_action_features are a subset of action_features, then separate the two into distinct lists
+	#!ValidateDerivedActionFeaturesIsSubset
+	!ValidateDerivedActionFeaturesIsSubset
+	(if (and (size action_features) (size derived_action_features))
+		;if derived_action_features isn't a subset of action_features, error out
+		(if (> (size (remove (zip derived_action_features) action_features)) 0)
+			(conclude
+				(call !Return (assoc errors (list "Specified 'derived_action_features' must be a subset of 'action_features'.") ))
+			)
+
+			;else separate  derived_action_features from action_features
+			(assign (assoc
+				action_features (filter (lambda (not (contains_value derived_action_features (current_value)))) action_features)
+			))
+		)
+	)
+
+	;quick check incomplete action features for every react() call
+	#!CheckForIncompletePreservedActionFeatures
+	!CheckForIncompletePreservedActionFeatures
+	(if (and
+			(= (null) desired_conviction)
+			(size preserve_feature_values)
+			(size action_features)
+		)
+		(let
+			(assoc
+				preserved_action_features_map (intersect (zip preserve_feature_values) (zip action_features))
+			)
+
+			(if (and
+					(size preserved_action_features_map)
+					(!= preserved_action_features_map (zip action_features))
+				)
+				(conclude
+					(call !Return (assoc
+						errors
+							[(concat
+								"When doing a discriminative react, if any action features are being preserved from a "
+								"trained case using `preserve_feature_values`, "
+								"then all action features should be included in `preserve_feature_values`."
+							)]
+					))
+				)
+			)
+		)
+	)
+
+	;helper method to output a map of num_enabled_features -> probability for the specified num_features
+	;
+	;the number of features that will be used as contexts is random for every react, following a binomial distribution.
+	;since at least one feature must be predicted, the most number of features that can be used for any react is
+	;'(num_features - 1)'  therefore a binomial distribution for '(num_features - 1)' can be used to precompute the
+	;probabilities of how many features to use for any react. To undo the bias of those cases that have fewer
+	;features selected as contexts being used more often in computations, each probability is scaled down by the number of
+	;results (left out features). e.g., if there are 5 features, and all 5 are left out (0 selected), that case will be
+	;used 5x as often as a case that had only 1 feature left out (4 selected), so the binomial probability of selecting
+	;0 features would be divided by 5, but the probability of selecting 4 features would be divided by 1 and thus left as-is.
+	;These normalized scaled probabilities happen to be the same as a binomial distribution for 'num_features'
+	;with the tail probability for the last feature cut off.
+	;
+	;This creates the binomial probabilities map for enabling 0 to (num_features - 1) features, given num_features.
+	#!ComputeNumEnabledFeaturesProbabilitiesMap
+	!ComputeNumEnabledFeaturesProbabilitiesMap
+	(map
+		(lambda
+			(call !BinomialDistribution (assoc
+				k (current_index 1)
+				n num_features
+				p 0.5
+			))
+		)
+		(zip (range 0 (- num_features 1)))
+	)
+
+	;Helper method, return returns a binomial distrubution value for (n, k, p):
+	; (gamma(n+1) / (gamma(k+1) * gamma(n-k+1))) * (p**k) * ((1-p)**(n-k))
+	; compute in logarithmic space for stability with large values
+	#!BinomialDistribution
+	!BinomialDistribution
+	(exp
+		(+
+			(-
+				(lgamma (+ n 1))
+				(lgamma (+ k 1))
+				(lgamma (- n k -1))
+			)
+			(* k (log p))
+			(*
+				(- n k)
+				(log (- 1 p))
+			)
+		)
+	)
+
 }
