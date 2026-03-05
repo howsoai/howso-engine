@@ -1,0 +1,147 @@
+(seq
+	;import the unit_test 'library'
+	#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_nom_null_class.amlg"))
+
+
+	(declare (assoc
+		;set to true to see full output
+		verbose .false
+	    data (load "unit_test_data/bool_null_test.csv")
+	))
+
+	; DATASET DESCRIPTION
+	; This dataset is a simple 4 feature dataset.
+
+	; 'a' is a randomly generated continuous value.
+	; 'up_b' is a randomly selected nominal number (effectively a boolean), zero or one. (up_b = boolean describing if value goes up [or down])
+	; 'noise' is a randomly generated continuous value, with no relationships to other features.
+	; 'target' is a continuous value. When 'up_b' is 1, 'target' is 'a' + 10, otherwise 'target' is 'a' - 10.
+
+	; As a result, we hope to see strong relationships between 'target', 'a', and 'up_b'.
+	; The purpose of this test is to ensure the relationships described with AC and prediction stats is held when 'up_b'
+	; is in its original form AND when one of its classes is converted to (null)'s.
+
+
+	(declare (assoc
+		features (first data)
+		training_data (tail data)
+	))
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		feature_attributes
+			(assoc
+				up_b {"type" "nominal" "data_type" "number"}
+				;rest are continuous values so no need to specify
+			)
+	))
+
+	(call_entity "howso" "train" (assoc
+		features features
+		cases training_data
+	))
+	(call_entity "howso" "analyze")
+
+	(declare (assoc
+		baseline_acs
+			(get
+				(call_entity "howso" "react_aggregate" (assoc
+					details {"feature_robust_accuracy_contributions" .true}
+					convergence_threshold 0
+				))
+				[1 "payload" "feature_robust_accuracy_contributions"]
+			)
+		baseline_pred_stats
+			(get
+				(call_entity "howso" "react_aggregate" (assoc
+					details {"prediction_stats" .true}
+				))
+				[1 "payload"]
+			)
+	))
+
+
+	;Now to reload Trainee, and train again with the zero class of 'up_b'
+	(destroy_entities "howso")
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_nom_null_class.amlg" skip_init .true) )
+
+	;same attributes
+	(call_entity "howso" "set_feature_attributes" (assoc
+		feature_attributes
+			(assoc
+				up_b {"type" "nominal" "data_type" "number"}
+				;rest are continuous values so no need to specify
+			)
+	))
+	;replace all zeros with nulls for 'up_b'
+	(call_entity "howso" "train" (assoc
+		features features
+		cases
+			(map
+				(lambda
+					;replace 0 with nulls for up_b (second_value)
+					(if (= 0 (get (current_value) 1))
+						(set (current_value) 1 (null))
+
+						;else
+						(current_value)
+					)
+				)
+				training_data
+			)
+	))
+	(call_entity "howso" "analyze")
+
+	(declare (assoc
+		null_class_acs
+			(get
+				(call_entity "howso" "react_aggregate" (assoc
+					details {"feature_robust_accuracy_contributions" .true}
+					convergence_threshold 0
+				))
+				[1 "payload" "feature_robust_accuracy_contributions"]
+			)
+		null_class_pred_stats
+			(get
+				(call_entity "howso" "react_aggregate" (assoc
+					details {"prediction_stats" .true}
+				))
+				[1 "payload"]
+			)
+	))
+
+	(print "Computed AC values are equivalent whether a nominal class is (null)-ed or not: ")
+	(call assert_approximate (assoc
+		obs
+			(map
+				;perhaps one day these will not to be normalized. But that is not today.
+				;for the time being, the ACs of 'a' and 'target' in predicting 'up_b' are a tad larger
+				;in the original form of the data.
+				;Even normalized, this should be able to detect any noticable swings in the observed ACs
+				(lambda (normalize (remove (current_value) "noise")))
+				(remove baseline_acs "noise")
+			)
+		exp
+			(map
+				(lambda (normalize (remove (current_value) "noise")))
+				(remove null_class_acs "noise")
+			)
+		percent 0.2
+	))
+
+	(print "Accuracy is equivalent: ")
+	(call assert_approximate (assoc
+		obs (get baseline_pred_stats "accuracy")
+		exp (get null_class_pred_stats "accuracy")
+	))
+	(print "MAE for 'a' is equivalent: ")
+	(call assert_approximate (assoc
+		obs (get baseline_pred_stats ["mae" "a"])
+		exp (get null_class_pred_stats ["mae" "a"])
+		;A is on an approximate scale of 50-140, so this is pretty tight with only 1000 cases.
+		thresh 1.0
+	))
+
+
+	(call exit_if_failures (assoc msg unit_test_name))
+)
