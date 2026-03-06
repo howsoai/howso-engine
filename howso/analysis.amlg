@@ -1,8 +1,9 @@
 ;Contains methods for hyperparameter analysis and feature deviation and weights calculations.
-(null
+{
 	;automatically analyze the dataset using stored parameters from previous analyze calls
 	;{long_running .true statistically_idempotent .true}
 	#auto_analyze
+	auto_analyze
 	(let
 		(assoc saved_analyze_parameters_map (retrieve_from_entity "!savedAnalyzeParameterMap"))
 
@@ -18,6 +19,7 @@
 	;Analyzes the data to compute the appropriate statistics, uncertainties, and select parameters as appropriate.
 	;{long_running .true statistically_idempotent .true}
 	#analyze
+	analyze
 	(declare
 		(assoc
 			;{type "list" values "string"}
@@ -46,7 +48,7 @@
 			;{type "number" min 2}
 			;number of cases to use to approximate deviations and residuals for both targetless and targeted flows.
 			;defaults to 1000 if unspecified.
-			num_deviation_samples (null)
+			num_deviation_samples 1000
 			;{type "number" min 2}
 			;number of samples to use to compute feature probabilities, only applies to targetless flow.
 			;If unspecified will be dynamically set based on number features and data characteristics.
@@ -83,7 +85,6 @@
 			;{type "list" values "string"}
 			;list of features whose values to use to rebalance case weighting of the data and to store into weight_feature
 			rebalance_features (null)
-
 			;{type "boolean"}
 			;when true, the default, will compute and use a sparse deviation matrix (SDM) for each nominal feature in all similarity queries.
 			;Enabling SDM will typically incur a small to moderate penalty on speed when using nominal features in inference in exchange for
@@ -129,15 +130,13 @@
 
 		;analyze uses its own explicit warnings since it should not output warnings from all the
 		;react calls made during the analyze flow
-		(declare (assoc analyze_warnings (assoc) ))
+		(declare (assoc
+			analyze_warnings (assoc)
+			num_cases (call !GetNumTrainingCases)
+			holdout_entity_name (null)
+		))
 
-		(if (and
-				(= (null) use_case_weights)
-				!hasPopulatedCaseWeight
-				(= weight_feature ".case_weight")
-			)
-			(assign (assoc use_case_weights .true ))
-		)
+		(call !UpdateAnalyzeParameterDefaults)
 
 		(if (or use_case_weights (size rebalance_features))
 			;CreateCaseWeights will find all cases missing weight_feature, then initialize
@@ -147,20 +146,6 @@
 				has_rebalance_features (!= 0 (size rebalance_features))
 			))
 		)
-
-		;if k_folds is not a number value, or it's less than 1, ensure that it's overwritten with the default value
-		(if (or (not (= "number" (get_type_string k_folds))) (< k_folds 1))
-			(assign (assoc k_folds 1))
-		)
-
-		(declare (assoc num_cases (call !GetNumTrainingCases)))
-
-		;cap max k_folds to the number of cases in the dataset
-		(if (> k_folds num_cases)
-			(assign (assoc k_folds num_cases))
-		)
-
-		(declare (assoc holdout_entity_name (null) ))
 
 		;if user specified how many samples to use for analysis, randomly hold out the rest
 		(if (!= (null) analysis_sub_model_size)
@@ -178,35 +163,6 @@
 					))
 				)
 			)
-		)
-
-		;if no action features were specified, and neither was targeted_model, set it to targetless
-		(if (and
-				(= 0 (size action_features))
-				(or
-					(= (null) targeted_model)
-					(= "single_targeted" targeted_model)
-				)
-			)
-			(assign (assoc targeted_model "targetless"))
-
-			;else one or more action features specified but targeted_model wasn't, set it to single_targeted
-			(and
-				(>= 1 (size action_features))
-				(= (null) targeted_model)
-			)
-			(assign (assoc targeted_model "single_targeted"))
-
-			;if omni_targeted and didn't provide action_features, assume all features are action features
-			(and
-				(= "omni_targeted" targeted_model)
-				(= 0 (size action_features))
-			)
-			(assign (assoc action_features context_features))
-
-			;default is targetless if inputs are bad
-			(not (contains_value (list "targetless" "single_targeted" "omni_targeted") targeted_model))
-			(assign (assoc targeted_model "targetless"))
 		)
 
 		;if this is a time series Trainee, there are no targetless hyperparameters,
@@ -254,6 +210,8 @@
 					"weight_feature" weight_feature
 					"rebalance_features" rebalance_features
 					"use_sdm" use_sdm
+					"use_dynamic_deviations" use_dynamic_deviations
+					"dynamic_deviations_subtrainee_size" dynamic_deviations_subtrainee_size
 					"convergence_threshold" convergence_threshold
 					"convergence_samples_growth_rate" convergence_samples_growth_rate
 					"convergence_min_size" convergence_min_size
@@ -274,7 +232,7 @@
 				targeted_model targeted_model
 				num_analysis_samples num_analysis_samples
 				num_feature_probability_samples num_feature_probability_samples
-				num_deviation_samples (if (> num_deviation_samples 0) num_deviation_samples 1000)
+				num_deviation_samples num_deviation_samples
 				use_case_weights use_case_weights
 				weight_feature weight_feature
 				use_dynamic_deviations use_dynamic_deviations
@@ -307,7 +265,7 @@
 									(call !CalculateResidualsAndUpdateParameters (assoc
 										context_features all_features
 										;default the num_samples to 1000
-										num_samples (if (> num_deviation_samples 0) num_deviation_samples 1000)
+										num_samples num_deviation_samples
 										robust_residuals (= "targetless" targeted_mode)
 										;use the specific action feature's hyperparameters
 										hyperparameter_feature (current_value 2)
@@ -341,8 +299,61 @@
 		(call !Return (assoc warnings (if (size analyze_warnings) (indices analyze_warnings)) ))
 	)
 
+	;helper method to set default values for some parameters
+	#!UpdateAnalyzeParameterDefaults
+	!UpdateAnalyzeParameterDefaults
+	(seq
+		(if (and
+				(= (null) use_case_weights)
+				!hasPopulatedCaseWeight
+				(= weight_feature ".case_weight")
+			)
+			(assign (assoc use_case_weights .true ))
+		)
+
+		;if k_folds is not a number value, or it's less than 1, ensure that it's overwritten with the default value
+		(if (or (not (= "number" (get_type_string k_folds))) (< k_folds 1))
+			(assign (assoc k_folds 1))
+		)
+
+		;cap max k_folds to the number of cases in the dataset
+		(if (> k_folds num_cases)
+			(assign (assoc k_folds num_cases))
+		)
+
+		;if no action features were specified, and neither was targeted_model, set it to targetless
+		(if (and
+				(= 0 (size action_features))
+				(or
+					(= (null) targeted_model)
+					(= "single_targeted" targeted_model)
+				)
+			)
+			(assign (assoc targeted_model "targetless"))
+
+			;else one or more action features specified but targeted_model wasn't, set it to single_targeted
+			(and
+				(>= 1 (size action_features))
+				(= (null) targeted_model)
+			)
+			(assign (assoc targeted_model "single_targeted"))
+
+			;if omni_targeted and didn't provide action_features, assume all features are action features
+			(and
+				(= "omni_targeted" targeted_model)
+				(= 0 (size action_features))
+			)
+			(assign (assoc action_features context_features))
+
+			;default is targetless if inputs are bad
+			(not (contains_value (list "targetless" "single_targeted" "omni_targeted") targeted_model))
+			(assign (assoc targeted_model "targetless"))
+		)
+	)
+
 	;helper method to run the targeted or targetless analyze
 	#!Analyze
+	!Analyze
 	(let
 		(assoc
 			;assoc of case id -> (assoc ".imputed" (list of imputed features))
@@ -564,7 +575,7 @@
 		)
 	)
 
-	;called on none or one action feature at a time by #Analyze
+	;called on none or one action feature at a time by Analyze()
 	; targeted_model: enumeration, default is "single_targeted"
 	;   "single_targeted" = analyze hyperparameters for the specified action_features
 	;   "targetless" = analyze hyperparameters for all context features as possible action features, ignores action_features parameter
@@ -575,6 +586,7 @@
 	; derived_auto_analyzed: optional, if true, will set the 'derivedAutoAnalyzed' parameter to true in the hyperparameter set,
 	;			denoting that these parameters were auto-analyzed during derive features flow.
 	#!AnalyzeHyperparameters
+	!AnalyzeHyperparameters
 	(declare
 		(assoc
 			targeted_model "targetless"
@@ -689,6 +701,7 @@
 	;	deviation_subtrainee_name: this variable will store the name of the subtrainee, this name should be stored in the
 	;					resulting hyperparameter assoc under the key "subtraineeName"
 	#!StoreResidualSubTrainee
+	!StoreResidualSubTrainee
 	(declare
 		(assoc
 			custom_hyperparam_map (null)
@@ -708,7 +721,6 @@
 			query_feature_attributes_map (null)
 			case_features (null)
 			num_context_features 0
-			ordinal_features_map !ordinalFeaturesSet
 			hyperparam_map (assoc)
 			residuals_map (assoc)
 			ordinal_residuals_map (assoc)
@@ -757,17 +769,17 @@
 		(set_entity_permissions [!traineeContainer deviation_subtrainee_name] .true)
 
 		;add a method to remove !ValidateParameters
-		(accum_entity_roots [!traineeContainer deviation_subtrainee_name]
-			(zip_labels
-				(list "removeValidateParameters")
-				(list (lambda
-					(assign_to_entities
-						(assoc
-							"!ValidateParameters" (null)
-							"removeValidateParameters" (null)
+		(assign_to_entities [!traineeContainer deviation_subtrainee_name]
+			(assoc
+				"removeValidateParameters"
+					(lambda
+						(assign_to_entities
+							(assoc
+								"!ValidateParameters" (null)
+								"removeValidateParameters" (null)
+							)
 						)
 					)
-				))
 			)
 		)
 		;remove the methods
@@ -817,6 +829,7 @@
 
 	;initialize variables and cache feature expected values
 	#!InitAnalyze
+	!InitAnalyze
 	(seq
 		(if (!= (null) action_feature)
 			;DiscriminativeReact will use context values for action features if provided
@@ -1051,6 +1064,7 @@
 	;updates baseline_hyperparameter_map
 	;wrapper method to grid searches hyperparameters and backs up the results into previous_analyzed_hp_map
 	#!GridSearch
+	!GridSearch
 	(seq
 		(set_rand_seed sampling_random_seed)
 		(assign (assoc
@@ -1087,6 +1101,7 @@
 	; num_analysis_samples : optional. number of cases to sample during analysis. only applies for k_folds = 1
 	; baseline_hyperparameter_map : the base hyperparameters to use for computation
 	#!ComputeResidualsAcrossParametersAndSelectOptimal
+	!ComputeResidualsAcrossParametersAndSelectOptimal
 	(declare
 		(assoc
 			action_features (list)
@@ -1270,6 +1285,7 @@
 
 	;output dataset Mean Absolute Error (MAE) for the provided baseline_hyperparameter_map
 	#!ComputeResidualForParameters
+	!ComputeResidualForParameters
 	(seq
 		(declare (assoc
 			sample_case_ids
@@ -1302,6 +1318,7 @@
 
 	;accumulate dataset MAE during kfold validation using provided baseline_hyperparameter_map
 	#!ComputeAndAccumulateKFoldsMAE
+	!ComputeAndAccumulateKFoldsMAE
 	(accum (assoc
 		accumulated_kfold_errors
 			(call !CalculateMAE (assoc
@@ -1318,6 +1335,7 @@
 
 	;doing k-fold validation, so each validation block is 1/k_folds of all the cases
 	#!AccumulateErrorsViaKFoldsGridSearch
+	!AccumulateErrorsViaKFoldsGridSearch
 	(declare
 		(assoc
 			validation_size
@@ -1371,6 +1389,7 @@
 	)
 
 	#!AccumulateErrorsViaGridSearch
+	!AccumulateErrorsViaGridSearch
 	(map
 		(lambda (let
 			(assoc p_value (current_value 1))
@@ -1461,4 +1480,4 @@
 		p_values
 	)
 
-)
+}

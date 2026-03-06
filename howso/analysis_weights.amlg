@@ -1,9 +1,10 @@
 ;Contains methods for hyperparameter analysis of feature and case weights and feature deviation calculations.
-(null
+{
 
 	;updates baseline_hyperparameter_map
 	;calculate feature residuals several times to converge on stable deviation values
 	#!ConvergeResiduals
+	!ConvergeResiduals
 	(declare
 		(assoc
 			num_samples num_deviation_samples
@@ -82,6 +83,7 @@
 	;updates baseline_hyperparameter_map
 	;wrapper method to compute context feature weights for a specified action_feature and update baseline_hyperparameter_map with those weights
 	#!ComputeAndUseWeights
+	!ComputeAndUseWeights
 	(let
 		;compute an assoc of feature -> weight for the action_feature
 		(assoc
@@ -106,6 +108,7 @@
 
 	;outputs weights_map for as action_feature for specified context_features
 	#!ComputeActionFeatureWeights
+	!ComputeActionFeatureWeights
 	(declare
 		(assoc
 			action_feature (null)
@@ -209,6 +212,7 @@
 	;parameters:
 	; desired_samples_per_feature: the number of samples desired for each feature
 	#!ComputeRequiredNumSamplesForSharedDeviationsWithTS
+	!ComputeRequiredNumSamplesForSharedDeviationsWithTS
 	(let
 		(assoc
 			;map of the desired samples per feature multiplied by the number of features in each shared deviation group
@@ -275,6 +279,7 @@
 
 	;output initial deviations to be the smallest gaps for each feature scaled by the number of features
 	#!ComputeInitialDeviations
+	!ComputeInitialDeviations
 	(let
 		(assoc all_features (values (append context_features action_features) .true))
 		(map
@@ -283,9 +288,86 @@
 		)
 	)
 
+	#!ComputeInitialResiduals
+	!ComputeInitialResiduals
+	(map
+		(lambda
+			;for nominals, random chance of getting a prediction wrong is: 1 - 1/num_classes
+			;set initial value to (1 - 1/num_classes) / 2
+			(if (contains_index !nominalsMap (current_index))
+				(-
+					0.5
+					;pull number of classes for this feature corresponding to the weight_feature being used during this analyze
+					(/ 0.5 (or (size (get !nominalClassProbabilitiesMap [weight_feature (current_index 1)]))) 2)
+				)
+
+				;else continuous values
+				(let
+					(assoc
+						max_gap
+							;edit distance features, use max length: size for strings, or total_size for code
+							(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
+								(let
+									(assoc edit_dist_feature (current_index 2) )
+									(declare (assoc
+										feature_values
+											(filter (map
+												(lambda (retrieve_from_entity (current_value) edit_dist_feature))
+												(call !AllCases)
+											))
+									))
+
+									(if (or
+											(= "string" (get !editDistanceFeatureTypesMap edit_dist_feature))
+											(= "string_mixable" (get !editDistanceFeatureTypesMap edit_dist_feature))
+										)
+										(apply "max" (map (lambda (size (current_value))) feature_values))
+
+										(apply "max" (map (lambda (total_size (current_value))) feature_values))
+									)
+								)
+
+								;else normal continuous feature, pull cached max gap
+								(get !cachedFeatureMaxGapMap (current_index 1))
+							)
+						min_gap
+							(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
+								0
+
+								(compute_on_contained_entities
+									(query_min_difference (current_index 1) (get !cyclicFeaturesMap (current_index 1)) )
+								)
+							)
+						;pull from cached marginal stats
+						num_buckets (get !featureMarginalStatsMap [weight_feature (current_index 2) "uniques"])
+						num_values (get !featureMarginalStatsMap [weight_feature (current_index 2) "count"])
+					)
+
+					;infinity means there was no gap, and nan means all values are null and can't compute gap
+					(if (or (= (null) min_gap) (= .infinity min_gap) (= .infinity max_gap))
+						1
+
+						;use the smaller of of max_gap * (1 - 1/num_buckets) or
+						;(average of max_gap/2 and min_gap/2) * sqrt(avg_num_values_per_bucket)
+						(min
+							(* max_gap (- 1 (/ 1 num_buckets)) )
+							(*
+								(sqrt (/ num_values num_buckets))
+								(/ (+ (/ max_gap 2) (/ min_gap 2)) 2)
+							)
+						)
+					)
+				)
+			)
+
+		)
+		(zip features)
+	)
+
 	;updates analyzed_hp_map
 	;run multiple iterations of grid search and residuals
 	#!ConvergeTargetless
+	!ConvergeTargetless
 	(declare
 		(assoc
 			;don't need to do the last iteration if running reduce_only flow
@@ -318,81 +400,7 @@
 		;when calculating IRW and LK deviations, compute the initial residual values if necessary
 		(if (= (null) initial_residual_values_map)
 			(assign (assoc
-				initial_residual_values_map
-					#!ComputeInitialResiduals
-					(map
-						(lambda
-							;for nominals, random chance of getting a prediction wrong is: 1 - 1/num_classes
-							;set initial value to (1 - 1/num_classes) / 2
-							(if (contains_index !nominalsMap (current_index))
-								(-
-									0.5
-									;pull number of classes for this feature corresponding to the weight_feature being used during this analyze
-									(/ 0.5 (or (size (get !nominalClassProbabilitiesMap [weight_feature (current_index 1)]))) 2)
-								)
-
-								;else continuous values
-								(let
-									(assoc
-										max_gap
-											;edit distance features, use max length: size for strings, or total_size for code
-											(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
-												(let
-													(assoc edit_dist_feature (current_index 2) )
-													(declare (assoc
-														feature_values
-															(filter (map
-																(lambda (retrieve_from_entity (current_value) edit_dist_feature))
-																(call !AllCases)
-															))
-													))
-
-													(if (or
-															(= "string" (get !editDistanceFeatureTypesMap edit_dist_feature))
-															(= "string_mixable" (get !editDistanceFeatureTypesMap edit_dist_feature))
-														)
-														(apply "max" (map (lambda (size (current_value))) feature_values))
-
-														(apply "max" (map (lambda (total_size (current_value))) feature_values))
-													)
-												)
-
-												;else normal continuous feature, pull cached max gap
-												(get !cachedFeatureMaxGapMap (current_index 1))
-											)
-										min_gap
-											(if (contains_index !editDistanceFeatureTypesMap (current_index 1))
-												0
-
-												(compute_on_contained_entities
-													(query_min_difference (current_index 1) (get !cyclicFeaturesMap (current_index 1)) )
-												)
-											)
-										;pull from cached marginal stats
-										num_buckets (get !featureMarginalStatsMap [weight_feature (current_index 2) "uniques"])
-										num_values (get !featureMarginalStatsMap [weight_feature (current_index 2) "count"])
-									)
-
-									;infinity means there was no gap, and nan means all values are null and can't compute gap
-									(if (or (= (null) min_gap) (= .infinity min_gap) (= .infinity max_gap))
-										1
-
-										;use the smaller of of max_gap * (1 - 1/num_buckets) or
-										;(average of max_gap/2 and min_gap/2) * sqrt(avg_num_values_per_bucket)
-										(min
-											(* max_gap (- 1 (/ 1 num_buckets)) )
-											(*
-												(sqrt (/ num_values num_buckets))
-												(/ (+ (/ max_gap 2) (/ min_gap 2)) 2)
-											)
-										)
-									)
-								)
-							)
-
-						)
-						(zip features)
-					)
+				initial_residual_values_map (call !ComputeInitialResiduals)
 			))
 		)
 
@@ -448,6 +456,7 @@
 									convergence_threshold convergence_threshold
 									convergence_samples_growth_rate convergence_samples_growth_rate
 									convergence_min_size convergence_min_size
+									filter_fanout_values (> (size !fanoutFeaturesMap) 0)
 								))
 						))
 					)
@@ -481,6 +490,7 @@
 	;rebalance features, the product of the weights of all the rebalance features is the case weight, which is stored
 	;in each case into the .case_weight feature
 	#!ComputeAndStoreRebalanceFeatureCaseWeights
+	!ComputeAndStoreRebalanceFeatureCaseWeights
 	(declare
 		(assoc rebalance_features [] )
 
@@ -726,4 +736,4 @@
 				)
 		))
 	)
-)
+}

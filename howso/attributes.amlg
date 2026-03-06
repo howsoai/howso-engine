@@ -1,8 +1,9 @@
 ;Contains methods to set and get feature attributes.
-(null
+{
 	;set all features and their attributes for the trainee, and returns the updated feature attributes
 	;{idempotent .true}
 	#set_feature_attributes
+	set_feature_attributes
 	(declare
 		;returns {ref "FeatureAttributesIndex"}
 		(assoc
@@ -80,6 +81,9 @@
 			;						possible while maintaining the dependency. As a rule of thumb, sets of features that have
 			;						dependency relationships should generally not include more than 1 continuous feature, unless
 			;						the continuous features have a small number of values that are commonly used.
+			;
+			;	'fanout_on': list of other features whose values can be used to identify other trained cases that have had the same value
+			;					for this feature fanned out.
 			;
 			;	'null_is_dependent': boolean, modifies how dependent features with nulls are treated during a react, specifically
 			;						when they use null as a context value. Only applicable to dependent features. When false, the
@@ -307,14 +311,31 @@
 
 		(if (size invalid_constraint_features)
 			(conclude
-				(call !Return (assoc errors
-					(list (concat
-						"The following features have an invalid constraint defined: "
-						(apply "concat" (weave
-							invalid_constraint_features
-							(range " " 1 (size invalid_constraint_features) 1)
+				(call !Return (assoc
+					errors
+						(list (concat
+							"Features must reference their own value for a constraint to be valid. The following features have an invalid constraint defined: "
+							(apply "concat" (weave invalid_constraint_features " "))
 						))
-					))
+				))
+			)
+		)
+
+		(declare (assoc code_errors (null) ))
+
+		(if (or
+				(size post_process_map)
+				(size custom_derived_features_map)
+				(size constraint_referenced_features_map)
+			)
+			(assign (assoc
+				code_errors (call !FeatureAttributeCodeValidation)
+			))
+		)
+		(if (size (filter (lambda (size (current_value))) code_errors))
+			(conclude
+				(call !Return (assoc
+					errors (apply "append" (values code_errors))
 				))
 			)
 		)
@@ -661,6 +682,18 @@
 			(accum_to_entities (assoc !revision 1))
 		)
 
+		;this is strictly after !CreateTimeSeriesFeatures, so that the filtering logic
+		;will prioritize the assigned "fanout_on" key features rather than series IDs for features
+		;that are both stationary and joined from another table.
+		(declare (assoc
+			fanout_features_map (call !ComposeFanoutFeaturesMap)
+		))
+		(if (size fanout_features_map)
+			(accum_to_entities (assoc
+				!fanoutFeaturesMap fanout_features_map
+			))
+		)
+
 		;compose dependents after TS features are made so that TS features can be made dependent as necessary
 		(declare (assoc
 			dependents_map (call !ComposeDependentsMap)
@@ -682,6 +715,7 @@
 	)
 
 	#!ComposeCustomDerivedMethods
+	!ComposeCustomDerivedMethods
 	(map
 		(lambda (let
 			(assoc
@@ -765,6 +799,7 @@
 	;output all feature attributes
 	;{idempotent .true}
 	#get_feature_attributes
+	get_feature_attributes
 	(declare
 		;returns {ref "FeatureAttributesIndex"}
 		(assoc)
@@ -831,6 +866,7 @@
 	; nominals: list of nominal features corresponding to the continuous value feature
 	;value_feature_nulls_are_dependent: flag, if true nulls are treated as valid dependent values
 	#!ComputeDependentBoundaries
+	!ComputeDependentBoundaries
 	(declare
 		(assoc
 			base_query_among_statements (list)
@@ -1005,6 +1041,7 @@
 	; nested_value_combinations_map: nested assocs of feature value -> [min, max], eg: {'heartrate : {'bpm' : [ 25, 180] }}
 	; values_lists: list of nominal values to append each corresponding feature value. e.g, [ "heartrate", "bpm"]
 	#!AccumulateDependentValuesCombinations
+	!AccumulateDependentValuesCombinations
 	(filter (map
 		(lambda
 			(if (~ (assoc) (current_value))
@@ -1027,6 +1064,7 @@
 	;parameters:
 	; ordinal_features: list of ordinal features
 	#!SetOrdinalFeatures
+	!SetOrdinalFeatures
 	(declare
 		(assoc ordinal_features (list))
 
@@ -1053,6 +1091,7 @@
 	;parameters
 	; nominal_features: list of nominal features
 	#!SetNominalFeatures
+	!SetNominalFeatures
 	(declare
 		(assoc nominal_features (list))
 
@@ -1080,6 +1119,7 @@
 	; feature_attributes: assoc of feature -> cycle length
 	;example: (assoc "day" 7 "degrees" 360)
 	#!SetCyclicFeatures
+	!SetCyclicFeatures
 	(declare
 		(assoc feature_attributes (assoc))
 		(if (= 0 (size feature_attributes))
@@ -1105,4 +1145,4 @@
 		;returns whether or not the trainee has cyclic features
 		!hasCyclicFeatures
 	)
-)
+}

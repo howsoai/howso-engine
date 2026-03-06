@@ -1,6 +1,5 @@
 ;Contains methods for computing and outputting feature contributions.
-(null
-
+{
 	;Calculate feature prediction contributions - average delta between predicted value for action_feature with and without a context feature
 	; for all specified context_features.
 	;
@@ -22,6 +21,7 @@
 	; context_condition_filter_query: a list of queries that can be used to filter the possible set of cases that can be used for predictions
 	; derive_action_feature: flag, if true action feature will be derived and the features needed to derive will be predicted
 	#!CalculateFeaturePredictionContributions
+	!CalculateFeaturePredictionContributions
 	(declare
 		(assoc
 			context_features (list)
@@ -254,6 +254,7 @@
 	;iterate over num_cases_to_sample cases and run num_robust_prediction_contributions_samples_per_case.  Each react uses a robust set of features. For each feature, we average out the delta
 	;of predicting the action_feature when using vs not using it as a context feature.  Sets feature_contributions_map.
 	#!RunRobustContributions
+	!RunRobustContributions
 	(let
 		(assoc
 			enabled_num_features_probability_map
@@ -296,207 +297,16 @@
 						;	 [ .75 (null) (null) .75 ]  ;values for the 'with' context features, list corresponding to features a through d
 						;	 [ (null) .75 .75 (null) ]  ;values for the 'without' features, list corresponding to features a through d
 						; ]
-						;Labeled as a helper method so that local_case_reaction_pairs can be computed on a per-case basis provided the following parameters:
-						;  case_id: id of case for which to compute robust contributions
-						;  correct_value: correct action_feature value from the case_id
-						;  case_values_map: all the feature values from the case
-						;  action_feature: feature for which to compute contributions
-						;  context_features: list of features from which to select a robust set to use as context features for each react
-						;  num_robust_prediction_contributions_samples_per_case: total number of robust reacts to run on this case
-						;  hyperparam_map: optional custom hyperparameter map, specifying which hyperparameters to use for the react
-						;and thus can be used in individual react details to compute feature contributions for a specific case.
-						#!ComputeRobustContributionReactsPerCase
-						(assign (assoc
-							local_case_reaction_pairs
-								(range
-									(lambda (let
-										(assoc
-											;list of remaining filtered context features
-											filtered_context_features (list)
-											;set of all removed features
-											without_features_set (assoc)
-											with_features_set (assoc)
-											react_value 0
-											reaction (null)
-										)
-
-										;filter out a random number of context features
-										(assign (assoc
-											filtered_context_features
-												(rand
-													context_features
-													;number of features to enable is probabilistically weighted
-													(if (and !tsTimeFeature (!= (size context_features) num_features))
-														(rand
-															(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
-														)
-
-														(rand enabled_num_features_probability_map)
-													)
-													;unique random features (not with replacement)
-													.true
-												)
-										))
-
-										;assoc of all removed features to their residual values
-										(assign (assoc
-											without_features_set
-													;filter the action features to be those that are not context features, feature/context_features params may overlap
-													(remove (zip all_context_features) filtered_context_features)
-										))
-
-										(if derive_action_feature
-											(declare (assoc
-												features_to_predict_for_derivation (filter (lambda (not (contains_value filtered_context_features (current_value)))) features_for_derivation)
-											))
-										)
-
-										(assign (assoc
-											reaction
-												(call !ContributionReact (assoc
-													context_features filtered_context_features
-												))
-											with_features_set (zip filtered_context_features)
-										))
-
-										(assign (assoc
-											react_value
-												(if action_is_nominal
-													(+ (or
-														(get reaction (list "categorical_action_probabilities" action_feature correct_value))
-													))
-
-													(get reaction (list "action_values" 0))
-												)
-										))
-
-										;output a pair of two lists, each of the two list is the length of context_features
-										; (list (list react_values_with_feature_as_context) (list react_values_without_feature_as_context))
-										(list
-											;all context features with this react_value as the 'with' list
-											(map
-												(lambda
-													(if (contains_index with_features_set (current_value)) react_value)
-												)
-												all_context_features
-											)
-
-											;all removed features with this react_value as the 'without' list
-											(map
-												(lambda
-													(if (contains_index without_features_set (current_value)) react_value)
-												)
-												all_context_features
-											)
-										)
-									))
-									1 num_robust_prediction_contributions_samples_per_case 1
-								)
-						))
+						;
+						;inline call to !ComputeRobustContributionReactsPerCase to set local_case_reaction_pairs
+						@(target .true "!ComputeRobustContributionReactsPerCase")
 
 						;for this case, compute the absolute difference between the average with and average without for the computed feature combinations
 						;do this computation for each feature
-						;Labeled as a helper method to output a list of feature contribution values on a per-case basis provided the following parameters:
-						;  local_case_reaction_pairs: list of pairs of [reacts_with_feature, reacts_without_feature]
-						;  context_features: list of features to use as robust context features
-						;and thus can be used in individual react details to compute feature contributions for a specific case.
-						#!ComputeRobustWithAndWithoutDeltaPerCase
-						(map
-							(lambda (let
-								(assoc feature_index (current_index 1))
+						;
+						;inline call to !ComputeRobustWithAndWithoutDeltaPerCase to output a contribution tuple for each feature
+						@(target .true "!ComputeRobustWithAndWithoutDeltaPerCase")
 
-								(declare (assoc
-									;for this feature, pull all the 'with' react values, filtering out nulls if edit distance
-									feature_reactions_with
-										(if edit_distance_action_feature
-											(filter (map
-												(lambda (get (first (current_value)) feature_index) )
-												local_case_reaction_pairs
-											))
-											;else no need to filter nulls since generalized_mean does it automatically
-											(map
-												(lambda (get (first (current_value)) feature_index) )
-												local_case_reaction_pairs
-											)
-										)
-									;for this feature, pull all the 'without' react values, filtering out nulls if edit distance
-									feature_reactions_without
-										(if edit_distance_action_feature
-											(filter (map
-												(lambda (get (last (current_value)) feature_index) )
-												local_case_reaction_pairs
-											))
-											;else no need to filter nulls since generalized_mean does it automatically
-											(map
-												(lambda (get (last (current_value)) feature_index) )
-												local_case_reaction_pairs
-											)
-										)
-								))
-
-								(if edit_distance_action_feature
-									(let
-										(assoc
-											;create lists of 1's with appropriate sizes
-											weights_with (range 1 1 (size feature_reactions_with) 1)
-											weights_without (range 1 1 (size feature_reactions_without) 1)
-											mixes (list)
-											num_mixes 30
-										)
-
-										;mix all the with and all the without, take difference between them; do it num_mixes times
-										(assign (assoc
-											mixes
-												||(range
-													(lambda (let
-														(assoc
-															mixed_with
-																(call !CombineCode (assoc
-																	sources feature_reactions_with
-																	weights weights_with
-																	code_feature_attributes_map code_feature_attributes_map
-																))
-															mixed_without
-																(call !CombineCode (assoc
-																	sources feature_reactions_without
-																	weights weights_without
-																	code_feature_attributes_map code_feature_attributes_map
-																))
-														)
-														(list
-															(edit_distance mixed_with mixed_without code_feature_attributes_map)
-															(difference mixed_with mixed_without)
-														)
-													))
-													1 num_mixes 1
-												)
-										))
-
-										;mixes is a list of pairs,
-										;collapse into a single pair by averaging out column 1 and column 2 separately
-										(list
-											(/ (apply "+" (map (lambda (first (current_value))) mixes)) num_mixes)
-											;TODO: 17356, roll up/average out differences
-											(/ (apply "+" (map (lambda (last (current_value))) mixes)) num_mixes)
-										)
-									)
-
-									;else average with - average without for this feature
-									(list
-										(abs (-
-											(generalized_mean feature_reactions_with)
-											(generalized_mean feature_reactions_without)
-										))
-										(-
-											(generalized_mean feature_reactions_with)
-											(generalized_mean feature_reactions_without)
-										)
-									)
-								)
-
-							))
-							all_context_features
-						)
 					))
 					case_ids
 				)
@@ -545,6 +355,7 @@
 	;to compute the average delta for the predicted action feature.
 	;Sets feature_contributions_map.
 	#!RunFullContributions
+	!RunFullContributions
 	(assign (assoc
 		feature_contributions_map
 			;for each feature, iterate over the cases to average out the delta between reactions with and without the feature
@@ -591,76 +402,8 @@
 										)
 									)
 
-									;Labeled as a helper method so that feature contributions can be computed on a per-case basis provided the following parameters:
-									;  case_id: id of case for which to compute robust contributions
-									;  case_values_map: all the feature values from the case
-									;  action_feature: feature for which to compute contributions
-									;  filtered_context_features: list of features to use as context features for each react
-									;  action_is_nominal: flag, should be true if action_feature is nominal
-									;  hyperparam_map: optional custom hyperparameter map, specifying which hyperparameters to use for the react
-									;and thus can be used in individual react details to compute feature contributions for a specific case.
-									#!ComputeFullContributionForCase
-									(let
-										(assoc
-											reaction_with
-												(call !ContributionReact (assoc
-													context_features (append filtered_context_features feature)
-												))
-											reaction_without
-												(call !ContributionReact (assoc
-													context_features filtered_context_features
-												))
-											correct_value
-												(if action_is_nominal
-													(get case_values_map action_feature)
-												)
-										)
-
-										;compute delta
-										(if action_is_nominal
-											(let
-												(assoc
-													with_prob (+ (or (get reaction_with (list "categorical_action_probabilities" action_feature correct_value)) ))
-													without_prob (+ (or (get reaction_without (list "categorical_action_probabilities" action_feature correct_value)) ))
-												)
-
-												(list
-													(abs
-														(- with_prob without_prob )
-													)
-													(- with_prob without_prob)
-												)
-											)
-
-											;not nominal. treat as continuous, but could be edit distance
-											(if edit_distance_action_feature
-												(list
-													(edit_distance
-														(get reaction_with (list "action_values" 0))
-														(get reaction_without (list "action_values" 0))
-														code_feature_attributes_map
-													)
-													;TODO: 17356, deal with averaging out differences
-													(difference
-														(get reaction_with (list "action_values" 0))
-														(get reaction_without (list "action_values" 0))
-													)
-												)
-
-												;else continuous, output pair of [absolute, non-absolute] delta
-												(list
-													(abs (-
-														(get reaction_with (list "action_values" 0))
-														(get reaction_without (list "action_values" 0))
-													))
-													(-
-														(get reaction_with (list "action_values" 0))
-														(get reaction_without (list "action_values" 0))
-													)
-												)
-											)
-										)
-									)
+									;inline call to !ComputeFullContributionForCase to output a pair of absolute and non-absolute delta
+									@(target .true "!ComputeFullContributionForCase")
 								))
 								(if !tsTimeFeature
 									;if TS, only use the cases that can be evaluted for the feature contributions are being measured for
@@ -701,6 +444,7 @@
 	;specifically needs case_values_map, action feature, action_is_nominal, case_id, etc
 	;context_features should be passed alongside the call to this method.
 	#!ContributionReact
+	!ContributionReact
 	(if (not derive_action_feature)
 		;simply react if no need to derive
 		(call !ReactDiscriminative (assoc
@@ -755,4 +499,287 @@
 		)
 	)
 
-)
+	;for this local case, run num_robust_prediction_contributions_samples_per_case reacts and output a list of pairs of [reacts_with_feature, reacts_without_feature]
+	;Example output of a *single* react execution for a 4 feature dataset where the react value was 0.75 and it only used 'a' and 'd' as contexts:
+	; [
+	;	 [ .75 (null) (null) .75 ]  ;values for the 'with' context features, list corresponding to features a through d
+	;	 [ (null) .75 .75 (null) ]  ;values for the 'without' features, list corresponding to features a through d
+	; ]
+	;
+	;helper method so that local_case_reaction_pairs can be computed on a per-case basis provided the following parameters:
+	;  case_id: id of case for which to compute robust contributions
+	;  correct_value: correct action_feature value from the case_id
+	;  case_values_map: all the feature values from the case
+	;  action_feature: feature for which to compute contributions
+	;  context_features: list of features from which to select a robust set to use as context features for each react
+	;  num_robust_prediction_contributions_samples_per_case: total number of robust reacts to run on this case
+	;  hyperparam_map: optional custom hyperparameter map, specifying which hyperparameters to use for the react
+	;and thus can be used in individual react details to compute feature contributions for a specific case.
+	#!ComputeRobustContributionReactsPerCase
+	!ComputeRobustContributionReactsPerCase
+	(assign (assoc
+		local_case_reaction_pairs
+			(range
+				(lambda (let
+					(assoc
+						;list of remaining filtered context features
+						filtered_context_features (list)
+						;set of all removed features
+						without_features_set (assoc)
+						with_features_set (assoc)
+						react_value 0
+						reaction (null)
+					)
+
+					;filter out a random number of context features
+					(assign (assoc
+						filtered_context_features
+							(rand
+								context_features
+								;number of features to enable is probabilistically weighted
+								(if (and !tsTimeFeature (!= (size context_features) num_features))
+									(rand
+										(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
+									)
+
+									(rand enabled_num_features_probability_map)
+								)
+								;unique random features (not with replacement)
+								.true
+							)
+					))
+
+					;assoc of all removed features to their residual values
+					(assign (assoc
+						without_features_set
+								;filter the action features to be those that are not context features, feature/context_features params may overlap
+								(remove (zip all_context_features) filtered_context_features)
+					))
+
+					(if derive_action_feature
+						(declare (assoc
+							features_to_predict_for_derivation (filter (lambda (not (contains_value filtered_context_features (current_value)))) features_for_derivation)
+						))
+					)
+
+					(assign (assoc
+						reaction
+							(call !ContributionReact (assoc
+								context_features filtered_context_features
+							))
+						with_features_set (zip filtered_context_features)
+					))
+
+					(assign (assoc
+						react_value
+							(if action_is_nominal
+								(+ (or
+									(get reaction (list "categorical_action_probabilities" action_feature correct_value))
+								))
+
+								(get reaction (list "action_values" 0))
+							)
+					))
+
+					;output a pair of two lists, each of the two list is the length of context_features
+					; (list (list react_values_with_feature_as_context) (list react_values_without_feature_as_context))
+					(list
+						;all context features with this react_value as the 'with' list
+						(map
+							(lambda
+								(if (contains_index with_features_set (current_value)) react_value)
+							)
+							all_context_features
+						)
+
+						;all removed features with this react_value as the 'without' list
+						(map
+							(lambda
+								(if (contains_index without_features_set (current_value)) react_value)
+							)
+							all_context_features
+						)
+					)
+				))
+				1 num_robust_prediction_contributions_samples_per_case 1
+			)
+	))
+
+
+	;helper method to output a list of feature contribution values on a per-case basis provided the following parameters:
+	;  local_case_reaction_pairs: list of pairs of [reacts_with_feature, reacts_without_feature]
+	;  context_features: list of features to use as robust context features
+	;and thus can be used in individual react details to compute feature contributions for a specific case.
+	#!ComputeRobustWithAndWithoutDeltaPerCase
+	!ComputeRobustWithAndWithoutDeltaPerCase
+	(map
+		(lambda (let
+			(assoc feature_index (current_index 1))
+
+			(declare (assoc
+				;for this feature, pull all the 'with' react values, filtering out nulls if edit distance
+				feature_reactions_with
+					(if edit_distance_action_feature
+						(filter (map
+							(lambda (get (first (current_value)) feature_index) )
+							local_case_reaction_pairs
+						))
+						;else no need to filter nulls since generalized_mean does it automatically
+						(map
+							(lambda (get (first (current_value)) feature_index) )
+							local_case_reaction_pairs
+						)
+					)
+				;for this feature, pull all the 'without' react values, filtering out nulls if edit distance
+				feature_reactions_without
+					(if edit_distance_action_feature
+						(filter (map
+							(lambda (get (last (current_value)) feature_index) )
+							local_case_reaction_pairs
+						))
+						;else no need to filter nulls since generalized_mean does it automatically
+						(map
+							(lambda (get (last (current_value)) feature_index) )
+							local_case_reaction_pairs
+						)
+					)
+			))
+
+			(if edit_distance_action_feature
+				(let
+					(assoc
+						;create lists of 1's with appropriate sizes
+						weights_with (range 1 1 (size feature_reactions_with) 1)
+						weights_without (range 1 1 (size feature_reactions_without) 1)
+						mixes (list)
+						num_mixes 30
+					)
+
+					;mix all the with and all the without, take difference between them; do it num_mixes times
+					(assign (assoc
+						mixes
+							||(range
+								(lambda (let
+									(assoc
+										mixed_with
+											(call !CombineCode (assoc
+												sources feature_reactions_with
+												weights weights_with
+												code_feature_attributes_map code_feature_attributes_map
+											))
+										mixed_without
+											(call !CombineCode (assoc
+												sources feature_reactions_without
+												weights weights_without
+												code_feature_attributes_map code_feature_attributes_map
+											))
+									)
+									(list
+										(edit_distance mixed_with mixed_without code_feature_attributes_map)
+										;TODO: 17356, determine how to handle difference of code as a single value
+										(edit_distance mixed_with mixed_without code_feature_attributes_map)
+									)
+								))
+								1 num_mixes 1
+							)
+					))
+
+					;mixes is a list of pairs,
+					;collapse into a single pair by averaging out column 1 and column 2 separately
+					(list
+						(/ (apply "+" (map (lambda (first (current_value))) mixes)) num_mixes)
+						(/ (apply "+" (map (lambda (last (current_value))) mixes)) num_mixes)
+					)
+				)
+
+				;else average with - average without for this feature
+				(list
+					(abs (-
+						(generalized_mean feature_reactions_with)
+						(generalized_mean feature_reactions_without)
+					))
+					(-
+						(generalized_mean feature_reactions_with)
+						(generalized_mean feature_reactions_without)
+					)
+				)
+			)
+
+		))
+		all_context_features
+	)
+
+	;helper method so that full feature contributions can be computed on a per-case basis provided the following parameters:
+	;  case_id: id of case for which to compute robust contributions
+	;  case_values_map: all the feature values from the case
+	;  action_feature: feature for which to compute contributions
+	;  filtered_context_features: list of features to use as context features for each react
+	;  action_is_nominal: flag, should be true if action_feature is nominal
+	;  hyperparam_map: optional custom hyperparameter map, specifying which hyperparameters to use for the react
+	;and thus can be used in individual react details to compute feature contributions for a specific case.
+	#!ComputeFullContributionForCase
+	!ComputeFullContributionForCase
+	(let
+		(assoc
+			reaction_with
+				(call !ContributionReact (assoc
+					context_features (append filtered_context_features feature)
+				))
+			reaction_without
+				(call !ContributionReact (assoc
+					context_features filtered_context_features
+				))
+			correct_value
+				(if action_is_nominal
+					(get case_values_map action_feature)
+				)
+		)
+
+		;compute delta
+		(if action_is_nominal
+			(let
+				(assoc
+					with_prob (+ (or (get reaction_with (list "categorical_action_probabilities" action_feature correct_value)) ))
+					without_prob (+ (or (get reaction_without (list "categorical_action_probabilities" action_feature correct_value)) ))
+				)
+
+				(list
+					(abs
+						(- with_prob without_prob )
+					)
+					(- with_prob without_prob)
+				)
+			)
+
+			;not nominal. treat as continuous, but could be edit distance
+			(if edit_distance_action_feature
+				(list
+					(edit_distance
+						(get reaction_with (list "action_values" 0))
+						(get reaction_without (list "action_values" 0))
+						code_feature_attributes_map
+					)
+					;TODO: 17356, deal with averaging out differences
+					(difference
+						(get reaction_with (list "action_values" 0))
+						(get reaction_without (list "action_values" 0))
+					)
+				)
+
+				;else continuous, output pair of [absolute, non-absolute] delta
+				(list
+					(abs (-
+						(get reaction_with (list "action_values" 0))
+						(get reaction_without (list "action_values" 0))
+					))
+					(-
+						(get reaction_with (list "action_values" 0))
+						(get reaction_without (list "action_values" 0))
+					)
+				)
+			)
+		)
+	)
+
+
+}

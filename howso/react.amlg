@@ -1,9 +1,9 @@
 ;Contains methods for reacting.
-(null
-
+{
 	;Run reacts in a batch, output a an assoc of list of outputs from each individual react.
 	;{long_running .true statistically_idempotent .true read_only .true}
 	#react
+	react
 	(declare
 		;returns {ref "ReactResponse"}
 		(assoc
@@ -61,7 +61,7 @@
 			; If specified must be either length of 1 or num_reacts.
 			case_indices (null)
 			;{type "list"}
-			;see #react for description.  if specified must be length of num_reacts.
+			;see react() for description.  if specified must be length of num_reacts.
 			rand_seed (null)
 			;{ref "DesiredConviction"}
 			;If null, will do a discriminative react. If specified, will do a generative react
@@ -338,6 +338,9 @@
 			;	overwriting the specified context and context features as necessary.  For generative reacts, if case_indices isn't specified,
 			;	will preserve feature values of a random case.
 			preserve_feature_values (list)
+			;{type "list" values "string"}
+			;list of semi-structured features whose values will be mutated, possibly changing their schema in generative reacts. Ignored in discriminative reacts.
+			mutate_schema_features (list)
 			;{type "boolean"}
 			;flag, if set to true and specified along with case_indices, will set ignore_case to the one specified by case_indices.
 			leave_case_out (null)
@@ -376,6 +379,9 @@
 			;{type "boolean"}
 			;flag, if true will return the context values used in the reaction alongside the action values.
 			return_context_values .false
+			;{type "boolean"}
+			;flag, if true, queries will filter out cases with the same fanned out values when predicting the value of a fanout feature.
+			filter_fanout_values .false
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
@@ -444,34 +450,7 @@
 			)
 		)
 
-		#!CheckForIncompletePreservedActionFeatures
-		(if (and
-				(= (null) desired_conviction)
-				(size preserve_feature_values)
-				(size action_features)
-			)
-			(let
-				(assoc
-					preserved_action_features_map (intersect (zip preserve_feature_values) (zip action_features))
-				)
-
-				(if (and
-						(size preserved_action_features_map)
-						(!= preserved_action_features_map (zip action_features))
-					)
-					(conclude
-						(call !Return (assoc
-							errors
-								[(concat
-									"When doing a discriminative react, if any action features are being preserved from a "
-									"trained case using `preserve_feature_values`, "
-									"then all action features should be included in `preserve_feature_values`."
-								)]
-						))
-					)
-				)
-			)
-		)
+		(call !CheckForIncompletePreservedActionFeatures)
 
 		(declare (assoc
 			;if any of these are length of 1, the index will be 0 to pull the values and apply to all reacts
@@ -715,6 +694,7 @@
 	;	See API docs for documentation of all output properties
 	;{long_running .true statistically_idempotent .true read_only .true}
 	#single_react
+	single_react
 	(declare
 		(assoc
 			;{type "list" values "string"}
@@ -767,7 +747,7 @@
 			;			trained into the session. If this case does not exist, discriminative react outputs null, generative react ignores it.
 			case_indices (null)
 			;{ref "ReactDetails"}
-			;see the description of the details parameter of #react
+			;see the description of the details parameter of react()
 			details (null)
 			;{ref "DesiredConviction"}
 			;If null, will do a discriminative react. If specified, will do a generative react
@@ -855,6 +835,9 @@
 			;	overwriting the specified context and context features as necessary.  For generative reacts, if case_indices isn't specified,
 			;	will preserve feature values of a random case.
 			preserve_feature_values (list)
+			;{type "list" values "string"}
+			;list of semi-structured features whose values will be mutated, possibly changing their schema in generative reacts. Ignored in discriminative reacts.
+			mutate_schema_features (list)
 			;{type "boolean"}
 			;flag, default is true, only applicable if a substitution value map has been set. If set to false, will not substitute categorical feature values.
 			; Only used when desired_conviction is specified
@@ -873,6 +856,9 @@
 			;{type "boolean"}
 			;flag, if true will return the context values used in the reaction alongside the action values.
 			return_context_values .false
+			;{type "boolean"}
+			;flag, if true, queries will filter out cases with the same fanned out values when predicting the value of a fanout feature.
+			filter_fanout_values .false
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
@@ -882,22 +868,8 @@
 
 		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
 
-		;if both action_features and derived_action_features are specified,
-		;ensure that derived_action_features are a subset of action_features, then separate the two into distinct lists
-		#!ValidateDerivedActionFeaturesIsSubset
-		(if (and (size action_features) (size derived_action_features))
-			;if derived_action_features isn't a subset of action_features, error out
-			(if (> (size (remove (zip derived_action_features) action_features)) 0)
-				(conclude
-					(call !Return (assoc errors (list "Specified 'derived_action_features' must be a subset of 'action_features'.") ))
-				)
+		(call !ValidateDerivedActionFeaturesIsSubset)
 
-				;else separate  derived_action_features from action_features
-				(assign (assoc
-					action_features (filter (lambda (not (contains_value derived_action_features (current_value)))) action_features)
-				))
-			)
-		)
 		(call !CheckForIncompletePreservedActionFeatures)
 
 		(declare (assoc
@@ -1040,11 +1012,12 @@
 	;Wrapper method for ReactDiscriminative and GenerateCase
 	;note: this method may overwmrite desired_conviction if it's specified along with generate_new_cases=true and the case isn't generated in one attempt
 	;parameters:
-	;  see comment block for #single_react in howso.amlg for details
+	;  see comment block for single_react() in howso.amlg for details
 	;
 	;  for generative flows only, new parameter:
 	;  pre_generated_uniques_map: optional, map of feature -> value for all unique features whose output value has been pre-generated for output
 	#!SingleReact
+	!SingleReact
 	(declare
 		(assoc
 			context_features (list)
@@ -1457,6 +1430,7 @@
 	; has_details: optional flag, if true will prep filtering_queries for details that are based on the output of this reaction
 	;returns: assoc of case (entity) ids -> their distance to react case, and the next_action_chase_case id if there is one
 	#!GenerateReaction
+	!GenerateReaction
 	(declare
 		(assoc
 			custom_extra_filtering_queries (list)
@@ -1570,46 +1544,20 @@
 		)
 
 		(declare (assoc
-			local_data_cases_tuple
-				#!ReactionQuery
-				(compute_on_contained_entities
-					not_null_features_queries
-					;if ignoring null action feature, query for cases where action feature is not null
-					(if ignore_null_action_feature
-						(query_not_equals (first action_features) (null))
-						(null)
-					)
-					dependent_queries_list
-					user_specified_constraints_query
-					(if (size custom_extra_filtering_queries)
-						custom_extra_filtering_queries
-						(null)
-					)
-					(if ignore_case
-						(if focal_case
-							(query_not_in_entity_list (list ignore_case focal_case))
-							(query_not_in_entity_list (list ignore_case))
-						)
-						(null)
-					)
-					(query_nearest_generalized_distance
-						k_parameter
-						context_features
-						context_values
-						(get hyperparam_map "p")
-						feature_weights
-						!queryDistanceTypeMap
-						(get hyperparam_map "featureDomainAttributes")
-						feature_deviations
-						(first action_features) ;used to select the feature weights
-						(get hyperparam_map "dt")
-						(if valid_weight_feature weight_feature (null))
-						tie_break_random_seed
-						(null) ;radius
-						!numericalPrecision
-						(first action_features)
-					)
+			fanout_features_queries
+				(if filter_fanout_values
+					(call !ConstructFanoutFeaturesQueries (assoc
+						predicting_features [(first action_features)]
+						case_id ignore_case
+						;case_value_map is used if ignore_case is null
+						case_value_map (zip context_features context_values)
+					))
 				)
+		))
+
+		(declare (assoc
+			;reference the code in !ReactionQuery
+			local_data_cases_tuple @(target .true "!ReactionQuery")
 		))
 
 		(if goal_features
@@ -1651,15 +1599,19 @@
 
 				;use the global class counts for the feature as the categorical action probabilities
 				(if output_categorical_action_probabilities
-					(call !AccumulateCategoricalActionProbabilties (assoc
-						action_feature (first action_features)
-						categorical_value_weights_map
-							(get !expectedValuesMap [
-								(if valid_weight_feature weight_feature ".none")
-								(first action_features)
-								"class_counts"
-							])
-					))
+					(declare
+						(assoc
+							action_feature (first action_features)
+							categorical_value_weights_map
+								(get !expectedValuesMap [
+									(if valid_weight_feature weight_feature ".none")
+									(first action_features)
+									"class_counts"
+								])
+						)
+						;must call this label because it is defined in a different module and thus cannot be inlined here
+						(call !AccumulateCategoricalActionProbabilties)
+					)
 				)
 
 				exp_value
@@ -1676,11 +1628,55 @@
 		)
 	)
 
+	;macro for the react query used by !GenerateReaction
+	#!ReactionQuery
+	!ReactionQuery
+	(compute_on_contained_entities
+		not_null_features_queries
+		;if ignoring null action feature, query for cases where action feature is not null
+		(if ignore_null_action_feature
+			(query_not_equals (first action_features) (null))
+			(null)
+		)
+		dependent_queries_list
+		user_specified_constraints_query
+		fanout_features_queries
+		(if (size custom_extra_filtering_queries)
+			custom_extra_filtering_queries
+			(null)
+		)
+		(if ignore_case
+			(if focal_case
+				(query_not_in_entity_list (list ignore_case focal_case))
+				(query_not_in_entity_list (list ignore_case))
+			)
+			(null)
+		)
+		(query_nearest_generalized_distance
+			k_parameter
+			context_features
+			context_values
+			(get hyperparam_map "p")
+			feature_weights
+			!queryDistanceTypeMap
+			(get hyperparam_map "featureDomainAttributes")
+			feature_deviations
+			(first action_features) ;used to select the feature weights
+			(get hyperparam_map "dt")
+			(if valid_weight_feature weight_feature (null))
+			tie_break_random_seed
+			(null) ;radius
+			!numericalPrecision
+			(first action_features)
+		)
+	)
+
 	;helper method for React calls that checks marginal, expected value, and residuals caches
 	;requires the following vars on the stack:
 	; hyperparam_map, desired_conviction, weight_feature, use_case_weights
 	; These should be ready if !GetHyperparameters and !UpdateCaseWeightParameters are called beforehand
 	#!PreReactCacheChecks
+	!PreReactCacheChecks
 	(seq
 		;if doing a generative react and global residuals have have not been calculated yet,
 		;recalculate them only if there are enough training cases
@@ -1745,32 +1741,35 @@
 				!tsTimeFeatureUniversal
 				(not (get !tsFeaturesMap "minimum_time_bound"))
 			)
-			;update "minimum_time_bound" which is the stored minimum time value that can be used as an upper bound
-			;in queries when the time feature is universal
-			;needs "hyperparam_map"
-			#!UpdateMinimumTimeBound
-			(assign_to_entities (assoc
-				!tsFeaturesMap
-					(set
-						!tsFeaturesMap
-						["minimum_time_bound"]
-						(retrieve_from_entity
-							(last
-								(contained_entities
-									(query_exists !tsTimeFeature)
-									(query_min
-										!tsTimeFeature
-										(if (~ 0 (get hyperparam_map "k"))
-											(get hyperparam_map "k")
-											(get hyperparam_map ["k" 1])
-										)
-									)
-								)
-							)
-							!tsTimeFeature
-						)
-					)
-			))
+			(call !UpdateMinimumTimeBound)
 		)
 	)
-)
+
+	;update "minimum_time_bound" which is the stored minimum time value that can be used as an upper bound
+	;in queries when the time feature is universal
+	;needs "hyperparam_map"
+	#!UpdateMinimumTimeBound
+	!UpdateMinimumTimeBound
+	(assign_to_entities (assoc
+		!tsFeaturesMap
+			(set
+				!tsFeaturesMap
+				["minimum_time_bound"]
+				(retrieve_from_entity
+					(last
+						(contained_entities
+							(query_exists !tsTimeFeature)
+							(query_min
+								!tsTimeFeature
+								(if (~ 0 (get hyperparam_map "k"))
+									(get hyperparam_map "k")
+									(get hyperparam_map ["k" 1])
+								)
+							)
+						)
+					)
+					!tsTimeFeature
+				)
+			)
+	))
+}
