@@ -267,6 +267,54 @@
 		)
 
 		(declare (assoc
+			all_valid_features_map
+				(append
+					(call !AllValidFeaturesSet (assoc output_built_ins .true))
+					(zip !trainedFeatures)
+				)
+		))
+		(declare (assoc
+			code_errors
+				(filter (map
+					(lambda
+						(call !ValidateDerivedCodeForFeatures (assoc
+							code (current_value 1)
+							feature (current_index 1)
+							attribute_type "'feature_to_code_map'"
+						))
+					)
+					features_to_code_map
+				))
+		))
+		(if (!= (null) aggregation_code)
+			(let
+				(assoc
+					agg_code_errors
+						(filter {
+							""
+							(call !ValidateDerivedCodeForFeatures (assoc
+								code aggregation_code
+								feature (null)
+								attribute_type "'aggregation_code'"
+							))
+						})
+				)
+
+				(if (size agg_code_errors)
+					(accum (assoc code_errors agg_code_errors ))
+				)
+			)
+		)
+		(if (size (filter (lambda (size (current_value))) code_errors))
+			(conclude
+				(call !Return (assoc
+					errors (apply "append" (values code_errors))
+				))
+			)
+		)
+
+
+		(declare (assoc
 			has_aggregation (!= (null) aggregation_code)
 			case_ids (call !AllCases)
 		))
@@ -801,4 +849,204 @@
 			))
 		)
 	)
+
+	;output a set of all valid features that can be used in this dataset by appending all
+	;valid built-in features, specified features from feature_attributes and all possible derived time series features
+	#!AllValidFeaturesSet
+	!AllValidFeaturesSet
+	(let
+		(assoc
+			built_ins
+				[
+					".reverse_series_index"
+					".time_to_horizon"
+					".synchronous_counter"
+					".series_index"
+					".case_weight"
+					".session"
+					".session_training_index"
+					".imputed"
+					".case_edit_history"
+					".influence_weight_entropy"
+					".probability_mass"
+					".cluster_id"
+				]
+		)
+
+		(if output_built_ins
+			(conclude (zip built_ins))
+		)
+
+		(declare (assoc
+			ts_features
+				(if (size time_series_feature)
+					(apply "append"
+						(filter (map
+							(lambda
+								(if (contains_index (current_value) "time_series")
+									(let
+										(assoc
+											order (or (get (current_value 1) ["time_series" "order"]) 1)
+											has_rate (= "rate" (get (current_value 1) ["time_series" "type"]))
+											lags
+												(or
+													(get (current_value 1) ["time_series" "lags"])
+													(range
+														1
+														(or (get (current_value 1) ["time_series" "num_lags"]) 1)
+													)
+												)
+											prefix (concat "." (current_index 1) "_")
+										)
+
+										(append
+											(range
+												(lambda (concat prefix "delta_" (current_index)))
+												1 order 1
+											)
+											(if has_rate
+												(range
+													(lambda (concat prefix "rate_" (current_index)))
+													1 order 1
+												)
+												[]
+											)
+											(map
+												(lambda (concat prefix "lag_" (current_value)))
+												lags
+											)
+										)
+									)
+								)
+							)
+							feature_attributes
+						))
+					)
+					;else set to empty list
+					[]
+				)
+		))
+
+		;output the set
+		(zip (append built_ins (indices feature_attributes) ts_features) )
+	)
+
+
+	;helper method to validate all possible derived feature code strings from feature_attributes
+	;outputs an assoc of feature -> list of parse/derive errors, if any are found
+	#!FeatureAttributeCodeValidation
+	!FeatureAttributeCodeValidation
+	(let
+		(assoc
+			all_valid_features_map (call !AllValidFeaturesSet)
+		)
+
+		(filter (map
+			(lambda (if
+				(or
+					(contains_index custom_derived_features_map (current_index))
+					(contains_index constraint_referenced_features_map (current_index))
+					(contains_index post_process_map (current_index))
+				)
+				;it's possible for a feature to have all these attributes defined
+				;check all for each feature and append any errors
+				(filter (append
+					(if (contains_index constraint_referenced_features_map (current_index))
+						(call !ValidateDerivedCodeForFeatures (assoc
+							code (get (current_value 1) ["bounds" "constraint"])
+							feature (current_index 1)
+							attribute_type "'bounds'->'constraint'"
+						))
+					)
+					(if (contains_index post_process_map (current_index))
+						(call !ValidateDerivedCodeForFeatures (assoc
+							code (get (current_value 1) "post_process")
+							feature (current_index 1)
+							attribute_type "'post_process'"
+						))
+					)
+					(if (and
+							(contains_index custom_derived_features_map (current_index))
+							(contains_index (current_value) "derived_feature_code")
+						)
+						(call !ValidateDerivedCodeForFeatures (assoc
+							code (get (current_value 1) "derived_feature_code")
+							feature (current_index 1)
+							attribute_type "'derived_feature_code'"
+						))
+					)
+					(if (and
+							(contains_index custom_derived_features_map (current_index))
+							(contains_index (current_value) "auto_derive_on_train")
+							(get (current_value) ["auto_derive_on_train" "code"])
+						)
+						(call !ValidateDerivedCodeForFeatures (assoc
+							code (get (current_value 1) ["auto_derive_on_train" "code"])
+							feature (current_index 1)
+							attribute_type "'auto_derive_on_train'->'code'"
+						))
+					)
+				))
+			))
+			feature_attributes
+		))
+	)
+
+	;helper method that outputs any parse or invalid feature errors for a specified code string
+	;parameters:
+	; feature: string, name of feature
+	; code: string of custom code to parse and validate
+	; attribute_type: string, the feature attribute for the code string is being validated to add to output to error
+	;				i.e., 'constraint' or 'derived_feature_code' or 'post_process'
+	#!ValidateDerivedCodeForFeatures
+	!ValidateDerivedCodeForFeatures
+	(declare
+		(assoc
+			code ""
+			attribute_type ""
+			feature (null)
+		)
+
+		;accumulate any basic parse errors, such as mismatching parenthesis
+		(declare (assoc
+			errors
+				(zip (map
+					(lambda (concat attribute_type " " (current_value)) )
+					(last
+						(parse code .false .true)
+					)
+				))
+			feature_str (if feature (concat feature ": ") "")
+		))
+
+		;accumulate any invalid feature references, i.e., typos in feature names or features that are not in the dataset
+		(rewrite
+			(lambda
+				;if it's a string, check if it's a feature name
+				(if (and
+						(~ "" (current_value))
+						;if node 2 levels up is: (call value {feature "<current_value>"}) then (current_value) is referencing a feature
+						(=
+							(unparse (current_value 2))
+							(concat "(call value {feature \"" (current_value) "\"})")
+						)
+						(not (contains_index all_valid_features_map (current_value)))
+					)
+					(accum (assoc
+						errors (associate (concat attribute_type " references an invalid feature name " (unparse (current_value 2)) " "))
+					))
+				)
+			)
+			(parse code)
+		)
+
+		;output accumulated errors
+		(if (size errors)
+			(map
+				(lambda (concat feature_str (current_value)))
+				(indices errors)
+			)
+		)
+	)
+
 }
