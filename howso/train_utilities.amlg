@@ -1,13 +1,13 @@
 ;Contains methods for training (input of data into the trainee).
-(null
-
+{
 	;private helper method that checks if the conditions for auto-analyze are met, and calls the analyze if so
-	;this method should be called within #train
+	;this method should be called within train()
 	;
 	;parameters:
 	; skip_auto_analyze: flag, if true and auto-analyze is needed, then status_output will be assigned to "analyze".
 	;                    If false, and auto-analyze is needed, the analyze will be executed.
 	#!AutoAnalyzeIfNeeded
+	!AutoAnalyzeIfNeeded
 	(if (>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
 		(if skip_auto_analyze
 			;if skip_auto_analyze, send back "analyze" status so users knows an analyze is needed/recommended
@@ -43,6 +43,7 @@
 	;parameters:
 	; features_weights_map: assoc of feature -> weight to overwrite in all hyperparameter sets
 	#!SetInactiveFeatureWeights
+	!SetInactiveFeatureWeights
 	(declare
 		(assoc
 			features_weights_map (assoc)
@@ -127,6 +128,7 @@
 	;Helper method for training, updates null flags and resets dataset level attributes based on the data such as
 	;dataset case entropies, marginal stats, expected values, etc.
 	#!ClearCachedDataProperties
+	!ClearCachedDataProperties
 	(seq
 		(accum_to_entities (assoc
 			!featureNullRatiosMap
@@ -150,19 +152,22 @@
 		))
 
 		;dataset has changed so clear out these cached value
-		#!ClearCachedCountsAndEntropies
-		(assign_to_entities (assoc
-			!averageCaseEntropyAddition (null)
-			!averageCaseEntropyRemoval (null)
-			!storedCaseConvictionsFeatureAddition (null)
-			!averageCaseDistanceContribution (null)
-			!staleOrdinalValuesCount .true
-			!nominalClassProbabilitiesMap (assoc)
-			!expectedValuesMap (assoc)
-			!featureMarginalStatsMap (assoc)
-			!tsModelFeaturesMap (set !tsFeaturesMap ["minimum_time_bound"] (null))
-		))
+		(call !ClearCachedCountsAndEntropies)
 	)
+
+	#!ClearCachedCountsAndEntropies
+	!ClearCachedCountsAndEntropies
+	(assign_to_entities (assoc
+		!averageCaseEntropyAddition (null)
+		!averageCaseEntropyRemoval (null)
+		!storedCaseConvictionsFeatureAddition (null)
+		!averageCaseDistanceContribution (null)
+		!staleOrdinalValuesCount .true
+		!nominalClassProbabilitiesMap (assoc)
+		!expectedValuesMap (assoc)
+		!featureMarginalStatsMap (assoc)
+		!tsModelFeaturesMap (set !tsFeaturesMap ["minimum_time_bound"] (null))
+	))
 
 	;Helper method to prime query caches for all !trainedFeatures and update the !inactiveFeaturesMap
 	;parameters:
@@ -170,6 +175,7 @@
 	;		being edited and thus !inactiveFeaturesMap may be being added to or removed from and
 	;		all the features are already defined in hyperparameters.
 	#!UpdateInactiveFeatures
+	!UpdateInactiveFeatures
 	(declare
 		(assoc editing_existing_cases .false )
 
@@ -275,6 +281,7 @@
 
 	;sub method to compute and output rebalance case weights for provided rebalance_cases if there are rebalance features defined
 	#!ComputeRebalanceCaseWeights
+	!ComputeRebalanceCaseWeights
 	(let
 		(assoc
 			hyperparam_map
@@ -428,6 +435,7 @@
 
 	;Helper method that computes Computed features specified by react_into_features (e.g., distance_contribution) everytime a case is trained
 	#!ComputeFeaturesDuringTrain
+	!ComputeFeaturesDuringTrain
 	(let
 		(assoc
 			hyperparam_map
@@ -754,4 +762,141 @@
 		)
 	)
 
-)
+	;helper method used during training to compute and update dependent feature relationship maps
+	#!UpdateDependentFeaturesMaps
+	!UpdateDependentFeaturesMaps
+	(let
+		(assoc
+			dependents_boundary_map (assoc)
+			dependent_values_combinations_map (assoc)
+		)
+
+		(if (size !continuousToNominalDependenciesMap)
+			(seq
+				(map
+					(lambda (let
+						(assoc
+							dependent_nominals (current_value 1)
+							continuous_feature (current_index 1)
+						)
+
+						;creates a nested map of:  value -> (optional nested layers values) -> valid ranges, for each unique combination
+						(declare (assoc
+							dependents_combinations_map
+								(call !ComputeDependentBoundaries (assoc
+									nominals dependent_nominals
+									value_feature continuous_feature
+									value_feature_nulls_are_dependent (get !featureAttributes [continuous_feature "null_is_dependent"])
+								))
+						))
+
+						;creates a list of all unique valid nominal value combinations, e.g., [ ['heartrate' 'bpm'] ['xray' 'mSv'] ... ]
+						(declare (assoc
+							dependent_values_combinations
+								(apply "append" (values
+									(call !AccumulateDependentValuesCombinations (assoc
+										nested_value_combinations_map dependents_combinations_map
+										values_lists []
+									))
+								))
+						))
+
+						(accum (assoc
+							dependents_boundary_map (associate continuous_feature dependents_combinations_map)
+							dependent_values_combinations_map (associate continuous_feature dependent_values_combinations)
+						))
+					))
+					!continuousToNominalDependenciesMap
+				)
+
+				(assign_to_entities (assoc
+					!dependentsBoundaryMap dependents_boundary_map
+					!dependentValuesCombinationsMap dependent_values_combinations_map
+				))
+			)
+		)
+	)
+
+	;helper method used during training to update session entity and !trainedFeatures
+	#!UpdateSessionAndFeaturesAfterTrain
+	!UpdateSessionAndFeaturesAfterTrain
+	(if (> (size new_case_ids ) 0)
+		(let
+			(assoc
+				new_features (remove (zip features) !trainedFeatures)
+				dataset_size (+ num_cases (size new_case_ids))
+			)
+
+			(accum (assoc trained_instance_count (size new_case_ids)))
+
+			;add action to the existing replay data
+			(accum_to_entities session (assoc
+				".replay_steps" new_case_ids
+				".trained_instance_count" (size new_case_ids)
+				".indices_map"
+					(zip
+						(range next_trained_index (+ next_trained_index (size new_case_ids) -1))
+						new_case_ids
+					)
+			))
+
+
+			;if any of the trained features are not defined in feature attributes, add them as continuous_numeric with default attributes
+			(if (size new_features)
+				(seq
+					(accum (assoc
+						warnings
+							(associate (concat
+								"The following features trained were previously undefined: "
+								(apply "concat" (trunc (weave (indices new_features) ", "))) ". "
+								"They have been trained and assumed to be numeric and continuous. "
+								"Please update the feature attributes if they are known."
+							))
+					))
+					(accum_to_entities (assoc
+						!featureAttributes
+							(map
+								(lambda (assoc "type" "continuous" "bounds" (assoc "allow_null" .true) ))
+								new_features
+							)
+						!queryDistanceTypeMap (map (lambda "continuous_number") new_features)
+					))
+					(assign_to_entities (assoc
+						!trainedFeatures (sort (values (append !trainedFeatures (indices !featureAttributes)) .true) )
+						!trainedFeaturesContextKey
+							(call !BuildContextFeaturesKey (assoc
+								context_features (values (append !trainedFeatures (indices !featureAttributes)) .true)
+							))
+					))
+					(call !UpdateDefinedFeatures)
+				)
+			)
+
+			(call !UpdateRegionalMinSize)
+
+			;update cached data properties such as has_nulls, null ratios, marginal stats, average dataset case entropies, etc
+			(call !ClearCachedDataProperties)
+		)
+	)
+
+	;helper macro for creating an empty session
+	;overwrites the session variable in case creating a new session without a name
+	#!CreateEmptySession
+	!CreateEmptySession
+	(assign (assoc
+		session
+			(first (create_entities session
+				{
+					".replay_steps" []
+					".indices_map" {}
+					;total count of cases trained
+					".trained_instance_count" 0
+					;total count of cases observed (incl ablated, trained as weights, etc)
+					".total_instance_count" 0
+					".next_trained_index" 0
+					".metadata" {}
+				}
+			))
+	))
+
+}

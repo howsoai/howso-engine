@@ -53,7 +53,7 @@ To create your own tests, we recommend creating a new Amalgam script in the `uni
 also recommended to use the following code at the beginning of the test:
 
 ```
-#unit_test (direct_assign_to_entities (assoc unit_test (load "unit_test.amlg")))
+(assign_to_entities (load "unit_test.amlg"))
 (call (load "unit_test_howso.amlg") (assoc name "ut_your_custom_test_name.amlg"))
 ```
 
