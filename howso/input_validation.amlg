@@ -1,7 +1,6 @@
 ;Contains helper methods for validating user-defined parameters
 {
 	;helper method to return an error if a given feature name is not valid
-	#!SingleFeatureCheck
 	!SingleFeatureCheck
 	(declare
 		(assoc
@@ -26,7 +25,6 @@
 	)
 
 	;helper method to return an error if a given feature name is not valid
-	#!MultipleFeatureCheck
 	!MultipleFeatureCheck
 	(declare
 		(assoc
@@ -64,7 +62,6 @@
 
 	;helper method to validate specified batch react parameters are either length of num_reacts or 1
 	; if the aren't, sets the variable invalid_react_parameters to .true
-	#!ValidateBatchReactParameter
 	!ValidateBatchReactParameter
 	(if (and
 			(> (size param) 0)
@@ -78,7 +75,6 @@
 		)
 	)
 
-	#!ValidateFeatures
 	!ValidateFeatures
 	(let
 		(assoc
@@ -98,7 +94,6 @@
 	;Verifies that feature parameters do not contain untrained features
 	; this method checks context_features, action_features, and action feature
 	; returns a list of strings, one for each invalid parameter
-	#!CheckForUntrainedFeatures
 	!CheckForUntrainedFeatures
 	(declare
 		(assoc
@@ -172,7 +167,6 @@
 		errors
 	)
 
-	#!UpdateDefinedFeatures
 	!UpdateDefinedFeatures
 	(assign_to_entities (assoc
 		!definedFeatures
@@ -190,7 +184,6 @@
 	;Validates input maps for conditions (and goal feature maps)
 	;verifies that the indices are either trained features (or built-in features)
 	;returns (null) if no error, string error if input is invalid
-	#!ValidateConditionMap
 	!ValidateConditionMap
 	(declare
 		(assoc
@@ -214,7 +207,6 @@
 	)
 
 	;Macro for validating the `goal_features_map` parameter for labels that accept it
-	#!ValidateGoalFeaturesMap
 	!ValidateGoalFeaturesMap
 	(if (size goal_features_map)
 		(let
@@ -236,7 +228,6 @@
 	)
 
 	;Macro for validating the `condition` parameter for labels that accept it
-	#!ValidateCondition
 	!ValidateCondition
 	(if (size condition)
 		(let
@@ -258,7 +249,6 @@
 	)
 
 	;Macro for validating the `constraints` parameter for labels that accept it
-	#!ValidateConstraints
 	!ValidateConstraints
 	(if (size constraints)
 		(let
@@ -289,7 +279,6 @@
 	;
 	;parameters:
 	; single_series: indicates if the method is called for a single series (from single_react_series()) or for multiple series (from react_series())
-	#!ValidateDateTimeInputs
 	!ValidateDateTimeInputs
 	(let
 		(assoc
@@ -397,7 +386,6 @@
 	; datetime_feature: the name of the feature being checked
 	; datetime_string: the string datetime value whose format is being verified
 	; parameter_name: the name of the parameter whose value is being checked, used in the error message
-	#!CheckDateTimeFormat
 	!CheckDateTimeFormat
 	(seq
 		(assign (assoc
@@ -434,20 +422,19 @@
 	)
 
 	;helper method that builds a map of label name to map of parameter name to type specification.
-	;assigns the resulting map to !parameterValidationMap, which is used in !ValidateParameters()
+	;assigns the resulting map to !parsedParameterTypes, which is used in !ValidateParameters()
 	;this should *only* be called within initialize[_for_deployment()]
 	;no parameters
-	#!BuildParameterValidationMap
 	!BuildParameterValidationMap
 	(let
 		(assoc invalid_type_hints (list))
 		(declare (assoc
-			param_validation_map
-				(map
+			memoized_parsed_types
+				(apply "append" (values (map
 					(lambda
 						;when debugging, comments are injected to all lines, these must be removed
 						;some parameters may have comments other than the type hint as well
-						(map
+						(apply "append" (values (map
 							;(current_value) is a tuple of [comments of parameter, default value]
 							(lambda
 								(let
@@ -464,29 +451,24 @@
 									; (print method_name "-" parameter_name "\n")
 
 									(assign (assoc
-										typing_map
-											;regex to just capture the {} information, debugger adds more and there can be other comments on the parameters
-											(parse (substr parameter_comment "\\{.+\\}"))
+										;regex to just capture the {} information, debugger adds more and there can be other comments on the parameters
+										typing_map (parse (substr parameter_comment "\\{.+\\}"))
 									))
 
 									;uses typing_map, method_name, and parameter_name. accums to invalid_type_hints
 									(call !CheckTypingMap)
 
-									;return the typing map with default/optional added
-									(append
-										typing_map
-										(assoc
-											default default_value
-										)
-									)
+									;return an assoc of the string to the parsed type to be appended all together with
+									;the rest
+									(associate parameter_comment typing_map)
 								)
 							)
 							;first item is the assoc of parameter names to comments/default value
-							(first (get_entity_comments (null) (current_index) .true))
-						)
+							(first (get_entity_annotations (null) (current_index) .true))
+						)))
 					)
-					(get_entity_comments (null) (null) .true)
-				)
+					(get_entity_annotations (null) (null) .true)
+				)))
 		))
 
 		;also need to check the CustomTypes schemas
@@ -505,12 +487,11 @@
 			;return list of invalid type hints
 			invalid_type_hints
 
-			(assign_to_entities (assoc !parameterValidationMap param_validation_map ))
+			(assign_to_entities (assoc !parsedParameterTypes memoized_parsed_types ))
 		)
 	)
 
 	;helper method to check typingmap
-	#!CheckTypingMap
 	!CheckTypingMap
 	(seq
 		(if (= (null) typing_map)
@@ -572,21 +553,20 @@
 		)
 	)
 
-	;Method that uses !parameterValidationMap to get the appropriate typing specification for each parameter of the called label
+	;Method that uses !parsedParameterTypes to get the appropriate typing specification for each parameter of the called label
 	;and uses this specification to validate the parameter values given as defaults or by the user.
 	;no parameters, but inspects the parameters passed along the label this method was called from.
-	#!ValidateParameters
 	!ValidateParameters
 	(declare
 		(assoc
-			;this automatically determines the label/method that this method is being called within
-			label_name (get_annotations (opcode_stack 5 .true))
 			;the args passed to the method above
 			given_parameters (args 1)
+			;the list of parameters defined for this endpoint
+			defined_parameter_map (get (opcode_stack 5) 0)
 		)
 
 		(declare (assoc
-			undefined_parameters (indices (remove given_parameters (indices (get !parameterValidationMap label_name))))
+			undefined_parameters (indices (remove given_parameters (indices defined_parameter_map) ))
 		))
 
 		(if (size undefined_parameters)
@@ -595,7 +575,7 @@
 					error_code "invalid"
 					errors
 						(list (concat
-							"The following given parameters are not supported for \"" label_name "\": "
+							"The following given parameters are not supported: "
 							(apply
 								"concat"
 								(trunc (weave
@@ -616,11 +596,12 @@
 			parameter_validity_map
 				(map
 					(lambda
+						;(current_value) is a tuple of [comments of parameter, default value]
 						(let
 							(assoc
 								parameter_name (current_index 1)
-								specification (current_value 1)
-								exp_type (get (current_value 1) "type")
+								specification (get !parsedParameterTypes (get_annotations (current_value 1)))
+								exp_type (get !parsedParameterTypes [(get_annotations (current_value 2)) "type"])
 								given_value (get (args 1) (current_index 1))
 							)
 
@@ -628,7 +609,8 @@
 							@(target .true "!SingleTypeCheck")
 						)
 					)
-					(get !parameterValidationMap label_name)
+					;this is the assoc of parameters for the called method
+					defined_parameter_map
 				)
 		))
 
@@ -663,7 +645,6 @@
 
 	;macro used by !ValidateParameters to check a single type
 	;requires exp_type, specification, given_value
-	#!SingleTypeCheck
 	!SingleTypeCheck
 	(seq
 		(if (contains_index specification "ref")
@@ -1029,7 +1010,6 @@
 	)
 
 	;macro that checks the details assoc for any defined errors and returns them
-	#!CheckDetailsForErrors
 	!CheckDetailsForErrors
 	(if (size details)
 		(seq
