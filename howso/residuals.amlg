@@ -615,6 +615,7 @@
 				)
 			;list, length of case_ids, each item will be a list of residual values, one per feature
 			case_residuals_lists (list)
+			dbl_precision_epsilon (call !ComputePrecisionEpsilon)
 		))
 
 		;iterate over each case and accumulate residuals for all the feature(s)
@@ -758,6 +759,12 @@
 								)
 						))
 
+						;reference the code in !ExpandLocalWhenAllEquidistant to ensure to expand the local data to
+						;include all equidistant cases if they are all equidistant
+						(if local_cases_map
+							@(target .true "!ExpandLocalWhenAllEquidistant")
+						)
+
 						;create a map of removed feature -> residual value for each removed feature
 						(assign (assoc
 							removed_features_map
@@ -843,6 +850,92 @@
 			)
 		))
 		features
+	)
+
+	;helper method to expand local data if all cases there are equidistant
+	!ExpandLocalWhenAllEquidistant
+	(let
+		(assoc
+			ratio_closest_to_farthest
+				(/
+					(apply "max" (values local_cases_map) )
+					(apply "min" (values local_cases_map) )
+				)
+		)
+		;if closest and farthest are essentially same (or 0), expand search
+		(if (or (< ratio_closest_to_farthest 1.00001) (= (null) ratio_closest_to_farthest))
+			(let
+				(assoc
+					local_data_pair
+						;rerun the query, but this time output as sorted list of distances/surprisals instead of inv distances/probabilities
+						(compute_on_contained_entities
+							(if focal_case
+								(query_not_in_entity_list (list (replace case_id) (replace focal_case)))
+								(query_not_in_entity_list (list (replace case_id)))
+							)
+							(if (size context_condition_filter_query)
+								context_condition_filter_query
+								(list)
+							)
+							dependent_queries_list
+							time_series_filter_query
+							fanout_features_queries
+							(query_nearest_generalized_distance
+								1
+								(replace react_context_features)
+								(replace (unzip case_values_map react_context_features))
+								p_parameter
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								(null)
+								(if (= -1 dt_parameter) 1 "surprisal")
+								(if valid_weight_feature weight_feature)
+								tie_break_random_seed
+								(null) ;radius
+								!numericalPrecision
+								.true
+							)
+						)
+				)
+
+				;overwrite local_cases_map with all cases that are equidistant
+				(assign (assoc
+					local_cases_map
+						(compute_on_contained_entities
+							(if focal_case
+								(query_not_in_entity_list (list (replace case_id) (replace focal_case)))
+								(query_not_in_entity_list (list (replace case_id)))
+							)
+							(if (size context_condition_filter_query)
+								context_condition_filter_query
+								(list)
+							)
+							dependent_queries_list
+							time_series_filter_query
+							fanout_features_queries
+							(query_within_generalized_distance
+								;dbl_precision_epsilon for defining whether two values are equal within acceptable precision
+								(+ (* dbl_precision_epsilon (last (last local_data_pair)) ) (last (last local_data_pair)) )
+								(replace react_context_features)
+								(replace (unzip case_values_map react_context_features))
+								p_parameter
+								feature_weights
+								!queryDistanceTypeMap
+								query_feature_attributes_map
+								feature_deviations
+								(null)
+								dt_parameter
+								(if valid_weight_feature weight_feature)
+								tie_break_random_seed
+								(null) ;radius
+								!numericalPrecision
+							)
+						)
+				))
+			)
+		)
 	)
 
 	;macro method for computing the diff for an assoc of features used by !RunRobustResiduals
