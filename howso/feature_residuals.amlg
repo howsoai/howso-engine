@@ -670,12 +670,12 @@
 			continuous_indices (unzip feature_indices_map continuous_features)
 			nominal_indices (unzip feature_indices_map nominal_features)
 			has_ordinals (> (size ordinal_features_map) 0)
-			;default index offset of where the actual case value is in each output react
-			actual_offset 1
-			predicted_offset 2
-			actual_nom_offset (if compute_all_statistics 2 1)
-			predicted_nom_offset (if compute_all_statistics 3 2)
+			;index offsets of where the diff, actual case value, predicted value and CAP are in each react tuple
+			;diff_offset 0 ; diff is always the first value
 			cap_offset 1
+			actual_offset 2
+			predicted_offset 3
+			ordinal_diff_offset 4
 		))
 
 		;if some of the features are edit distance types, r2 and spearman coefficient don't apply since there's no mean or relative sorting
@@ -697,12 +697,8 @@
 
 		(if has_ordinals
 			(assign (assoc
-				;for continuous features, each react output is stored as [diff, actual_value, predicted_value]
-				;but if there are ordinals, it's stored as [diff, ordinal_diff, actual_value, predicted_value]
-				;if there are ardinals, the index offest for actual_value is 2 instead of 1
-				actual_offset 2
-				predicted_offset 3
-
+				;for continuous features, reacts are stored as:	 [diff, cap, actual_value, predicted_value]
+				;but if there are ordinals, it's stored as:		 [diff, cap, actual_value, predicted_value, ordinal_diff]
 				ordinal_residuals_map
 					(filter (zip
 						continuous_features
@@ -711,7 +707,7 @@
 								(if (contains_index ordinal_features_map (get continuous_features (current_index)))
 									(if (size (current_value))
 										;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
-										(generalized_mean (map (lambda (get (current_value) 1)) (current_value)) )
+										(generalized_mean (map (lambda (get (current_value) ordinal_diff_offset)) (current_value)) )
 
 										;else if there were no values for this feature, return global feature residual
 										(get hyperparam_map (list "featureResiduals" (get continuous_features (current_index 1))))
@@ -741,7 +737,30 @@
 									;else if there were no values for this feature, return global feature residual
 									(get hyperparam_map [ "featureResiduals" (get continuous_features (current_index 2)) ] )
 								)
+							;must have 15 or more nulls for null residuals to be statistically significant
+							null_residual
+								(if (>=
+										(size
+											(filter (lambda (= (null) (first (current_value)))) (current_value 1) )
+										)
+										15
+									)
+									(generalized_mean (map (lambda (get (current_value) 1)) (current_value 1)) )
 
+									;else if there were less values than significance for this feature, output large null residual
+									(let
+										(assoc
+											feature (get features (get continuous_indices (current_index 2)))
+										)
+										(- 1
+											(/
+												;add 0.5 to num_nulls per Jeffrey's prior approach
+												(+ 0.5 (get !featureNullRatiosMap [feature "num_nulls"]) )
+												num_cases
+											)
+										)
+									)
+								)
 							;RMSE - root mean squared error = sqrt( sum( |actual-predicted|^2 ) / num_cases )
 							rmse
 								(if (size (current_value 1))
@@ -760,6 +779,23 @@
 		(assign (assoc
 			residuals_map (map (lambda (get (current_value) "residuals")) continuous_stats_maps)
 			rmse_map (map (lambda (get (current_value) "rmse")) continuous_stats_maps)
+			null_residual_map
+				(map
+					(lambda
+						(if (get !featureNullRatiosMap [(current_index 1) "has_nulls"])
+							(if (get (current_value) "null_residual")
+								(get (current_value) "null_residual")
+
+								;else the null residual was computed as 0, set it the smallest residual value of  1 / (1 + num_nulls)
+								(/
+									1
+									(+ 1 (get !featureNullRatiosMap [(current_index 1) "num_nulls"]) )
+								)
+							)
+						)
+					)
+					continuous_stats_maps
+				)
 		))
 
 		(declare (assoc
@@ -964,7 +1000,7 @@
 											(current_value)
 										)
 									)
-									(map (lambda (get (current_value) actual_nom_offset) ) (current_value))
+									(map (lambda (get (current_value) actual_offset) ) (current_value))
 									(map (lambda (get (current_value) cap_offset) ) (current_value))
 								)
 							)
@@ -1023,10 +1059,10 @@
 													(append (replace (current_value 1)) (list (replace (current_value 1))))
 												)
 												;(get (current_value) 1) refers to the actual case value in each react tuple
-												(map (lambda (replace (get (current_value) actual_nom_offset))) (current_value))
+												(map (lambda (replace (get (current_value) actual_offset))) (current_value))
 												;and (get (current_value) 2) refers to the interpolated/predicted case value in
 												;each react tuple
-												(map (lambda (replace (get (current_value) predicted_nom_offset))) (current_value))
+												(map (lambda (replace (get (current_value) predicted_offset))) (current_value))
 											)
 										)
 									)
