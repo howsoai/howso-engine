@@ -952,6 +952,20 @@
 					(max 50 (/ 10000 (size features)))
 				)
 			hyperparam_map (set hyperparam_map "featureMdaMap" custom_mda_map)
+			;assoc of feature -> minimum null residual, for features with nulls
+			min_null_residual_map
+				(filter
+					(lambda
+						(if (get !featureNullRatiosMap [(current_index 1) "has_nulls"])
+							;low bound for null residual
+							(/
+								1
+								(+ 1 (get !featureNullRatiosMap [(current_index 1) "num_nulls"]) )
+							)
+						)
+					)
+					(zip features)
+				)
 		))
 
 		(call !AccumulateMissingInformation)
@@ -1055,9 +1069,6 @@
 								(lambda (let
 									(assoc
 										feature (get_value (current_index 1))
-										feature_is_dependent (contains_index !dependentFeatureMap (current_value 1))
-										case_feature_value (get case_values_map (current_index 1))
-										feature_is_nominal (contains_index !nominalsMap (current_index 1))
 										output_categorical_action_probabilities .true
 										categorical_action_probabilities_map (assoc)
 									)
@@ -1169,40 +1180,143 @@
 													(call !InterpolateOrDerive (assoc
 														candidate_cases_lists full_candidate_cases_lists
 														react_context_features full_context_features
-														allow_nulls .false
+														allow_nulls .true
 													))
+												feature_deviation (get orig_hyperparam_map ["featureResiduals" feature])
+											)
+											(declare (assoc
+												;if there were any nulls in the local data, the CAP will be set
+												full_caps_map (if (size categorical_action_probabilities_map) (replace categorical_action_probabilities_map))
+											))
 
+											;clear out the CAP for use with superfull if it isn't empty already
+											(if full_caps_map
+												(assign (assoc categorical_action_probabilities_map {}))
+											)
+											(declare (assoc
 												superfull_predicted_value
 													(call !InterpolateOrDerive (assoc
 														candidate_cases_lists superfull_candidate_cases_lists
 														react_context_features superfull_context_features
-														allow_nulls .false
+														allow_nulls .true
 													))
-												feature_deviation (get orig_hyperparam_map ["featureResiduals" feature])
+											))
+
+											;there are nulls in the local data if either full_caps_map or categorical_action_probabilities_map has values
+											;if both are empty, there are no nulls, return the surprisal to the predicted values
+											(if (= 0 (size full_caps_map) (size categorical_action_probabilities_map))
+												(conclude
+													;surprisal of difference in predictions minus assumption
+													;surprisal of diff = LK_exp(diff, dev) / dev
+													; assumption = 1.5 nats in the case of laplacian LK
+													(-
+														(/
+															(call !LK_metric_laplace (assoc
+																difference
+																	(generalized_distance
+																		[full_predicted_value]
+																		[superfull_predicted_value]
+																		1 ;p
+																		(null) ;weights
+																		!queryDistanceTypeMap ;distance_types
+																		query_feature_attributes_map ;attributes
+																		(null) ;deviations
+																		[feature]
+																	)
+																deviation feature_deviation
+															))
+															feature_deviation
+														)
+														1.5
+													)
+												)
 											)
 
-											;surprisal of difference in predictions minus assumption
-											;surprisal of diff = LK_exp(diff, dev) / dev
-											; assumption = 1.5 nats in the case of laplacian LK
-											(-
-												(/
-													(call !LK_metric_laplace (assoc
-														difference
-															(generalized_distance
-																[full_predicted_value]
-																[superfull_predicted_value]
-																1 ;p
-																(null) ;weights
-																!queryDistanceTypeMap ;distance_types
-																query_feature_attributes_map ;attributes
-																(null) ;deviations
-																[feature]
+											(declare (assoc
+												null_entropy
+													;the CAP will be an assoc of the single feature -> null probability,
+													;take entropy of the assocs but with remaining 'non-null' probability as the other key
+													(entropy
+														(if full_caps_map
+															(normalize
+																(set
+																	full_caps_map
+																	".not_null"
+																	;not null probability is 1 - null probability, but capped to be at least the min null residual
+																	(max (- 1 (first full_caps_map)) (get min_null_residual_map feature))
+																)
 															)
-														deviation feature_deviation
-													))
-													feature_deviation
+															;else full prediction had no nulls, manually set the assoc to be normalized between the two possible probabilities
+															(associate
+																feature (get min_null_residual_map feature)
+																".not_null" (- 1 (get min_null_residual_map feature))
+															)
+														)
+														(if categorical_action_probabilities_map
+															(normalize
+																(set
+																	categorical_action_probabilities_map
+																	".not_null"
+																	;not null probability is 1 - null probability, but capped to be at least the min null residual
+																	(max (- 1 (first categorical_action_probabilities_map)) (get min_null_residual_map feature))
+																)
+															)
+															;else full prediction had no nulls, manually set the assoc to be normalized between the two possible probabilities
+															(associate
+																feature (get min_null_residual_map feature)
+																".not_null" (- 1 (get min_null_residual_map feature))
+															)
+														)
+														-1
+														1
+													)
+											))
+
+											;either of the predictions is null, re-query it while not allowing nulls toforce a non-null value
+											(if (= (null) full_predicted_value)
+												(assign (assoc
+													full_predicted_value
+														(call !InterpolateOrDerive (assoc
+															candidate_cases_lists full_candidate_cases_lists
+															react_context_features full_context_features
+															allow_nulls .false
+												))
+											)
+											(if (= (null) superfull_predicted_value)
+												(assign (assoc
+													superfull_predicted_value
+														(call !InterpolateOrDerive (assoc
+															candidate_cases_lists superfull_candidate_cases_lists
+															react_context_features superfull_context_features
+															allow_nulls .false
+														))
+												))
+											)
+
+											;have both values and null probabilities, add up their surprisals
+											;;;TODO: should these be weighted, ie null_entropy weighted by the avg nulls CAP of full and superfull?
+											(+
+												null_entropy
+												(-
+													(/
+														(call !LK_metric_laplace (assoc
+															difference
+																(generalized_distance
+																	[full_predicted_value]
+																	[superfull_predicted_value]
+																	1 ;p
+																	(null) ;weights
+																	!queryDistanceTypeMap ;distance_types
+																	query_feature_attributes_map ;attributes
+																	(null) ;deviations
+																	[feature]
+																)
+															deviation feature_deviation
+														))
+														feature_deviation
+													)
+													1.5
 												)
-												1.5
 											)
 										)
 									)
