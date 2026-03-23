@@ -67,7 +67,7 @@
 
 		;if there are ordinals but the hyperparameter map doesn't have a featureOrdinalDeviations assoc, initialize it
 		(if (and
-				(size ordinal_features_map)
+				(size !ordinalFeaturesSet)
 				(= (null) (get hyperparam_map "featureOrdinalDeviations"))
 			)
 			(accum (assoc hyperparam_map (assoc "featureOrdinalDeviations" (assoc))))
@@ -160,7 +160,7 @@
 		;return the output map with capped residual values
 		(assign (assoc
 			output_map
-				(call !ExpandResidualValuesToUncertainty  (assoc
+				(call !ExpandResidualValuesToUncertainty  (assoc ;;;TODO: process this for tuples?
 					feature_residuals_map output_map
 					using_shared_deviations use_shared_deviations
 				))
@@ -386,9 +386,9 @@
 		;for computing the feature mda matrix, only robust residuals were needed, the rest of the flow below
 		;is not necessary since this only needs to output the feature_mda_map
 		(if (and (= "robust_mda" robust_residuals) (= (null) target_residual_feature))
-			(conclude
-				(assoc
-					"feature_mda_map"
+			(seq
+				(assign (assoc
+					feature_mda_map
 						(call !ComputeRobustTargetlessMDA (assoc
 							features
 								(if (size excluded_inactive_features_map)
@@ -399,6 +399,32 @@
 							output_raw_mda output_raw_mda
 							mda_action_feature mda_action_feature
 						))
+				))
+
+				(if in_analyze
+					(seq
+						;compute the robust residuals here if they haven't been computed yet.
+						;if they were auto converged above, they'll have already been computed there to determine when to early out
+						(if (= 0 (size residuals_map))
+							(call !PrepResidualOutput)
+						)
+						(conclude
+							(assoc
+								"feature_mda_map" feature_mda_map
+								"residuals_map"
+									(map
+										(lambda
+											;limit the floor value to the min residual, use the first value out of [value residual, null residual] pair
+											(if (< (first (current_value)) (get !cachedFeatureMinResidualMap (current_index)))
+												[ (get !cachedFeatureMinResidualMap (current_index 1)) (last (current_value 1)) ]
+												(current_value)
+											)
+										)
+										residuals_map
+									)
+							)
+						)
+					)
 				)
 			)
 		)
@@ -550,6 +576,27 @@
 			)
 		)
 
+		;when computing AC and requesting robust residuals:  compute_null_uncertainties will be false since they aren't needed for that flow
+		;output_raw_mda will be true and feature_mda_map will have been computed.
+		(if (and output_raw_mda feature_mda_map (not compute_null_uncertainties))
+			(conclude
+				(assoc
+					"feature_mda_map" feature_mda_map
+					"residuals_map"
+						(map
+							(lambda
+								;limit the floor value to the min residual, use the first value out of [value residual, null residual] pair
+								(if (< (first (current_value)) (get !cachedFeatureMinResidualMap (current_index)))
+									[ (get !cachedFeatureMinResidualMap (current_index 1)) (last (current_value 1)) ]
+									(current_value)
+								)
+							)
+							residuals_map
+						)
+				)
+			)
+		)
+
 		;if there are time series features where the nulls are only in the lag null-triangle, set their uncertainties to
 		;the MAD and feature residual so that the deltas to these features in these triangle cases aren't extreme (neither too far nor too close)
 		(if (and compute_null_uncertainties (size ts_feature_lag_amount_map))
@@ -669,13 +716,12 @@
 		(assign (assoc
 			continuous_indices (unzip feature_indices_map continuous_features)
 			nominal_indices (unzip feature_indices_map nominal_features)
-			has_ordinals (> (size ordinal_features_map) 0)
-			;default index offset of where the actual case value is in each output react
-			actual_offset 1
-			predicted_offset 2
-			actual_nom_offset (if compute_all_statistics 2 1)
-			predicted_nom_offset (if compute_all_statistics 3 2)
+			has_ordinals (> (size !ordinalFeaturesSet) 0)
+			;index offsets of where the diff, actual case value, predicted value and CAP are in each react tuple
+			;diff_offset 0 ; diff is always the first value
 			cap_offset 1
+			actual_offset 2
+			predicted_offset 3
 		))
 
 		;if some of the features are edit distance types, r2 and spearman coefficient don't apply since there's no mean or relative sorting
@@ -697,21 +743,26 @@
 
 		(if has_ordinals
 			(assign (assoc
-				;for continuous features, each react output is stored as [diff, actual_value, predicted_value]
-				;but if there are ordinals, it's stored as [diff, ordinal_diff, actual_value, predicted_value]
-				;if there are ardinals, the index offest for actual_value is 2 instead of 1
-				actual_offset 2
-				predicted_offset 3
-
+				;for continuous features, reacts are stored as:	 [diff, cap, actual_value, predicted_value]
 				ordinal_residuals_map
 					(filter (zip
 						continuous_features
 						(map
 							(lambda
-								(if (contains_index ordinal_features_map (get continuous_features (current_index)))
+								(if (contains_index !ordinalFeaturesSet (get continuous_features (current_index)))
 									(if (size (current_value))
-										;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
-										(generalized_mean (map (lambda (get (current_value) 1)) (current_value)) )
+										;create a list of ordinal_diffs by dividing diff by range
+										(generalized_mean
+											(map
+												(lambda
+													(/
+														(first (current_value))
+														(get !ordinalFeaturesRangesMap (get continuous_features (current_index 1)))
+													)
+												)
+												(current_value)
+											)
+										)
 
 										;else if there were no values for this feature, return global feature residual
 										(get hyperparam_map (list "featureResiduals" (get continuous_features (current_index 1))))
@@ -741,7 +792,27 @@
 									;else if there were no values for this feature, return global feature residual
 									(get hyperparam_map [ "featureResiduals" (get continuous_features (current_index 2)) ] )
 								)
+							;must have 15 or more nulls for null residuals to be statistically significant
+							null_residual
+								(if (get !featureNullRatiosMap [(get continuous_features (current_index 2)) "has_nulls"])
+									(if (>=
+											(size
+												(filter (lambda (= (null) (first (current_value)))) (current_value 1) )
+											)
+											15
+										)
+										(generalized_mean (map (lambda (get (current_value) 1)) (current_value 1)) )
 
+										;else if there were less values than significance for this feature, output large null residual
+										(- 1
+											(/
+												;add 0.5 to num_nulls per Jeffrey's prior approach
+												(+ 0.5 (get !featureNullRatiosMap [(get continuous_features (current_index 2)) "num_nulls"]) )
+												num_cases
+											)
+										)
+									)
+								)
 							;RMSE - root mean squared error = sqrt( sum( |actual-predicted|^2 ) / num_cases )
 							rmse
 								(if (size (current_value 1))
@@ -760,6 +831,23 @@
 		(assign (assoc
 			residuals_map (map (lambda (get (current_value) "residuals")) continuous_stats_maps)
 			rmse_map (map (lambda (get (current_value) "rmse")) continuous_stats_maps)
+			null_residual_map
+				(map
+					(lambda
+						(if (get !featureNullRatiosMap [(current_index 1) "has_nulls"])
+							(if (get (current_value) "null_residual")
+								(get (current_value) "null_residual")
+
+								;else the null residual was computed as 0, set it the smallest residual value of  1 / (1 + num_nulls)
+								(/
+									1
+									(+ 1 (get !featureNullRatiosMap [(current_index 1) "num_nulls"]) )
+								)
+							)
+						)
+					)
+					continuous_stats_maps
+				)
 		))
 
 		(declare (assoc
@@ -964,7 +1052,7 @@
 											(current_value)
 										)
 									)
-									(map (lambda (get (current_value) actual_nom_offset) ) (current_value))
+									(map (lambda (get (current_value) actual_offset) ) (current_value))
 									(map (lambda (get (current_value) cap_offset) ) (current_value))
 								)
 							)
@@ -1023,10 +1111,10 @@
 													(append (replace (current_value 1)) (list (replace (current_value 1))))
 												)
 												;(get (current_value) 1) refers to the actual case value in each react tuple
-												(map (lambda (replace (get (current_value) actual_nom_offset))) (current_value))
+												(map (lambda (replace (get (current_value) actual_offset))) (current_value))
 												;and (get (current_value) 2) refers to the interpolated/predicted case value in
 												;each react tuple
-												(map (lambda (replace (get (current_value) predicted_nom_offset))) (current_value))
+												(map (lambda (replace (get (current_value) predicted_offset))) (current_value))
 											)
 										)
 									)
@@ -1369,80 +1457,104 @@
 		; 	(list react1 react2 ... react n) ; feature N reacts
 		; )
 		;
-		;where each react is either:
-		; the diff value, for nominals and continuous, or a list of [diff, ordinal_diff] for continuous ordinal features
 
-		;for each feature, collapse each list of residuals into a single value by averaging them out
-		;for ordinals we need to split out the ordinal residuals from the rest
-		(if (size ordinal_features_map)
-			(seq
-				(assign (assoc
-					residuals_map
-						(zip
-							features
-							(map
-								(lambda (if
-									(size (current_value))
-									;feature_residuals_lists is of length of features, and corresponds 1-1 to features
-									;thus 'feature' is (get features (current_index))
-									(if (contains_index ordinal_features_map (get features (current_index)))
-										;ordinal feature, (current_value) is a list of tuples [diff, ordinal_diff]
-										;create a list of diffs by pulling diff from each tuple
-										(generalized_mean (map (lambda (first (current_value))) (current_value)) )
+		(assign (assoc
+			residuals_map
+				(if (= "missing_information" robust_residuals)
+					;for missing_information, each feature list is a list of surprisal values
+					||(zip
+						features
+						(map
+							(lambda
+								(if (size (current_value))
+									(generalized_mean (current_value) )
 
-										;else simply compute avg of all diffs
-										(generalized_mean (current_value))
+									(contains_index !inactiveFeaturesMap (get features (current_index)))
+									(null)
+
+									0
+								)
+							)
+							feature_residuals_lists
+						)
+					)
+
+					;else all other residual flows, each feature list is a list of [ value residual, null residual]
+					||(zip
+						features
+						(map
+							(lambda (let
+								(assoc feature (get features (current_index 1)) )
+								(if (size (current_value))
+									(if (contains_index !nominalsMap feature )
+										[
+											(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
+											;nominals always output 0 for null residual because nulls are rolled up into the nominal residual value
+											0
+										]
+
+										;continuous values output a pair
+										[
+											(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
+											(if (get !featureNullRatiosMap [feature "num_nulls"])
+												(generalized_mean (map (lambda (last (current_value))) (current_value 1)) )
+												;no nulls, null residual is 0
+												0
+											)
+										]
 									)
 
 									;else if there were no values for this feature, return global feature residual
-									(get hyperparam_map (list "featureDeviations" (get features (current_index 1))))
-								))
-								feature_residuals_lists
-							)
-						)
-					ordinal_residuals_map
-						(filter (zip
-							features
-							(map
-								(lambda
-									(if (contains_index ordinal_features_map (get features (current_index)))
-										(if (size (current_value))
-											;ordinal feature, (current_value) is a list of tuples [diff, ordinal_diff]
-											;create a list of ordinal_diffs by pulling ordinal_diff from each tuple
-											(generalized_mean (map (lambda (last (current_value))) (current_value)) )
-
-											;else if there were no values for this feature, return global feature residual
-											(get hyperparam_map (list "featureDeviations" (get features (current_index 1))))
-										)
-									)
-								)
-								feature_residuals_lists
-							)
-						))
-				))
-			)
-
-			;else simply compute all residuals
-			(assign (assoc
-				residuals_map
-					(zip
-						features
-						(map
-							(lambda (if
-								(size (current_value))
-								;compute average by dividing by the number of values
-								(generalized_mean (current_value))
-
-								;else if there were no values for this feature, return global feature residual
-								;or simply null for inactive features
-								(if (contains_index !inactiveFeaturesMap (get features (current_index)))
+									;or simply null for inactive features
+									(contains_index !inactiveFeaturesMap feature)
 									(null)
-									(get hyperparam_map (list "featureResiduals" (get features (current_index 1))))
+
+									(contains_index !nominalsMap feature)
+									[(get hyperparam_map ["featureResiduals" feature ]) 0 ]
+
+									;else continuous outputs a pair of default values
+									[
+										(get hyperparam_map ["featureResiduals" feature ])
+										(/
+											1
+											(+ 1 (get !featureNullRatiosMap [feature "num_nulls"]) )
+										)
+									]
 								)
 							))
 							feature_residuals_lists
 						)
 					)
+				)
+		))
+
+		;for each feature, collapse each list of residuals into a single value by averaging them out
+		;for ordinals we need to split out the ordinal residuals from the rest
+		(if (and (size !ordinalFeaturesSet) (!= "missing_information" robust_residuals))
+			(assign (assoc
+				ordinal_residuals_map
+					(filter (zip
+						features
+						(map
+							(lambda
+								(if (contains_index !ordinalFeaturesSet (get features (current_index)) )
+									(let
+										(assoc
+											range (get !ordinalFeaturesRangesMap (get features (current_index 1)))
+											feature (get features (current_index 1))
+										)
+										(if (size (current_value))
+											(generalized_mean (map (lambda (/ (first (current_value)) range)) (current_value 1)) )
+
+											;else if there were no values for this feature, return global feature residual
+											(get hyperparam_map ["featureResiduals" feature ])
+										)
+									)
+								)
+							)
+							feature_residuals_lists
+						)
+					))
 			))
 		)
 
@@ -1759,7 +1871,6 @@
 														pre_domain_value (null)
 														post_domain_value (null)
 													))
-												feature_is_ordinal (contains_index !ordinalFeaturesSet feat_to_diff)
 												feature_mad (get feature_mda_map feat_to_diff)
 											))
 

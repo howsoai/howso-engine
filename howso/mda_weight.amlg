@@ -342,7 +342,14 @@
 			(if (contains_index excluded_inactive_features_map feature) (conclude (range 0 1 (size features) 1)) )
 
 			(map
-				(lambda (seq
+				(lambda (let
+					(assoc
+						has_nulls_and_is_continuous
+							(and
+								(get !featureNullRatiosMap [(current_value 2) "has_nulls"])
+								(not (contains_index !nominalsMap (current_value 1)))
+							)
+					)
 					;a feature should not have mda computed for itself
 					(if (and (not estimating_residual_lower_bound) (= (current_value) feature)) (conclude 0) )
 
@@ -364,43 +371,112 @@
 					(if (contains_index excluded_inactive_features_map (current_value)) (conclude 0) )
 
 					;output delta of the (expectedly) larger residual computed without this feature - residual computed with this feature
-					(if output_raw_mda
-						(-
-							;avg_without_residuals
-							(generalized_mean (unzip (get feature_residuals_lists (current_index)) case_indices_without_feature) )
-							;average with residuals
-							(generalized_mean (unzip (get feature_residuals_lists (current_index)) case_indices_with_feature) )
-						)
 
-						;cap the lower value for probability conversion
+					;triple of: [ac of values, ac of nulls, % of nulls], where nulls are any reacts where null was either the case value or predicted value
+					;where ac is the: averages of reacts without feature - average of reacts with feature
+					[
+						;AC values
 						(max
-							;if estimating lower bound residuals, must pull residual value from each pair
-							(if estimating_residual_lower_bound
-								(-
-									;avg_without_residuals
-									(generalized_mean (map
-										(lambda (last (current_value)))
-										(unzip (get feature_residuals_lists (current_index)) case_indices_without_feature)
-									))
+							(-
+								;average of 'without' residuals
+								(if estimating_residual_lower_bound
+									(generalized_mean
+										(map
+											(lambda (if (last (current_value)) (first (last (current_value)))) )
+											(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+										)
+									)
 
-									;average with residuals
-									(generalized_mean (map
-										(lambda (last (current_value)))
-										(unzip (get feature_residuals_lists (current_index)) case_indices_with_feature)
-									))
+									(generalized_mean
+										(map
+											(lambda (if (current_value) (first (current_value))) )
+											(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+										)
+									)
 								)
+								;average of 'with' residuals
+								(if estimating_residual_lower_bound
+									(generalized_mean
+										(map
+											(lambda (if (last (current_value)) (first (last (current_value)))) )
+											(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+										)
+									)
 
-								;else the lists are residual values, can simply unzip the lists by their indices
-								(-
-									;avg_without_residuals
-									(generalized_mean (unzip (get feature_residuals_lists (current_index)) case_indices_without_feature) )
-									;average with residuals
-									(generalized_mean (unzip (get feature_residuals_lists (current_index)) case_indices_with_feature) )
+									(generalized_mean
+										(map
+											(lambda (if (current_value) (first (current_value))) )
+											(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+										)
+									)
 								)
 							)
-							(get !cachedFeatureMinResidualMap (current_value))
+							(if (not output_raw_mda)
+								(get !cachedFeatureMinResidualMap (current_value 1))
+							)
 						)
-					)
+
+						;AC nulls
+						(if has_nulls_and_is_continuous
+							(max
+								(-
+									;average of 'without' null residuals
+									(if estimating_residual_lower_bound
+										(generalized_mean
+											(map
+												(lambda (if (last (current_value)) (last (last (current_value)))) )
+												(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+											)
+										)
+
+										(generalized_mean
+											(map
+												(lambda (if (current_value) (last (current_value))) )
+												(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+											)
+										)
+									)
+									;average of 'with' null residuals
+									(if estimating_residual_lower_bound
+										(generalized_mean
+											(map
+												(lambda (if (last (current_value)) (last (last (current_value)))) )
+												(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+											)
+										)
+
+										(generalized_mean
+											(map
+												(lambda (if (current_value) (last (current_value))) )
+												(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+											)
+										)
+									)
+								)
+								(if (not output_raw_mda)
+									;low bound for nulls, half the smallest residual
+									(/
+										0.5
+										(+ 1 (get !featureNullRatiosMap [(current_value 2) "num_nulls"]) )
+									)
+								)
+							)
+						)
+
+						;percent nulls
+						(if has_nulls_and_is_continuous
+							(/
+								(size (filter
+									(lambda
+										(and (current_value) (= (null) (first (current_value))))
+									)
+									(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+								))
+								(size (filter (unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature) ))
+							)
+							0
+						)
+					]
 				))
 				features
 			)
@@ -429,8 +505,13 @@
 							(zip
 								features
 								(map
-									;convert any nulls to 0s
-									(lambda (+ (or (get (current_value) feature_index))) )
+									;convert any nulls and .false to 0s
+									(lambda
+										(if (get (current_value) feature_index)
+											(get (current_value) feature_index)
+											0
+										)
+									)
 									mda_matrix
 								)
 							)
@@ -458,6 +539,8 @@
 						target_feature (current_value 1)
 						feature_index (current_index 1)
 						target_feature_residual (get baseline_hyperparameter_map ["featureResiduals" (current_value 2)])
+						;the second value is the nullness
+						target_null_residual (get null_residual_map (current_value 1))
 					)
 
 					(declare (assoc
@@ -465,7 +548,8 @@
 							;iterate over an assoc map of MDA values per feature and convert to probabilities
 							(map
 								(lambda (let
-									(assoc mda (current_value 1) )
+									;triple of [ AC values, AC nulls, % nulls ]
+									(assoc mda_tuple (current_value 1) )
 
 									;skip if mda_feature = target_feature
 									(if (and (not estimating_residual_lower_bound) (= (current_index) target_feature)) (conclude 0) )
@@ -478,8 +562,13 @@
 									(declare (assoc
 										lk_value
 											(call !LK_metric_exp (assoc
-												difference mda
+												difference (first mda_tuple)
 												deviation target_feature_residual
+											))
+										null_lk_value
+											(call !LK_metric_exp (assoc
+												difference (get mda_tuple 1)
+												deviation target_null_residual
 											))
 									))
 
@@ -490,7 +579,22 @@
 									(max
 										(-
 											1
-											(exp (- (- (/ lk_value target_feature_residual) 1)))
+											(exp
+												(-
+													(+
+
+														(*
+															(/ lk_value target_feature_residual)
+															(- 1 (last mda_tuple))
+														)
+														(or (*
+															(/ null_lk_value target_null_residual)
+															(last mda_tuple)
+														))
+														-1
+													)
+												)
+											)
 										)
 										0
 									)
@@ -703,7 +807,8 @@
 				(assoc
 					smallest_residual
 						(min
-							(current_value 1)
+							;use the first value out of [value residual, null residual] pair
+							(first (current_value 1))
 							;compare with originally computed residuals by doubling the half-sized ones that are stored in hyperparameters
 							(* 2 (get updated_estimated_residuals_map ["hyperparam_map" "featureResiduals" (current_index 2)]))
 						)
@@ -820,6 +925,20 @@
 					(max 50 (/ 10000 (size features)))
 				)
 			hyperparam_map (set hyperparam_map "featureMdaMap" custom_mda_map)
+			;assoc of feature -> minimum null residual, for features with nulls
+			min_null_residual_map
+				(filter (map
+					(lambda
+						(if (get !featureNullRatiosMap [(current_index 1) "has_nulls"])
+							;low bound for null residual
+							(/
+								1
+								(+ 1 (get !featureNullRatiosMap [(current_index 1) "num_nulls"]) )
+							)
+						)
+					)
+					(zip features)
+				))
 		))
 
 		(call !AccumulateMissingInformation)
@@ -923,9 +1042,6 @@
 								(lambda (let
 									(assoc
 										feature (get_value (current_index 1))
-										feature_is_dependent (contains_index !dependentFeatureMap (current_value 1))
-										case_feature_value (get case_values_map (current_index 1))
-										feature_is_nominal (contains_index !nominalsMap (current_index 1))
 										output_categorical_action_probabilities .true
 										categorical_action_probabilities_map (assoc)
 									)
@@ -963,24 +1079,22 @@
 
 									(declare (assoc
 										full_context_features
-											(indices (remove
-												(zip
-													(if (contains_index features_for_derivation_map feature)
-														;if this feature should be derived, need to hold out the features that will be used to derive it
-														(filter
-															(lambda (or
-																(not (contains_value (get features_for_derivation_map feature) (current_value)))
-																(!= feature (get !derivedFeaturesMap (current_value)))
-																(contains_value (get !tsFeaturesMap "lag_features") (current_value))
-															))
-															context_features
-														)
-
+											(filter
+												(lambda (!= feature (current_value)))
+												(if (contains_index features_for_derivation_map feature)
+													;if this feature should be derived, need to hold out the features that will be used to derive it
+													(filter
+														(lambda (or
+															(not (contains_value (get features_for_derivation_map feature) (current_value)))
+															(!= feature (get !derivedFeaturesMap (current_value)))
+															(contains_value (get !tsFeaturesMap "lag_features") (current_value))
+														))
 														context_features
 													)
+
+													context_features
 												)
-												[feature]
-											))
+											)
 									))
 
 									(declare (assoc
@@ -1039,40 +1153,170 @@
 													(call !InterpolateOrDerive (assoc
 														candidate_cases_lists full_candidate_cases_lists
 														react_context_features full_context_features
-														allow_nulls .false
+														allow_nulls .true
 													))
+												feature_deviation (get orig_hyperparam_map ["featureRobustResiduals" feature])
+											)
+											(declare (assoc
+												;if there were any nulls in the local data, the CAP will be set
+												full_caps_map (if (size categorical_action_probabilities_map) (replace categorical_action_probabilities_map))
+											))
 
+											;clear out the CAP for use with superfull if it isn't empty already
+											(if full_caps_map
+												(assign (assoc categorical_action_probabilities_map {}))
+											)
+											(declare (assoc
 												superfull_predicted_value
 													(call !InterpolateOrDerive (assoc
 														candidate_cases_lists superfull_candidate_cases_lists
 														react_context_features superfull_context_features
-														allow_nulls .false
+														allow_nulls .true
 													))
-												feature_deviation (get orig_hyperparam_map ["featureResiduals" feature])
+											))
+
+											;there are nulls in the local data if either full_caps_map or categorical_action_probabilities_map has values
+											;if both are empty, there are no nulls, return the surprisal to the predicted values
+											(if (= 0 (size full_caps_map) (size categorical_action_probabilities_map))
+												(conclude
+													;surprisal of difference in predictions minus assumption
+													;surprisal of diff = LK_exp(diff, dev) / dev
+													; assumption = 1.5 nats in the case of laplacian LK
+													(-
+														(/
+															(call !LK_metric_laplace (assoc
+																difference
+																	(generalized_distance
+																		[full_predicted_value]
+																		[superfull_predicted_value]
+																		1 ;p
+																		(null) ;weights
+																		!queryDistanceTypeMap ;distance_types
+																		query_feature_attributes_map ;attributes
+																		(null) ;deviations
+																		[feature]
+																	)
+																deviation feature_deviation
+															))
+															feature_deviation
+														)
+														1.5
+													)
+												)
 											)
 
-											;surprisal of difference in predictions minus assumption
-											;surprisal of diff = LK_exp(diff, dev) / dev
-											; assumption = 1.5 nats in the case of laplacian LK
-											(-
-												(/
-													(call !LK_metric_laplace (assoc
-														difference
-															(generalized_distance
-																[full_predicted_value]
-																[superfull_predicted_value]
-																1 ;p
-																(null) ;weights
-																!queryDistanceTypeMap ;distance_types
-																query_feature_attributes_map ;attributes
-																(null) ;deviations
-																[feature]
+											(declare (assoc
+												null_entropy
+													;the CAP will be an assoc of the single feature -> null probability,
+													;take entropy of the assocs but with remaining 'non-null' probability as the other key
+													(entropy
+														(if (size full_caps_map)
+															(normalize
+																(set
+																	full_caps_map
+																	".not_null"
+																	;not null probability is 1 - null probability, but capped to be at least the min null residual
+																	(max (- 1 (first full_caps_map)) (get min_null_residual_map feature))
+																)
 															)
-														deviation feature_deviation
-													))
-													feature_deviation
+															;else full prediction had no nulls, manually set the assoc to be normalized between the two possible probabilities
+															(associate
+																feature (get min_null_residual_map feature)
+																".not_null" (- 1 (get min_null_residual_map feature))
+															)
+														)
+														(if (size categorical_action_probabilities_map)
+															(normalize
+																(set
+																	categorical_action_probabilities_map
+																	".not_null"
+																	;not null probability is 1 - null probability, but capped to be at least the min null residual
+																	(max (- 1 (first categorical_action_probabilities_map)) (get min_null_residual_map feature))
+																)
+															)
+															;else full prediction had no nulls, manually set the assoc to be normalized between the two possible probabilities
+															(associate
+																feature (get min_null_residual_map feature)
+																".not_null" (- 1 (get min_null_residual_map feature))
+															)
+														)
+														-1
+														1
+													)
+												; null_weight
+												; 	(/
+												; 		(+
+												; 			(or (first full_caps_map))
+												; 			(or (first categorical_action_probabilities_map))
+												; 		)
+												; 		2
+												; 	)
+											))
+
+											;either of the predictions is null, re-query it while not allowing nulls to force a non-null value
+											(if (= (null) full_predicted_value)
+												(assign (assoc
+													full_predicted_value
+														(call !InterpolateOrDerive (assoc
+															candidate_cases_lists
+																(call !MissingInformationQuery (assoc
+																	query_context_features full_context_features
+																	feature_weights (get orig_hyperparam_map ["featureMdaMap"])
+																	context_condition_filter_query
+																		(if (size context_condition_filter_query)
+																			(append context_condition_filter_query (query_not_equals feature (null)) )
+																			(query_not_equals feature (null))
+																		)
+																))
+															react_context_features full_context_features
+															allow_nulls .false
+														))
+												))
+											)
+											(if (= (null) superfull_predicted_value)
+												(assign (assoc
+													superfull_predicted_value
+														(call !InterpolateOrDerive (assoc
+															candidate_cases_lists
+																(call !MissingInformationQuery (assoc
+																	query_context_features superfull_context_features
+																	feature_weights (get hyperparam_map ["featureMdaMap"])
+																	context_condition_filter_query
+																		(if (size context_condition_filter_query)
+																			(append context_condition_filter_query (query_not_equals feature (null)) )
+																			(query_not_equals feature (null))
+																		)
+																))
+															react_context_features superfull_context_features
+															allow_nulls .false
+														))
+												))
+											)
+
+											;have both values and null probabilities, add up their surprisals
+											;;;TODO: should these be weighted, ie null_entropy weighted by the avg nulls CAP of full and superfull?
+											(+
+												null_entropy
+												(-
+													(/
+														(call !LK_metric_laplace (assoc
+															difference
+																(generalized_distance
+																	[full_predicted_value]
+																	[superfull_predicted_value]
+																	1 ;p
+																	(null) ;weights
+																	!queryDistanceTypeMap ;distance_types
+																	query_feature_attributes_map ;attributes
+																	(null) ;deviations
+																	[feature]
+																)
+															deviation feature_deviation
+														))
+														feature_deviation
+													)
+													1.5
 												)
-												1.5
 											)
 										)
 									)
