@@ -576,8 +576,7 @@
 			)
 		)
 
-		;when computing AC and requesting robust residuals:  compute_null_uncertainties will be false since they aren't needed for that flow
-		;output_raw_mda will be true and feature_mda_map will have been computed.
+		;output raw mda and robust residuals
 		(if (and output_raw_mda feature_mda_map (not compute_null_uncertainties))
 			(conclude
 				(assoc
@@ -592,6 +591,39 @@
 								)
 							)
 							residuals_map
+						)
+				)
+			)
+
+			(and (= "missing_information" estimating_residual_lower_bound) (= "robust_mda" robust_residuals))
+			(conclude
+				(assoc
+					"feature_mda_map" feature_mda_map
+					"residuals_map"
+						(if output_robust_residuals
+							(map
+							(lambda
+								;limit the floor value to the min residual, use the first value out of [value residual, null residual] pair
+								(if (< (first (current_value)) (get !cachedFeatureMinResidualMap (current_index)))
+									[ (get !cachedFeatureMinResidualMap (current_index 1)) (last (current_value 1)) ]
+									(current_value)
+								)
+							)
+							residuals_map
+						)
+						)
+					"feature_ac_map"
+						(if output_robust_acs
+							(call !ComputeRobustTargetlessMDA (assoc
+								features
+									(if (size excluded_inactive_features_map)
+										(append features (indices excluded_inactive_features_map))
+
+										features
+									)
+								output_raw_mda .true
+								estimated_residual_lower_bound "missing_information"
+							))
 						)
 				)
 			)
@@ -1488,35 +1520,81 @@
 								(if (contains_index !inactiveFeaturesMap feature)
 									(null)
 
+									;pair of [value residual, null resiudual]
 									(size (current_value))
-									(if (contains_index !nominalsMap feature )
-										[
-											(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
-											;nominals always output 0 for null residual because nulls are rolled up into the nominal residual value
-											0
-										]
-
-										;continuous values output a pair
-										[
-											(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
-											(if (get !featureNullRatiosMap [feature "num_nulls"])
-												;;;(generalized_mean (map (lambda (last (current_value))) (current_value 1)) )
-												(if (>=
-														(size (filter (map (lambda (last (current_value))) (current_value 1))))
-														30
+									[
+										(if (and estimating_residual_lower_bound (= "robust_mda" robust_residuals))
+											(generalized_mean
+												(map
+													(lambda
+														;only compute mean of values from features that were not used in queries,
+														;for erlb flows each (current_value) is a pair of: [used in query flag, [value residual null residual]]
+														(if (= .false (first (current_value)))
+															(first (last (current_value)))
+														)
 													)
-													(+ (or
-														(generalized_mean (map (lambda (last (current_value))) (current_value 1)) )
-													))
-													;else there are less than 30 null values, not significant enough to count
-													0
+													(current_value)
+												)
+											)
+
+											;else simple average of all diffs
+											(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
+										)
+
+
+										;nominals always output 0 for null residual because nulls are rolled up into the nominal residual value
+										(if (contains_index !nominalsMap feature )
+											0
+
+											(if (get !featureNullRatiosMap [feature "num_nulls"])
+												(if (and estimating_residual_lower_bound (= "robust_mda" robust_residuals))
+													;for erlb flows each (current_value) is a pair of: [used in query flag, [value residual null residual]]
+													(if (>=
+															(size
+																(filter (map
+																	(lambda
+																		(if (and (= .false (first (current_value))) (last (last (current_value))) )
+																			(last (last (current_value)))
+																		)
+																	)
+																	(current_value 1)
+																))
+															)
+															30
+														)
+														(+ (or
+															(generalized_mean
+																(map
+																	(lambda
+																		(if (and (= .false (first (current_value))) (last (last (current_value))) )
+																			(last (last (current_value)))
+																		)
+																	)
+																	(current_value 1)
+																)
+															)
+														))
+														;else there are less than 30 null values, not significant enough to count
+														0
+													)
+
+													(if (>=
+															(size (filter (map (lambda (last (current_value))) (current_value 1))))
+															30
+														)
+														(+ (or
+															(generalized_mean (map (lambda (last (current_value))) (current_value 1)) )
+														))
+														;else there are less than 30 null values, not significant enough to count
+														0
+													)
 												)
 
 												;no nulls, null residual is 0
 												0
 											)
-										]
-									)
+										)
+									]
 
 									(contains_index !nominalsMap feature)
 									[(get hyperparam_map ["featureResiduals" feature ]) 0 ]
