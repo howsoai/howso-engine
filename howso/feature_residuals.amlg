@@ -386,9 +386,9 @@
 		;for computing the feature mda matrix, only robust residuals were needed, the rest of the flow below
 		;is not necessary since this only needs to output the feature_mda_map
 		(if (and (= "robust_mda" robust_residuals) (= (null) target_residual_feature))
-			(conclude
-				(assoc
-					"feature_mda_map"
+			(seq
+				(assign (assoc
+					feature_mda_map
 						(call !ComputeRobustTargetlessMDA (assoc
 							features
 								(if (size excluded_inactive_features_map)
@@ -399,6 +399,10 @@
 							output_raw_mda output_raw_mda
 							mda_action_feature mda_action_feature
 						))
+				))
+
+				(if in_analyze
+					(conclude (assoc "feature_mda_map" feature_mda_map))
 				)
 			)
 		)
@@ -546,6 +550,47 @@
 					"ordinal_residuals_map" ordinal_residuals_map
 					"residuals_map" residuals_map
 					"null_uncertainties_map" null_uncertainties_map
+				)
+			)
+		)
+
+		;output raw mda and robust residuals
+		(if (and output_raw_mda feature_mda_map (not compute_null_uncertainties))
+			(conclude
+				(assoc
+					"feature_mda_map" feature_mda_map
+					"residuals_map"
+						(map
+							(lambda (max (current_value) (get !cachedFeatureMinResidualMap (current_index))))
+							residuals_map
+						)
+				)
+			)
+
+			(and (= "missing_information" estimating_residual_lower_bound) (= "robust_mda" robust_residuals))
+			(conclude
+				(assoc
+					"feature_mda_map" feature_mda_map
+					"residuals_map"
+						(if output_robust_residuals
+							(map
+								(lambda (max (current_value) (get !cachedFeatureMinResidualMap (current_index))))
+								residuals_map
+							)
+						)
+					"feature_ac_map"
+						(if output_robust_acs
+							(call !ComputeRobustTargetlessMDA (assoc
+								features
+									(if (size excluded_inactive_features_map)
+										(append features (indices excluded_inactive_features_map))
+
+										features
+									)
+								output_raw_mda .true
+								estimated_residual_lower_bound "missing_information"
+							))
+						)
 				)
 			)
 		)
@@ -1374,7 +1419,7 @@
 
 		;for each feature, collapse each list of residuals into a single value by averaging them out
 		;for ordinals we need to split out the ordinal residuals from the rest
-		(if (size ordinal_features_map)
+		(if (and (size ordinal_features_map) (not estimating_residual_lower_bound))
 			(seq
 				(assign (assoc
 					residuals_map
@@ -1430,8 +1475,23 @@
 						(map
 							(lambda (if
 								(size (current_value))
-								;compute average by dividing by the number of values
-								(generalized_mean (current_value))
+								;compute robust residuals from the ERLB flow
+								(if (and estimating_residual_lower_bound (= "robust_mda" robust_residuals))
+									(generalized_mean
+										(map
+											(lambda
+												;only compute mean of values from features that were not used in queries
+												(if (= .false (first (current_value)))
+													(last (current_value))
+												)
+											)
+											(current_value)
+										)
+									)
+
+									;else simple average of all diffs
+									(generalized_mean (current_value))
+								)
 
 								;else if there were no values for this feature, return global feature residual
 								;or simply null for inactive features
