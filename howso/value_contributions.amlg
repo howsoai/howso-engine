@@ -16,16 +16,6 @@
 		))
 
 		(declare (assoc
-			;continuous features with nulls need their MAD computed
-			action_feature_mad
-				(if (and
-						(not (contains_index !nominalsMap action_feature))
-						(!= .false (get !featureNullRatiosMap (list action_feature "has_nulls")))
-						(not (contains_index !editDistanceFeatureTypesMap action_feature))
-						(not (contains_index !inactiveFeaturesMap action_feature) )
-					)
-					(call !ComputeFeatureMAD (assoc feature action_feature))
-				)
 			;create a backup of context_features for time series flows
 			original_context_features (if !tsTimeFeature (replace context_features))
 			num_features (size context_features)
@@ -254,7 +244,6 @@
 												(call !InterpolateAndComputeDiffToCase (assoc
 													feature action_feature
 													output_categorical_action_probabilities .true
-													feature_mad action_feature_mad
 													candidate_cases_lists
 														(if (= 0 (size  react_context_features))
 															[[][][]]
@@ -333,7 +322,8 @@
 
 									;;;TODO: handle nulls from the diff pair of [value diff, null diff] for continuous features
 									[
-										(first diff)
+										(first diff) ;value diff
+										(last diff) ;null diff
 										;get the original categorical action probability for the nominal
 										(if feature_is_nominal
 											(or (get categorical_action_probabilities_map [action_feature (get case_values_map action_feature)] ))
@@ -386,7 +376,6 @@
 												(call !InterpolateAndComputeDiffToCase (assoc
 													feature action_feature
 													output_categorical_action_probabilities .true
-													feature_mad action_feature_mad
 													candidate_cases_lists
 														(compute_on_contained_entities
 															(query_not_in_entity_list [(replace case_id)])
@@ -458,7 +447,8 @@
 
 									;;;TODO: handle nulls from the diff pair of [value diff, null diff] for continuous features
 									[
-										(first diff)
+										(first diff) ;value diff
+										(last diff) ;null diff
 										;get the original categorical action probability for the nominal
 										(if feature_is_nominal
 											(or (get categorical_action_probabilities_map [action_feature (get case_values_map action_feature)] ))
@@ -499,10 +489,15 @@
 								)
 						))
 
-						;output a tuple of : [ AC, PC, directional PC, values ]
+						;each pair is [value-diff, null-diff, predicted value/predicted CAP]
+						;output a tuple of : [ value-AC, null-AC, value-PC, directional value-PC, null-PC, direcitonal null-PC, values ]
 						[
 							(if compute_ac
 								(- (first without_ac_features_action_pair) (first with_ac_features_action_pair) )
+							)
+							;null AC
+							(if compute_ac
+								(- (get without_ac_features_action_pair 1) (get with_ac_features_action_pair 1) )
 							)
 							(if compute_pc
 								(abs (- (last with_ac_features_action_pair) (last without_ac_features_action_pair)))
@@ -510,6 +505,14 @@
 							;directional PC
 							(if compute_pc
 								(- (last with_ac_features_action_pair) (last without_ac_features_action_pair))
+							)
+							;null PC
+							(if compute_pc
+								(abs (- (get with_ac_features_action_pair 1) (get without_ac_features_action_pair 1)))
+							)
+							;directional null PC
+							(if compute_pc
+								(- (get with_ac_features_action_pair 1) (get without_ac_features_action_pair 1))
 							)
 							;unique value combination for this case as a tuple
 							unique_value_combo
@@ -560,17 +563,38 @@
 										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
 									)
 								)
+								;output null AC for this combination of unique values combination
+								(if compute_ac
+									(*
+										(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
+										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+									)
+								)
 								;output PC for this combination of unique values combination
 								(if compute_pc
 									(*
-										(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
+										(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
 										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
 									)
 								)
 								;output directional PC for this combination of unique values combination
 								(if compute_pc
 									(*
-										(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
+										(generalized_mean (map (lambda (get (current_value) 3)) matching_ac_pc_tuples))
+										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+									)
+								)
+								;output null-PC for this combination of unique values combination
+								(if compute_pc
+									(*
+										(generalized_mean (map (lambda (get (current_value) 4)) matching_ac_pc_tuples))
+										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+									)
+								)
+								;output directional null-PC for this combination of unique values combination
+								(if compute_pc
+									(*
+										(generalized_mean (map (lambda (get (current_value) 5)) matching_ac_pc_tuples))
 										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
 									)
 								)
@@ -632,8 +656,8 @@
 							(lambda
 								;if there are nulls, wrap the (get)s in an (or) to assign low value for (null)s while sorting
 								(<=
-									(or (get corresponding_contribution_tuples [(current_value 1) 1]) -.infinity)
-									(or (get corresponding_contribution_tuples [(current_value 2) 1]) -.infinity)
+									(or (get corresponding_contribution_tuples [(current_value 1) 2]) -.infinity)
+									(or (get corresponding_contribution_tuples [(current_value 2) 2]) -.infinity)
 								)
 							)
 
@@ -678,8 +702,11 @@
 				"features" value_robust_contributions_features
 				"feature_values" sorted_feature_values
 				"ac_values" (map (lambda (first (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
-				"pc_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
-				"pc_directional_values" (map (lambda (last (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
+				"null_ac_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
+				"pc_values" (map (lambda (get (current_value) 2)) (unzip corresponding_contribution_tuples sorted_indices))
+				"pc_directional_values" (map (lambda (get (current_value) 3)) (unzip corresponding_contribution_tuples sorted_indices))
+				"null_pc_values" (map (lambda (get (current_value) 4)) (unzip corresponding_contribution_tuples sorted_indices))
+				"null_pc_directional_values" (map (lambda (get (current_value) 5)) (unzip corresponding_contribution_tuples sorted_indices))
 			}
 
 			compute_ac
@@ -687,14 +714,17 @@
 				"features" value_robust_contributions_features
 				"feature_values" sorted_feature_values
 				"ac_values" (map (lambda (first (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
+				"null_ac_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
 			}
 
 			;else compute_pc
 			{
 				"features" value_robust_contributions_features
 				"feature_values" sorted_feature_values
-				"pc_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
-				"pc_directional_values" (map (lambda (last (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
+				"pc_values" (map (lambda (get (current_value) 2)) (unzip corresponding_contribution_tuples sorted_indices))
+				"pc_directional_values" (map (lambda (get (current_value) 3)) (unzip corresponding_contribution_tuples sorted_indices))
+				"null_pc_values" (map (lambda (get (current_value) 4)) (unzip corresponding_contribution_tuples sorted_indices))
+				"null_pc_directional_values" (map (lambda (get (current_value) 5)) (unzip corresponding_contribution_tuples sorted_indices))
 			}
 		)
 	)
@@ -945,16 +975,6 @@
 		))
 
 		(declare (assoc
-			;continuous features with nulls need their MAD computed
-			action_feature_mad
-				(if (and
-						(not (contains_index !nominalsMap action_feature))
-						(!= .false (get !featureNullRatiosMap (list action_feature "has_nulls")))
-						(not (contains_index !editDistanceFeatureTypesMap action_feature))
-						(not (contains_index !inactiveFeaturesMap action_feature) )
-					)
-					(call !ComputeFeatureMAD (assoc feature action_feature))
-				)
 			;map of feature -> mad for continuous features with nulls
 			feature_mad_map (call !ConstructFeatureMADMap (assoc features value_robust_contributions_features))
 			;create a backup of context_features for time series flows
@@ -1193,7 +1213,6 @@
 									case_feature_value (get case_values_map action_feature)
 									feature_is_nominal action_feature_is_nominal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
-									feature_mad action_feature_mad
 									output_categorical_action_probabilities .true
 									candidate_cases_lists
 										(if (= 0 (size react_context_features))
@@ -1347,7 +1366,6 @@
 									feature action_feature
 									output_categorical_action_probabilities .true
 									case_feature_value (get case_values_map action_feature)
-									feature_mad action_feature_mad
 									feature_is_nominal action_feature_is_nominal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
 
