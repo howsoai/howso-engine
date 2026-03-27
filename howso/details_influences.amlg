@@ -213,10 +213,9 @@
 				)
 
 			action_feature (first action_features)
-			action_is_nominal (contains_index !nominalsMap (first action_features))
+			feature_is_nominal (contains_index !nominalsMap (first action_features))
 			output_categorical_action_probabilities .false
 			cases_to_expected_values_map (assoc)
-			cases_mdas (list)
 			original_cap_map categorical_action_probabilities_map
 		)
 
@@ -227,138 +226,146 @@
 
 		(assign (assoc
 			cases_to_expected_values_map (zip (first local_data_cases_tuple) (last local_data_cases_tuple))
-			output_categorical_action_probabilities action_is_nominal
+			output_categorical_action_probabilities feature_is_nominal
 		))
 
-		(assign (assoc
-			cases_mdas
+		(declare (assoc
+			case_ac_tuples
 				;iterate over each case in the local data, hold it out and compute acccuracy of local data without it. ie, nested accuracy flow
 				(map
 					(lambda (let
 						(assoc
 							mda_case_id (current_value 1)
-							remaining_k_cases_map (remove cases_to_expected_values_map (current_value 1))
-							predictions (list)
-							mda (null)
-							robust_remaining_k_cases_map (null)
+							remaining_k_cases (indices (remove cases_to_expected_values_map (current_value 1)))
+							robust_remaining_k_cases (null)
 						)
 
-						;for robust residuals ensure at least 30 cases per case are used by duplicating the remaining cases list enough times
+						;for robust ensure at least 200 cases per neighbor are used by duplicating the remaining cases list enough times
 						(if robust
 							(assign (assoc
-								robust_remaining_k_cases_map
-									(if (< (size remaining_k_cases_map) 30)
-										(apply "append" (range remaining_k_cases_map 1 (ceil (/ 30 (size remaining_k_cases_map))) 1 ))
-
-										remaining_k_cases_map
-									)
+								robust_remaining_k_cases
+									(apply "append" (range remaining_k_cases 1 (ceil (/ 200 (size remaining_k_cases))) 1 ))
 							))
 						)
 
 						;predict action feature for all the remaining k cases to compute the mda
-						(assign (assoc
+						(declare (assoc
 							predictions
-								;remove any nulls
-								(filter (values
-									(map
-										(lambda (let
-											(assoc
-												react_case (current_index 1)
-												expected_value (current_value 1)
-												reaction (null)
-												ignore_case_list (null)
-												;categorical_action_probabilities_map needs to be cleared before each reaction so that it can be accumulated correctly
-												categorical_action_probabilities_map (assoc)
-												abs_error_with_case 0
-												abs_error_without_case 0
-											)
+								(map
+									(lambda (let
+										(assoc
+											react_case (current_value 1)
+											case_feature_value (get cases_to_expected_values_map (current_value 1))
+											reaction (null)
+											;categorical_action_probabilities_map needs to be cleared before each reaction so that it can be accumulated correctly
+											categorical_action_probabilities_map (assoc)
+											abs_error_with_case 0
+											abs_error_without_case 0
+										)
 
-											(assign (assoc
-												ignore_case_list
-													;remove a random selection of local cases in addition to the react case
-													(if robust
-														(append
-															(list react_case)
-															(filter (lambda (< (rand) .5)) (indices (remove remaining_k_cases_map react_case)) )
+										(declare (assoc
+											ignore_case_list
+												;remove a random selection of local cases in addition to the react case
+												(if robust
+													(append
+														[react_case]
+														(filter
+															(lambda (< (rand) .5))
+															(filter (lambda (!= react_case (current_value))) remaining_k_cases)
 														)
-
-														(list react_case)
 													)
-											))
 
-											(assign (assoc
-												reaction_with_case
-													(call !GenerateReaction (assoc
-														custom_extra_filtering_queries (query_not_in_entity_list ignore_case_list)
-														context_values (retrieve_from_entity react_case context_features)
-													))
-											))
-
-											;if nominal, return the caterogorical action probability for the expected class
-											(if action_is_nominal
-												(seq
-													(assign (assoc
-														reaction_with_case
-															(get categorical_action_probabilities_map (list action_feature expected_value) )
-													))
-													;cap needs to be cleared before each reaction so that it can be accumulated correctly
-													(assign (assoc categorical_action_probabilities_map (assoc)))
+													[react_case]
 												)
-
-												(assign (assoc
-													abs_error_with_case (abs (- expected_value reaction_with_case))
-												))
-											)
-
-											(assign (assoc
-												reaction_without_case
-													(call !GenerateReaction (assoc
-														custom_extra_filtering_queries (query_not_in_entity_list (append mda_case_id ignore_case_list))
-														context_values (retrieve_from_entity react_case context_features)
-													))
-											))
-											(if action_is_nominal
-												(assign (assoc
-													reaction_without_case
-														(get categorical_action_probabilities_map (list action_feature expected_value) )
-												))
-
-												(assign (assoc
-													abs_error_without_case (abs (- expected_value reaction_without_case))
-												))
-											)
-
-											;output delta between with case and without case, if both are null output a 0
-											(if (or (= (null) reaction_with_case) (= (null) reaction_without_case))
-												0
-
-												(if action_is_nominal
-													;if removing a case dropped accuracy from .9 to .8, we want a positive value since this case contributed 0.1 to accuracy
-													;but if removing a case improves accuracy, this diff should be negative
-													(- reaction_with_case reaction_without_case)
-
-													;else take the differences in the absolute errors for continuous
-													;if error without case increased, this case contributed positively to accuracy.
-													(- abs_error_without_case abs_error_with_case)
-												)
-											)
 										))
 
-										;iterate over the possibly larger list if robust
-										(if robust
-											robust_remaining_k_cases_map
+										(declare (assoc
+											reaction_with_case
+												(call !InterpolateAndComputeDiffToCase (assoc
+													feature action_feature
+													interpolated_value
+														(call !GenerateReaction (assoc
+															allow_nulls allow_nulls
+															output_categorical_action_probabilities .true
+															custom_extra_filtering_queries (query_not_in_entity_list ignore_case_list)
+															context_values (retrieve_from_entity react_case context_features)
+															tie_break_random_seed (rand)
+														))
+													compute_all_statistics .false
+												))
+										))
 
-											remaining_k_cases_map
+										(assign (assoc categorical_action_probabilities_map (assoc) ))
+										(declare (assoc
+											reaction_without_case
+												(call !InterpolateAndComputeDiffToCase (assoc
+													feature action_feature
+													interpolated_value
+														(call !GenerateReaction (assoc
+															allow_nulls allow_nulls
+															output_categorical_action_probabilities .true
+															custom_extra_filtering_queries (query_not_in_entity_list (append mda_case_id ignore_case_list))
+															context_values (retrieve_from_entity react_case context_features)
+															tie_break_random_seed (rand)
+														))
+													compute_all_statistics .false
+												))
+										))
+
+										;both value diffs have values
+										(if (and
+												(!= (null) (first reaction_without_case))
+												(!= (null) (first reaction_with_case))
+											)
+											[
+												(- (first reaction_without_case) (first reaction_with_case) )
+												(- (last reaction_without_case) (last reaction_with_case) )
+											]
+
+											;else at least one of the value difs are null
+											[
+												(null)
+												(- (or (last reaction_without_case)) (or (last reaction_with_case)) )
+											]
 										)
+									))
+
+									;iterate over the possibly larger list if robust
+									(if robust
+										robust_remaining_k_cases
+
+										;else repeat this 3 times for the local data to averoge out tie breakers
+										(append remaining_k_cases remaining_k_cases remaining_k_cases)
 									)
-								))
+								)
+
 						))
 
-						(assign (assoc mda (generalized_mean predictions) ))
+						(declare (assoc
+							ac_tuple
+								(if (and
+										(not feature_is_nominal)
+										(get !featureNullRatiosMap [action_feature "has_nulls"])
+									)
+									[
+										;ac of diffs
+										(generalized_mean (map (lambda (first (current_value))) predictions))
+										;ac of nulls
+										(generalized_mean (map (lambda (last (current_value))) predictions))
+										;% of nulls
+										(/ (size (filter (map (lambda (last (current_value))) predictions))) (size predictions))
+									]
+									[
+										(generalized_mean (map (lambda (first (current_value))) predictions))
+										(null)
+										(null)
+									]
+								)
+						))
 
 						(append
 							(retrieve_from_entity mda_case_id (zip (list !internalLabelSession !internalLabelSessionTrainingIndex)))
-							(assoc "accuracy_contribution" mda)
+							{ "accuracy_contribution" ac_tuple }
 						)
 					))
 					(first local_data_cases_tuple)
@@ -370,8 +377,8 @@
 		(accum (assoc
 			output
 				(if robust
-					(assoc "case_robust_accuracy_contributions" cases_mdas)
-					(assoc "case_full_accuracy_contributions" cases_mdas)
+					(assoc "case_robust_accuracy_contributions" case_ac_tuples)
+					(assoc "case_full_accuracy_contributions" case_ac_tuples)
 				)
 		))
 	)
