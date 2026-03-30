@@ -221,7 +221,11 @@
 			(accum (assoc feature_contributions_map (map 0 excluded_inactive_features_map) ))
 		)
 
-		(declare (assoc directional_contributions_map (map (lambda (last (current_value))) feature_contributions_map) ))
+		(declare (assoc
+			directional_contributions_map (map (lambda (get (current_value) 1)) feature_contributions_map)
+			null_contributions_map (map (lambda (get (current_value) 2)) feature_contributions_map)
+			directional_null_contributions_map (map (lambda (get (current_value) 3)) feature_contributions_map)
+		))
 		(assign (assoc feature_contributions_map  (map (lambda (first (current_value))) feature_contributions_map) ))
 
 		;replace (null) with 0 to prevent (null) output, in situations where there were not enough samples to compute a contribution for a feature
@@ -235,6 +239,16 @@
 				directional_contributions_map (map (lambda (if (= (null) (current_value)) 0 (current_value) )) directional_contributions_map)
 			))
 		)
+		(if (contains_value null_contributions_map (null))
+			(assign (assoc
+				null_contributions_map (map (lambda (if (= (null) (current_value)) 0 (current_value) )) null_contributions_map)
+			))
+		)
+		(if (contains_value directional_null_contributions_map (null))
+			(assign (assoc
+				directional_null_contributions_map (map (lambda (if (= (null) (current_value)) 0 (current_value) )) directional_null_contributions_map)
+			))
+		)
 
 		;outputs the pair of assocs
 		(if run_on_local_model
@@ -245,6 +259,10 @@
 			(concat "feature_" (if robust "robust" "full") "_prediction_contributions")
 				feature_contributions_map
 			(concat "feature_" (if robust "robust" "full") "_directional_prediction_contributions")
+				directional_contributions_map
+			(concat "null_feature_" (if robust "robust" "full") "_prediction_contributions")
+				feature_contributions_map
+			(concat "null_feature_" (if robust "robust" "full") "_directional_prediction_contributions")
 				directional_contributions_map
 		)
 	)
@@ -335,11 +353,25 @@
 										(lambda (get (current_value) (list feature_index 1)) )
 										accrued_cases_delta_lists
 									))
+								null_abs_avgs
+									;these lists must be filtered because some cases will
+									;have some context features completely filtered due to TS
+									(filter (map
+										(lambda (get (current_value) (list feature_index 2)) )
+										accrued_cases_delta_lists
+									))
+								null_avgs
+									(filter (map
+										(lambda (get (current_value) (list feature_index 3)) )
+										accrued_cases_delta_lists
+									))
 							))
 							(list
 								;for each feature, iterate over the list of feature deltas for each case, and average them out
 								(generalized_mean abs_avgs)
 								(generalized_mean avgs)
+								(generalized_mean null_abs_avgs)
+								(generalized_mean null_avgs)
 							)
 						))
 						(or details_context_features all_context_features)
@@ -424,7 +456,11 @@
 					(list
 						(generalized_mean (map (lambda (first (current_value))) deltas) )
 						;TODO: 17356, deal with averaging out differences to handle edit distance features
-						(/ (apply "+" (map (lambda (last (current_value))) deltas)) (size deltas))
+						(/ (apply "+" (map (lambda (get (current_value) 1)) deltas)) (size deltas))
+						;abs null probability deltas
+						(generalized_mean (map (lambda (get (current_value) 2)) deltas) )
+						;null probability deltas
+						(generalized_mean (map (lambda (get (current_value) 3)) deltas) )
 					)
 
 				))
@@ -449,9 +485,14 @@
 			action_features (list action_feature)
 			skip_decoding .true
 			skip_encoding .true
+			allow_nulls .true
 			;ignore the local case
 			ignore_case case_id
-			details (assoc "categorical_action_probabilities" action_is_nominal)
+			details
+				(assoc
+					"categorical_action_probabilities" action_is_nominal
+					"null_probabilities" .true
+				)
 			hyperparam_map hyperparam_map
 			filtering_queries context_condition_filter_query
 		))
@@ -523,6 +564,7 @@
 						without_features_set (assoc)
 						with_features_set (assoc)
 						react_value 0
+						nullness_value (null)
 						reaction (null)
 					)
 
@@ -576,13 +618,22 @@
 							)
 					))
 
+					(assign (assoc
+						nullness_value
+							(if action_is_nominal
+								(null)
+
+								(get reaction ["null_probabilities" action_feature])
+							)
+					))
+
 					;output a pair of two lists, each of the two list is the length of context_features
 					; (list (list react_values_with_feature_as_context) (list react_values_without_feature_as_context))
 					(list
 						;all context features with this react_value as the 'with' list
 						(map
 							(lambda
-								(if (contains_index with_features_set (current_value)) react_value)
+								(if (contains_index with_features_set (current_value)) [react_value nullness_value])
 							)
 							all_context_features
 						)
@@ -590,7 +641,7 @@
 						;all removed features with this react_value as the 'without' list
 						(map
 							(lambda
-								(if (contains_index without_features_set (current_value)) react_value)
+								(if (contains_index without_features_set (current_value)) [react_value nullness_value])
 							)
 							all_context_features
 						)
@@ -688,13 +739,25 @@
 
 				;else average with - average without for this feature
 				(list
+					;abs difference in mean predicted values
 					(abs (-
-						(generalized_mean feature_reactions_with)
-						(generalized_mean feature_reactions_without)
+						(generalized_mean (map (lambda (first (current_value))) feature_reactions_with) )
+						(generalized_mean (map (lambda (first (current_value))) feature_reactions_without) )
 					))
+					;difference in mean predicted values
 					(-
-						(generalized_mean feature_reactions_with)
-						(generalized_mean feature_reactions_without)
+						(generalized_mean (map (lambda (first (current_value))) feature_reactions_with) )
+						(generalized_mean (map (lambda (first (current_value))) feature_reactions_without) )
+					)
+					;abs difference in mean null probabilities
+					(abs (-
+						(generalized_mean (map (lambda (last (current_value))) feature_reactions_with) )
+						(generalized_mean (map (lambda (last (current_value))) feature_reactions_without) )
+					))
+					;difference in mean null probabilities
+					(-
+						(generalized_mean (map (lambda (last (current_value))) feature_reactions_with) )
+						(generalized_mean (map (lambda (last (current_value))) feature_reactions_without) )
 					)
 				)
 			)
@@ -741,6 +804,8 @@
 						(- with_prob without_prob )
 					)
 					(- with_prob without_prob)
+					(null)
+					(null)
 				)
 			)
 
@@ -757,6 +822,14 @@
 						(get reaction_with (list "action_values" 0))
 						(get reaction_without (list "action_values" 0))
 					)
+					(abs (-
+						(get reaction_with (list "null_probabilities" action_feature))
+						(get reaction_without (list "null_probabilities" action_feature))
+					))
+					(-
+						(get reaction_with (list "null_probabilities" action_feature))
+						(get reaction_without (list "null_probabilities" action_feature))
+					)
 				)
 
 				;else continuous, output pair of [absolute, non-absolute] delta
@@ -768,6 +841,14 @@
 					(-
 						(get reaction_with (list "action_values" 0))
 						(get reaction_without (list "action_values" 0))
+					)
+					(abs (-
+						(get reaction_with (list "null_probabilities" action_feature))
+						(get reaction_without (list "null_probabilities" action_feature))
+					))
+					(-
+						(get reaction_with (list "null_probabilities" action_feature))
+						(get reaction_without (list "null_probabilities" action_feature))
 					)
 				)
 			)
