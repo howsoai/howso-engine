@@ -1,18 +1,12 @@
 ;Contains methods for computing and outputting feature MDA.
 {
 	;calculate the accuracy contribution for each feature as the decrease in accuracy for the specified list of context and action features
-	;outputs an assoc of context features -> decrease in accuracy Mean Absolute Error value
-	; if output_ratio, the ratio is: feature_mae / baseline_mae
-	; else:  feature_mae - baseline_mae
+	;outputs an assoc of context features -> decrease in accuracy Mean Absolute Error value as a pair of [value AC, null AC]
 	;
 	;parameters:
 	; action_features : list of action features
 	; context_features : list of context features
 	; case_ids : optional list of case_ids, will use the full dataset if not provided, otherwise will validate against only the specified case_ids
-	; sensitivity_to_randomization: optional flag. if set to true will scramble feature values being reacted to instead of dropping out the feature
-	; output_ratio : optional flag, if set to true will output of ratio of Feature-error / dateset-error
-	; classification_precision: 0=low, 1=medium, 2=high. low uses 1 or 0 for residuals. medium uses categorical action probability for incorrect
-	;			predictions, high uses categorical action probabilities for both correct and incorrect predictions
 	; num_samples: run decrease in accuracy only a specified sample of the dataset, default is 1000
 	; robust: flag, default to false. when true, the power set/permutations of features are used as contexts
 	;			to calculate the decrease in accuracy for a given feature. when false, the full set of features is used to calculate the
@@ -33,9 +27,6 @@
 			context_features (list)
 			action_features (list)
 			case_ids (null)
-			sensitivity_to_randomization .false
-			classification_precision 1
-			output_ratio .false
 			num_samples 1000
 			robust .false
 			weight_feature ".case_weight"
@@ -51,7 +42,7 @@
 		)
 
 		;if computing robust accuracy contributions, use the fast method and output raw mda values as accuracy contributions
-		(if (and robust (not sensitivity_to_randomization))
+		(if robust
 			(let
 				(assoc
 					ac_map
@@ -70,8 +61,8 @@
 							convergence_min_size convergence_min_size
 						))
 				)
-				(if output_robust_residuals
-					(conclude
+				(conclude
+					(if output_robust_residuals
 						;output only the specified action feature accuracy contributions if action_features are specified
 						(if (size action_features)
 							(set
@@ -82,9 +73,7 @@
 
 							ac_map
 						)
-					)
 
-					(conclude
 						(if (size action_features)
 							(keep (get ac_map "feature_mda_map") action_features)
 							(get ac_map "feature_mda_map")
@@ -92,6 +81,139 @@
 					)
 				)
 			)
+		)
+
+		(if (= (null) hyperparam_map)
+			(assign (assoc
+				hyperparam_map
+					(if (= 1 (size action_features))
+						(call !GetHyperparameters (assoc
+							context_features context_features
+							feature (first action_features)
+							weight_feature weight_feature
+						))
+					)
+			))
+		)
+		(call !UpdateCaseWeightParameters (assoc set_valid_weight_feature .false ))
+
+		(declare (assoc
+			valid_weight_feature (and use_case_weights (or !hasPopulatedCaseWeight (!= weight_feature ".case_weight")) )
+			;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
+			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
+			max_lag_index_value (null)
+			action_feature (first action_features)
+		))
+		(if ts_feature_lag_amount_map
+			(assign (assoc max_lag_index_value (apply "max" (values ts_feature_lag_amount_map)) ))
+		)
+
+		;if case_ids were not explicitly specified but num_samples was, we're computing global MDA, randomly sample case_ids to be the num_samples
+		(if (and (!= (null) num_samples) (= (null) case_ids))
+			(assign (assoc
+				case_ids
+					(call !SampleCases (assoc
+						num num_samples
+						case_weight_feature (if valid_weight_feature weight_feature)
+					))
+			))
+		)
+
+		(declare (assoc
+			full_residual_output
+				(call !CalculateFeatureResiduals (assoc
+					features [action_feature]
+					context_features context_features
+					robust_residuals .false
+					case_ids case_ids
+					custom_hyperparam_map hyperparam_map
+					features_to_derive features_to_derive
+					compute_null_uncertainties .false
+					regional_data_only regional_data_only
+					use_shared_deviations .false
+				))
+		))
+
+		(declare (assoc
+			full_residual_pair (get full_residual_output ["residual_map" action_feature])
+			full_num_nulls (get full_residual_output ["null_accuracy_map" "num_nulls"])
+			num_total_samples_x2 (* 2 (size case_ids))
+		))
+
+		(map
+			(lambda (let
+				(assoc
+					ctx_feature_residual_output
+						(call !CalculateFeatureResiduals (assoc
+							features [action_feature]
+							context_features (filter (lambda (!= (current_index 3) (current_value))) context_features)
+							robust_residuals .false
+							case_ids case_ids
+							custom_hyperparam_map hyperparam_map
+							features_to_derive features_to_derive
+							compute_null_uncertainties .false
+							regional_data_only regional_data_only
+							use_shared_deviations .false
+						))
+				)
+
+				(assign (assoc
+					ctx_residual_pair (get ctx_feature_residual_output ["residual_map" action_feature])
+					ctx_num_nulls (get ctx_feature_residual_output ["null_accuracy_map" "num_nulls"])
+				))
+
+				[
+					;value AC
+					(- (first ctx_residual_pair) (first full_residual_pair))
+					;null AC
+					(- (last ctx_residual_pair) (last full_residual_pair))
+					;% of nulls
+					(/ (+ full_num_nulls ctx_num_nulls) num_total_samples_x2)
+				]
+			))
+			(zip context_features)
+		)
+	)
+
+
+	;Method used for targeted analyze (or by permutation AC flows) to calculate the accuracy contribution for each feature as the decrease in accuracy
+	;for the specified list of context and action features.
+	;outputs an assoc of context features -> AC.  when output_ratio is true, AC is the ratio of Mean Absolute Error value of feature / baseline M.A.E.
+	;
+	;parameters:
+	; action_features : list of action features
+	; context_features : list of context features
+	; case_ids : optional list of case_ids, will use the full dataset if not provided, otherwise will validate against only the specified case_ids
+	; sensitivity_to_randomization: optional flag. if set to true will scramble feature values being reacted to instead of dropping out the feature
+	; output_ratio : optional flag, if set to true will output of ratio of Feature-error / dateset-error
+	; classification_precision: 0=low, 1=medium, 2=high. low uses 1 or 0 for residuals. medium uses categorical action probability for incorrect
+	;			predictions, high uses categorical action probabilities for both correct and incorrect predictions
+	; num_samples: run decrease in accuracy only a specified sample of the dataset, default is 1000
+	; robust: flag, default to false. when true, the power set/permutations of features are used as contexts
+	;			to calculate the decrease in accuracy for a given feature. when false, the full set of features is used to calculate the
+	;			decrease in accuracy for a given feature.
+	; use_case_weights: flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
+	;   			case weights will be used if the trainee has them.
+	; weight_feature: optional, default '.case_weight'.  name of feature whose values to use as case weights
+	; context_condition_filter_query: a list of queries that can be used to filter the possible set of cases that can be used for predictions
+	; features_to_derive: list of features whose values should be derived rather than interpolated
+	!CalculateBalancedFeatureAC
+	(declare
+		(assoc
+			context_features (list)
+			action_features (list)
+			case_ids (null)
+			sensitivity_to_randomization .false
+			classification_precision 1
+			output_ratio .false
+			num_samples 1000
+			robust .false
+			weight_feature ".case_weight"
+			use_case_weights (null)
+			hyperparam_map (null)
+			context_condition_filter_query (list)
+			regional_data_only .false
+			features_to_derive []
 		)
 
 		(if (= (null) hyperparam_map)
@@ -119,7 +241,6 @@
 		(if ts_feature_lag_amount_map
 			(assign (assoc max_lag_index_value (apply "max" (values ts_feature_lag_amount_map)) ))
 		)
-
 
 		;if case_ids were not explicitly specified but num_samples was, we're computing global MDA, randomly sample case_ids to be the num_samples
 		(if (and (!= (null) num_samples) (= (null) case_ids))
@@ -191,6 +312,7 @@
 						)
 
 						;output the decrease in accuracy as a ratio of the feature / baseline MAE
+						;prevent output of (null) in case all maes are 0
 						(if output_ratio
 							;prevent output of (null) in case all maes are 0
 							(if (= 0 baseline_error)

@@ -31,7 +31,6 @@
 			num_features (size context_features)
 
 			feature_is_nominal (contains_index !nominalsMap action_feature)
-			feature_is_ordinal (contains_index !ordinalFeaturesSet action_feature)
 			feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
 			feature_is_dependent (contains_index !dependentFeatureMap action_feature)
 			feature_is_non_string_edit_distance .false
@@ -332,8 +331,9 @@
 											)
 									))
 
+									;;;TODO: 25230, handle nulls from the diff pair of [value diff, null diff] for continuous features
 									[
-										diff
+										(first diff)
 										;get the original categorical action probability for the nominal
 										(if feature_is_nominal
 											(or (get categorical_action_probabilities_map [action_feature (get case_values_map action_feature)] ))
@@ -456,8 +456,9 @@
 											)
 									))
 
+									;;;TODO: 25230, handle nulls from the diff pair of [value diff, null diff] for continuous features
 									[
-										diff
+										(first diff)
 										;get the original categorical action probability for the nominal
 										(if feature_is_nominal
 											(or (get categorical_action_probabilities_map [action_feature (get case_values_map action_feature)] ))
@@ -735,6 +736,8 @@
 			total_num (size sorted_unique_values)
 		))
 
+		;;;TODO: 25230, add a bucket for null if select cases have significant amount (>=30) of nulls
+
 		;assoc of bucket -> values pair of:  min, max] of all the unique values that go into that bucket
 		(zip
 			(range 0 (- num_buckets 1))
@@ -917,28 +920,28 @@
 		;robust_residuals are used as the deviation for the ACs when converting to surprisal.
 		(declare (assoc
 			robust_residuals_map
-				(map
-					(lambda (max (current_value) (get !cachedFeatureMinResidualMap (current_index))))
-					(get
-						(call !CalculateFeatureResiduals (assoc
-							features case_features
-							context_features case_features
-							case_ids
-								;don't need all 100k samples for robust residuals, 10k will do.
-								(rand case_ids 10000)
-							robust_residuals .true
-							use_case_weights use_case_weights
-							weight_feature weight_feature
-							custom_hyperparam_map custom_hyperparam_map
-							compute_all_statistics .false
-							confusion_matrix_min_count confusion_matrix_min_count
-							context_condition_filter_query context_condition_filter_query
-							strict_case_ids (!= 0 (size action_condition_filter_query))
-							features_to_derive features_to_derive
-						))
-						"residual_map"
-					)
-				)
+				(call !ExpandValuesMapToUncertainty (assoc
+					values_map
+						(get
+							(call !CalculateFeatureResiduals (assoc
+								features case_features
+								context_features case_features
+								case_ids
+									;don't need all 100k samples for robust residuals, 10k will do.
+									(rand case_ids 10000)
+								robust_residuals .true
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+								custom_hyperparam_map custom_hyperparam_map
+								compute_all_statistics .false
+								confusion_matrix_min_count confusion_matrix_min_count
+								context_condition_filter_query context_condition_filter_query
+								strict_case_ids (!= 0 (size action_condition_filter_query))
+								features_to_derive features_to_derive
+							))
+							"residual_map"
+						)
+				))
 		))
 
 		(declare (assoc
@@ -959,18 +962,12 @@
 			num_features (size context_features)
 
 			action_feature_is_nominal (contains_index !nominalsMap action_feature)
-			action_feature_is_ordinal (contains_index !ordinalFeaturesSet action_feature)
 			action_feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
 			action_feature_is_dependent (contains_index !dependentFeatureMap action_feature)
 
 			ac_feature_is_nominal_map
 				(map
 					(lambda (contains_index !nominalsMap (current_index)))
-					(zip value_robust_contributions_features)
-				)
-			ac_feature_is_ordinal_map
-				(map
-					(lambda (contains_index !ordinalFeaturesSet (current_index)))
 					(zip value_robust_contributions_features)
 				)
 			ac_feature_is_edit_distance_map
@@ -1195,7 +1192,6 @@
 									feature action_feature
 									case_feature_value (get case_values_map action_feature)
 									feature_is_nominal action_feature_is_nominal
-									feature_is_ordinal action_feature_is_ordinal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
 									feature_mad action_feature_mad
 									output_categorical_action_probabilities .true
@@ -1272,7 +1268,6 @@
 											feature ac_feature
 											case_feature_value (get case_values_map ac_feature)
 											feature_is_nominal (get ac_feature_is_nominal_map ac_feature)
-											feature_is_ordinal (get ac_feature_is_ordinal_map ac_feature)
 											feature_is_non_string_edit_distance (get ac_feature_is_non_string_edit_distance_map ac_feature)
 											feature_mad (get feature_mad_map ac_feature)
 											output_categorical_action_probabilities .true
@@ -1354,7 +1349,6 @@
 									case_feature_value (get case_values_map action_feature)
 									feature_mad action_feature_mad
 									feature_is_nominal action_feature_is_nominal
-									feature_is_ordinal action_feature_is_ordinal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
 
 									candidate_cases_lists
@@ -1446,7 +1440,6 @@
 											feature ac_feature
 											case_feature_value (get case_values_map ac_feature)
 											feature_is_nominal (get ac_feature_is_nominal_map ac_feature)
-											feature_is_ordinal (get ac_feature_is_ordinal_map ac_feature)
 											feature_is_non_string_edit_distance (get ac_feature_is_non_string_edit_distance_map ac_feature)
 											feature_mad (get feature_mad_map ac_feature)
 											output_categorical_action_probabilities .true
@@ -1485,23 +1478,25 @@
 						))
 
 						(declare (assoc
-							ac_for_action_feature (- without_ac_features_action_diff with_ac_features_action_diff)
+							ac_for_action_feature (- (first without_ac_features_action_diff) (first with_ac_features_action_diff))
 							acs_for_ac_features
 								(map
-									(lambda (apply "-" (current_value)))
+									(lambda (- (first (first (current_value))) (first (last (current_value)))))
 									without_action_ac_feature_diffs
 									with_action_ac_feature_diffs
 								)
 						))
+
+						;;;TODO: 25230, account for nulls similar to how missing information works
 						(declare (assoc
 							action_feature_surprisal
 								(-
 									(/
 										(call !LK_metric_laplace (assoc
 											difference (max ac_for_action_feature 0)
-											deviation (get robust_residuals_map action_feature)
+											deviation (first (get robust_residuals_map action_feature))
 										))
-										(get robust_residuals_map action_feature)
+										(first (get robust_residuals_map action_feature))
 									)
 									1.5
 								)
@@ -1512,9 +1507,9 @@
 											(/
 												(call !LK_metric_laplace (assoc
 													difference (max (current_value 1) 0)
-													deviation (get robust_residuals_map (get value_robust_contributions_features (current_index 1)))
+													deviation (first (get robust_residuals_map (get value_robust_contributions_features (current_index 1))))
 												))
-												(get robust_residuals_map (get value_robust_contributions_features (current_index)))
+												(first (get robust_residuals_map (get value_robust_contributions_features (current_index))))
 											)
 											1.5
 										)
