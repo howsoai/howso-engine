@@ -642,200 +642,229 @@
 					custom_residuals_map
 					(get hyperparam_map "featureDeviations")
 				)
-			;list, length of case_ids, each item will be a list of residual values, one per feature
-			case_residuals_lists (list)
 			;don't need to compute ordinal diff when estimating residual lower bounds, treat them all as continuous
 			ordinal_feature_set (if (not estimating_residual_lower_bound) !ordinalFeaturesSet)
 		))
 
 		;iterate over each case and accumulate residuals for all the feature(s)
-		(assign (assoc
-			case_residuals_lists
-				||(map
-					(lambda (let
-						(assoc
-							case_id (current_value 1)
-							;map of feature -> value for all the case values
-							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
-							time_series_filter_query (list)
-							feature_weights (get hyperparam_map "featureWeights")
-							context_features context_features
-							dependent_queries_list (null)
-							fanout_features_queries (null)
-						)
+		||(map
+			(lambda (let
+				(assoc
+					case_id (current_value 1)
+					;map of feature -> value for all the case values
+					case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
+					time_series_filter_query (list)
+					feature_weights (get hyperparam_map "featureWeights")
+					context_features context_features
+					dependent_queries_list (null)
+					fanout_features_queries (null)
+				)
 
-						(if !tsTimeFeature
-							(assign (assoc
-								context_features
-									(call !FilterContextsBySeriesIndex (assoc
-										all_context_features original_context_features
-										series_index (get case_values_map ".series_index")
-									))
+				(if !tsTimeFeature
+					(assign (assoc
+						context_features
+							(call !FilterContextsBySeriesIndex (assoc
+								all_context_features original_context_features
+								series_index (get case_values_map ".series_index")
 							))
-						)
+					))
+				)
 
-						;filter out a random number of context features
-						(declare (assoc
-							react_context_features
+				;filter out a random number of context features
+				(declare (assoc
+					react_context_features
+						(rand
+							context_features
+							;number of features to enable is probabilistically weighted
+							(if (and !tsTimeFeature (!= (size context_features) num_features))
 								(rand
-									context_features
-									;number of features to enable is probabilistically weighted
-									(if (and !tsTimeFeature (!= (size context_features) num_features))
-										(rand
-											(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
-										)
-
-										(rand enabled_num_features_probability_map)
-									)
-									;unique random features (not with replacement)
-									.true
+									(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
 								)
-						))
 
-						;assoc of all removed features to their residual values
-						(declare (assoc
-							removed_features_map
-								(if target_residual_feature
-									(zip (list target_residual_feature))
+								(rand enabled_num_features_probability_map)
+							)
+							;unique random features (not with replacement)
+							.true
+						)
+				))
 
-									;filter the action features to be those that are not context features, feature/context_features params may overlap
-									(remove (zip features) react_context_features)
+				;assoc of all removed features to their residual values
+				(declare (assoc
+					removed_features_map
+						(if target_residual_feature
+							(zip (list target_residual_feature))
+
+							;filter the action features to be those that are not context features, feature/context_features params may overlap
+							(remove (zip features) react_context_features)
+						)
+				))
+
+				(if !tsTimeFeature
+					(let
+						(assoc context_map (keep case_values_map react_context_features) )
+						(if (contains_index context_map !tsTimeFeature)
+							(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterFutureCasesQuery) ))
+						)
+					)
+				)
+
+				;use dynamic deviations subtrainee if present
+				(if (get hyperparam_map "subtraineeName")
+					(call !UseDynamicDeviationsAndWeights (assoc
+						context_features react_context_features
+						context_values (unzip case_values_map react_context_features)
+						hyperparam_map hyperparam_map
+					))
+				)
+
+				(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
+					(assign (assoc
+						dependent_queries_list
+							;if any of the features being predicted are dependent to any of the contexts, then
+							;append all the dependencies together for the query
+							(apply "append" (map
+								(lambda
+									(call !ComputeDependentQueries (assoc
+										context_features react_context_features
+										context_values (unzip case_values_map react_context_features)
+										action_feature (current_value 1)
+									))
 								)
-						))
+								;just the features to be predicted that have dependencies defined
+								(indices (keep !dependentFeatureMap (indices removed_features_map)))
+							))
+					))
+				)
 
-						(if !tsTimeFeature
-							(let
-								(assoc context_map (keep case_values_map react_context_features) )
-								(if (contains_index context_map !tsTimeFeature)
-									(assign (assoc time_series_filter_query (call !ComputeTimeSeriesFilterFutureCasesQuery) ))
+				(if filter_fanout_values
+					(assign (assoc
+						fanout_features_queries
+							(call !ConstructFanoutFeaturesQueries (assoc
+								predicting_features (indices removed_features_map)
+								case_id case_id
+							))
+					))
+				)
+
+				(declare (assoc
+					local_cases_map
+						;if empty context set, use global expected values for all features, set local_cases_map to null
+						(if (= 0 (size react_context_features))
+							(null)
+
+							;else compute the local data around the case using the robust set of react_context_features
+							(compute_on_contained_entities
+								(if focal_case
+									(query_not_in_entity_list (list (replace case_id) (replace focal_case)))
+									(query_not_in_entity_list (list (replace case_id)))
+								)
+								(if (size context_condition_filter_query)
+									context_condition_filter_query
+									(list)
+								)
+								dependent_queries_list
+								time_series_filter_query
+								fanout_features_queries
+								(query_nearest_generalized_distance
+									k_parameter
+									(replace react_context_features)
+									(replace (unzip case_values_map react_context_features))
+									p_parameter
+									feature_weights
+									!queryDistanceTypeMap
+									query_feature_attributes_map
+									feature_deviations
+									(null)
+									dt_parameter
+									(if valid_weight_feature weight_feature)
+									tie_break_random_seed
+									(null) ;radius
+									!numericalPrecision
 								)
 							)
 						)
+				))
 
-						;use dynamic deviations subtrainee if present
-						(if (get hyperparam_map "subtraineeName")
-							(call !UseDynamicDeviationsAndWeights (assoc
-								context_features react_context_features
-								context_values (unzip case_values_map react_context_features)
-								hyperparam_map hyperparam_map
-							))
+				;create a map of removed feature -> residual value for each removed feature
+				(assign (assoc
+					removed_features_map
+						(map
+							;reference the code in !ComputeFeatureDiff
+							@(target .true "!ComputeFeatureDiff")
+							removed_features_map
 						)
+				))
 
-						(if (and !hasDependentFeatures (size (keep !dependentFeatureMap (indices removed_features_map))) )
-							(assign (assoc
-								dependent_queries_list
-									;if any of the features being predicted are dependent to any of the contexts, then
-									;append all the dependencies together for the query
+				; (declare (assoc
+				; 	with_features_map
+				; 		(if estimating_residual_lower_bound
+				; 			(map
+				; 				;reference the code in !ComputeFeatureDiff
+				; 				@(target .true "!ComputeFeatureDiff")
+				; 				(remove all_features_map (indices removed_features_map))
+				; 			)
+				; 		)
+				; ))
+
+				;return the computed value for this one feature as a list
+				; (if target_residual_feature
+				; 	(values removed_features_map)
+
+				; 	;output a list of pairs of [ with diff ] : if feature was used in contexts 'with' is .true
+				; 	;and .false if it was removed from contexts, and 'diff' is the computed diff
+				; 	(if estimating_residual_lower_bound
+				; 		(map
+				; 			(lambda [
+				; 				(contains_index with_features_map (current_value 1) )
+				; 				(if (contains_index with_features_map (current_value 1) )
+				; 					(get with_features_map (current_value 1))
+				; 					(get removed_features_map (current_value 1))
+				; 				)
+				; 			])
+				; 			features
+				; 		)
+
+				; 		;else output list of: residual value for each removed feature and null for each feature used as a context
+				; 		(unzip removed_features_map features)
+				; 	)
+				; )
+
+
+				(apply "accum"
+					(append "residual_matrix"
+						(apply "append" (values
+							(map
+								(lambda (let
+									(assoc
+										predicted_feature (current_index 1)
+										value (first (current_value 1)) ;;;TODO: parse null residuals and store those
+									)
 									(apply "append" (map
 										(lambda
-											(call !ComputeDependentQueries (assoc
-												context_features react_context_features
-												context_values (unzip case_values_map react_context_features)
-												action_feature (current_value 1)
-											))
+											(if (contains_index removed_features_map (current_value))
+												[
+													[ predicted_feature (current_value 2) "without"] value
+													[ predicted_feature (current_value 2) "num_without"] 1
+												]
+
+												[
+													[ predicted_feature (current_value 2) "with"] value
+													[ predicted_feature (current_value 2) "num_with"] 1
+												]
+											)
 										)
-										;just the features to be predicted that have dependencies defined
-										(indices (keep !dependentFeatureMap (indices removed_features_map)))
+										features
 									))
-							))
-						)
-
-						(if filter_fanout_values
-							(assign (assoc
-								fanout_features_queries
-									(call !ConstructFanoutFeaturesQueries (assoc
-										predicting_features (indices removed_features_map)
-										case_id case_id
-									))
-							))
-						)
-
-						(declare (assoc
-							local_cases_map
-								;if empty context set, use global expected values for all features, set local_cases_map to null
-								(if (= 0 (size react_context_features))
-									(null)
-
-									;else compute the local data around the case using the robust set of react_context_features
-									(compute_on_contained_entities
-										(if focal_case
-											(query_not_in_entity_list (list (replace case_id) (replace focal_case)))
-											(query_not_in_entity_list (list (replace case_id)))
-										)
-										(if (size context_condition_filter_query)
-											context_condition_filter_query
-											(list)
-										)
-										dependent_queries_list
-										time_series_filter_query
-										fanout_features_queries
-										(query_nearest_generalized_distance
-											k_parameter
-											(replace react_context_features)
-											(replace (unzip case_values_map react_context_features))
-											p_parameter
-											feature_weights
-											!queryDistanceTypeMap
-											query_feature_attributes_map
-											feature_deviations
-											(null)
-											dt_parameter
-											(if valid_weight_feature weight_feature)
-											tie_break_random_seed
-											(null) ;radius
-											!numericalPrecision
-										)
-									)
-								)
-						))
-
-						;create a map of removed feature -> residual value for each removed feature
-						(assign (assoc
-							removed_features_map
-								(map
-									;reference the code in !ComputeFeatureDiff
-									@(target .true "!ComputeFeatureDiff")
-									removed_features_map
-								)
-						))
-
-						(declare (assoc
-							with_features_map
-								(if estimating_residual_lower_bound
-									(map
-										;reference the code in !ComputeFeatureDiff
-										@(target .true "!ComputeFeatureDiff")
-										(remove all_features_map (indices removed_features_map))
-									)
-								)
-						))
-
-						;return the computed value for this one feature as a list
-						(if target_residual_feature
-							(values removed_features_map)
-
-							;output a list of pairs of [ with diff ] : if feature was used in contexts 'with' is .true
-							;and .false if it was removed from contexts, and 'diff' is the computed diff
-							(if estimating_residual_lower_bound
-								(map
-									(lambda [
-										(contains_index with_features_map (current_value 1) )
-										(if (contains_index with_features_map (current_value 1) )
-											(get with_features_map (current_value 1))
-											(get removed_features_map (current_value 1))
-										)
-									])
-									features
-								)
-
-								;else output list of: residual value for each removed feature and null for each feature used as a context
-								(unzip removed_features_map features)
+								))
+								removed_features_map
 							)
-						)
-					))
-					case_ids
+						))
+					)
 				)
-		))
+
+			))
+			case_ids
+		)
 
 		;if we only collected residuals for this one feature, set the residuals features list to have only target_residual_feature
 		(if target_residual_feature
@@ -843,10 +872,10 @@
 		)
 
 		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
-		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
-		(assign (assoc
-			feature_residuals_lists (call !TransposeResidualLists)
-		))
+		; ;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
+		; (assign (assoc
+		; 	feature_residuals_lists (call !TransposeResidualLists)
+		; ))
 
 		(declare (assoc
 			feature_index_map (zip features (indices features))
@@ -1763,7 +1792,7 @@
 			(declare (assoc preselected_case_ids (replace case_ids) ))
 		)
 
-		;run the first batch of robust residuals, stores them all into feature_residuals_lists
+		;run the first batch of robust residuals, stores them all into residual_matrix
 		(call !RunRobustResiduals (assoc
 			leave_nulls_in_results .true
 			case_ids
@@ -1777,157 +1806,115 @@
 		;and storing as an assoc of: feature -> [ avg_residual, count_of_residuals ]
 		(declare (assoc
 			previous_residuals_map
-				(zip
-					features
+				(map
+					(lambda
+						;compute the average robust residual for this feature and output as a pair of [ avg_residual, count_of_residuals ]
+						;if values are all nulls, this ensures the tuple is output as [0 0]
+						[
+							(/
+								(get (current_value 1) [(current_index 2) "without"])
+								(get (current_value 1) [(current_index 2) "num_without"])
+							)
+
+							(get (current_value 1) [(current_index 2) "num_without"])
+						]
+					)
+					residual_matrix
+				)
+			done .false
+			total_samples num_samples
+		))
+(print "converging... ")
+		(while (not done)
+			;increase the number sampled each iteration by 'convergence_samples_growth_rate '
+			(assign (assoc num_samples (ceil (* convergence_samples_growth_rate  num_samples)) ))
+			(accum (assoc total_samples num_samples))
+
+			;don't exceed the specified maximum of num_feature_probability_samples
+			(if (> total_samples num_feature_probability_samples)
+				(seq
+					(assign (assoc
+						num_samples (- num_samples (- total_samples num_feature_probability_samples) )
+					))
+					(accum (assoc total_samples (- num_feature_probability_samples total_samples ) ))
+				)
+			)
+
+			;overwrite residual_matrix with a fresh copy so it is perfomant to accum to it
+			(assign (assoc residual_matrix (replace residual_matrix) ))
+(print total_samples "\n")
+			(call !RunRobustResiduals (assoc
+				leave_nulls_in_results .true
+				case_ids
+					;if cases were preselected in react_aggregate, grab the next batch according to the index
+					(if computing_via_aggregate
+						(unzip
+							preselected_case_ids
+							(range (- total_samples num_samples) (- total_samples 1) )
+						)
+
+						;else randomly select num_samples cases
+						(call !SelectCaseIdsForResiduals)
+					)
+			))
+
+			;updated residuals map taking into account new values
+			(assign (assoc
+				residuals_map
 					(map
 						(lambda
 							;compute the average robust residual for this feature and output as a pair of [ avg_residual, count_of_residuals ]
 							;if values are all nulls, this ensures the tuple is output as [0 0]
 							[
-								;average value residuals from the pair of [value residual, null residual]
-								(+ (or (generalized_mean (map (lambda (first (current_value))) (current_value 1))) ))
-								(size (filter (current_value 1)))
+								(/
+									(get (current_value 1) [(current_index 2) "without"])
+									(get (current_value 1) [(current_index 2) "num_without"])
+								)
+
+								(get (current_value 1) [(current_index 2) "num_without"])
 							]
 						)
-						feature_residuals_lists
+						residual_matrix
 					)
-				)
-			first_residuals_lists feature_residuals_lists
-			done .false
-			total_samples num_samples
-		))
+			))
 
-		;store all the accumulated residuals from the while loop into feature_residuals_lists to be used later to compute robust accuracy contributions
-		(assign (assoc
-			feature_residuals_lists
-				(while (not done)
-					;increase the number sampled each iteration by 'convergence_samples_growth_rate '
-					(assign (assoc num_samples (ceil (* convergence_samples_growth_rate  num_samples)) ))
-					(accum (assoc total_samples num_samples))
-
-					;don't exceed the specified maximum of num_feature_probability_samples
-					(if (> total_samples num_feature_probability_samples)
-						(seq
-							(assign (assoc
-								num_samples (- num_samples (- total_samples num_feature_probability_samples) )
-							))
-							(accum (assoc total_samples (- num_feature_probability_samples total_samples ) ))
-						)
-					)
-
-					(call !RunRobustResiduals (assoc
-						leave_nulls_in_results .true
-						case_ids
-							;if cases were preselected in react_aggregate, grab the next batch according to the index
-							(if computing_via_aggregate
-								(unzip
-									preselected_case_ids
-									(range (- total_samples num_samples) (- total_samples 1) )
-								)
-
-								;else randomly select num_samples cases
-								(call !SelectCaseIdsForResiduals)
-							)
-					))
-
-					;updated residuals map taking into account new values
-					(assign (assoc
-						residuals_map
-							(map
-								(lambda (let
-									(assoc
-										previous_avg_residual (first (first (current_value 1)))
-										prev_count (last (first (current_value 1)))
-										new_average_residual (first (last (current_value 1)))
-										new_count (last (last (current_value 1)))
-									)
-
-									;update the running average, by: multipliying the previous residual by the previous count,
-									;adding the product of the new residual and the new count, and dividing by the updated total count
-									;and store as a pair of [ avg_residual, count_of_residuals ]
-									[
-										;updated running mean with the new residual values
-										(/
-											(+
-												(* previous_avg_residual prev_count)
-												(* new_average_residual new_count)
-											)
-											(+ prev_count new_count)
-										)
-
-										;new total count
-										(+ prev_count new_count)
-									]
-								))
-
-								previous_residuals_map
-								;newly computed residuals
-								(zip
-									features
-									(map
-										(lambda
-											;compute the average robust residual for this feature and output as a pair of [ avg_residual, count_of_residuals ]
-											;if values are all nulls, this ensures the tuple is output as [0 0]
-											[
-												;average value residuals from the pair of [value residual, null residual]
-												(+ (or (generalized_mean (map (lambda (first (current_value))) (current_value 1))) ))
-												(size (filter (current_value 1)))
-											]
-										)
-										feature_residuals_lists
-									)
-								)
-							)
-					))
-
-					;compute deltas for each feature: new running avg vs previous running avg
-					(assign (assoc
-						deltas_map
-							(map
-								(lambda (abs
-									(- (first (first (current_value ))) (first (last (current_value))))
-								))
-								previous_residuals_map
-								residuals_map
-							)
-					))
-
-					;stop if values converged or accumulated 'num_feature_probability_samples' reacts
-					(if (or
-							(>= total_samples num_feature_probability_samples)
-							(=
-								0
-								(size (filter
-									;keep those where the delta is > specified %
-									(lambda
-										(>
-											(/ (current_value) (first (get residuals_map (current_index))) )
-											convergence_threshold
-										)
-									)
-									deltas_map
-								))
-							)
-						)
-						;need to set loop to done to accumulate the last batch of residuals below insead of simply concluding out of the while loop
-						(assign (assoc done .true ))
-
-						;else overwrite previous residuals
-						(assign (assoc previous_residuals_map residuals_map))
-					)
-
-					;accumulate all the residuals lists for all the features into one big list into (previous_result)
+			;compute deltas for each feature: new running avg vs previous running avg
+			(assign (assoc
+				deltas_map
 					(map
-						(lambda (append (first (current_value)) (last (current_value)) ))
+						(lambda (abs
+							(- (first (first (current_value ))) (first (last (current_value))))
+						))
+						previous_residuals_map
+						residuals_map
+					)
+			))
 
-						(if (= 0 (current_index))
-							first_residuals_lists
-							(previous_result)
-						)
-						feature_residuals_lists
+			;stop if values converged or accumulated 'num_feature_probability_samples' reacts
+			(if (or
+					(>= total_samples num_feature_probability_samples)
+					(=
+						0
+						(size (filter
+							;keep those where the delta is > specified %
+							(lambda
+								(>
+									(/ (current_value) (first (get residuals_map (current_index))) )
+									convergence_threshold
+								)
+							)
+							deltas_map
+						))
 					)
 				)
-		))
+				;need to set loop to done to accumulate the last batch of residuals below insead of simply concluding out of the while loop
+				(assign (assoc done .true ))
+
+				;else overwrite previous residuals
+				(assign (assoc previous_residuals_map residuals_map))
+			)
+		)
+
 
 	)
 
