@@ -300,30 +300,20 @@
 		))
 	)
 
-	;helper method to compute MDA matrix given a list of features and the corresponding feature_residuals_lists
-	!ComputeMDAMatrix
+
+	!PrecomputeFeatureTotalCounts
 	||(map
 		(lambda (let
 			(assoc
-				;feature whose mda is being measured
 				feature (current_value 1)
 				feature_index (current_index 1)
 			)
+
+			(if (contains_index excluded_inactive_features_map feature)
+				(conclude (null))
+			)
+
 			(declare (assoc
-				;keep only indices of cases where feature was used in query and its residual is null
-				case_indices_with_feature
-					(if estimating_residual_lower_bound
-						(filter
-							(lambda (= .true (get feature_residuals_lists [feature_index (current_value 1) 0])) )
-							all_sample_indices
-						)
-
-						(filter
-							(lambda (= (null) (get feature_residuals_lists [feature_index (current_value 1)])) )
-							all_sample_indices
-						)
-					)
-
 				;keep only indices of cases where feature was not used in query and has a residual value
 				case_indices_without_feature
 					(if estimating_residual_lower_bound
@@ -339,7 +329,94 @@
 					)
 			))
 
+			{
+				"indices_without_feature" case_indices_without_feature
+				"num_residuals"
+					(if (contains_index continuous_with_nulls_map feature)
+						(size (filter
+							(map
+								(lambda (first (current_value)))
+								(unzip (get feature_residuals_lists feature_index) case_indices_without_feature)
+							)
+						))
+						(size case_indices_without_feature)
+					)
+				"num_nulls"
+					(if (contains_index continuous_with_nulls_map feature)
+						(size (filter
+							(map
+								(lambda (last (current_value)))
+								(unzip (get feature_residuals_lists feature_index) case_indices_without_feature)
+							)
+						))
+						0
+					)
+				"sum_of_residuals"
+					(apply "+"
+						(if (contains_index continuous_with_nulls_map feature)
+							(filter (map
+								(lambda (first (current_value)))
+								(unzip (get feature_residuals_lists feature_index) case_indices_without_feature)
+							))
+
+							(unzip (get feature_residuals_lists feature_index) case_indices_without_feature)
+						)
+					)
+				"sum_of_nulls"
+					(if (contains_index continuous_with_nulls_map feature)
+						(apply "+"
+							(filter (map
+								(lambda (last (current_value)))
+								(unzip (get feature_residuals_lists feature_index) case_indices_without_feature)
+							))
+						)
+						0
+					)
+			}
+		))
+		features
+	)
+
+	;helper method to compute MDA matrix given a list of features and the corresponding feature_residuals_lists
+	!ComputeMDAMatrix
+	||(map
+		(lambda (let
+			(assoc
+				;feature whose mda is being measured
+				feature (current_value 1)
+				feature_index (current_index 1)
+			)
 			(if (contains_index excluded_inactive_features_map feature) (conclude (range [0 (null) (null)] 1 (size features) 1)) )
+
+			(declare (assoc
+				;keep only indices of cases where feature was used in query and its residual is null
+				; case_indices_with_feature
+				; 	(if estimating_residual_lower_bound
+				; 		(filter
+				; 			(lambda (= .true (get feature_residuals_lists [feature_index (current_value 1) 0])) )
+				; 			all_sample_indices
+				; 		)
+
+				; 		(filter
+				; 			(lambda (= (null) (get feature_residuals_lists [feature_index (current_value 1)])) )
+				; 			all_sample_indices
+				; 		)
+				; 	)
+
+				;keep only indices of cases where feature was not used in query and has a residual value
+				case_indices_without_feature (get precomputed_counts_maps [feature_index "indices_without_feature"])
+					; (if estimating_residual_lower_bound
+					; 	(filter
+					; 		(lambda (= .false (get feature_residuals_lists [feature_index (current_value 1) 0])) )
+					; 		all_sample_indices
+					; 	)
+
+					; 	(filter
+					; 		(lambda (!= (null) (get feature_residuals_lists [feature_index (current_value 1)])) )
+					; 		all_sample_indices
+					; 	)
+					; )
+			))
 
 			(map
 				(lambda (let
@@ -348,9 +425,11 @@
 							(and
 								(not (contains_index !nominalsMap (current_value 1)))
 								(!= .false (get !featureNullRatiosMap [(current_value 2) "has_nulls"]))
+
 								;there is a null residual stored in robust residuals for this feature
 								(> (get feature_robust_residuals_map [(current_value 2) 1]) 0)
 							)
+						target_feature (current_value 1)
 					)
 					;a feature should not have mda computed for itself in all flows except when computing ERLB as probabilities
 					(if (and
@@ -367,205 +446,273 @@
 							;if measuring mda for a feature that is the parent of a derived feature, skip it
 							;because they are not used when that feature is predicted within time-series flow
 							;allowing the other feature's weights to not be suppressed (the parent feature's MDA will be large)
-							(contains_index !derivedFeaturesMap (current_value))
-							(= feature (get !derivedFeaturesMap (current_value)))
+							(contains_index !derivedFeaturesMap target_feature)
+							(= feature (get !derivedFeaturesMap target_feature))
 						)
 						(conclude [0 (null) (null)])
 					)
 
 					;if a single mda_action_feature is specified, only compute mda for that specific feature, skipping all the rest
-					(if (and mda_action_feature (!= (current_value) mda_action_feature))
+					(if (and mda_action_feature (!= target_feature mda_action_feature))
 						(conclude)
 					)
 
-					(if (contains_index excluded_inactive_features_map (current_value)) (conclude [0 (null) (null)]) )
+					(if (contains_index excluded_inactive_features_map target_feature) (conclude [0 (null) (null)]) )
+
+					(declare (assoc
+						num_of_target (get precomputed_counts_maps [(current_index 2) "num_residuals"])
+						sum_of_target (get precomputed_counts_maps [(current_index 2) "sum_of_residuals"])
+						sum_of_nulls (get precomputed_counts_maps [(current_index 2) "sum_of_nulls"])
+						num_of_nulls (get precomputed_counts_maps [(current_index 2) "num_nulls"])
+					))
+
+					(declare (assoc
+						target_without_feature_residuals (filter (unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature))
+					))
+
+					(declare (assoc
+						sum_of_target_wo_feature
+							(apply "+"
+								(if has_nulls_and_is_continuous
+									(filter (map (lambda (first (current_value)) ) target_without_feature_residuals))
+									target_without_feature_residuals
+								)
+							)
+						num_of_target_wo_feature
+							(if has_nulls_and_is_continuous
+								(size
+									(filter (map (lambda (first (current_value)) ) target_without_feature_residuals))
+								)
+								(size target_without_feature_residuals)
+							)
+					))
+
+					(declare (assoc
+						num_of_target_with_feature (- num_of_target num_of_target_wo_feature)
+						sum_of_target_with_feature (- sum_of_target sum_of_target_wo_feature)
+					))
+
+					(if has_nulls_and_is_continuous
+						(declare (assoc
+							sum_of_target_nulls_wo_feature
+								(apply "+"
+									(filter (map (lambda (last (current_value)) ) target_without_feature_residuals))
+								)
+							num_of_target_nulls_wo_feature
+								(size
+									(filter (map (lambda (last (current_value)) ) target_without_feature_residuals))
+								)
+						))
+					)
+					(if has_nulls_and_is_continuous
+						(declare (assoc
+							num_of_target_nulls_with_feature (- num_of_nulls num_of_target_nulls_wo_feature)
+							sum_of_target_nulls_with_feature (- sum_of_nulls sum_of_target_nulls_wo_feature)
+						))
+					)
 
 					;output delta of the (expectedly) larger residual computed without this feature - residual computed with this feature
 
 					;triple of: [ac of values, ac of nulls, % of nulls], where nulls are any reacts where null was either the case value or predicted value
 					;where ac is the: averages of reacts without feature - average of reacts with feature
 					[
-						;AC values
+						;AC of values
 						(max
 							(-
-								;average of 'without' residuals
-								(if estimating_residual_lower_bound
-									(if output_raw_mda
-										(if has_nulls_and_is_continuous
-											(generalized_mean
-												(map
-													(lambda (if (and (= .false (first (current_value)) ) (last (current_value))) (first (last (current_value)))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
-												)
-											)
-											(generalized_mean
-												(map
-													(lambda (if (= .false (first (current_value))) (last (current_value))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
-												)
-											)
-										)
-
-										;else this is computing weighted superfull feature probabilities, no need to filter diffs of features that were used in the queries
-										(if has_nulls_and_is_continuous
-											(generalized_mean
-												(map
-													(lambda (if (last (current_value)) (first (last (current_value)))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
-												)
-											)
-											(generalized_mean
-												(map
-													(lambda (last (current_value)) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
-												)
-											)
-										)
-									)
-
-									(if has_nulls_and_is_continuous
-										(generalized_mean
-											(map
-												(lambda (if (current_value) (first (current_value))) )
-												(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
-											)
-										)
-										(generalized_mean (unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature) )
-									)
-								)
-								;average of 'with' residuals
-								(if estimating_residual_lower_bound
-									(if output_raw_mda
-										(if has_nulls_and_is_continuous
-											(generalized_mean
-												(map
-													(lambda (if (and (= .false (first (current_value)) ) (last (current_value))) (first (last (current_value)))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
-												)
-											)
-											(generalized_mean
-												(map
-													(lambda (if (= .false (first (current_value)) ) (last (current_value))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
-												)
-											)
-										)
-
-										;else this is computing weighted superfull feature probabilities, no need to filter diffs of features that were used in the queries
-										(if has_nulls_and_is_continuous
-											(generalized_mean
-												(map
-													(lambda (if (last (current_value)) (first (last (current_value)))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
-												)
-											)
-											(generalized_mean
-												(map
-													(lambda (last (current_value)) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
-												)
-											)
-										)
-									)
-
-									(if has_nulls_and_is_continuous
-										(generalized_mean
-											(map
-												(lambda (if (current_value) (first (current_value))) )
-												(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
-											)
-										)
-
-										(generalized_mean (unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature) )
-									)
-								)
+								(/ sum_of_target_wo_feature num_of_target_wo_feature)
+								(/ sum_of_target_with_feature num_of_target_with_feature)
 							)
 							(if (not output_raw_mda)
-								(get !cachedFeatureMinResidualMap (current_value 1))
+								(get !cachedFeatureMinResidualMap target_feature)
 							)
 						)
 
-						;AC nulls
+						;AC of nulls
 						(if has_nulls_and_is_continuous
 							(max
 								(-
-									;average of 'without' null residuals
-									(if estimating_residual_lower_bound
-										(if output_raw_mda
-											(generalized_mean
-												(map
-													(lambda (if (and (= .false (first (current_value)) ) (last (current_value)) ) (last (last (current_value)))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
-												)
-											)
-
-											;else this is computing weighted superfull feature probabilities, no need to filter diffs of features that were used in the queries
-											(generalized_mean
-												(map
-													(lambda (if (last (current_value)) (last (last (current_value)))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
-												)
-											)
-										)
-
-										(generalized_mean
-											(map
-												(lambda (last (current_value)) )
-												(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
-											)
-										)
-									)
-									;average of 'with' null residuals
-									(if estimating_residual_lower_bound
-										(if output_raw_mda
-											(generalized_mean
-												(map
-													(lambda (if (and (= .false (first (current_value)) ) (last (current_value)) ) (last (last (current_value)))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
-												)
-											)
-
-											;else this is computing weighted superfull feature probabilities, no need to filter diffs of features that were used in the queries
-											(generalized_mean
-												(map
-													(lambda (if (last (current_value)) (last (last (current_value)))) )
-													(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
-												)
-											)
-										)
-
-										(generalized_mean
-											(map
-												(lambda (last (current_value)) )
-												(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
-											)
-										)
-									)
+									(/ sum_of_target_nulls_wo_feature num_of_target_nulls_wo_feature)
+									(/ sum_of_target_nulls_with_feature num_of_target_nulls_with_feature)
 								)
 								(if (not output_raw_mda)
 									;low bound for nulls, half the smallest residual
 									(/
 										0.5
-										(+ 1 (get !featureNullRatiosMap [(current_value 2) "num_nulls"]) )
+										(+ 1 (get !featureNullRatiosMap [target_feature "num_nulls"]) )
 									)
 								)
 							)
+							0
 						)
 
 						;percent nulls
 						(if has_nulls_and_is_continuous
 							(/
 								(size (filter
-									(lambda
-										(and (current_value) (= (null) (first (current_value))))
-									)
-									(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+									(lambda (= (null) (first (current_value))) )
+									target_without_feature_residuals
 								))
-								(size (filter (unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature) ))
+								(size target_without_feature_residuals)
 							)
 							0
 						)
 					]
+
+					;output delta of the (expectedly) larger residual computed without this feature - residual computed with this feature
+
+					;triple of: [ac of values, ac of nulls, % of nulls], where nulls are any reacts where null was either the case value or predicted value
+					;where ac is the: averages of reacts without feature - average of reacts with feature
+					; [
+					; 	;AC values
+					; 	(max
+					; 		(-
+					; 			;average of 'without' residuals
+					; 			(if estimating_residual_lower_bound
+					; 				(if output_raw_mda
+					; 					(generalized_mean
+					; 						(map
+					; 							(lambda (if (and (= .false (first (current_value)) ) (last (current_value))) (first (last (current_value)))) )
+					; 							(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+					; 						)
+					; 					)
+
+					; 					;else this is computing weighted superfull feature probabilities, no need to filter diffs of features that were used in the queries
+					; 					(generalized_mean
+					; 						(map
+					; 							(lambda (if (last (current_value)) (first (last (current_value)))) )
+					; 							(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+					; 						)
+					; 					)
+					; 				)
+
+					; 				(if has_nulls_and_is_continuous
+					; 					(generalized_mean
+					; 						(map
+					; 							(lambda (if (current_value) (first (current_value))) )
+					; 							(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+					; 						)
+					; 					)
+
+					; 					(generalized_mean (unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature))
+					; 				)
+					; 			)
+					; 			;average of 'with' residuals
+					; 			(if estimating_residual_lower_bound
+					; 				(if output_raw_mda
+					; 					(generalized_mean
+					; 						(map
+					; 							(lambda (if (and (= .false (first (current_value)) ) (last (current_value))) (first (last (current_value)))) )
+					; 							(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+					; 						)
+					; 					)
+
+					; 					;else this is computing weighted superfull feature probabilities, no need to filter diffs of features that were used in the queries
+					; 					(generalized_mean
+					; 						(map
+					; 							(lambda (if (last (current_value)) (first (last (current_value)))) )
+					; 							(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+					; 						)
+					; 					)
+					; 				)
+
+					; 				(if has_nulls_and_is_continuous
+					; 					(generalized_mean
+					; 						(map
+					; 							(lambda (if (current_value) (first (current_value))) )
+					; 							(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+					; 						)
+					; 					)
+
+					; 					(generalized_mean (unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature) )
+					; 				)
+					; 			)
+					; 		)
+					; 		(if (not output_raw_mda)
+					; 			(get !cachedFeatureMinResidualMap target_feature)
+					; 		)
+					; 	)
+
+					; 	;AC nulls
+					; 	(if has_nulls_and_is_continuous
+					; 		(max
+					; 			(-
+					; 				;average of 'without' null residuals
+					; 				(if estimating_residual_lower_bound
+					; 					(if output_raw_mda
+					; 						(generalized_mean
+					; 							(map
+					; 								(lambda (if (and (= .false (first (current_value)) ) (last (current_value)) ) (last (last (current_value)))) )
+					; 								(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+					; 							)
+					; 						)
+
+					; 						;else this is computing weighted superfull feature probabilities, no need to filter diffs of features that were used in the queries
+					; 						(generalized_mean
+					; 							(map
+					; 								(lambda (if (last (current_value)) (last (last (current_value)))) )
+					; 								(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+					; 							)
+					; 						)
+					; 					)
+
+					; 					(generalized_mean
+					; 						(map
+					; 							(lambda (if (current_value) (last (current_value))) )
+					; 							(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+					; 						)
+					; 					)
+					; 				)
+					; 				;average of 'with' null residuals
+					; 				(if estimating_residual_lower_bound
+					; 					(if output_raw_mda
+					; 						(generalized_mean
+					; 							(map
+					; 								(lambda (if (and (= .false (first (current_value)) ) (last (current_value)) ) (last (last (current_value)))) )
+					; 								(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+					; 							)
+					; 						)
+
+					; 						;else this is computing weighted superfull feature probabilities, no need to filter diffs of features that were used in the queries
+					; 						(generalized_mean
+					; 							(map
+					; 								(lambda (if (last (current_value)) (last (last (current_value)))) )
+					; 								(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+					; 							)
+					; 						)
+					; 					)
+
+					; 					(generalized_mean
+					; 						(map
+					; 							(lambda (if (current_value) (last (current_value))) )
+					; 							(unzip (get feature_residuals_lists (current_index 1)) case_indices_with_feature)
+					; 						)
+					; 					)
+					; 				)
+					; 			)
+					; 			(if (not output_raw_mda)
+					; 				;low bound for nulls, half the smallest residual
+					; 				(/
+					; 					0.5
+					; 					(+ 1 (get !featureNullRatiosMap [target_feature "num_nulls"]) )
+					; 				)
+					; 			)
+					; 		)
+					; 	)
+
+					; 	;percent nulls
+					; 	(if has_nulls_and_is_continuous
+					; 		(/
+					; 			(size (filter
+					; 				(lambda
+					; 					(and (current_value) (= (null) (first (current_value))))
+					; 				)
+					; 				(unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature)
+					; 			))
+					; 			(size (filter (unzip (get feature_residuals_lists (current_index 1)) case_indices_without_feature) ))
+					; 		)
+					; 		0
+					; 	)
+					; ]
 				))
 				features
 			)
@@ -579,9 +726,16 @@
 
 		(declare (assoc all_sample_indices (range 0 (- (size (first feature_residuals_lists)) 1)) ))
 
+		(print "precomputing...\n")
+
+		(declare (assoc precomputed_counts_maps (call !PrecomputeFeatureTotalCounts) ))
+
+		(print "doing mda matrix...\n")
 		;for each feature, create a list, also length of features, where each column value is the mda
 		;for the column feature computed with and without the row feature
 		(declare (assoc mda_matrix (call !ComputeMDAMatrix) ))
+
+		(print "done\n")
 
 		(if output_raw_mda
 			(conclude
