@@ -349,6 +349,19 @@
 
 		(call !InitResiduals)
 
+		;set this here because !featureNullRatiosMap will be populated in !InitResiduals if it hasn't yet
+		(declare (assoc
+			;map of continuous features that have nulls
+			continuous_with_nulls_map
+				(filter
+					(lambda (and
+						(not (contains_index !nominalsMap (current_index)))
+						(!= .false (get !featureNullRatiosMap [(current_index 1) "has_nulls"]))
+					))
+					(zip features)
+				)
+		))
+
 		(if (= "deviations" robust_residuals)
 			(call !ComputeDeviations)
 
@@ -813,47 +826,49 @@
 				(zip
 					continuous_features
 					||(map
-						(lambda (assoc
-							;(current_value 1) is a list of react tuples for each feature
+						(lambda (let
+							(assoc feature (get continuous_features (current_index 1)) )
+							{
+								;(current_value 1) is a list of react tuples for each feature
+								;MAE - mean absolute error = sum(|actual-predicted|) / num_cases
+								residuals
+									(if (size (current_value 1))
+										(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
 
-							;MAE - mean absolute error = sum(|actual-predicted|) / num_cases
-							residuals
-								(if (size (current_value 1))
-									(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
-
-									;else if there were no values for this feature, return global feature residual
-									(get hyperparam_map [ "featureResiduals" (get continuous_features (current_index 2)) ] )
-								)
-							;must have 30 or more nulls for null residuals to be statistically significant
-							null_residual
-								(if (get !featureNullRatiosMap [(get continuous_features (current_index 2)) "has_nulls"])
-									(if (>=
-											(size
-												(filter (lambda (= (null) (first (current_value)))) (current_value 1) )
+										;else if there were no values for this feature, return global feature residual
+										(get hyperparam_map [ "featureResiduals" feature ] )
+									)
+								;must have 30 or more nulls for null residuals to be statistically significant
+								null_residual
+									(if (contains_index continuous_with_nulls_map feature)
+										(if (>=
+												(size
+													(filter (lambda (= (null) (first (current_value)))) (current_value 1) )
+												)
+												null_significance_threshold
 											)
-											null_significance_threshold
-										)
-										(generalized_mean (map (lambda (get (current_value) 1)) (current_value 1)) )
+											(generalized_mean (map (lambda (get (current_value) 1)) (current_value 1)) )
 
-										;else if there were less values than significance for this feature, output large null residual
-										(- 1
-											(/
-												;add 0.5 to num_nulls per Jeffrey's prior approach
-												(+ 0.5 (get !featureNullRatiosMap [(get continuous_features (current_index 2)) "num_nulls"]) )
-												num_cases
+											;else if there were less values than significance for this feature, output large null residual
+											(- 1
+												(/
+													;add 0.5 to num_nulls per Jeffrey's prior approach
+													(+ 0.5 (or (get !featureNullRatiosMap [feature "num_nulls"])) )
+													num_cases
+												)
 											)
 										)
 									)
-								)
-							;RMSE - root mean squared error = sqrt( sum( |actual-predicted|^2 ) / num_cases )
-							rmse
-								(if (size (current_value 1))
-									;generalized mean with p=2 computes root mean squared
-									(generalized_mean
-										(map (lambda (first (current_value)) ) (current_value 1))
-										2
+								;RMSE - root mean squared error = sqrt( sum( |actual-predicted|^2 ) / num_cases )
+								rmse
+									(if (size (current_value 1))
+										;generalized mean with p=2 computes root mean squared
+										(generalized_mean
+											(map (lambda (first (current_value)) ) (current_value 1))
+											2
+										)
 									)
-								)
+							}
 						))
 						(unzip feature_residuals_lists continuous_indices)
 					)
@@ -866,14 +881,14 @@
 			null_residual_map
 				(map
 					(lambda
-						(if (get !featureNullRatiosMap [(current_index 1) "has_nulls"])
+						(if (contains_index continuous_with_nulls_map (current_index))
 							(if (get (current_value) "null_residual")
 								(get (current_value) "null_residual")
 
 								;else the null residual was computed as 0, set it the smallest residual value of  1 / (1 + num_nulls)
 								(/
 									1
-									(+ 1 (get !featureNullRatiosMap [(current_index 1) "num_nulls"]) )
+									(+ 1 (or (get !featureNullRatiosMap [(current_index 1) "num_nulls"])) )
 								)
 							)
 						)
@@ -1524,19 +1539,36 @@
 									(size (current_value))
 									[
 										(if (and estimating_residual_lower_bound (= "robust_mda" robust_residuals))
-											(generalized_mean (map
-												(lambda
-													;only compute mean of values from features that were not used in queries,
-													;for erlb flows each (current_value) is a pair of: [used in query flag, [value residual null residual]]
-													(if (= .false (first (current_value)))
-														(first (last (current_value)))
+											(if (contains_index continuous_with_nulls_map feature)
+												(generalized_mean (map
+													(lambda
+														;only compute mean of values from features that were not used in queries,
+														;for erlb flows each (current_value) is a pair of: [used in query flag, [value residual null residual]]
+														(if (= .false (first (current_value)))
+															(first (last (current_value)))
+														)
 													)
-												)
-												(current_value 1)
-											))
+													(current_value 1)
+												))
+
+												;else residual value is are stored as [used in query flag, residual ]
+												(generalized_mean (map
+													(lambda
+														;only compute mean of values from features that were not used in queries,
+														;for erlb flows each (current_value) is a pair of: [used in query flag, [value residual null residual]]
+														(if (= .false (first (current_value)))
+															(last (current_value))
+														)
+													)
+													(current_value 1)
+												))
+											)
 
 											;else simple average of all diffs
-											(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
+											(if (contains_index continuous_with_nulls_map feature)
+												(generalized_mean (map (lambda (first (current_value))) (current_value 1)) )
+												(generalized_mean (current_value 1))
+											)
 										)
 
 
@@ -1544,7 +1576,7 @@
 										(if (contains_index !nominalsMap feature )
 											0
 
-											(if (get !featureNullRatiosMap [feature "num_nulls"])
+											(if (contains_index continuous_with_nulls_map feature)
 												(if (and estimating_residual_lower_bound (= "robust_mda" robust_residuals))
 													;for erlb flows each (current_value) is a pair of: [used in query flag, [value residual null residual]]
 													(if (>=
@@ -1573,7 +1605,7 @@
 														;else there are less than 30 null values, not significant enough to count
 														;set deviation to: 1 - (0.5 + num_nulls) / num_cases, add 0.5 to num_nulls per Jeffrey's prior approach
 														(- 1
-															(/ (+ 0.5 (get !featureNullRatiosMap [feature "num_nulls"])) num_cases)
+															(/ (+ 0.5 (or (get !featureNullRatiosMap [feature "num_nulls"]))) num_cases)
 														)
 													)
 
@@ -1587,7 +1619,7 @@
 														;else there are less than 30 null values, not significant enough to count
 														;set deviation to: 1 - (0.5 + num_nulls) / num_cases, add 0.5 to num_nulls per Jeffrey's prior approach
 														(- 1
-															(/ (+ 0.5 (get !featureNullRatiosMap [feature "num_nulls"])) num_cases)
+															(/ (+ 0.5 (or (get !featureNullRatiosMap [feature "num_nulls"])) ) num_cases)
 														)
 													)
 												)
@@ -1606,7 +1638,7 @@
 										(get hyperparam_map ["featureResiduals" feature ])
 										(/
 											1
-											(+ 1 (get !featureNullRatiosMap [feature "num_nulls"]) )
+											(+ 1 (or (get !featureNullRatiosMap [feature "num_nulls"])) )
 										)
 									]
 								)
@@ -1633,10 +1665,13 @@
 											feature (get features (current_index 1))
 										)
 										(if (size (current_value))
-											(generalized_mean (map (lambda (/ (first (current_value)) range)) (current_value 1)) )
+											(if (contains_index continuous_with_nulls_map (get features (current_index)))
+												(generalized_mean (map (lambda (/ (first (current_value)) range)) (current_value 1)) )
+												(generalized_mean (map (lambda (/ (current_value) range)) (current_value 1)) )
+											)
 
 											;else if there were no values for this feature, return global feature residual
-											(get hyperparam_map ["featureResiduals" feature ])
+											(get hyperparam_map ["featureResiduals" (get features (current_index 1)) ])
 										)
 									)
 								)
@@ -1654,10 +1689,7 @@
 				null_accuracies_map
 					{
 						"num_nulls"
-							(if (and
-									(not (contains_index !nominalsMap (first features)))
-									(get !featureNullRatiosMap [(first features) "num_nulls"])
-								)
+							(if (contains_index continuous_with_nulls_map (first features))
 								(size (filter (map (lambda (last (current_value))) (first feature_residuals_lists))))
 								0
 							)
@@ -1826,6 +1858,14 @@
 				)
 			;list, length of case_ids, each item will be a list of residual values, one per feature
 			case_residuals_lists (list)
+			continuous_with_nulls_map
+				(filter
+					(lambda (and
+						(not (contains_index !nominalsMap (current_index)))
+						(!= .false (get !featureNullRatiosMap [(current_index 1) "has_nulls"]))
+					))
+					feature_index_map
+				)
 		))
 
 		(assign (assoc
@@ -1947,6 +1987,8 @@
 
 										(if (= "continuous" (get !featureAttributes [feat_to_diff "type"]))
 											(call !ComputeDiffTuple (assoc
+												feature feat_to_diff
+												feature_has_continuous_nulls (contains_index continuous_with_nulls_map feat_to_diff)
 												interpolated_value
 													;interpolated value for forecast
 													(call !InterpolateSeriesValuesContinuous (assoc
