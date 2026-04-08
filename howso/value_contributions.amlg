@@ -84,7 +84,15 @@
 
 		(declare (assoc
 			context_features (filter (lambda (not (contains_value (append action_feature value_robust_contributions_features) (current_value)))) features)
-			case_features (values (append features action_feature value_robust_contributions_features (if !tsTimeFeature [".series_index"] [])) .true)
+			case_features
+				(values
+					(append
+						features action_feature value_robust_contributions_features
+						(if !tsTimeFeature [".series_index"] [])
+						(if use_case_weights [weight_feature] [])
+					)
+					.true
+				)
 		))
 
 		(declare (assoc
@@ -507,6 +515,8 @@
 							(if compute_pc
 								(- (get with_ac_features_action_pair 1) (get without_ac_features_action_pair 1))
 							)
+							;case weight
+							(if use_case_weights (get case_values_map weight_feature) )
 							;unique value combination for this case as a tuple
 							unique_value_combo
 						]
@@ -525,6 +535,13 @@
 					))
 				)
 			has_null_results .false
+			;total size of experiment. Number of sampled cases if not using case weights, otherwise total case weight
+			total_size
+				(if use_case_weights
+					(apply "+" (map (lambda (get (current_value) 6)) matching_ac_pc_tuples))
+
+					(size case_ac_pc_tuples)
+				)
 		))
 
 		;given all possible value combinations, compute the ac/pc for each combination
@@ -545,50 +562,63 @@
 								)
 						)
 
+						(declare (assoc
+							sample_size
+								(if use_case_weights
+									(apply "+" (map (lambda (get (current_value) 6)) matching_ac_pc_tuples))
+
+									(size matching_ac_pc_tuples)
+								)
+						))
+
+						(declare (assoc
+							sample_fraction (/ sample_size total_size)
+						))
+
 						;matching_ac_pc_tuples will be empty if this unique values combination did not appear in the dataset (or no reacts were registered using them),
 						;of so, output null so it can be filtered out later
-						(if (>= (size matching_ac_pc_tuples) value_robust_contributions_min_samples)
+						(if (>= sample_size value_robust_contributions_min_samples)
 							[
 								;output AC for this combination of unique values combination
 								(if compute_ac
 									(*
 										(generalized_mean (map (lambda (first (current_value))) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 								;output null AC for this combination of unique values combination
 								(if (and compute_ac feature_has_continuous_nulls)
 									(*
 										(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 								;output PC for this combination of unique values combination
 								(if compute_pc
 									(*
 										(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 								;output directional PC for this combination of unique values combination
 								(if compute_pc
 									(*
 										(generalized_mean (map (lambda (get (current_value) 3)) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 								;output null-PC for this combination of unique values combination
 								(if (and compute_pc feature_has_continuous_nulls)
 									(*
 										(generalized_mean (map (lambda (get (current_value) 4)) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 								;output directional null-PC for this combination of unique values combination
 								(if (and compute_pc feature_has_continuous_nulls)
 									(*
 										(generalized_mean (map (lambda (get (current_value) 5)) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 							]
@@ -954,11 +984,20 @@
 								;(current_index) = feature value or bucket index
 								(>
 									(if (contains_index !nominalsMap (current_index 1))
-										;num cases matching this class
-										(size (contained_entities
-											(query_in_entity_list case_ids)
-											(query_equals (current_index 1) (current_index))
-										))
+										(if use_case_weights
+											;sum of sampled cases weights
+											(compute_on_contained_entities
+												(query_in_entity_list case_ids)
+												(query_equals (current_index 1) (current_index))
+												(query_sum weight_feature)
+											)
+
+											;num sampled cases matching this class
+											(size (contained_entities
+												(query_in_entity_list case_ids)
+												(query_equals (current_index 1) (current_index))
+											))
+										)
 
 										;if this is a continuous feature with nulls and the bucket being checked is the
 										;last bucket which holds nulls, the bucket wouldn't exist if there weren't enough
@@ -971,14 +1010,28 @@
 										.infinity
 
 										;else compute num cases in this bucket
-										(size (contained_entities
-											(query_in_entity_list case_ids)
-											(query_between
-												(current_index 1)
-												(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
-												(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+										(if use_case_weights
+											;sum of weights of cases in bucket
+											(compute_on_contained_entities
+												(query_in_entity_list case_ids)
+												(query_between
+													(current_index 1)
+													(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+													(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+												)
+												(query_sum weight_feature)
 											)
-										))
+
+											;num sampled cases in the bucket
+											(size (contained_entities
+												(query_in_entity_list case_ids)
+												(query_between
+													(current_index 1)
+													(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+													(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+												)
+											))
+										)
 									)
 									(if (~ value_robust_contributions_min_cases {})
 										;if an assoc, get the value for this feature (default to 15 if the feature is missing from the assoc)
@@ -1079,7 +1132,15 @@
 		(declare (assoc
 			context_features (filter (lambda (not (contains_value (append value_robust_contributions_features action_feature) (current_value)))) features)
 			;all features needed
-			case_features (values (append features action_feature value_robust_contributions_features (if !tsTimeFeature [".series_index"] [])) .true)
+			case_features
+				(values
+					(append
+						features action_feature value_robust_contributions_features
+						(if !tsTimeFeature [".series_index"] [])
+						(if use_case_weights [weight_feature] [])
+					)
+					.true
+				)
 		))
 
 		;robust_residuals are used as the deviation for the ACs when converting to surprisal.
@@ -1683,6 +1744,8 @@
 								(+ (or action_feature_surprisal) (or action_feature_null_surprisal))
 								total_ac_feature_surprisal
 							)
+							;case weight
+							(if use_case_weights (get case_values_map weight_feature) )
 							unique_value_combo
 						]
 					))
@@ -1700,6 +1763,14 @@
 					))
 				)
 			has_null_results .false
+
+			;total size of experiment. Number of sampled cases if not using case weights, otherwise total case weight
+			total_size
+				(if use_case_weights
+					(apply "+" (map (lambda (get (current_value) 1)) case_surprisal_asymmetries))
+
+					(size case_surprisal_asymmetries)
+				)
 		))
 
 		;given all possible value combinations, compute the mean surprisal asymmetry for each combination
@@ -1719,13 +1790,22 @@
 								)
 						)
 
-						(if (>= (size matching_value_asymmetry_pairs) value_robust_contributions_min_samples)
+						(declare (assoc
+							sample_size
+								(if use_case_weights
+									(apply "+" (map (lambda (get (current_value) 1)) matching_value_asymmetry_pairs))
+
+									(size matching_value_asymmetry_pairs)
+								)
+						))
+
+						(if (>= sample_size value_robust_contributions_min_samples)
 							(*
 								(generalized_mean (map
 									(lambda (first (current_value)))
 									matching_value_asymmetry_pairs
 								))
-								(/ (size matching_value_asymmetry_pairs) (size case_surprisal_asymmetries))
+								(/ sample_size total_size)
 							)
 
 							;else return null if not enough samples
