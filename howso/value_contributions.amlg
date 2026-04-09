@@ -1,4 +1,76 @@
+
 {
+	;helper method to initialize common value used in value contribution decomposition flows
+	!InitValueContributions
+	(seq
+		(if (= (null) hyperparam_map)
+			(assign (assoc
+				hyperparam_map
+					(call !GetHyperparameters (assoc
+						context_features features
+						weight_feature weight_feature
+						use_case_weights use_case_weights
+					))
+			))
+		)
+
+		(call !UpdateCaseWeightParameters)
+
+		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
+
+		;if expected values haven't been cached (i.e., analyze was skipped), do that here
+		(if (= 0 (size !expectedValuesMap))
+			(call !CacheExpectedValuesAndProbabilities (assoc
+				features features
+				weight_feature weight_feature
+				use_case_weights use_case_weights
+			))
+		)
+
+		;map of all sampled cases to assocs of needed features to values
+		(assign (assoc
+			case_to_values_map
+				(compute_on_contained_entities
+					(query_in_entity_list case_ids)
+					(map
+						(lambda (query_exists (current_value)))
+						case_features
+					)
+				)
+		))
+
+		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
+		(assign (assoc
+			continuous_feature_buckets_map (call !CreateContinuousFeatureBucketsMap)
+		))
+
+		;set of continuous features that have enough nulls
+		(assign (assoc
+			continuous_with_nulls_set (call !CreateContinuousWithNullsSet)
+		))
+
+		;create an assoc of feature -> all unique values (classes or buckets)
+		(assign (assoc
+			feature_value_lists_map
+				(zip
+					value_robust_contributions_features
+					(map
+						(lambda
+							(if (contains_index !nominalsMap (current_value))
+								;all unique classes
+								(values (map (lambda (get (current_value) (current_value 1))) case_to_values_map) .true)
+
+								;all unique buckets
+								(indices (get continuous_feature_buckets_map (current_value)))
+							)
+						)
+						value_robust_contributions_features
+					)
+				)
+		))
+	)
+
+
 	!ComputeValueRobustContributions
 	(declare
 		(assoc
@@ -12,46 +84,38 @@
 
 		(declare (assoc
 			context_features (filter (lambda (not (contains_value (append action_feature value_robust_contributions_features) (current_value)))) features)
-			case_features (values (append features action_feature value_robust_contributions_features (if !tsTimeFeature [".series_index"] [])) .true)
+			case_features
+				(values
+					(append
+						features action_feature value_robust_contributions_features
+						(if !tsTimeFeature [".series_index"] [])
+						(if use_case_weights [weight_feature] [])
+					)
+					.true
+				)
 		))
 
 		(declare (assoc
-			;continuous features with nulls need their MAD computed
-			action_feature_mad
-				(if (and
-						(not (contains_index !nominalsMap action_feature))
-						(!= .false (get !featureNullRatiosMap (list action_feature "has_nulls")))
-						(not (contains_index !editDistanceFeatureTypesMap action_feature))
-						(not (contains_index !inactiveFeaturesMap action_feature) )
-					)
-					(call !ComputeFeatureMAD (assoc feature action_feature))
-				)
 			;create a backup of context_features for time series flows
 			original_context_features (if !tsTimeFeature (replace context_features))
 			num_features (size context_features)
 
 			feature_is_nominal (contains_index !nominalsMap action_feature)
-			feature_is_ordinal (contains_index !ordinalFeaturesSet action_feature)
 			feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
 			feature_is_dependent (contains_index !dependentFeatureMap action_feature)
 			feature_is_non_string_edit_distance .false
+
+			;these will be set in the !InitValueContributions method below
+			case_to_values_map (null)
+			continuous_feature_buckets_map (null)
+			continuous_with_nulls_set (null)
+			feature_value_lists_map (null)
 		))
 		(if (and feature_is_edit_distance (!= "string_mixable" (get !editDistanceFeatureTypesMap action_feature)) )
 			(assign (assoc feature_is_non_string_edit_distance .true))
 		)
 
-		(if (= (null) hyperparam_map)
-			(assign (assoc
-				hyperparam_map
-					(call !GetHyperparameters (assoc
-						context_features features
-						weight_feature weight_feature
-						use_case_weights use_case_weights
-					))
-			))
-		)
-
-		(call !UpdateCaseWeightParameters)
+		(call !InitValueContributions)
 
 		(assign (assoc
 			k_parameter (get hyperparam_map "k")
@@ -72,6 +136,11 @@
 
 			;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
 			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
+			feature_has_continuous_nulls
+				(and
+					(not (contains_index !nominalsMap action_feature))
+					(!= .false (get !featureNullRatiosMap [action_feature "has_nulls"]))
+				)
 		))
 
 		(if !tsTimeFeature (call !FilterValuesCaseIDsForLaggedFeatures))
@@ -83,78 +152,7 @@
 			all_features_map (zip features)
 		))
 
-		;a index map to match index of feature to value
-		(declare (assoc
-			contribution_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
-		))
 
-		;map of all sampled cases to assocs of needed features to values
-		(declare (assoc
-			case_to_values_map
-				(compute_on_contained_entities
-					(query_in_entity_list case_ids)
-					(map
-						(lambda (query_exists (current_value)))
-						case_features
-					)
-				)
-		))
-
-		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
-		(declare (assoc
-			continuous_feature_buckets_map
-				(map
-					(lambda
-						(if (contains_index value_robust_contributions_buckets (current_index))
-							(zip
-								(range 1 (size (get value_robust_contributions_buckets (current_index))))
-								(get value_robust_contributions_buckets (current_index))
-							)
-
-							;determine buckets automatically
-							(let
-								(assoc ac_feature_index (get contribution_feature_index_map (current_index 1)) )
-								(call !BinValuesByQuantiles (assoc
-									max_num_buckets max_num_buckets
-									sorted_unique_values
-										;sort is descending order
-										(sort
-											(lambda (< (current_value) (current_value 1)) )
-											(values
-												(map (lambda (get (current_value) (current_index 2))) case_to_values_map)
-												.true
-											)
-										)
-								))
-							)
-						)
-					)
-					(zip (filter
-						(lambda (not (contains_index !nominalsMap (current_value))))
-						value_robust_contributions_features
-					))
-				)
-		))
-
-		;create an assoc of feature -> all unique values (classes or buckets)
-		(declare (assoc
-			feature_value_lists_map
-				(zip
-					value_robust_contributions_features
-					(map
-						(lambda
-							(if (contains_index !nominalsMap (current_value))
-								;all unique classes
-								(values (map (lambda (get (current_value) (current_value 1))) case_to_values_map) .true)
-
-								;all unique buckets
-								(indices (get continuous_feature_buckets_map (current_value)))
-							)
-						)
-						value_robust_contributions_features
-					)
-				)
-		))
 
 		(if (or (~ value_robust_contributions_min_cases {}) (> value_robust_contributions_min_cases 1))
 			;call the macro to filter down feature_value_lists_map and case_ids to remove entries that
@@ -255,7 +253,6 @@
 												(call !InterpolateAndComputeDiffToCase (assoc
 													feature action_feature
 													output_categorical_action_probabilities .true
-													feature_mad action_feature_mad
 													candidate_cases_lists
 														(if (= 0 (size  react_context_features))
 															[[][][]]
@@ -332,15 +329,25 @@
 											)
 									))
 
-									[
-										diff
-										;get the original categorical action probability for the nominal
-										(if feature_is_nominal
-											(or (get categorical_action_probabilities_map [action_feature (get case_values_map action_feature)] ))
-											;else output the predicted value for continuous
+									(if feature_has_continuous_nulls
+										[
+											(first diff) ;value diff
+											(last diff) ;null diff
 											interpolated_value
-										)
-									]
+										]
+
+										;else no nulls and it may be nominal
+										[
+											diff
+											(null)
+											;get the original categorical action probability for the nominal
+											(if feature_is_nominal
+												(or (get categorical_action_probabilities_map [action_feature (get case_values_map action_feature)] ))
+												;else output the predicted value for continuous
+												interpolated_value
+											)
+										]
+									)
 								)
 						))
 
@@ -386,7 +393,6 @@
 												(call !InterpolateAndComputeDiffToCase (assoc
 													feature action_feature
 													output_categorical_action_probabilities .true
-													feature_mad action_feature_mad
 													candidate_cases_lists
 														(compute_on_contained_entities
 															(query_not_in_entity_list [(replace case_id)])
@@ -456,52 +462,44 @@
 											)
 									))
 
-									[
-										diff
-										;get the original categorical action probability for the nominal
-										(if feature_is_nominal
-											(or (get categorical_action_probabilities_map [action_feature (get case_values_map action_feature)] ))
-											;else output the predicted value for continuous
+
+									(if feature_has_continuous_nulls
+										[
+											(first diff) ;value diff
+											(last diff) ;null diff
 											interpolated_value
-										)
-									]
+										]
+
+										;else no nulls and it may be nominal
+										[
+											diff
+											(null)
+											;get the original categorical action probability for the nominal
+											(if feature_is_nominal
+												(or (get categorical_action_probabilities_map [action_feature (get case_values_map action_feature)] ))
+												;else output the predicted value for continuous
+												interpolated_value
+											)
+										]
+									)
 								)
 						))
 
 						(declare (assoc
-							unique_value_combo
-								(map
-									(lambda
-										(if (contains_index !nominalsMap (current_value))
-											(get case_values_map (current_value))
-
-											;find the bucket containing this continuous value
-											(let
-												(assoc
-													feature_bucket_map (get continuous_feature_buckets_map (current_value 1))
-													value (get case_values_map (current_value 1))
-												)
-												;iterate over the 0-based ordered indices of the bucket map, where each bucket is a pair of [low high]
-												;if it matches the bucket, output the index of the bucket
-												(while (< (current_index) (size feature_bucket_map))
-													(if (and
-															(>= value (get feature_bucket_map [(current_index 1) 0]) )
-															(<= value (get feature_bucket_map [(current_index 1) 1]) )
-														)
-														(conclude (current_index))
-													)
-												)
-											)
-										)
-									)
-									value_robust_contributions_features
-								)
+							;reference the code in !CreateUniqueValueCombination
+							unique_value_combo @(target .true "!CreateUniqueValueCombination")
 						))
 
-						;output a tuple of : [ AC, PC, directional PC, values ]
+						;each pair is [value-diff, null-diff, predicted value/predicted CAP]
+						;output a tuple of : [ value-AC, null-AC, value-PC, directional value-PC, null-PC, directional null-PC, case-weight, values ]
+						;indices here are named and defined below the outer declare.
 						[
 							(if compute_ac
 								(- (first without_ac_features_action_pair) (first with_ac_features_action_pair) )
+							)
+							;null AC
+							(if compute_ac
+								(- (get without_ac_features_action_pair 1) (get with_ac_features_action_pair 1) )
 							)
 							(if compute_pc
 								(abs (- (last with_ac_features_action_pair) (last without_ac_features_action_pair)))
@@ -510,12 +508,34 @@
 							(if compute_pc
 								(- (last with_ac_features_action_pair) (last without_ac_features_action_pair))
 							)
+							;null PC
+							(if compute_pc
+								(abs (- (get with_ac_features_action_pair 1) (get without_ac_features_action_pair 1)))
+							)
+							;directional null PC
+							(if compute_pc
+								(- (get with_ac_features_action_pair 1) (get without_ac_features_action_pair 1))
+							)
+							;case weight
+							(if use_case_weights (get case_values_map weight_feature) )
 							;unique value combination for this case as a tuple
 							unique_value_combo
 						]
 					))
 					case_ids
 				)
+		))
+
+		;named indices for the tuples created above
+		(declare (assoc
+			value_ac_index 0
+			null_ac_index 1
+			value_pc_index 2
+			directional_value_pc_index 3
+			null_pc_index 4
+			direectional_null_pc_index 5
+			case_weight_index 6
+			value_combo_index 7
 		))
 
 		;create a list of all possible value combinations for the value_robust_contributions_features
@@ -528,10 +548,17 @@
 					))
 				)
 			has_null_results .false
+			;total size of experiment. Number of sampled cases if not using case weights, otherwise total case weight
+			total_size
+				(if use_case_weights
+					(apply "+" (map (lambda (get (current_value) case_weight_index)) case_ac_pc_tuples))
+
+					(size case_ac_pc_tuples)
+				)
 		))
 
 		;given all possible value combinations, compute the ac/pc for each combination
-		;list of tuples of: [ AC, PC, directional PC]
+		;list of tuples of: [ AC, null AC, PC, directional PC, null PC, null directianal PC]
 		(declare (assoc
 			corresponding_contribution_tuples
 				||(map
@@ -548,29 +575,63 @@
 								)
 						)
 
+						(declare (assoc
+							sample_size
+								(if use_case_weights
+									(apply "+" (map (lambda (get (current_value) case_weight_index)) matching_ac_pc_tuples))
+
+									(size matching_ac_pc_tuples)
+								)
+						))
+
+						(declare (assoc
+							sample_fraction (/ sample_size total_size)
+						))
+
 						;matching_ac_pc_tuples will be empty if this unique values combination did not appear in the dataset (or no reacts were registered using them),
 						;of so, output null so it can be filtered out later
-						(if (>= (size matching_ac_pc_tuples) value_robust_contributions_min_samples)
+						(if (>= sample_size value_robust_contributions_min_samples)
 							[
 								;output AC for this combination of unique values combination
 								(if compute_ac
 									(*
 										(generalized_mean (map (lambda (first (current_value))) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										sample_fraction
+									)
+								)
+								;output null AC for this combination of unique values combination
+								(if (and compute_ac feature_has_continuous_nulls)
+									(*
+										(generalized_mean (map (lambda (get (current_value) null_ac_index)) matching_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 								;output PC for this combination of unique values combination
 								(if compute_pc
 									(*
-										(generalized_mean (map (lambda (get (current_value) 1)) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										(generalized_mean (map (lambda (get (current_value) value_pc_index)) matching_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 								;output directional PC for this combination of unique values combination
 								(if compute_pc
 									(*
-										(generalized_mean (map (lambda (get (current_value) 2)) matching_ac_pc_tuples))
-										(/ (size matching_ac_pc_tuples) (size case_ac_pc_tuples))
+										(generalized_mean (map (lambda (get (current_value) directional_value_pc_index)) matching_ac_pc_tuples))
+										sample_fraction
+									)
+								)
+								;output null-PC for this combination of unique values combination
+								(if (and compute_pc feature_has_continuous_nulls)
+									(*
+										(generalized_mean (map (lambda (get (current_value) null_pc_index)) matching_ac_pc_tuples))
+										sample_fraction
+									)
+								)
+								;output directional null-PC for this combination of unique values combination
+								(if (and compute_pc feature_has_continuous_nulls)
+									(*
+										(generalized_mean (map (lambda (get (current_value) direectional_null_pc_index)) matching_ac_pc_tuples))
+										sample_fraction
 									)
 								)
 							]
@@ -613,13 +674,13 @@
 							(lambda
 								;if there are nulls, wrap the (get)s in an (or) to assign low value for (null)s while sorting
 								(<=
-									(or (get corresponding_contribution_tuples [(current_value 1) 0]) -.infinity)
-									(or (get corresponding_contribution_tuples [(current_value 2) 0]) -.infinity)
+									(or (get corresponding_contribution_tuples [(current_value 1) value_ac_index]) -.infinity)
+									(or (get corresponding_contribution_tuples [(current_value 2) value_ac_index]) -.infinity)
 								)
 							)
 
 							(lambda
-								(<= (get corresponding_contribution_tuples [(current_value 1) 0]) (get corresponding_contribution_tuples [(current_value 2) 0] ) )
+								(<= (get corresponding_contribution_tuples [(current_value 1) value_ac_index]) (get corresponding_contribution_tuples [(current_value 2) value_ac_index] ) )
 							)
 						)
 						(indices corresponding_contribution_tuples)
@@ -631,13 +692,13 @@
 							(lambda
 								;if there are nulls, wrap the (get)s in an (or) to assign low value for (null)s while sorting
 								(<=
-									(or (get corresponding_contribution_tuples [(current_value 1) 1]) -.infinity)
-									(or (get corresponding_contribution_tuples [(current_value 2) 1]) -.infinity)
+									(or (get corresponding_contribution_tuples [(current_value 1) value_pc_index]) -.infinity)
+									(or (get corresponding_contribution_tuples [(current_value 2) value_pc_index]) -.infinity)
 								)
 							)
 
 							(lambda
-								(<= (get corresponding_contribution_tuples [(current_value 1) 1]) (get corresponding_contribution_tuples [(current_value 2) 1] ) )
+								(<= (get corresponding_contribution_tuples [(current_value 1) value_pc_index]) (get corresponding_contribution_tuples [(current_value 2) value_pc_index] ) )
 							)
 						)
 						(indices corresponding_contribution_tuples)
@@ -672,30 +733,75 @@
 
 		;split the lists of all values into corresponding lists for output:
 		;just the unique feature values and their corresponding AC and/or PC values
-		(if (and compute_ac compute_pc)
+		(append
 			{
 				"features" value_robust_contributions_features
 				"feature_values" sorted_feature_values
-				"ac_values" (map (lambda (first (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
-				"pc_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
-				"pc_directional_values" (map (lambda (last (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
 			}
-
-			compute_ac
-			{
-				"features" value_robust_contributions_features
-				"feature_values" sorted_feature_values
-				"ac_values" (map (lambda (first (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
-			}
-
-			;else compute_pc
-			{
-				"features" value_robust_contributions_features
-				"feature_values" sorted_feature_values
-				"pc_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
-				"pc_directional_values" (map (lambda (last (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
-			}
+			(if compute_ac
+				{
+					"ac_values" (map (lambda (first (current_value))) (unzip corresponding_contribution_tuples sorted_indices))
+				}
+				{}
+			)
+			(if (and compute_ac feature_has_continuous_nulls)
+				{
+					"null_ac_values" (map (lambda (get (current_value) 1)) (unzip corresponding_contribution_tuples sorted_indices))
+				}
+				{}
+			)
+			(if compute_pc
+				{
+					"pc_values" (map (lambda (get (current_value) 2)) (unzip corresponding_contribution_tuples sorted_indices))
+					"pc_directional_values" (map (lambda (get (current_value) 3)) (unzip corresponding_contribution_tuples sorted_indices))
+				}
+				{}
+			)
+			(if (and compute_pc feature_has_continuous_nulls)
+				{
+					"null_pc_values" (map (lambda (get (current_value) 4)) (unzip corresponding_contribution_tuples sorted_indices))
+					"null_pc_directional_values" (map (lambda (get (current_value) 5)) (unzip corresponding_contribution_tuples sorted_indices))
+				}
+				{}
+			)
 		)
+	)
+
+	;helper method for creating a unique value combination tuple from this case for all value_robust_contributions_features
+	!CreateUniqueValueCombination
+	(map
+		(lambda
+			(if (contains_index !nominalsMap (current_value))
+				(get case_values_map (current_value))
+
+				;find the bucket containing this continuous value
+				(let
+					(assoc
+						feature_bucket_map (get continuous_feature_buckets_map (current_value 1))
+						value (get case_values_map (current_value 1))
+					)
+					;if value is null for a continuous feature with nulls, output the last bucket index which is the null bucket
+					(if (and
+							(= (null) value)
+							(contains_index continuous_with_nulls_set (current_value))
+						)
+						(- (size feature_bucket_map) 1)
+
+						;iterate over the 0-based ordered indices of the bucket map, where each bucket is a pair of [low high]
+						;if it matches the bucket, output the index of the bucket
+						(while (< (current_index) (size feature_bucket_map))
+							(if (and
+									(>= value (get feature_bucket_map [(current_index 1) 0]) )
+									(<= value (get feature_bucket_map [(current_index 1) 1]) )
+								)
+								(conclude (current_index))
+							)
+						)
+					)
+				)
+			)
+		)
+		value_robust_contributions_features
 	)
 
 	!FilterValuesCaseIDsForLaggedFeatures
@@ -713,6 +819,100 @@
 						)
 						case_ids
 					)
+			))
+		)
+	)
+
+	;helper method, given a continuous_feature_buckets_map, it creates a set of all continuous features that have significant nulls
+	!CreateContinuousWithNullsSet
+	(zip (indices
+		(filter
+			(lambda
+				(and
+					;continous feature
+					(not (contains_index !nominalsMap (current_index)))
+					;the last bucket is a null bucket
+					(=
+						(null)
+						(get (current_value) (- (size (current_value)) 1) )
+					)
+				)
+			)
+			continuous_feature_buckets_map
+		)
+	))
+
+	;creates a map of continuous feature -> buckets map (assoc of bucket -> [min max])
+	!CreateContinuousFeatureBucketsMap
+	(let
+		(assoc
+			;an index map to match index of feature to value
+			contribution_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
+		)
+		(map
+			(lambda
+				(if (contains_index value_robust_contributions_buckets (current_index))
+					(zip
+						(range 1 (size (get value_robust_contributions_buckets (current_index))))
+						(get value_robust_contributions_buckets (current_index))
+					)
+
+					;determine buckets automatically
+					(let
+						(assoc
+							ac_feature_index (get contribution_feature_index_map (current_index 1))
+							feature (current_index 1)
+							has_nulls (get !featureNullRatiosMap [(current_index 2) "has_nulls"])
+						)
+
+						(declare (assoc
+							buckets
+								(call !BinValuesByQuantiles (assoc
+									max_num_buckets max_num_buckets
+									sorted_unique_values
+										;sort is descending order
+										(sort
+											(lambda (< (current_value) (current_value 1)) )
+											(values
+												(if has_nulls
+													;remove nulls from unique values
+													(filter (map (lambda (get (current_value) feature)) case_to_values_map))
+													(map (lambda (get (current_value) feature)) case_to_values_map)
+												)
+												.true
+											)
+										)
+								))
+						))
+
+						;if feature has enough nulls, create one extra bucket for the nulls
+						(if (and
+								has_nulls
+								(>=
+									(size (compute_on_contained_entities
+										(query_in_entity_list case_ids)
+										(query_equals feature (null))
+									))
+									(if (~ 0 value_robust_contributions_min_cases)
+										value_robust_contributions_min_cases
+										(or (get value_robust_contributions_min_cases feature) 15)
+									)
+								)
+							)
+							(append
+								buckets
+								(associate (size buckets) (null))
+							)
+
+							;else output the buckets as they are
+							buckets
+						)
+					)
+				)
+			)
+			(zip (filter
+				(lambda (not (contains_index !nominalsMap (current_value))))
+				value_robust_contributions_features
 			))
 		)
 	)
@@ -735,6 +935,7 @@
 			total_num (size sorted_unique_values)
 		))
 
+		;TODO 25245: add a bucket for null if select cases have significant amount (>=30) of nulls
 		;assoc of bucket -> values pair of:  min, max] of all the unique values that go into that bucket
 		(zip
 			(range 0 (- num_buckets 1))
@@ -796,21 +997,54 @@
 								;(current_index) = feature value or bucket index
 								(>
 									(if (contains_index !nominalsMap (current_index 1))
-										;num cases matching this class
-										(size (contained_entities
-											(query_in_entity_list case_ids)
-											(query_equals (current_index 1) (current_index))
-										))
-
-										;num cases in this bucket
-										(size (contained_entities
-											(query_in_entity_list case_ids)
-											(query_between
-												(current_index 1)
-												(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
-												(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+										(if use_case_weights
+											;sum of sampled cases weights
+											(compute_on_contained_entities
+												(query_in_entity_list case_ids)
+												(query_equals (current_index 1) (current_index))
+												(query_sum weight_feature)
 											)
-										))
+
+											;num sampled cases matching this class
+											(size (contained_entities
+												(query_in_entity_list case_ids)
+												(query_equals (current_index 1) (current_index))
+											))
+										)
+
+										;if this is a continuous feature with nulls and the bucket being checked is the
+										;last bucket which holds nulls, the bucket wouldn't exist if there weren't enough
+										;so always include it by having this value be infinity
+										(and
+											(contains_index continuous_with_nulls_set (current_index 1))
+											;(current_index) is the bucket, (current_value 1) is the list of buckets
+											(= (current_index) (- (size (current_value 1)) 1))
+										)
+										.infinity
+
+										;else compute num cases in this bucket
+										(if use_case_weights
+											;sum of weights of cases in bucket
+											(compute_on_contained_entities
+												(query_in_entity_list case_ids)
+												(query_between
+													(current_index 1)
+													(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+													(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+												)
+												(query_sum weight_feature)
+											)
+
+											;num sampled cases in the bucket
+											(size (contained_entities
+												(query_in_entity_list case_ids)
+												(query_between
+													(current_index 1)
+													(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 0])
+													(get continuous_feature_buckets_map [(current_index 2) (current_index 1) 1])
+												)
+											))
+										)
 									)
 									(if (~ value_robust_contributions_min_cases {})
 										;if an assoc, get the value for this feature (default to 15 if the feature is missing from the assoc)
@@ -911,47 +1145,45 @@
 		(declare (assoc
 			context_features (filter (lambda (not (contains_value (append value_robust_contributions_features action_feature) (current_value)))) features)
 			;all features needed
-			case_features (values (append features action_feature value_robust_contributions_features (if !tsTimeFeature [".series_index"] [])) .true)
+			case_features
+				(values
+					(append
+						features action_feature value_robust_contributions_features
+						(if !tsTimeFeature [".series_index"] [])
+						(if use_case_weights [weight_feature] [])
+					)
+					.true
+				)
 		))
 
 		;robust_residuals are used as the deviation for the ACs when converting to surprisal.
 		(declare (assoc
 			robust_residuals_map
-				(map
-					(lambda (max (current_value) (get !cachedFeatureMinResidualMap (current_index))))
-					(get
-						(call !CalculateFeatureResiduals (assoc
-							features case_features
-							context_features case_features
-							case_ids
-								;don't need all 100k samples for robust residuals, 10k will do.
-								(rand case_ids 10000)
-							robust_residuals .true
-							use_case_weights use_case_weights
-							weight_feature weight_feature
-							custom_hyperparam_map custom_hyperparam_map
-							compute_all_statistics .false
-							confusion_matrix_min_count confusion_matrix_min_count
-							context_condition_filter_query context_condition_filter_query
-							strict_case_ids (!= 0 (size action_condition_filter_query))
-							features_to_derive features_to_derive
-						))
-						"residual_map"
-					)
-				)
+				(call !ExpandValuesMapToUncertainty (assoc
+					values_map
+						(get
+							(call !CalculateFeatureResiduals (assoc
+								features case_features
+								context_features case_features
+								case_ids
+									;don't need all 100k samples for robust residuals, 10k will do.
+									(rand case_ids 10000)
+								robust_residuals .true
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+								custom_hyperparam_map custom_hyperparam_map
+								compute_all_statistics .false
+								confusion_matrix_min_count confusion_matrix_min_count
+								context_condition_filter_query context_condition_filter_query
+								strict_case_ids (!= 0 (size action_condition_filter_query))
+								features_to_derive features_to_derive
+							))
+							"residual_map"
+						)
+				))
 		))
 
 		(declare (assoc
-			;continuous features with nulls need their MAD computed
-			action_feature_mad
-				(if (and
-						(not (contains_index !nominalsMap action_feature))
-						(!= .false (get !featureNullRatiosMap (list action_feature "has_nulls")))
-						(not (contains_index !editDistanceFeatureTypesMap action_feature))
-						(not (contains_index !inactiveFeaturesMap action_feature) )
-					)
-					(call !ComputeFeatureMAD (assoc feature action_feature))
-				)
 			;map of feature -> mad for continuous features with nulls
 			feature_mad_map (call !ConstructFeatureMADMap (assoc features value_robust_contributions_features))
 			;create a backup of context_features for time series flows
@@ -959,18 +1191,12 @@
 			num_features (size context_features)
 
 			action_feature_is_nominal (contains_index !nominalsMap action_feature)
-			action_feature_is_ordinal (contains_index !ordinalFeaturesSet action_feature)
 			action_feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
 			action_feature_is_dependent (contains_index !dependentFeatureMap action_feature)
 
 			ac_feature_is_nominal_map
 				(map
 					(lambda (contains_index !nominalsMap (current_index)))
-					(zip value_robust_contributions_features)
-				)
-			ac_feature_is_ordinal_map
-				(map
-					(lambda (contains_index !ordinalFeaturesSet (current_index)))
 					(zip value_robust_contributions_features)
 				)
 			ac_feature_is_edit_distance_map
@@ -983,20 +1209,15 @@
 					(lambda (contains_index !dependentFeatureMap (current_index)))
 					(zip value_robust_contributions_features)
 				)
+
+			;these will be set in the !InitValueContributions method below
+			case_to_values_map (null)
+			continuous_feature_buckets_map (null)
+			continuous_with_nulls_set (null)
+			feature_value_lists_map (null)
 		))
 
-		(if (= (null) hyperparam_map)
-			(assign (assoc
-				hyperparam_map
-					(call !GetHyperparameters (assoc
-						context_features features
-						weight_feature weight_feature
-						use_case_weights use_case_weights
-					))
-			))
-		)
-
-		(call !UpdateCaseWeightParameters)
+		(call !InitValueContributions)
 
 		(assign (assoc
 			k_parameter (get hyperparam_map "k")
@@ -1006,6 +1227,22 @@
 
 			;store an assoc of lag/rate/delta feature -> lag/order amount for time series flows
 			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
+
+			action_feature_has_continuous_nulls
+				(and
+					(not (contains_index !nominalsMap action_feature))
+					(!= .false (get !featureNullRatiosMap [action_feature "has_nulls"]))
+				)
+			ac_feature_has_continuous_nulls_map
+				(map
+					(lambda
+						(and
+							(not (contains_index !nominalsMap (current_index)))
+							(!= .false (get !featureNullRatiosMap [(current_index 1) "has_nulls"]))
+						)
+					)
+					(zip value_robust_contributions_features)
+				)
 		))
 		(if !tsTimeFeature (call !FilterValuesCaseIDsForLaggedFeatures))
 
@@ -1020,79 +1257,6 @@
 						(and (get ac_feature_is_edit_distance_map (current_index)) (!= "string_mixable" (get !editDistanceFeatureTypesMap (current_index))))
 					)
 					(zip value_robust_contributions_features)
-				)
-		))
-
-		;a index map to match index of feature to value
-		(declare (assoc
-			ac_feature_index_map (zip value_robust_contributions_features (range 0 (- (size value_robust_contributions_features) 1)))
-		))
-
-		;map of all sampled cases to assocs of needed features to values
-		(declare (assoc
-			case_to_values_map
-				(compute_on_contained_entities
-					(query_in_entity_list case_ids)
-					(map
-						(lambda (query_exists (current_value)))
-						case_features
-					)
-				)
-		))
-
-		;map of continuous feature -> buckets map (assoc of bucket -> [min max])
-		(declare (assoc
-			continuous_feature_buckets_map
-				(map
-					(lambda
-						(if (contains_index value_robust_contributions_buckets (current_index))
-							(zip
-								(range 1 (size (get value_robust_contributions_buckets (current_index))))
-								(get value_robust_contributions_buckets (current_index))
-							)
-
-							;otherwise automatically determine buckets
-							(let
-								(assoc ac_feature_index (get ac_feature_index_map (current_index 1)) )
-								(call !BinValuesByQuantiles (assoc
-									max_num_buckets max_num_buckets
-									sorted_unique_values
-										;sort is descending order
-										(sort
-											(lambda (< (current_value) (current_value 1)) )
-											(values
-												(map (lambda (get (current_value) (current_index 2))) case_to_values_map)
-												.true
-											)
-										)
-								))
-							)
-						)
-					)
-					(zip (filter
-						(lambda (not (contains_index !nominalsMap (current_value))))
-						value_robust_contributions_features
-					))
-				)
-		))
-
-		;create an assoc of feature -> all unique values (classes or buckets)
-		(declare (assoc
-			feature_value_lists_map
-				(zip
-					value_robust_contributions_features
-					(map
-						(lambda
-							(if (contains_index !nominalsMap (current_value))
-								;all unique classes
-								(values (map (lambda (get (current_value) (current_value 1))) case_to_values_map) .true)
-
-								;all unique buckets
-								(indices (get continuous_feature_buckets_map (current_value)))
-							)
-						)
-						value_robust_contributions_features
-					)
 				)
 		))
 
@@ -1195,9 +1359,7 @@
 									feature action_feature
 									case_feature_value (get case_values_map action_feature)
 									feature_is_nominal action_feature_is_nominal
-									feature_is_ordinal action_feature_is_ordinal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
-									feature_mad action_feature_mad
 									output_categorical_action_probabilities .true
 									candidate_cases_lists
 										(if (= 0 (size react_context_features))
@@ -1272,7 +1434,6 @@
 											feature ac_feature
 											case_feature_value (get case_values_map ac_feature)
 											feature_is_nominal (get ac_feature_is_nominal_map ac_feature)
-											feature_is_ordinal (get ac_feature_is_ordinal_map ac_feature)
 											feature_is_non_string_edit_distance (get ac_feature_is_non_string_edit_distance_map ac_feature)
 											feature_mad (get feature_mad_map ac_feature)
 											output_categorical_action_probabilities .true
@@ -1352,9 +1513,7 @@
 									feature action_feature
 									output_categorical_action_probabilities .true
 									case_feature_value (get case_values_map action_feature)
-									feature_mad action_feature_mad
 									feature_is_nominal action_feature_is_nominal
-									feature_is_ordinal action_feature_is_ordinal
 									feature_is_non_string_edit_distance action_feature_is_non_string_edit_distance
 
 									candidate_cases_lists
@@ -1446,7 +1605,6 @@
 											feature ac_feature
 											case_feature_value (get case_values_map ac_feature)
 											feature_is_nominal (get ac_feature_is_nominal_map ac_feature)
-											feature_is_ordinal (get ac_feature_is_ordinal_map ac_feature)
 											feature_is_non_string_edit_distance (get ac_feature_is_non_string_edit_distance_map ac_feature)
 											feature_mad (get feature_mad_map ac_feature)
 											output_categorical_action_probabilities .true
@@ -1485,25 +1643,66 @@
 						))
 
 						(declare (assoc
-							ac_for_action_feature (- without_ac_features_action_diff with_ac_features_action_diff)
+							ac_for_action_feature
+								(if action_feature_has_continuous_nulls
+									(- (first without_ac_features_action_diff) (first with_ac_features_action_diff))
+									(- without_ac_features_action_diff with_ac_features_action_diff)
+
+								)
+							null_ac_for_action_feature
+								(if action_feature_has_continuous_nulls
+									(- (last without_ac_features_action_diff) (last with_ac_features_action_diff))
+									0
+								)
 							acs_for_ac_features
 								(map
-									(lambda (apply "-" (current_value)))
+									(lambda
+										(if (get ac_feature_has_continuous_nulls_map (get value_robust_contributions_features (current_index) ) )
+											(- (first (first (current_value))) (first (last (current_value))))
+											(- (first (current_value)) (last (current_value)))
+										)
+									)
+									without_action_ac_feature_diffs
+									with_action_ac_feature_diffs
+								)
+							null_acs_for_ac_features
+								(map
+									(lambda
+										(if (get ac_feature_has_continuous_nulls_map (get value_robust_contributions_features (current_index) ) )
+											(- (last (first (current_value))) (last (last (current_value))))
+											0
+										)
+									)
 									without_action_ac_feature_diffs
 									with_action_ac_feature_diffs
 								)
 						))
+
 						(declare (assoc
 							action_feature_surprisal
 								(-
 									(/
 										(call !LK_metric_laplace (assoc
 											difference (max ac_for_action_feature 0)
-											deviation (get robust_residuals_map action_feature)
+											deviation (first (get robust_residuals_map action_feature))
 										))
-										(get robust_residuals_map action_feature)
+										(first (get robust_residuals_map action_feature))
 									)
 									1.5
+								)
+							action_feature_null_surprisal
+								(if action_feature_has_continuous_nulls
+									(-
+										(/
+											(call !LK_metric_laplace (assoc
+												difference (max null_ac_for_action_feature 0)
+												deviation (last (get robust_residuals_map action_feature))
+											))
+											(last (get robust_residuals_map action_feature))
+										)
+										1.5
+									)
+									0
 								)
 							ac_feature_surprisals
 								(map
@@ -1512,59 +1711,66 @@
 											(/
 												(call !LK_metric_laplace (assoc
 													difference (max (current_value 1) 0)
-													deviation (get robust_residuals_map (get value_robust_contributions_features (current_index 1)))
+													deviation (first (get robust_residuals_map (get value_robust_contributions_features (current_index 1))))
 												))
-												(get robust_residuals_map (get value_robust_contributions_features (current_index)))
+												(first (get robust_residuals_map (get value_robust_contributions_features (current_index))))
 											)
 											1.5
 										)
 									)
 									acs_for_ac_features
 								)
-						))
-
-						(declare (assoc
-							total_ac_feature_surprisal (apply "+" ac_feature_surprisals)
-							unique_value_combo
+							ac_feature_null_surprisals
 								(map
 									(lambda
-										(if (contains_index !nominalsMap (current_value))
-											(get case_values_map (current_value))
-
-											;find the bucket containing this continuous value
-											(let
-												(assoc
-													feature_bucket_map (get continuous_feature_buckets_map (current_value 1))
-													value (get case_values_map (current_value 1))
+										(if (get ac_feature_has_continuous_nulls_map (get value_robust_contributions_features (current_index)))
+											(-
+												(/
+													(call !LK_metric_laplace (assoc
+														difference (max (current_value 1) 0)
+														deviation (last (get robust_residuals_map (get value_robust_contributions_features (current_index 1))))
+													))
+													(last (get robust_residuals_map (get value_robust_contributions_features (current_index))))
 												)
-												;iterate over the 0-based ordered indices of the bucket map, where each bucket is a pair of [low high]
-												;if it matches the bucket, output the index of the bucket
-												(while (< (current_index) (size feature_bucket_map))
-													(if (and
-															(>= value (get feature_bucket_map [(current_index 1) 0]) )
-															(<= value (get feature_bucket_map [(current_index 1) 1]) )
-														)
-														(conclude (current_index))
-													)
-												)
+												1.5
 											)
+											0
 										)
 									)
-									value_robust_contributions_features
+									null_acs_for_ac_features
 								)
 						))
 
-						;output a pair of : [ surprisal asymmetry for this case, values_combination ]
+						(declare (assoc
+							total_ac_feature_surprisal
+								(+
+									(or (apply "+" (filter ac_feature_surprisals)))
+									(or (apply "+" (filter ac_feature_null_surprisals)))
+								)
+							;reference the code in !CreateUniqueValueCombination
+							unique_value_combo @(target .true "!CreateUniqueValueCombination")
+						))
+
+						;output a pair of : [ surprisal asymmetry for this case, case_weight, values_combination ]
+						;tuples named below.
 						[
 							(-
-								action_feature_surprisal
+								(+ (or action_feature_surprisal) (or action_feature_null_surprisal))
 								total_ac_feature_surprisal
 							)
+							;case weight
+							(if use_case_weights (get case_values_map weight_feature) )
 							unique_value_combo
 						]
 					))
 					case_ids
 				)
+		))
+		;named indices for tuples created above
+		(declare (assoc
+			surprisal_asymmetry_index 0
+			case_weight_index 1
+			value_combo_index 2
 		))
 
 		;create a list of all possible value combinations for the value_robust_contributions_features
@@ -1577,6 +1783,14 @@
 					))
 				)
 			has_null_results .false
+
+			;total size of experiment. Number of sampled cases if not using case weights, otherwise total case weight
+			total_size
+				(if use_case_weights
+					(apply "+" (map (lambda (get (current_value) case_weight_index)) case_surprisal_asymmetries))
+
+					(size case_surprisal_asymmetries)
+				)
 		))
 
 		;given all possible value combinations, compute the mean surprisal asymmetry for each combination
@@ -1596,13 +1810,22 @@
 								)
 						)
 
-						(if (>= (size matching_value_asymmetry_pairs) value_robust_contributions_min_samples)
+						(declare (assoc
+							sample_size
+								(if use_case_weights
+									(apply "+" (map (lambda (get (current_value) case_weight_index)) matching_value_asymmetry_pairs))
+
+									(size matching_value_asymmetry_pairs)
+								)
+						))
+
+						(if (>= sample_size value_robust_contributions_min_samples)
 							(*
 								(generalized_mean (map
 									(lambda (first (current_value)))
 									matching_value_asymmetry_pairs
 								))
-								(/ (size matching_value_asymmetry_pairs) (size case_surprisal_asymmetries))
+								(/ sample_size total_size)
 							)
 
 							;else return null if not enough samples

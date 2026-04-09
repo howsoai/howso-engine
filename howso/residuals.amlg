@@ -201,19 +201,6 @@
 						(if (contains_index !inactiveFeaturesMap (current_index))
 							(get !cachedFeatureMinResidualMap (current_index))
 
-							;if residual is too small, replace it with the minimim allowed
-							(<
-								(current_value)
-								(max
-									(get !cachedFeatureMinResidualMap (current_index))
-									(get !userSpecifiedFeatureErrorsMap (current_index))
-								)
-							)
-							(max
-								(get !cachedFeatureMinResidualMap (current_index))
-								(get !userSpecifiedFeatureErrorsMap (current_index))
-							)
-
 							(= (null) (current_value))
 							(max (get !cachedFeatureMinResidualMap (current_index)) (get !userSpecifiedFeatureErrorsMap (current_index)) )
 
@@ -257,7 +244,7 @@
 
 								))
 
-								;only need to cap max nominal deviations if 2 or more classes have been trained
+								;need to cap max nominal deviations if 2 or more classes have been trained
 								(if (> (size class_counts_map) 1)
 									(let
 										(assoc
@@ -276,11 +263,44 @@
 													)
 												)
 										))
-										(if (> (current_value) nominal_max_deviation)
-											nominal_max_deviation
+										(if (~ 0 (current_value))
+											(if (> (current_value) nominal_max_deviation)
+												nominal_max_deviation
+											)
+
+											(if (> (first (current_value)) nominal_max_deviation)
+												[nominal_max_deviation (last (current_value 1))]
+											)
 										)
 									)
 								)
+							)
+
+							;if residual is too small, replace it with the minimim allowed
+							(<
+								;use the raw value if available, otherwise use the first value out of [value residual, null residual] pair
+								(if (~ 0 (current_value))
+									(current_value )
+									(first (current_value))
+								)
+								(max
+									(get !cachedFeatureMinResidualMap (current_index))
+									(get !userSpecifiedFeatureErrorsMap (current_index))
+								)
+							)
+							(if (~ 0 (current_value))
+								(max
+									(get !cachedFeatureMinResidualMap (current_index))
+									(get !userSpecifiedFeatureErrorsMap (current_index))
+								)
+								;else recreate the pair of [value residual, null residual] with the replaced value
+								[
+									(max
+										(get !cachedFeatureMinResidualMap (current_index 1))
+										(get !userSpecifiedFeatureErrorsMap (current_index 1))
+									)
+									(last (current_value 1))
+								]
 							)
 						)
 					)
@@ -336,6 +356,20 @@
 			;else output unmodified residuals
 			feature_residuals_map
 		)
+	)
+
+	;helper method to iterate over a map of feature -> [value residual, null residua]
+	;and expand the value residual to the cached uncertainty if necessary
+	!ExpandValuesMapToUncertainty
+	(map
+		(lambda
+			;limit the floor value to the min residual, use the first value out of [value residual, null residual] pair
+			(if (< (first (current_value)) (get !cachedFeatureMinResidualMap (current_index)))
+				[ (get !cachedFeatureMinResidualMap (current_index 1)) (last (current_value 1)) ]
+				(current_value)
+			)
+		)
+		values_map
 	)
 
 
@@ -578,16 +612,11 @@
 		;if computing for one target_residual_feature, remove it from features so it's never in the context
 		(if target_residual_feature
 			(assign (assoc
-				context_features (filter (lambda (!= (current_value) target_residual_feature)) context_features)
+				context_features (filter target_residual_feature context_features .false)
 			))
 		)
 
-		;create a map of feature -> MAD, used for continuous features that have null values
 		(declare (assoc
-			feature_mad_map
-				(call !ConstructFeatureMADMap (assoc
-					features (if target_residual_feature [target_residual_feature] features)
-				))
 			;create a backup of context_features for time series flows
 			original_context_features (if !tsTimeFeature (replace context_features))
 			num_features (size context_features)
@@ -617,6 +646,16 @@
 			case_residuals_lists (list)
 			;don't need to compute ordinal diff when estimating residual lower bounds, treat them all as continuous
 			ordinal_feature_set (if (not estimating_residual_lower_bound) !ordinalFeaturesSet)
+
+			;map of continuous features that have nulls
+			continuous_with_nulls_map
+				(filter
+					(lambda (and
+						(not (contains_index !nominalsMap (current_index)))
+						(!= .false (get !featureNullRatiosMap [(current_index 1) "has_nulls"]))
+					))
+					(zip features)
+				)
 		))
 
 		;iterate over each case and accumulate residuals for all the feature(s)
@@ -866,10 +905,10 @@
 		)
 
 		(call !InterpolateAndComputeDiffToCase (assoc
-			feature_mad (get feature_mad_map feature)
 			feature_is_ordinal (contains_index ordinal_feature_set feature)
 			case_feature_value (get case_values_map feature)
 			feature_is_nominal (contains_index !nominalsMap feature)
+			feature_has_continuous_nulls (contains_index continuous_with_nulls_map feature)
 			output_categorical_action_probabilities .true
 			candidate_cases_lists
 				;create the feature-specific candidate_cases_lists tuple for interpolation
@@ -895,7 +934,6 @@
 						(assoc
 							feature (get_value (current_value 1))
 							feature_is_nominal (contains_index !nominalsMap (current_value 1))
-							feature_is_ordinal (contains_index !ordinalFeaturesSet (current_value 1))
 							react_context_features (indices (remove context_features_map (current_value 1)))
 							feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_value 1))
 							feature_is_non_string_edit_distance .false
@@ -907,6 +945,11 @@
 								)
 							needed_features (append context_features (get_value (current_value 1)) (if !tsTimeFeature [".series_index"] []) )
 							feature_is_dependent (contains_index !dependentFeatureMap (current_value 1))
+							feature_has_continuous_nulls
+								(and
+									(not (contains_index !nominalsMap (current_value 1)))
+									(!= .false (get !featureNullRatiosMap [(current_value 2) "has_nulls"]))
+								)
 						)
 
 						;filter out rate of change features if deriving the feature
@@ -931,16 +974,6 @@
 						)
 
 						(declare (assoc
-							;continuous features with nulls need their MAD computed
-							action_feature_mad
-								(if (and
-										(not feature_is_nominal)
-										(!= .false (get !featureNullRatiosMap (list feature "has_nulls")))
-										(not feature_is_edit_distance)
-										(not (contains_index !inactiveFeaturesMap feature) )
-									)
-									(call !ComputeFeatureMAD (assoc feature feature))
-								)
 							has_time_series_filter_query (and !tsTimeFeature (contains_value react_context_features !tsTimeFeature) )
 							time_series_filter_query (list)
 							;create a backup of react_context_features for time series flows
@@ -957,25 +990,19 @@
 										local_cases_map (assoc)
 										case_id (current_value 1)
 										case_values_map (zip needed_features (retrieve_from_entity (current_value 1) needed_features))
-
-										output_categorical_action_probabilities .true
 										categorical_action_probabilities_map (assoc)
 										dependent_queries_list (null)
 										fanout_features_queries (null)
 									)
 
 									(if !tsTimeFeature
-										(let
-											(assoc original_react_context_features (replace react_context_features))
-
-											(assign (assoc
-												react_context_features
-													(call !FilterContextsBySeriesIndex (assoc
-														all_context_features react_context_features
-														series_index (get case_values_map ".series_index")
-													))
-											))
-										)
+										(assign (assoc
+											react_context_features
+												(call !FilterContextsBySeriesIndex (assoc
+													all_context_features original_react_context_features
+													series_index (get case_values_map ".series_index")
+												))
+										))
 									)
 
 									;set the filter query if has_time_series_filter already checked that time feature is in context features
@@ -1009,8 +1036,6 @@
 										))
 									)
 
-									(declare (assoc case_feature_value (get case_values_map feature) ))
-
 									(if filter_fanout_values
 										(assign (assoc
 											fanout_features_queries
@@ -1021,8 +1046,9 @@
 										))
 									)
 
-									(call !InterpolateAndComputeDiffToCase (assoc
-										feature_mad action_feature_mad
+									(call !InterpolateAndComputeDiffToCaseFullResiduals (assoc
+										output_categorical_action_probabilities .true
+										case_feature_value (get case_values_map feature)
 										candidate_cases_lists
 											(compute_on_contained_entities
 												(if focal_case
@@ -1187,11 +1213,47 @@
 	)
 
 	;helper method for RunRobustResiduals, RunFullResiduals, and ComputeDeviations to compute difference between interpolated value and actual case value
+	;this will first interpolate the specified candidate_cases_lists and then return a tuple of the difference from the expected case value
+	; outputs a pair of [value difference, null difference], note: null difference will always be 0 for nominal features
+	;
+	;parameters:
+	; candidate_cases_lists: tuple of [case ids, influence weights, feature values]
+	; case_feature_value: the cases's feature value
+	; feature: name of feature
+	; feature_is_nominal: boolean, if true, feature is treated as a nominal
+	; feature_is_edit_distance: boolean, if true, the difference is computed using edit distance
+	; feature_is_non_string_edit_distance: boolean, true if feature is a code type (json, amalgam, yml), but not a string
+	; compute_all_statistics: boolean, if true changes format of output tuple to:  [diff, C.A.P., case_feature_value, interpolated_value]
+	; output_categorical_action_probabilities: boolean, if true will use C.A.P. values in difference computations
 	!InterpolateAndComputeDiffToCase
 	(declare
 		(assoc
 			;reference the code in !InterpolateOrDeriveActionValues
 			interpolated_value @(target .true "!InterpolateOrDeriveActionValues")
+		)
+		(declare (assoc
+			case_or_predicted_is_null (or (= (null) interpolated_value) (= (null) case_feature_value))
+		))
+
+		;reference the code in !ComputeDiffTuple
+		@(target .true "!ComputeDiffTuple")
+	)
+
+	;second version of InterpolateAndComputeDiff that contains the hook to accum to predicted_case_values_map
+	;copied the method so that robust flows don't need to interpret the if-branch
+	!InterpolateAndComputeDiffToCaseFullResiduals
+	(declare
+		(assoc
+			;reference the code in !InterpolateOrDeriveActionValues
+			interpolated_value @(target .true "!InterpolateOrDeriveActionValues")
+		)
+		(declare (assoc
+			case_or_predicted_is_null (or (= (null) interpolated_value) (= (null) case_feature_value))
+		))
+		(if accum_predicted_values
+			(accum (assoc
+				predicted_case_values_map (associate feature interpolated_value)
+			))
 		)
 
 		;reference the code in !ComputeDiffTuple
@@ -1213,11 +1275,8 @@
 						feature_is_edit_distance
 						(edit_distance case_feature_value interpolated_value (get !codeFeatureDomainAttributesMap feature) )
 
-						;else continuous features, multiply by feature_mad (the mean absolute deviation for the feature)
-						(*
-							feature_mad
-							(- 1 (or (get categorical_action_probabilities_map feature) ) )
-						)
+						;else continuous feature, actual is null, output 1 - CAP of null
+						(- 1 (or (get categorical_action_probabilities_map feature) ) )
 					)
 
 					;else case value is not null
@@ -1255,50 +1314,20 @@
 					1
 				)
 
-				;else continuous, diff is null when interpolated to null but case_feature_value was not null, diff = MAD * null mass
-				feature_is_ordinal
-				(if computing_mda
-					(if compute_all_statistics
-						[
-							(* feature_mad (or (get categorical_action_probabilities_map feature)) )
-							case_feature_value
-							interpolated_value
-						]
-
-						(* feature_mad (or (get categorical_action_probabilities_map feature)) )
-					)
-
-					;otherwise output the tuple for residual aggregation flows
-					(if compute_all_statistics
-						[
-							(* feature_mad (or (get categorical_action_probabilities_map feature)) )
-							(/
-								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
-								(get !ordinalFeaturesRangesMap feature)
-							)
-							case_feature_value
-							interpolated_value
-						]
-
-						[
-							(* feature_mad (or (get categorical_action_probabilities_map feature)) )
-							(/
-								(* feature_mad (or (get categorical_action_probabilities_map feature)) )
-								(get !ordinalFeaturesRangesMap feature)
-							)
-						]
-					)
-				)
-
-				;else regular non-ordinal continuous
+				;else continuous, diff is null when interpolated to null but case_feature_value was not null, CAP = null mass
 				compute_all_statistics
 				[
-					(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+					(null)
+					(or (get categorical_action_probabilities_map feature))
 					case_feature_value
 					interpolated_value
 				]
 
-				(* feature_mad (or (get categorical_action_probabilities_map feature)) )
+				;continuous feature predicted null, but actual wasn't null, output CAP of null
+				[
+					(null)
+					(or (get categorical_action_probabilities_map feature) )
+				]
 			)
 
 			;output diff if feature is nominal
@@ -1314,39 +1343,32 @@
 				diff
 			)
 
-			;else for ordinals, output tuple [diff, ordinal_diff], and just diff for computing mda flows
-			feature_is_ordinal
-			(if computing_mda
-				(if compute_all_statistics
-					[ diff case_feature_value interpolated_value ]
-					diff
-				)
-
-				;otherwise output a tuple for residual aggregation flows
-				(if compute_all_statistics
-					[
-						diff
-						(/ diff (get !ordinalFeaturesRangesMap feature))
-						case_feature_value
-						interpolated_value
-					]
-
-					[
-						diff
-						(/ diff (get !ordinalFeaturesRangesMap feature))
-					]
-				)
-			)
-
 			compute_all_statistics
 			(if feature_is_non_string_edit_distance
 				;if non-string edit distance feature, wrap code values in a list so the append keeps this output as a tuple
-				[ diff [case_feature_value] [interpolated_value] ]
+				[
+					(if case_or_predicted_is_null (null) diff)
+					(if case_or_predicted_is_null diff)
+					[case_feature_value]
+					[interpolated_value]
+				]
 
-				[ diff case_feature_value interpolated_value ]
+				[
+					(if case_or_predicted_is_null (null) diff)
+					(if case_or_predicted_is_null diff)
+					case_feature_value
+					interpolated_value
+				]
 			)
 
-			diff
+			(if case_or_predicted_is_null
+				[ (null) diff ]
+
+				feature_has_continuous_nulls
+				[ diff (null) ]
+
+				diff
+			)
 		)
 	)
 
@@ -1786,7 +1808,13 @@
 							;compute the average robust residual for this feature and output as a pair of [ avg_residual, count_of_residuals ]
 							;if values are all nulls, this ensures the tuple is output as [0 0]
 							[
-								(+ (or (generalized_mean (current_value 1)) ))
+								(+ (or
+									(if (contains_index continuous_with_nulls_map (get features (current_index 1)))
+										;average value residuals from the pair of [value residual, null residual]
+										(generalized_mean (map (lambda (first (current_value))) (current_value 1)))
+										(generalized_mean (current_value 1))
+									)
+								))
 								(size (filter (current_value 1)))
 							]
 						)
@@ -1870,7 +1898,14 @@
 											;compute the average robust residual for this feature and output as a pair of [ avg_residual, count_of_residuals ]
 											;if values are all nulls, this ensures the tuple is output as [0 0]
 											[
-												(+ (or (generalized_mean (current_value 1)) ))
+												;average value residuals from the pair of [value residual, null residual]
+												(+ (or
+													(if (contains_index continuous_with_nulls_map (get features (current_index 1)))
+														;average value residuals from the pair of [value residual, null residual]
+														(generalized_mean (map (lambda (first (current_value))) (current_value 1)))
+														(generalized_mean (current_value 1))
+													)
+												))
 												(size (filter (current_value 1)))
 											]
 										)
