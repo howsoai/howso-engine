@@ -1,0 +1,327 @@
+(seq
+	(assign_to_entities (load "unit_test.amlg"))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_matrix.amlg" retries 0))
+
+	(call_entity "howso" "set_feature_attributes" (assoc
+		feature_attributes
+			(assoc
+				"a" { "type" "nominal" }
+				"b" { "type" "continuous"}
+				"c" { "type" "continuous"}
+				"d" { "type" "continuous"}
+			)
+	))
+
+	(declare (assoc
+		result (null)
+		features ["a" "b" "c" "d"]
+		n (null)
+		T .true
+		f .false
+	))
+
+	;explicitly allow access to internal method for this test
+	(assign_to_entities "howso" (assoc
+		"ComputeMDAMatrix"
+			(lambda
+				(call !ComputeMDAMatrix (assoc
+					features features
+					all_sample_indices all_sample_indices
+					feature_residuals_lists feature_residuals_lists
+				))
+			)
+		"TransposeMDAMatrix"
+			(lambda
+				(call !TransposeMDAMatrix (assoc
+					features features
+					mda_matrix mda_matrix
+				))
+			)
+	))
+
+
+;  		a	b 	c 	d
+; 		--  --  --  ---
+; 1					100
+; 2				10
+; 3				20	600
+; 4			1
+; 5			1		200
+; 6			2	30
+; 7			4	30	200
+; 8		.1
+; 9		.3			400
+; 10	.3		40
+; 11	.4		60	600
+; 12	.4	3
+; 13	.5	5		700
+; 14	.7	7	90
+;
+	(declare (assoc
+		feature_residuals_lists
+			[
+				[	n 	n 	n 	n 	n 	n 	n 	.1 	.3 	.3 	.4 	.4 	.5 	.7	]
+				[	n 	n 	n 	1	1	2	4	n 	n 	n 	n 	3 	5 	7	]
+				[	n 	10	20	n 	n 	30	30	n 	n 	40	60	n 	n 	90	]
+				[	100	n	600	n 	200	n 	200	n	400	n	600	n 	700	n	]
+			]
+	))
+
+	(declare (assoc all_sample_indices (range 0 (- (size (first feature_residuals_lists)) 1)) ))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "ComputeMDAMatrix" (assoc
+				features features
+				all_sample_indices all_sample_indices
+				feature_residuals_lists feature_residuals_lists
+				output_raw_mda .true
+			))
+	))
+
+	(declare (assoc
+		matrix
+			(call_entity "howso" "TransposeMDAMatrix" (assoc
+				features features
+				mda_matrix result
+			))
+	))
+
+	(declare (assoc
+		expected_ac_matrix
+			{
+				a {
+						a [0 (null) 0]
+						b [0.258333 (null) 0]
+						c [0.141666 (null) 0]
+						d [0.025 (null) 0]
+					}
+				b {
+						a [3 (null) 0]
+						b [0 (null) 0]
+						c [1.833333 (null) 0]
+						d [0.083333 (null) 0]
+					}
+				c {
+						a [40.833333 (null) 0]
+						b [17.5 (null) 0]
+						c [0 (null) 0]
+						d [-5.8333333 (null) 0]
+					}
+				d {
+						a [291.6666666 (null) 0]
+						b [-58.3333333 (null) 0]
+						c [116.6666666 (null) 0]
+						d [0 (null) 0]
+					}
+			}
+
+	))
+
+	(print "MDA computed correctly: ")
+	(call assert_approximate (assoc
+		obs matrix
+		exp expected_ac_matrix
+		thresh 0.0001
+	))
+
+	(call exit_if_failures (assoc msg "MDA matrix." ))
+
+; continuous features with nulls have a residual stored as a pair of [value residual, null residual]
+;
+; 		a	b 	c 	d
+; 		--  --  --  ---
+; 1					[100, ]
+; 2				10
+; 3				20	[600, ]
+; 4			1
+; 5			1		[200, ]
+; 6			2	30
+; 7			4	30	[200, ]
+; 8		.1
+; 9		.3			[ ,0.2]
+; 10	.3		40
+; 11	.4		60	[ ,0.6]
+; 12	.4	3
+; 13	.5	5		[, 0.1]
+; 14	.7	7	90
+;
+	(assign (assoc
+		feature_residuals_lists
+			[
+				[	n 	n 	n 	n 	n 	n 	n 	.1 	.3 	.3 	.4 	.4 	.5 	.7	]
+				[	n 	n 	n 	1	1	2	4	n 	n 	n 	n 	3 	5 	7	]
+				[	n 	10	20	n 	n 	30	30	n 	n 	40	60	n 	n 	90	]
+				[[100 n] n [600 n]	n [200 n] n [200 n]	n [n 0.2] n	[n 0.6]	n [n 0.1] n	]
+			]
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "ComputeMDAMatrix" (assoc
+				features features
+				all_sample_indices all_sample_indices
+				feature_residuals_lists feature_residuals_lists
+				;needs to specify the robust null residual
+				feature_robust_residuals_map { "d" [ 360, 0.3] }
+				output_raw_mda .true
+			))
+	))
+
+	(assign (assoc
+		matrix
+			(call_entity "howso" "TransposeMDAMatrix" (assoc
+				features features
+				mda_matrix result
+			))
+	))
+
+	;'d' is the only feature that should be different due to the nulls, set the expected values for 'd' here
+	(declare (assoc
+		expected_ac_matrix_with_nulls
+			(set
+				expected_ac_matrix
+				"d"
+					{
+						a [0 0 1]
+						b [-150 -0.3 0.333333]
+						c [250 0.45 0.333333]
+						d [0 (null) 0]
+					}
+			)
+	))
+
+	(print "MDA with nulls computed correctly: ")
+	(call assert_approximate (assoc
+		obs matrix
+		exp expected_ac_matrix_with_nulls
+		thresh 0.0001
+	))
+
+	(call exit_if_failures (assoc msg "MDA matrix with nulls." ))
+
+
+;residuals using estimated residual lower bounds are in pairs of [was_in_context_flag, residual], where the residual may be a pair for continuous nulls
+;
+; 		a		b 		c 		d
+; 		--  	--  	--  	---
+; 1		[T,.04]	[T,.2]	[T,6]	[f,[100, ]]
+; 2		[T,.04]	[T,.2]	[f,10]	[T,[1, ]]
+; 3		[T,.04]	[T,.3]	[f,20]	[f,[600, ]]
+; 4		[T,.04]	[f,1]	[T,7]	[T,[1, ]]
+; 5		[T,.08]	[f,1]	[T,8]	[f,[200, ]]
+; 6		[T,.08]	[f,2]	[f,30]	[T,[1, ]]
+; 7		[T,.08]	[f,4]	[f,30]	[f,[200, ]]
+; 8		[f,.1]	[T,.2]	[T,26]	[T,[ ,0.01]]
+; 9		[f,.3]	[T,.5]	[T,27]	[f,[ ,0.2]]
+; 10	[f,.3]	[T,.8]	[f,40]	[T,[ ,0.02]]
+; 11	[f,.4]	[T,.8]	[f,60]	[f,[ ,0.6]]
+; 12	[f,.4]	[f,3]	[T,27]	[T,[ ,0.03]]
+; 13	[f,.5]	[f,5]	[T,27]	[f,[, 0.1]]
+; 14	[f,.7]	[f,7]	[f,90]	[T,[ ,0.04]]
+;
+	(assign (assoc
+		feature_residuals_lists
+			[
+				[ [T 0.04] 		[T 0.04] 	[T 0.04] 	[T 0.04] 	[T 0.08] 	[T 0.08]  	[T 0.08]  	[f .1]  	[f .3]  	[f .3]  	[f .4]  	[f .4] 		[f .5] 		[f .7]		]
+				[ [T 0.2] 		[T 0.2]  	[T 0.3]  	[f 1] 		[f 1] 	 	[f 2] 	  	[f 4] 		[T 0.2] 	[T 0.5] 	[T 0.8] 	[T 0.8] 	[f 3]  		[f 5]  		[f 7]		]
+				[ [T 6]			[f 10]		[f 20]	  	[T 7]	 	[T 8] 	 	[f 30]	  	[f 30]		[T 26] 		[T 27] 		[f 40]		[f 60]		[T 27] 		[T 27] 		[f 90]		]
+				[ [f [100 n]] 	[T [1 n]] 	[f [600 n]]	[T [1 n]] 	[f [200 n]] [T [1 n]] 	[f [200 n]]	[T [n .01]] [f [n 0.2]] [T [n .02]]	[f [n 0.6]]	[T [n .03]] [f [n 0.1]] [T [n .04]]	]
+			]
+	))
+
+	(assign (assoc
+		result
+			(call_entity "howso" "ComputeMDAMatrix" (assoc
+				features features
+				all_sample_indices all_sample_indices
+				feature_residuals_lists feature_residuals_lists
+				;needs to specify the robust null residual
+				feature_robust_residuals_map { "d" [ 360, 0.3] }
+				;setting this to .true should result in the same output as though all AC values were computed during normal AC flows
+				output_raw_mda .true
+				estimating_residual_lower_bound .true
+
+			))
+	))
+
+	(assign (assoc
+		matrix
+			(call_entity "howso" "TransposeMDAMatrix" (assoc
+				features features
+				mda_matrix result
+			))
+	))
+
+	(print "Estimated residual lower bound residuals with 'output_raw_mda' should be same as normal 'output_raw_mda': ")
+	(call assert_approximate (assoc
+		obs matrix
+		exp expected_ac_matrix_with_nulls
+		thresh 0.0001
+	))
+
+	(call exit_if_failures (assoc msg "MDA matrix with nulls outputting raw values using ERLB residuals." ))
+
+
+
+	(assign (assoc
+		result
+			(call_entity "howso" "ComputeMDAMatrix" (assoc
+				features features
+				all_sample_indices all_sample_indices
+				feature_residuals_lists feature_residuals_lists
+				;needs to specify the robust null residual
+				feature_robust_residuals_map { "d" [ 360, 0.3] }
+				;setting this to .false should output ERLB ACs, incorporating the inclusion of the features and computing self-AC values
+				output_raw_mda .false
+				estimating_residual_lower_bound .true
+			))
+	))
+
+	(assign (assoc
+		matrix
+			(call_entity "howso" "TransposeMDAMatrix" (assoc
+				features features
+				mda_matrix result
+			))
+	))
+
+	(print "Estimated residual lower bound residuals contain and account for self ACs: ")
+	(call assert_approximate (assoc
+		obs matrix
+		exp
+			{
+				a {
+						a [0.328571 (null) 0]
+						b [0.094286 (null) 0]
+						c [0.025714 (null) 0]
+						d [-0.031429 (null) 0]
+					}
+				b {
+						a [1.228571 (null) 0]
+						b [2.857142 (null) 0]
+						c [0.6 (null) 0]
+						d [-0.342857 (null) 0]
+					}
+				c {
+						a [26.571429 (null) 0]
+						b [4.285714 (null) 0]
+						c [21.714286 (null) 0]
+						d [-7.428571 (null) 0]
+					}
+				d {
+						a [0 0 1]
+						b [-133.166667 -0.150833 0.428571]
+						c [100.166667 0.135 0.428571]
+						d [274 0.275 0.428571]
+					}
+			}
+		thresh 0.0001
+	))
+
+	(call exit_if_failures (assoc msg "MDA matrix with nulls using ERLB matches expected output." ))
+
+	(call exit_if_failures (assoc msg unit_test_name))
+
+)
+

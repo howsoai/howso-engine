@@ -309,7 +309,7 @@
 				feature (current_value 1)
 			)
 
-			(if (contains_index excluded_inactive_features_map feature) (conclude (range [0 (null) (null)] 1 (size features) 1)) )
+			(if (contains_index excluded_inactive_features_map feature) (conclude (range [0 (null) 0] 1 (size features) 1)) )
 
 			(declare (assoc
 				feature_index
@@ -321,17 +321,19 @@
 					)
 			))
 
+			(declare (assoc residuals (get feature_residuals_lists feature_index) ))
+
 			(declare (assoc
 				;keep only indices of cases where feature was used in query and its residual is null
 				case_indices_with_feature
 					(if estimating_residual_lower_bound
 						(filter
-							(lambda (= .true (get feature_residuals_lists [feature_index (current_value 1) 0])) )
+							(lambda (= .true (get residuals [(current_value 1) 0])) )
 							all_sample_indices
 						)
 
 						(filter
-							(lambda (= (null) (get feature_residuals_lists [feature_index (current_value 1)])) )
+							(lambda (= (null) (get residuals (current_value))) )
 							all_sample_indices
 						)
 					)
@@ -340,12 +342,12 @@
 				case_indices_without_feature
 					(if estimating_residual_lower_bound
 						(filter
-							(lambda (= .false (get feature_residuals_lists [feature_index (current_value 1) 0])) )
+							(lambda (= .false (get residuals [(current_value 1) 0])) )
 							all_sample_indices
 						)
 
 						(filter
-							(lambda (!= (null) (get feature_residuals_lists [feature_index (current_value 1)])) )
+							(lambda (!= (null) (get residuals (current_value))) )
 							all_sample_indices
 						)
 					)
@@ -370,7 +372,7 @@
 								(not estimating_residual_lower_bound)
 							)
 						)
-						(conclude [0 (null) (null)])
+						(conclude [0 (null) 0])
 					)
 
 					(if (and
@@ -388,8 +390,7 @@
 						(conclude)
 					)
 
-					(if (contains_index excluded_inactive_features_map (current_value)) (conclude [0 (null) (null)]) )
-
+					(if (contains_index excluded_inactive_features_map (current_value)) (conclude [0 (null) 0]) )
 
 					(declare (assoc
 						target_index
@@ -623,6 +624,63 @@
 		features
 	)
 
+	!TransposeMDAMatrix
+	(zip
+		features
+		;transpose the matrix, so every feature has its own (column) MDA values
+		(map
+			(lambda (let
+				(assoc feature_index (current_index 1))
+				(zip
+					features
+					(map
+						;convert nulls to 0s
+						(lambda
+							(if (or
+									;either the value residual is null
+									(= (null) (get (current_value) [feature_index 0]))
+									;or null residual is null but null % > 0, replace with 0's
+									(and
+										(= (null) (get (current_value) [feature_index 1]))
+										(> (get (current_value) [feature_index 2]) 0)
+									)
+								)
+								(let
+									(assoc
+										tuple (get (current_value 1) feature_index)
+									)
+									(apply
+										(lambda (set tuple))
+										(append
+											;overwrite the residual as 0 if it's null
+											(if (= (null) (first tuple))
+												[[0] 0]
+												[]
+											)
+											;overwrite the null residual as 0 if it's null and there are some % of nulls
+											(if (and
+													(> (last tuple) 0)
+													(= (null) (get tuple 1))
+												)
+												[[1] 0]
+												[]
+											)
+										)
+									)
+								)
+
+								;keep it as-is
+								(get (current_value) feature_index)
+							)
+						)
+						mda_matrix
+					)
+				)
+			))
+			mda_matrix
+		)
+	)
+
 	!ComputeRobustTargetlessMDA
 	(declare
 		(assoc features features )
@@ -634,31 +692,7 @@
 		(declare (assoc mda_matrix (call !ComputeMDAMatrix) ))
 
 		(if output_raw_mda
-			(conclude
-				(zip
-					features
-					;transpose the matrix, so every feature has its own (column) MDA values
-					(map
-						(lambda (let
-							(assoc feature_index (current_index 1))
-							(zip
-								features
-								(map
-									;convert any nulls and .false to 0s
-									(lambda
-										(if (get (current_value) feature_index)
-											(get (current_value) feature_index)
-											0
-										)
-									)
-									mda_matrix
-								)
-							)
-						))
-						mda_matrix
-					)
-				)
-			)
+			(conclude (call !TransposeMDAMatrix))
 		)
 
 		;set smallest possible probability assuming the Jeffreys prior approach
@@ -1314,6 +1348,7 @@
 														candidate_cases_lists full_candidate_cases_lists
 														react_context_features full_context_features
 														allow_nulls .true
+														feature_has_continuous_nulls (contains_index continuous_with_nulls_map feature)
 													))
 											)
 											(declare (assoc
@@ -1331,6 +1366,7 @@
 														candidate_cases_lists superfull_candidate_cases_lists
 														react_context_features superfull_context_features
 														allow_nulls .true
+														feature_has_continuous_nulls (contains_index continuous_with_nulls_map feature)
 													))
 												feature_deviation (get orig_hyperparam_map ["featureResiduals" feature]) ;;;TODO: 25242 replace with full deviation?
 											))
