@@ -103,7 +103,7 @@ Return types of methods should be specified by comments on the assoc with the pa
 | indices             | Only applicable when `type` is "assoc". Value is an assoc of named indices to their expected types.
 | additional_indices  | Only applicable when `type` is "assoc". Value should be  similar to `type` values but is defined for all unspecified indices. Also supports the value (false) to indicate there should be no additional indices.
 | dynamic_indices     | Still WiP. Specified just like `indices`, but instead specify indices with patterns that use `${string}` or `${number}` to match found indices.
-| required            | The value of this should be a boolean. If used under the type within an 'indices' (assoc), then that index must be present in the parent (assoc). If used in a top-level type, that parameter must be specified as a non-null value. Required parameters should have (null) as the default value.
+| required            | The value of this should be a boolean. If used under the type within an 'indices' (assoc), then that index must be present in the parent (assoc). If used in a top-level type, that parameter must be specified as a non-null value. Required parameters should have .null as the default value.
 
 ### Typing Examples
 
@@ -116,10 +116,10 @@ Return types of methods should be specified by comments on the assoc with the pa
         list_of_strs (list)
         ;{type "number" min 1}
         ;a value in the range (0,inf)
-        some_positive_number (null)
+        some_positive_number .null
         ;{type "boolean"}
         ;some true/false value
-        some_boolean (null)
+        some_boolean .null
         ;{type "assoc" additional_indices "number"}
         ;a map of numbers
         map_of_number_values (assoc)
@@ -130,8 +130,8 @@ Return types of methods should be specified by comments on the assoc with the pa
 
 Explicit mention of a parameter's type should not be repeated in the description. Additionally, explicit mention of
 `optional` in a parameter's description should not be included. Optional parameters are identified by having a default
-value of (null). In the above example `list_of_strs` and `map_of_number_values` would be interpreted as required while
- `some_positive_number` and `some_boolean` would be interpreted as optional because a default value is (null).
+value of .null. In the above example `list_of_strs` and `map_of_number_values` would be interpreted as required while
+ `some_positive_number` and `some_boolean` would be interpreted as optional because a default value is .null.
 
 ## Style Guide
 
