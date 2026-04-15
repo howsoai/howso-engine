@@ -50,20 +50,6 @@
 			!averageCaseDistanceContribution (null)
 		))
 
-		;pull all the cases that have nulls
-		(declare (assoc
-			;list of case ids
-			react_entity_ids (list)
-			;list of cases
-			react_cases (list)
-			;flag set when any row has remaining nulls after being filled
-			has_remaining_null 0
-			;flag set when any row had any value filled
-			has_value_filled 0
-			;id of entity currently being analyzed
-			case_entity_id (null)
-		))
-
 		;filter out any features where all cases are null (empty feature), they cannot be imputed
 		(assign (assoc
 			features_to_impute
@@ -81,34 +67,61 @@
 				)
 		))
 
+		;pull all the cases that have nulls
+		(declare (assoc
+			;list of case ids
+			;reference the code in !GetAllCasesWithNulls
+			react_entity_ids @(target .true "!GetAllCasesWithNulls")
+
+			;list of cases
+			react_cases (list)
+			;flag set when any row has remaining nulls after being filled
+			has_remaining_null 0
+			;flag set when any row had any value filled
+			has_value_filled 0
+			;id of entity currently being analyzed
+			case_entity_id (null)
+		))
+
+		(if (= 0 (size react_entity_ids))
+			(conclude
+				(call !Return (assoc errors (list "Failed to impute: nothing to impute.")))
+			)
+		)
+
+		(call !EstimateProgress (assoc
+			task_id task_id
+			method "impute"
+		))
+		(declare (assoc
+			num_progress_updates 1
+			progress_update_size (/ (size react_entity_ids) 11)
+			progress_start_size (size react_entity_ids)
+		))
+
 		(while .true
 
 			;get the list of entity ids that have null values
 			(assign (assoc
 				;get rid of duplicate values in the list by making them into an assoc and returning just the indeces
 				;then reduce the list of lists to one flat list of all the entity ids
-				react_entity_ids
-					(values
-						(apply
-							(lambda (append))
-							;make a list of lists of entity ids that have any features set to (null)
-							;find the entities that have a reference to replay sessions, only cases have this reference
-							(map
-								(lambda
-									(contained_entities
-										(query_equals (current_value) (null))
-										(query_exists !internalLabelSession)
-									)
-								)
-								features_to_impute
-							)
-						)
-						.true
-					)
+				;reference the code in !GetAllCasesWithNulls
+				react_entity_ids @(target .true "!GetAllCasesWithNulls")
+
 				;reset the flags for every iteration
 				has_remaining_null 0
 				has_value_filled 0
 			))
+
+			;prevent infinite loop if there are no react cases
+			(if (= 0 (size react_entity_ids))
+				(seq
+					(call !ProgressClear)
+					(conclude (conclude
+						(call !Return (assoc errors (list "Failed to impute: nothing to impute.")))
+					))
+				)
+			)
 
 			;pull the all the cases that have missing values by their entity id, and append the entity id to the end
 			(assign (assoc
@@ -119,13 +132,6 @@
 					)
 
 			))
-
-			;prevent infinite loop if there are no react cases
-			(if (= 0 (size react_cases))
-				(conclude
-					(call !Return (assoc errors (list "Failed to impute: nothing to impute.")))
-				)
-			)
 
 			;process all the cases that need to be filled
 			(while (> (size react_cases) 0)
@@ -304,12 +310,23 @@
 
 						;pop the the first row off react_cases, looping will stop when react_cases is empty
 						(assign (assoc react_cases (tail react_cases) ))
+
+						;update progress 10 times
+						(if (<= (size react_cases) (- progress_start_size (* num_progress_updates progress_update_size)))
+							(if (<= num_progress_updates 10)
+								(seq
+									(call !ProgressUpdate)
+									(accum (assoc num_progress_updates 1))
+								)
+							)
+						)
 					)
 				)
 
 				;stop iterating if none of the filled cases have nulls left, or none of the cases had anything filled
 				(if (or (not has_remaining_null) (not has_value_filled))
 					(seq
+						(call !ProgressClear)
 						(accum_to_entities (assoc !revision 1))
 						(conclude (call !Return))
 					)
@@ -318,10 +335,31 @@
 		) ;while (not stop_iterating)
 
 		(call !UpdateHasNulls (assoc features features_to_impute))
-
+		(call !ProgressClear)
 		(accum_to_entities (assoc !revision 1))
 
 		(call !Return)
+	)
+
+
+	;helper method to get all cases with nulls provided feature_to_impute
+	!GetAllCasesWithNulls
+	(values
+		(apply
+			(lambda (append))
+			;make a list of lists of entity ids that have any features set to (null)
+			;find the entities that have a reference to replay sessions, only cases have this reference
+			(map
+				(lambda
+					(contained_entities
+						(query_equals (current_value) (null))
+						(query_exists !internalLabelSession)
+					)
+				)
+				features_to_impute
+			)
+		)
+		.true
 	)
 
 
