@@ -571,4 +571,143 @@
 				)
 		))
 	)
+
+	;trainee endpoint that given a set of feature attributes and auto-analysis parameters, informs the user if this Trainee
+	;is similar enough to be used in place of rebuilding a new trainee from scratch with these attributes and parameters.
+	#{read_only .true}
+	get_rebuild_recommendation
+	(declare
+		;{type "any"}
+		(assoc
+			;{ref "FeatureAttributesIndex"}
+			new_feature_attributes .null
+			;{type "assoc"}
+			new_auto_analyze_params .null
+		)
+
+		(declare (assoc
+			warnings []
+			new_features (indices (remove new_feature_attributes (indices !featureAttributes)))
+		))
+
+		(if (size new_features)
+			(conclude
+				(call !Return (assoc
+					payload
+						(assoc
+							"rebuild" .true
+							"analyze" .true
+							"reason" "New features were added to the feature attributes."
+						)
+				))
+			)
+		)
+
+		(declare (assoc
+			removed_features (indices (remove !featureAttributes (indices new_feature_attributes)))
+		))
+
+		(if (size removed_features)
+			(accum (assoc
+				warnings (concat "The following features were removed: " (format removed_features "code" "json"))
+			))
+		)
+
+		(declare (assoc
+			;to be accumed to
+			feature_attribute_changes {}
+			;to be accumed to
+			auto_analyze_param_changes {}
+			should_rebuild .false
+			should_analyze .false
+		))
+
+		(map
+			(lambda (let
+				(assoc
+					old_attributes (first (current_value 1))
+					new_attributes (last (current_value 1))
+					feature_name (current_index 1)
+				)
+
+				(if (or
+						(= .null old_attributes)
+						(= .null new_attributes)
+					)
+					;this (map) does nothing for features that are only in one set of attributes
+					(conclude)
+				)
+
+				;type changes
+				(if (!=
+						(get old_attributes "type")
+						(get new_attributes "type")
+					)
+					(seq
+						;all type changes indicate that the trainee should re-analyze
+						(assign (assoc should_analyze .true ))
+
+						;if there was a type change, then there are a couple situations that do not necessitate a rebuild,
+						;but otherwise a rebuild should be necessary
+						(if
+							;nominal -> continuous
+							;If there are not many (20, for now) unique values, this may be ok
+							(and
+								(= "nominal" (get old_attributes "type"))
+								(= "continuous" (get new_attributes "type"))
+								(>=
+									(size (compute_on_contained_entities
+										(query_exists !internalLabelSession)
+										(query_value_masses feature_name)
+									))
+									20
+								)
+							)
+							;There are numerous unique values, so do not go to the else-block.
+							.null
+
+
+							;else should rebuild
+							(seq
+								(assign (assoc should_rebuild .true ))
+								(accum (assoc
+									feature_attribute_changes (associate feature_name "Feature type changed significantly.")
+								))
+							)
+
+						)
+					)
+				)
+			))
+			!featureAttributes
+			new_feature_attributes
+		)
+
+		;auto analyze params
+		(if (!=
+				(get new_auto_analyze_params "rebalance_features")
+				(get !savedAnalyzeParameterMap "rebalance_features")
+			)
+			(seq
+				(accum (assoc
+					"auto_analyze_param_changes" {"rebalance_features" "Different rebalance features are configured."}
+				))
+				(assign (assoc
+					should_rebuild .true
+					should_analyze .true
+				))
+			)
+		)
+
+		(call !Return (assoc
+			warnings warnings
+			payload
+				(assoc
+					"rebuild" should_rebuild
+					"analyze" should_analyze
+					"feature_attribute_changes" feature_attribute_changes
+					"auto_analyze_param_changes" auto_analyze_param_changes
+				)
+		))
+	)
 }
