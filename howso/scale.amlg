@@ -516,7 +516,6 @@
 
 				;reduceDataIfNeeded
 				;if the number of cases will exceed the reduce_data threshold since the last reduce_data call, run it again
-				;the default !reduceDataInfluenceWeightEntropyThreshold of 0.6 will ensure that approximately 1/e of the data is removed
 				(if
 					(and
 						(>= (+ num_cases (size cases)) !autoAblationMaxNumCases)
@@ -568,6 +567,264 @@
 				(assoc
 					"num_trained" (size new_case_ids)
 					"status" status_output
+				)
+		))
+	)
+
+	;trainee endpoint that given a set of feature attributes; auto-analysis parameters; and auto-ablation parameters, informs the user if this Trainee
+	;is similar enough to be used in place of rebuilding a new trainee from scratch with these attributes and parameters.
+	#{read_only .true}
+	get_rebuild_recommendation
+	(declare
+		#returns {
+		# 	type "assoc"
+		# 	indices {
+		# 		"rebuild" "boolean"
+		# 		"analyze" "boolean"
+		# 		"feature_attribute_changes" "assoc"
+		# 		"auto_analyze_param_changes" "assoc"
+		#		"auto_ablation_param_changes" "assoc"
+		# 	}
+		# }
+		(assoc
+			;The new feature attributes.
+			#{ref "FeatureAttributesIndex"}
+			new_feature_attributes .null
+			;The new set of auto analysis parameters.
+			#{type "assoc" values "any"}
+			new_auto_analyze_params .null
+			;The new set of auto-ablation of parameters.
+			#{type "assoc" values "any"}
+			new_auto_ablation_params .null
+		)
+
+		(declare (assoc
+			warnings []
+			new_features (indices (remove new_feature_attributes (indices !featureAttributes)))
+		))
+
+		(if (size new_features)
+			(conclude
+				(call !Return (assoc
+					payload
+						(assoc
+							"rebuild" .true
+							"analyze" .true
+							"feature_attribute_changes" (zip new_features "This feature was added to the feature attributes.")
+							"auto_analyze_param_changes" (assoc)
+							"auto_ablation_param_changes" (assoc)
+						)
+				))
+			)
+		)
+
+		(declare (assoc
+			removed_features (indices (remove !featureAttributes (indices new_feature_attributes)))
+		))
+
+		(if (size removed_features)
+			(accum (assoc
+				warnings (concat "The following features were removed: " (format removed_features "code" "json"))
+			))
+		)
+
+		(declare (assoc
+			;all three to be accumed to
+			feature_attribute_changes {}
+			auto_analyze_param_changes {}
+			auto_ablation_param_changes {}
+
+			should_rebuild .false
+			should_analyze .false
+
+			has_distilled_data !hasDistilledData
+			num_cases (call !GetNumTrainingCases)
+		))
+
+		(map
+			(lambda (let
+				(assoc
+					old_attributes (first (current_value 1))
+					new_attributes (last (current_value 1))
+					feature_name (current_index 1)
+				)
+
+				(if (or
+						(= .null old_attributes)
+						(= .null new_attributes)
+					)
+					;this (map) does nothing for features that are only in one set of attributes
+					;Any features added/removed are covered in preceding logic.
+					(conclude)
+				)
+
+				;feature type changes
+				(if (!=
+						(get old_attributes "type")
+						(get new_attributes "type")
+					)
+					(seq
+						;all type changes indicate that the trainee should re-analyze
+						(assign (assoc should_analyze .true ))
+
+						;if there was a type change, then there are a couple situations that do not necessitate a rebuild,
+						;but otherwise a rebuild should be necessary
+						(if
+							;nominal -> continuous
+							;If there are not many (20, for now) unique values, this may be ok
+							(and
+								(= "nominal" (get old_attributes "type"))
+								(= "continuous" (get new_attributes "type"))
+								(<=
+									(size (compute_on_contained_entities
+										(query_exists !internalLabelSession)
+										(query_value_masses feature_name)
+									))
+									20
+								)
+							)
+							;There are numerous unique values, so do not go to the else-block.
+							.null
+
+
+							;else should rebuild
+							(seq
+								(assign (assoc should_rebuild .true ))
+								(accum (assoc
+									feature_attribute_changes (associate feature_name "Feature type changed significantly.")
+								))
+							)
+						)
+					)
+				)
+
+				;time-series attributes changes
+				(if (!=
+						(get old_attributes "time_series")
+						(get new_attributes "time_series")
+					)
+					(seq
+						(assign (assoc should_rebuild .true ))
+						(accum (assoc
+							feature_attribute_changes (associate feature_name "Feature's time-series attributes changed.")
+						))
+					)
+				)
+
+				;fanout configuration changes
+				(if (!=
+						(get old_attributes "fanout_on")
+						(get new_attributes "fanout_on")
+					)
+					(seq
+						(if has_distilled_data
+							(assign (assoc should_rebuild .true ))
+							;if not distilled, just re-analyzing should be sufficient
+							(assign (assoc should_analyze .true ))
+						)
+						(accum (assoc
+							feature_attribute_changes (associate feature_name "Feature's fanout configuration changed.")
+						))
+					)
+				)
+
+				;fanout configuration changes
+				(if (!=
+						(get old_attributes "dependent_features")
+						(get new_attributes "dependent_features")
+					)
+					(seq
+						(if has_distilled_data
+							(assign (assoc should_rebuild .true ))
+							;if not distilled, just re-analyzing should be sufficient
+							(assign (assoc should_analyze .true ))
+						)
+						(accum (assoc
+							feature_attribute_changes (associate feature_name "Feature's dependent features configuration changed.")
+						))
+					)
+				)
+			))
+			!featureAttributes
+			new_feature_attributes
+		)
+
+		;auto analyze params
+		;rebalance features
+		(if (!=
+				(get new_auto_analyze_params "rebalance_features")
+				(get !savedAnalyzeParameterMap "rebalance_features")
+			)
+			(seq
+				(accum (assoc
+					auto_analyze_param_changes {"rebalance_features" "Different rebalance features are configured."}
+				))
+				(assign (assoc
+					;if data is distilled already, then a change in rebalance features demands a rebuild.
+					;(wrapped in an (or) so that a .false is not assigned over a .true)
+					should_rebuild (or should_rebuild has_distilled_data)
+					should_analyze .true
+				))
+			)
+		)
+		;use-sdm
+		(if (!=
+				(get new_auto_analyze_params "use_sdm")
+				(get !savedAnalyzeParameterMap "use_sdm")
+			)
+			(seq
+				(accum (assoc
+					auto_analyze_param_changes {"use_sdm" "Different values for SDM usage are configured."}
+				))
+				(assign (assoc
+					;if data is distilled already, then a change in rebalance features demands a rebuild.
+					;(wrapped in an (or) so that a .false is not assigned over a .true)
+					should_rebuild (or should_rebuild has_distilled_data)
+					should_analyze .true
+				))
+			)
+		)
+
+		;auto ablation params
+		(if has_distilled_data
+			(seq
+				;min_num_cases
+				;if the new min_num_cases is greater than the number of cases in the Trainee,
+				;then rebuild
+				(if (< num_cases (get new_auto_ablation_params "min_num_cases"))
+					(seq
+						(accum (assoc
+							auto_analyze_param_changes
+								{"min_num_cases" "The new minimum number of cases is greater than the number of cases in the Trainee."}
+						))
+						(assign (assoc should_rebuild .true ))
+					)
+				)
+
+				;min_num_cases
+				;if the new min_num_cases is greater than the number of cases in the Trainee,
+				;then rebuild
+				(if (> num_cases (get new_auto_ablation_params "max_num_cases"))
+					(seq
+						(accum (assoc
+							auto_analyze_param_changes
+								{"max_num_cases" "The new maximum number of cases is lesser than the number of cases in the Trainee."}
+						))
+						(assign (assoc should_rebuild .true ))
+					)
+				)
+			)
+		)
+
+		(call !Return (assoc
+			warnings warnings
+			payload
+				(assoc
+					"rebuild" should_rebuild
+					"analyze" should_analyze
+					"feature_attribute_changes" feature_attribute_changes
+					"auto_analyze_param_changes" auto_analyze_param_changes
+					"auto_ablation_param_changes" auto_ablation_param_changes
 				)
 		))
 	)
