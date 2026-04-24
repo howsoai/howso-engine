@@ -278,10 +278,14 @@
 		(assoc
 			;name of feature to odd
 			#{type "string" required .true}
-			feature .null
-			;value for the feature
+			feature_name .null
+			;value for the feature to assign to every case. Only `default_value` or `values` should be specified, both cannot be specified.
 			#{type "any"}
-			feature_value .null
+			default_value .null
+			;values for the feature to assign to each case corresponding to the case indices given for `case_indices`. Only `default_value` or `values` should be specified, both cannot be specified.
+			#{type "list" values "any"}
+			values .null
+			;values for the feature.
 			;assoc of feature->value(s).
 			;	  no value or .null = select cases where that feature is .null/missing
 			;	- for continuous or numeric ordinal features:
@@ -301,9 +305,10 @@
 			;the session id when this call is being made
 			#{type "string"}
 			session "none"
-			;list of case ids to operate on. if specified, conditions will be ignored
-			#{type "list" values "string"}
-			entities .null
+			;list of pair (list) of session id and index, where index is the original 0-based session_training_index of the
+			;	case as it was trained. If specified, ignores session and condition parameters.
+			#{ref "CaseIndices"}
+			case_indices .null
 			;flag, if set to true, will not update hyperparameter metadata map
 			#{type "boolean"}
 			internal_feature .false
@@ -314,62 +319,93 @@
 		(call !ValidateParameters)
 		(call !ValidateCondition)
 
-		(if (contains_index !untrainableFeatureCharacterSet (first feature))
+		(if (contains_index !untrainableFeatureCharacterSet (first feature_name))
 			(conclude
 				(call !Return (assoc errors (list "Failed to add feature: ensure it does not start with an invalid character.")  ))
 			)
 		)
 
-		(if (and feature_attributes (contains_index !featureAttributes feature))
+		(if (and feature_attributes (contains_index !featureAttributes feature_name))
 			(conclude
 				(call !Return (assoc errors (list "Feature already defined, either call add_feature without specifying feature_attributes or call set_feature_attributes to update existing feature attributes.")  ))
 			)
 		)
 
-		;add feature to dataset if no conditions are specified
+		(if (and
+				(!= .null default_values)
+				(!= .null values)
+			)
+			(conclude
+				(call !Return (assoc
+					errors ["Either `default_values` or `values` must be specified, but not both."]
+				))
+			)
+		)
+
+		(if (and
+				values
+				(or
+					(= .null case_indices)
+					(!= (size case_indices) (size values))
+				)
+			)
+			(conclude
+				(call !Return (assoc
+					errors ["If `values` is specified, then `case_indices` must also be specified and they must be equal length."]
+				))
+			)
+		)
+
+		;flag indicating if feature is being added to the entire dataset with a single value
 		(declare (assoc
-			add_feature_to_dataset (and (= .null condition) (= .null condition_session))
+			add_feature_to_dataset
+				(and
+					(= .null condition)
+					(= .null condition_session)
+					(= .null case_indices)
+				)
+			using_default_value (= .null values)
 		))
 
 		;get all cases that need to be updated
-		(if (= .null entities)
-			(assign (assoc
-				entities
-					(if (not add_feature_to_dataset)
-						;specify no limit for how many to match as long as they match the condition
-						(call !GetCasesByCondition (assoc
-							condition condition
-							condition_session condition_session
-							precision "exact"
-							num_cases 0
-						))
+		(assign (assoc
+			case_ids
+				(if (!= .null case_indices)
+					(call !GetCaseIds (assoc
+						case_indices case_indices
+					))
 
-						(call !AllCases)
-					)
-			))
-		)
+					(!= .null condition)
+					(call !GetCasesByCondition (assoc condition condition ))
+
+					;else use all cases
+					(call !AllCases)
+				)
+		))
 
 		;only add feature to dataset if it is not an internal feature (e.g., .imputed) or if feature_attributes were provided or feature isn't defined
 		(assign (assoc
 			add_feature_to_dataset
 				(and
 					(not internal_feature)
-					(not (contains_index !featureAttributes feature))
+					(not (contains_index !featureAttributes feature_name))
 					(or
 						feature_attributes
 						add_feature_to_dataset
-						(not (contains_index !featureAttributes feature))
+						(not (contains_index !featureAttributes feature_name))
 					)
 				)
 		))
 
 		(if add_feature_to_dataset
 			(seq
-				;all features are added as inactive since they start with a single value
-				(if !inactiveFeaturesMap
-					(accum_to_entities (assoc !inactiveFeaturesMap (associate feature feature_value) ))
+				(if using_default_value
+					;if adding a feature with all the same value, then add it to inactive features.
+					(if !inactiveFeaturesMap
+						(accum_to_entities (assoc !inactiveFeaturesMap (associate feature_name feature_value) ))
 
-					(assign_to_entities (assoc !inactiveFeaturesMap (associate feature feature_value) ))
+						(assign_to_entities (assoc !inactiveFeaturesMap (associate feature_name feature_value) ))
+					)
 				)
 
 				;update hyperparameters and clear the cached residuals flags
@@ -379,15 +415,15 @@
 					!defaultHyperparameters (call !UpdateHyperparametersWithNewFeature (assoc hp_map !defaultHyperparameters))
 
 					!trainedFeatures
-						(if (not (contains_value !trainedFeatures feature))
-							(sort (append !trainedFeatures feature))
+						(if (not (contains_value !trainedFeatures feature_name))
+							(sort (append !trainedFeatures feature_name))
 							!trainedFeatures
 						)
 					!trainedFeaturesContextKey
 						(call !BuildContextFeaturesKey (assoc
 							context_features
-								(if (not (contains_value !trainedFeatures feature))
-									(append !trainedFeatures feature)
+								(if (not (contains_value !trainedFeatures feature_name))
+									(append !trainedFeatures feature_name)
 									!trainedFeatures
 								)
 						))
@@ -409,16 +445,13 @@
 					feature_attributes
 						(append
 							(get (call get_feature_attributes) (list 1 "payload"))
-							(associate feature feature_attributes)
+							(associate feature_name feature_attributes)
 						)
 				))
 
 				(call set_feature_attributes (assoc feature_attributes feature_attributes))
 			)
 		)
-
-		;store the originally passed in value as-is for history tracking
-		(declare (assoc unencoded_feature_value (get_value feature_value)))
 
 		;encode feature values if necessary
 		(if !hasFeaturesNeedEncodingFromInput
@@ -427,7 +460,7 @@
 					(first
 						(call !ConvertFromInput (assoc
 							feature_values (list feature_value)
-							features (list feature)
+							features (list feature_name)
 						))
 					)
 			))
@@ -436,55 +469,55 @@
 		;create at assoc of case id -> value
 		(declare (assoc
 			case_values_map
-				(if (= .null feature_value)
-					(zip entities)
+				(if using_default_value
+					(zip case_ids default_value)
 
-					(zip
-						entities
-						(map feature_value entities)
-					)
+					(zip case_ids values)
 				)
 		))
 
 		;record edit history for each case
 		(map
 			(lambda (let
-				(assoc case_id (current_value 1))
+				(assoc
+					case_id (current_index 1)
+					f_value (current_value 1)
+				)
 
 				(call !AddCaseEditHistory (assoc
 					edit_type "set"
 					case case_id
-					feature feature
-					feature_value unencoded_feature_value
+					feature feature_name
+					feature_value f_value
 					session session
 				))
 
 				;make a map of all the imputed features (if there are any) for fast lookup and deletion
-				(declare (assoc imputed_map (zip (retrieve_from_entity case_id !internalLabelImputed))))
+				(declare (assoc imputed_map (zip (retrieve_from_entity case_id !internalLabelImputed)) ))
 
 				;check if this case has this feature on its imputed list, and if so remove it from there since its value was just overwritten
-				(if (contains_index imputed_map feature)
+				(if (contains_index imputed_map feature_name)
 					;remove this feature from the imputed_map and overwrite the stored imputed features using the resulting list
 					(call !StoreCaseValues (assoc
 						label_name !internalLabelImputed
-						case_values_map (associate case_id (indices (remove imputed_map feature)))
+						case_values_map (associate case_id (indices (remove imputed_map feature_name)))
 						overwrite 1
 					))
 				)
 			))
-			entities
+			case_values_map
 		)
 
 		(call !StoreCaseValues (assoc
 			case_values_map case_values_map
-			label_name feature
+			label_name feature_name
 			overwrite overwrite
 		))
 
 		;accumulate data mass change equivalent to one feature being changed for each case that satisfies the condition.
 		(accum_to_entities (assoc
-			!dataMassChangeSinceLastAnalyze (* (size entities) (/ 1 (size !trainedFeatures)) )
-			!dataMassChangeSinceLastDataReduction (* (size entities) (/ 1 (size !trainedFeatures)) )
+			!dataMassChangeSinceLastAnalyze (* (size case_ids) (/ 1 (size !trainedFeatures)) )
+			!dataMassChangeSinceLastDataReduction (* (size case_ids) (/ 1 (size !trainedFeatures)) )
 		))
 
 		(accum_to_entities (assoc !revision 1))
