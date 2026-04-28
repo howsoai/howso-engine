@@ -585,6 +585,7 @@
 		;any cases that aren't in their most similar 100 can be considered to be 'too far away'
 		(declare (assoc
 			neighbor_surprisals_map
+				;create a map of case -> { case -> surprisal/distance }
 				||(map
 					(lambda
 						(compute_on_contained_entities
@@ -599,7 +600,9 @@
 								feature_deviations
 								.null
 								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-								distribute_weight_feature
+								;case weight won't be used even if specified because it's
+								;computing surprisal/distance to cases, not their influence
+								.null
 								(rand)
 								.null ;radius
 								!numericalPrecision
@@ -609,6 +612,46 @@
 					(zip all_case_ids)
 				)
 		))
+
+		(declare (assoc
+			case_to_weight_map
+				(if (>
+						(size
+							(compute_on_contained_entities
+								(query_exists distribute_weight_feature)
+								(query_not_equals distribute_weight_feature 1)
+							)
+						)
+						0
+					)
+					(map
+						(lambda (first (current_value)))
+						(compute_on_contained_entities (query_exists distribute_weight_feature))
+					)
+				)
+		))
+
+		;if there are case weights, scale surprisals by their weights
+		(if case_to_weight_map
+			;scale each surprisal by each cases's own weight, the more weight the less surprisal (distance)
+			(assign (assoc
+				neighbor_surprisals_map
+					(map
+						(lambda (map
+							(lambda
+								(/
+									(current_value)
+									;reduce surprisal to each neighbor by case's own weight (current_index 1) instead of (current_index)
+									(get case_to_weight_map (current_index 1))
+								)
+							)
+							(current_value)
+						))
+						;assoc of: case id -> { neighbor case ids -> surprisals}
+						neighbor_surprisals_map
+					)
+			))
+		)
 
 		;mark each case as not being kept at first
 		(if (!= (size (contained_entities (query_exists ".keeping"))) num_cases)
@@ -626,7 +669,14 @@
 		(declare (assoc
 			min_neighbor_surprisals
 				(map
-					(lambda (apply "min" (values (current_value))))
+					(lambda
+						(or
+							(apply "min" (values (current_value)))
+							;prevent surprisal of 0 by replacing with extremely low value
+							;to prevent a divide by 0's when computing the lowest neighbor surprisal score ratio below
+							1e-15
+						)
+					)
 					neighbor_surprisals_map
 				)
 		))
@@ -714,16 +764,43 @@
 										)
 								))
 
+								;largest of the lowest neighbor surprisal scores
+								(declare (assoc
+									max_lowest_ns_score (apply "max" (values low_ns_case_scores_map))
+								))
+
 								;if enough cases have been selected, and ratios have fallen below the cutoff, then end case selection
 								;after this iteration.
 								(if (and
 										(>= coreset_size !autoAblationMinNumCases)
-										(<
-											(apply "max" (values low_ns_case_scores_map))
-											ratio_cutoff_value
-										)
+										(< max_lowest_ns_score ratio_cutoff_value)
 									)
 									(assign (assoc done .true))
+								)
+
+								;if a coreset has been selected such that all the remaining cases all have a score of 1, meaning all remaining cases
+								;are equidistant to the coreset, if there are case weights, instead of randomly picking which case to add to coreset next,
+								;change all 1s to case weights to select cases with the largest mass to keep as the tie breaker
+								(if (= 1 max_lowest_ns_score)
+									(if case_to_weight_map
+										(assign (assoc
+											low_ns_case_scores_map
+												(if (contains_value low_ns_case_scores_map 0)
+													;keep 0's
+													(map
+														(lambda
+															(if (current_value)
+																(get case_to_weight_map (current_index))
+																0
+															)
+														)
+														low_ns_case_scores_map
+													)
+													;else just use the case weights as the scores
+													(keep case_to_weight_map (indices low_ns_case_scores_map))
+												)
+										))
+									)
 								)
 
 								;sorting low dc cases by *decreasing* "score" and return the right amount
@@ -761,17 +838,25 @@
 							(lambda
 								(min
 									;for each non-coreset case, determine surprisal to its closest case in the coreset
-									(or
-										;get the case's min surprisal to any of the cases_to_add, and if they are all too far away,
-										;just output an exetremely large value
-										(apply "min" (values
-											(unzip
-												(get neighbor_surprisals_map (current_index))
-												cases_to_add
-											)
-										))
-										;extremeley large value
-										10e13
+									(let
+										(assoc
+											closest_neighbor_surprisal
+												;get the case's min surprisal to any of the cases_to_add, and if they are all too far away,
+												;i.e., they are not in the closest 100, just output an extremely large value
+												(apply "min" (values
+													(unzip
+														(get neighbor_surprisals_map (current_index 1))
+														cases_to_add
+													)
+												))
+										)
+
+										;0's are allowed
+										(if (!= .null closest_neighbor_surprisal)
+											closest_neighbor_surprisal
+											;else closest neighbors are so far away, output extremeley large value
+											10e13
+										)
 									)
 									(get case_to_css_map (current_index))
 								)
