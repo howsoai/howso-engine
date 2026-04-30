@@ -492,11 +492,95 @@
 		)
 	)
 
-	;reduce the trained data by removing cases that match the following criteria:
-	;a) it's an exact duplicate
-	;b) a near-duplicate (very similar to exactly one other case)
-	;c) it's not "too far" away (keep outliers and dissimilar cases)
-	;d) its influence weight entropy is relatively high (above a threshold, case can be evenly distributed among its neighbors)
+	;Helper method to prepare maps for reduction by caching surprisals and case weights
+	!PrepReduceData
+	(seq
+		;cache surprisals to the nearest 100 for each case
+		;any cases that aren't in their most similar 100 can be considered to be 'too far away'
+		(assign (assoc
+			neighbor_surprisals_map
+				;create a map of case -> { case -> surprisal/distance }
+				||(map
+					(lambda
+						(compute_on_contained_entities
+							(query_not_in_entity_list [(current_index 1)])
+							(query_nearest_generalized_distance
+								100
+								features
+								(current_index)
+								p_parameter
+								feature_weights
+								!queryFeatureAttributeTypeMap
+								feature_deviations
+								.null
+								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
+								;case weight won't be used even if specified because it's
+								;computing surprisal/distance to cases, not their influence
+								.null
+								(rand)
+								.null ;radius
+								!numericalPrecision
+							)
+						)
+					)
+					(zip all_case_ids)
+				)
+		))
+
+		;if there are cases with a weight that isn't 1, store all case weights for scaling surprisals
+		(if (>
+				(size
+					(compute_on_contained_entities
+						(query_exists distribute_weight_feature)
+						(query_not_equals distribute_weight_feature 1)
+					)
+				)
+				0
+			)
+			(assign (assoc
+				case_to_weight_map
+					(map
+						(lambda (first (current_value)))
+						(compute_on_contained_entities (query_exists distribute_weight_feature))
+					)
+			))
+		)
+
+		;create an assoc of case -> surprisal to nearest neighbor (scaled by own case weight, so that 'heavier' cases have lower surprisal)
+		(assign (assoc
+			min_neighbor_surprisal_map
+				;if there are case weights, scale min surprisals by their weights
+				(if case_to_weight_map
+					(map
+						(lambda
+							(/
+								(apply "min" (values (current_value)))
+								(get case_to_weight_map (current_index))
+							)
+						)
+						neighbor_surprisals_map
+					)
+
+					;else get smallest surprisals from neighbors
+					(map
+						(lambda (apply "min" (values (current_value))) )
+						neighbor_surprisals_map
+					)
+				)
+		))
+	)
+
+
+	;reduce the trained data by removing cases that are not in the coreset of cases for the dataset using the following flow:
+	;1) exact duplicates are merged into individual cases with all the duplicate weights accumulated
+	;2) unweighted surprisals (distances) to similar neighbors are computed for each case
+	;3) an initial case is selected to start the coreset by picking the case that has the smallest surprisal to its neighbors
+	;4) additional cases are added to the coreset until it reaches the necessary size (between !autoAblationMinNumCases and reduce_max_cases):
+	;	select the next case that has the largest ratio of `surprisal to coreset` / 'weighted surprisal to its neighbors'
+	;	where 'weighted surprisal' is: the case's smallest surprisal to its neighbors divided by its own weight, making 'heavier' cases
+	;	have smaller surprisals (and a larger ratio) because they individually represent a denser area.
+	;5) cases not in the coreset are removed from the dataset, all their weights distributed to their respective neighbors
+	;	that are selected based on unweighted surprisals to prevent over-accumulating to already 'heavy' cases.
 	#{long_running .true}
 	reduce_data
 	(declare
@@ -579,59 +663,27 @@
 
 			all_case_ids (call !AllCases)
 			done .false
+
+			neighbor_surprisals_map {}
+			case_to_weight_map .null
+			min_neighbor_surprisal_map {}
 		))
 
-		;cache surprisals to the nearest 100 for each case
-		;any cases that aren't in their most similar 100 can be considered to be 'too far away'
-		(declare (assoc
-			neighbor_surprisals_map
-				;create a map of case -> { case -> surprisal/distance }
-				||(map
-					(lambda
-						(compute_on_contained_entities
-							(query_not_in_entity_list [(current_index 1)])
-							(query_nearest_generalized_distance
-								100
-								features
-								(current_index)
-								p_parameter
-								feature_weights
-								!queryFeatureAttributeTypeMap
-								feature_deviations
-								.null
-								(if (= "surprisal_to_prob" dt_parameter) "surprisal" 1)
-								;case weight won't be used even if specified because it's
-								;computing surprisal/distance to cases, not their influence
-								.null
-								(rand)
-								.null ;radius
-								!numericalPrecision
-							)
-						)
-					)
-					(zip all_case_ids)
-				)
-		))
+		(call !PrepReduceData)
 
-		(declare (assoc
-			case_to_weight_map
-				(if (>
-						(size
-							(compute_on_contained_entities
-								(query_exists distribute_weight_feature)
-								(query_not_equals distribute_weight_feature 1)
-							)
-						)
-						0
-					)
-					(map
-						(lambda (first (current_value)))
-						(compute_on_contained_entities (query_exists distribute_weight_feature))
-					)
-				)
-		))
+		;there are duplicates (surprisals of 0), merge them
+		(if (contains_value min_neighbor_surprisal_map 0)
+			(seq
+				(call !ReduceMergeDuplicateCases)
 
-
+				;after duplicates have been merged, must recompute/cache all the surprisals
+				(assign (assoc
+					all_case_ids (call !AllCases)
+					num_cases (call !GetNumTrainingCases)
+				))
+				(call !PrepReduceData)
+			)
+		)
 		;mark each case as not being kept at first
 		(if (!= (size (contained_entities (query_exists ".keeping"))) num_cases)
 			;create the label because it doesn't exist yet
@@ -645,24 +697,9 @@
 			)
 		)
 
-		(declare (assoc
-			min_neighbor_surprisals
-				(map
-					(lambda
-						(or
-							(apply "min" (values (current_value)))
-							;prevent surprisal of 0 by replacing with extremely low value
-							;to prevent a divide by 0's when computing the lowest neighbor surprisal score ratio below
-							1e-15
-						)
-					)
-					neighbor_surprisals_map
-				)
-		))
-
 		;store the surprisal to each cases's most similar neighbor
 		(call !StoreCaseValues (assoc
-			case_values_map min_neighbor_surprisals
+			case_values_map min_neighbor_surprisal_map
 			label_name ".neighbor_surprisal"
 		))
 
@@ -708,7 +745,7 @@
 												;coreset surprisal / neighbor surprisal, the smaller the neighbor surprisal the larger this score
 												(/
 													(get case_to_css_map (current_index))
-													(get min_neighbor_surprisals (current_index))
+													(get min_neighbor_surprisal_map (current_index))
 												)
 											)
 											(compute_on_contained_entities
@@ -819,25 +856,18 @@
 							(lambda
 								(min
 									;for each non-coreset case, determine surprisal to its closest case in the coreset
-									(let
-										(assoc
-											closest_neighbor_surprisal
-												;get the case's min surprisal to any of the cases_to_add, and if they are all too far away,
-												;i.e., they are not in the closest 100, just output an extremely large value
-												(apply "min" (values
-													(unzip
-														(get neighbor_surprisals_map (current_index 1))
-														cases_to_add
-													)
-												))
-										)
+									(or
+										;get the case's min surprisal to any of the cases_to_add, and if they are all too far away,
+										;i.e., they are not in the closest 100, this'll be a null, so just output an extremely large value
+										(apply "min" (values
+											(unzip
+												(get neighbor_surprisals_map (current_index))
+												cases_to_add
+											)
+										))
 
-										;0's are allowed
-										(if (!= .null closest_neighbor_surprisal)
-											closest_neighbor_surprisal
-											;else closest neighbors are so far away, output extremeley large value
-											10e13
-										)
+										;when closest neighbors are so far away, output extremely large value
+										10e14
 									)
 									(get case_to_css_map (current_index))
 								)
@@ -1005,41 +1035,41 @@
 
 
 	;helper method that merges duplicate cases during the reduce_data flow
+	;uses the precomputed min_neighbor_surprisal_map and neighbor_surprisals_map to find and merge duplicates
 	!ReduceMergeDuplicateCases
 	(let
 		(assoc
 			;assoc of case id -> duplicate neighbors (not including the case id)
 			duplicate_neighbors_map {}
 			duplicates []
+			all_duplicate_cases_map (filter (lambda (= 0 (current_value))) min_neighbor_surprisal_map)
 		)
+
 		(while (size all_duplicate_cases_map)
-			;find all duplicates for a given case in this list
+			;get all duplicates for any given case in this list
 			(assign (assoc
 				duplicates
-					(contained_entities (values
-						(map
-							(lambda (query_equals (current_index) (current_value)) )
-							;assoc of feature -> value for all the values in a duplicate case
-							(zip features (retrieve_from_entity (first (indices all_duplicate_cases_map)) features))
-						)
-					))
+					(append
+						;select any duplicate case
+						(first (indices all_duplicate_cases_map))
+						;keep all of its neighbors with a 0 surprisal
+						(indices (filter
+							(lambda (= 0 (current_value)))
+							(get neighbor_surprisals_map (first (indices all_duplicate_cases_map)))
+						))
+					)
 			))
 
-			;quick check for a failure case that should never occur, but if query engine somehow fails the above query to find anything,
-			;ensure that the list all_duplicate_cases_map keeps shrinking to prevent being stuck in an infinite loop
-			(if (= 0 (size duplicates))
-				(assign (assoc
-					all_duplicate_cases_map (remove all_duplicate_cases_map (first (indices all_duplicate_cases_map)) )
-				))
+			(assign (assoc
+				all_duplicate_cases_map (remove all_duplicate_cases_map duplicates)
+			))
 
-				(seq
-					(assign (assoc
-						all_duplicate_cases_map (remove all_duplicate_cases_map duplicates)
-					))
-					(accum (assoc
-						duplicate_neighbors_map (associate (first duplicates) (tail duplicates))
-					))
-				)
+			;duplicates should always have at least 2 cases (by definition duplicates implies two or more same cases),
+			;but if for some mistake or error they don't, do not accumulate the lone case to duplicate_neighbors_map
+			(if (> (size duplicates) 1)
+				(accum (assoc
+					duplicate_neighbors_map (associate (first duplicates) (tail duplicates))
+				))
 			)
 		)
 
