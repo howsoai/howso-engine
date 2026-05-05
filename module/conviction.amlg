@@ -49,6 +49,7 @@
 			#{type "number" exclusive_min 0}
 			clustering_inclusion_relative_threshold 1.5
 			;flag, if set to true, will enable auto_analyze and analyze with these specified features computing their values.
+			;note: if clustering, analyze will not include the clustered feature
 			;   Only applicable when reacting for the entire dataset,  when case_ids is null.
 			#{type "boolean"}
 			analyze .null
@@ -76,6 +77,7 @@
 		(declare (assoc
 			valid_weight_feature .false
 			warnings (assoc)
+			num_steps 0
 		))
 
 		;if no parameters specified, do nothing
@@ -113,16 +115,47 @@
 			(assign (assoc clustering ".cluster_id"))
 		)
 
+		(if familiarity_conviction_addition (accum (assoc num_steps 1)) )
+		(if familiarity_conviction_removal  (accum (assoc num_steps 1)) )
+		(if p_value_of_addition
+			(if familiarity_conviction_addition .null (accum (assoc num_steps 1)) )
+		)
+		(if p_value_of_removal
+			(if familiarity_conviction_removal .null (accum (assoc num_steps 1)) )
+		)
+		(if distance_contribution (accum (assoc num_steps 1)) )
+		(if similarity_conviction (accum (assoc num_steps 1)) )
+		(if influence_weight_entropy (accum (assoc num_steps 1)) )
+		(if (and analyze (= .null case_ids)) (accum (assoc num_steps 20)) )
+
 		(if clustering
 			(seq
+				(accum (assoc num_steps 2))
+
 				(if (not similarity_conviction)
-					(assign (assoc similarity_conviction "similarity_conviction"))
+					(assign (assoc
+						similarity_conviction "similarity_conviction"
+						num_steps (+ 1 num_steps)
+					))
 				)
 				(if (not distance_contribution)
-					(assign (assoc distance_contribution "distance_contribution"))
+					(assign (assoc
+						distance_contribution "distance_contribution"
+						num_steps (+ 1 num_steps)
+					))
 				)
 			)
 		)
+
+		(call !EstimateProgress (assoc
+			task_id task_id
+			internal internal
+			method "react_into_features"
+			details "Reacting into features"
+			params {
+				"total" (+ 1 num_steps)
+			}
+		))
 
 		;prevent this method from overwriting any previously stored values if 'overwrite' is not .true
 		(if
@@ -332,6 +365,8 @@
 		;will need to compute distance_contributions if caching values even if distance_contribution were not explicitly requested
 		(if (or distance_contribution cache_values)
 			(seq
+				(call !ProgressUpdate (assoc details "Computing distance contributions"))
+
 				(assign (assoc
 					case_to_dc_map
 						(if (and
@@ -448,8 +483,9 @@
 
 		(if (or familiarity_conviction_addition p_value_of_addition)
 			;calculates the conviction for each case, making a map of case id -> conviction
-			(let
-				(assoc
+			(seq
+				(call !ProgressUpdate (assoc details "Computing familiarity conviction of addition"))
+				(declare (assoc
 					entropies_map
 						(compute_on_contained_entities
 							||(query_entity_kl_divergences
@@ -469,7 +505,7 @@
 								!numericalPrecision
 							)
 						)
-				)
+				))
 
 				(if p_value_of_addition
 					(seq
@@ -523,8 +559,9 @@
 
 		(if (or familiarity_conviction_removal p_value_of_removal)
 			;calculates the conviction for each case, making a map of case id -> conviction
-			(let
-				(assoc
+			(seq
+				(call !ProgressUpdate (assoc details "Computing familiarity conviction of removal"))
+				(declare (assoc
 					entropies_map
 						(compute_on_contained_entities
 							||(query_entity_kl_divergences
@@ -545,7 +582,7 @@
 								.true ;conviction of removal
 							)
 						)
-				)
+				))
 
 				(if p_value_of_removal
 					(seq
@@ -593,6 +630,7 @@
 
 		(if similarity_conviction
 			(seq
+				(call !ProgressUpdate (assoc details "Computing similarity convictions"))
 				(if existing_distance_contribution
 					(declare (assoc
 						case_to_dc_map
@@ -648,6 +686,7 @@
 
 		(if influence_weight_entropy
 			(seq
+				(call !ProgressUpdate (assoc details "Computing influence weight entropies"))
 				(call !ComputeAndStoreInfluenceWeightEntropies (assoc
 					features features
 					label_name influence_weight_entropy
@@ -682,8 +721,10 @@
 			)
 		)
 
+		;need to be analyzed before
 		(if clustering
 			(seq
+				(call !ProgressUpdate (assoc details "Clustering"))
 				(call !Clustering)
 				(if (not (contains_value !reactIntoFeaturesList clustering))
 					(accum_to_entities (assoc !reactIntoFeaturesList clustering))
@@ -713,6 +754,8 @@
 		;update the known features to include these
 		(call !UpdateDefinedFeatures)
 		(accum_to_entities (assoc !revision 1))
+
+		(call !ProgressClear)
 
 		;output warnings
 		(call !Return (assoc warnings (if (size warnings) (indices warnings)) ))
