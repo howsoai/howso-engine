@@ -373,7 +373,7 @@
 	(declare
 		(assoc
 			;don't need to do the last iteration if running reduce_only flow
-			num_iterations (if reduce_only 3 4)
+			num_iterations (if reduce_only 3 5)
 			iteration 0
 			hyperparam_map (assoc)
 		)
@@ -414,7 +414,7 @@
 		;when calculating IRW and LK deviations, compute the initial residual values if necessary
 		(if (= .null initial_residual_values_map)
 			(assign (assoc
-				initial_residual_values_map (call !ComputeInitialResiduals)
+				initial_residual_values_map (map (lambda (/ (current_value) 2)) (call !ComputeInitialResiduals))
 			))
 		)
 
@@ -431,7 +431,18 @@
 
 			;compute mda on last iteration, but only if not doing a reduce_only analyze
 			(assign (assoc
-				computing_mda (and (= reduce_only .false) (= iteration (- num_iterations 1)) )
+				computing_mda
+					(if reduce_only
+						"deviations"
+
+						(= 3 iteration)
+						"robust_residuals"
+
+						(= 4 iteration)
+						"robust_mda"
+
+						"deviations"
+					)
 			))
 
 			(assign (assoc
@@ -453,10 +464,17 @@
 							feature_residuals_map
 								(call !CalculateFeatureResiduals (assoc
 									features features
-									robust_residuals (if computing_mda "robust_mda" "deviations")
+									robust_residuals ;(if computing_mda "robust_mda" "deviations")
+										(if (= "robust_residuals" computing_mda)
+											.true
+											computing_mda
+										)
 									num_samples
-										(if computing_mda
+										(if (= "robust_mda" computing_mda)
 											num_feature_probability_samples
+
+											(= "robust_residuals" computing_mda)
+											20000
 
 											;the deviations query uses all features "superfull", there's no need to sample more
 											;than a default amount of 1000
@@ -464,7 +482,7 @@
 										)
 									custom_hyperparam_map baseline_hyperparameter_map
 									;must compute confusion matrix to use sparse deviation matrix, but not when computing mda
-									compute_all_statistics (and use_sdm (not computing_mda))
+									compute_all_statistics (and use_sdm (= "deviations" computing_mda))
 									;don't sparsify the confusion matrix so that SDM can be computed using full counts
 									confusion_matrix_min_count 0
 									use_shared_deviations .true
@@ -479,7 +497,7 @@
 					)
 			))
 
-			(if computing_mda
+			(if (= "robust_mda" computing_mda)
 				(accum (assoc
 					baseline_hyperparameter_map
 						(assoc
@@ -487,6 +505,30 @@
 							"featureRobustResiduals" (map (lambda (first (current_value))) (get residuals_map "residual_map"))
 						)
 				))
+
+				(= "robust_residuals" computing_mda)
+				(let
+					(assoc
+						robust_residuals (get residuals_map "residual_map")
+						deviations (get baseline_hyperparameter_map "featureResiduals")
+					)
+
+					(declare (assoc
+						weights_map
+							(normalize (map
+								(lambda
+									(or (/ (first (current_value)) (last (current_value))) 1)
+								)
+								robust_residuals
+								deviations
+							))
+					))
+					(call !UpdateHyperparameters (assoc
+						feature_weights weights_map
+						use_weights .true
+					))
+
+				)
 
 				(call !UpdateHyperparameters (assoc
 					feature_deviations (get residuals_map "residual_map")
