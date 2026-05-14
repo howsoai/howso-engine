@@ -208,6 +208,92 @@
 		))
 	)
 
+	;helper method for continuous boundary values logic.
+	;Rather than assign a ratio for each candidate value that measures the ratio of change in action to change in context from the
+	;*original* contexts/actions, instead the ratio is measured between the actions/contexts of previous candidate values.
+	;This allows for a more localized gradient measurement, which should be more accurate.
+	;parameters that should be passed or set per-call:
+	;	candidate_boundary_values: the ordered list of value to check for boundaries in increasing distance from
+	;		the original context value
+	!ComputeDistRatiosForContinuousCandidateBoundaryValues
+	(let
+		(assoc
+			;list of the new action values for each candidate boundary value
+			candidate_value_new_action_values
+				(map
+					(lambda
+						(call !GetNewActionValues (assoc new_feature_value (current_value 1) ))
+					)
+					candidate_boundary_values
+				)
+		)
+
+		;assign a ratio to each candidate boundary value that is the change in predicted action from previous candidate boundary value to
+		;change in value from previous boundary value
+		(range
+			(lambda
+				;(current_index) is the index of which to compute the boundary value ratio based on candidate values in candidate_boundary_values
+				(/
+					;difference in predicted action for this boundary value vs previous
+					(generalized_distance
+						;for the first candidate value, must compare to original values rather than previous
+						(if (= (current_index) 0)
+							action_values
+							(get candidate_value_new_action_values (- (current_index) 1))
+						)
+						(get candidate_value_new_action_values (current_index))
+						p_parameter
+						feature_weights
+						!queryFeatureAttributeTypeMap
+						feature_deviations
+						action_features
+						.null
+						.null
+					)
+					;difference from original or previous candidate boundary_value context, to this one.
+					(generalized_distance
+						;for the first candidate value, must compare to original values rather than previous
+						(if (= (current_index) 0)
+							context_values
+							(set context_values query_feature_index (get candidate_boundary_values (- (current_index) 1)) )
+						)
+						(set context_values query_feature_index (get candidate_boundary_values (current_index)))
+						p_parameter
+						feature_weights
+						!queryFeatureAttributeTypeMap
+						feature_deviations
+						context_features
+						.null
+						.null
+					)
+				)
+			)
+			0
+			(- (size candidate_boundary_values) 1)
+			1
+		)
+	)
+
+	;given a new_feature_value, return the new action values
+	!GetNewActionValues
+	(let
+		(assoc
+			new_context_values (set context_values query_feature_index new_feature_value)
+		)
+
+		(get
+			(call !ReactDiscriminative (assoc
+				action_features action_features
+				context_features context_features
+				context_values new_context_values
+				details {}
+				skip_encoding .true
+				skip_decoding .true
+				return_action_values_only .true
+			))
+			"action_values"
+		)
+	)
 
 	;helper function for ComputeBoundaryValues that computes the boundary values for a feature if it is ordinal
 	!ComputeOrdinalBoundaryValues
@@ -485,11 +571,17 @@
 	(let
 		(assoc
 			candidate_value_dist_ratios
-				(map
-					(lambda
-						(call !EvaluateNewValueBoundaryRatio (assoc new_feature_value (current_value 1) ))
+				(if (contains_index !nominalsMap query_feature)
+					;just compute the boundary ratio for each candidate value and return the max.
+					(map
+						(lambda
+							(call !EvaluateNewValueBoundaryRatio (assoc new_feature_value (current_value 1) ))
+						)
+						candidate_boundary_values
 					)
-					candidate_boundary_values
+
+					;else do a special logic for ordered values.
+					(call !ComputeDistRatiosForContinuousCandidateBoundaryValues)
 				)
 		)
 
