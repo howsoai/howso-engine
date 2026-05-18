@@ -391,6 +391,9 @@
 			;flag, if true, queries will filter out cases with the same fanned out values when predicting the value of a fanout feature.
 			#{type "boolean"}
 			filter_fanout_values .false
+			;Optional task_id to track progress of this long running operation. If unspecified, will use .null as the task_id.
+			#{type "string"}
+			task_id .null
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
@@ -537,6 +540,25 @@
 						)
 					) .true)
 				)
+			update_lock 0
+			num_progress_updates 1
+			;one update every 10000 (or more) cases, for a max of 10 times
+			progress_update_size (max 10000 (floor (/ num_reacts (min num_reacts 10))))
+			max_progress_updates (min (ceil (/ num_reacts 10000)) 10)
+			progress_detail_text
+				(if desired_conviction
+					"Executing a batch of generative reacts"
+					"Executing a batch of discriminative reacts"
+				)
+		))
+
+		(call !EstimateProgress (assoc
+			task_id task_id
+			method "react"
+			details "React"
+			params {
+				"total" max_progress_updates
+			}
 		))
 
 		(declare (assoc
@@ -569,6 +591,13 @@
 										)
 									)
 								)
+						)
+
+						;update progress every 'progress_update_size' number of reacts
+						(if (= 0 (mod (current_index) progress_update_size))
+							(if (< num_progress_updates max_progress_updates)
+								(call !ProgressLockAndUpdate)
+							)
 						)
 
 						;get the corresponding parameters by the index, values will be null if not specified
@@ -676,6 +705,8 @@
 		(if (not (contains_index react_output_map "action_values"))
 			(accum (assoc react_output_map { "action_values" []} ))
 		)
+
+		(call !ProgressClear)
 
 		(call !Return (assoc
 			payload
@@ -1709,6 +1740,12 @@
 				(>= (call !GetNumTrainingCases) 2)
 			)
 			(seq
+				(call !EstimateProgress (assoc
+					task_id task_id
+					method "react"
+					details "Caching Residuals"
+					params { "total" 2 }
+				))
 				(assign (assoc
 					hyperparam_map
 						(call !CalculateResidualsAndUpdateParameters (assoc
@@ -1727,6 +1764,7 @@
 							compute_all_statistics .false
 						))
 				))
+				(call !ProgressClear)
 				(if (= (first (get hyperparam_map "paramPath")) ".default")
 					;updating default hyperparam set with featuredeviations
 					(assign_to_entities (assoc !defaultHyperparameters hyperparam_map) )
