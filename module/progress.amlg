@@ -1,0 +1,289 @@
+;Contains methods for tracking progress of long running methods
+{
+	;output progress for a specified task_id
+	#{read_only .true idempotent .true}
+	get_progress
+	(declare
+		#returns {
+		#	type "assoc"
+		#	additional_indices .false
+		#	indices {
+		#		"details" {
+		#			"type" "string"
+		#			"description" "Description of current step being executed."
+		#		}
+		#		"step" {
+		#			"type" "number"
+		#			"description" "Current step number being executed."
+		#		}
+		#		"total" {
+		#			"type" "number"
+		#			"description" "Total number of estimated steps this task will take to execute to completion."
+		#		}
+		#	}
+		# }
+		(assoc
+			;unique task id for which to check progress
+			#{type "string"}
+			task_id .null
+		)
+
+		(if (contains_index !progressMap task_id)
+			(call !Return (assoc payload (get !progressMap task_id) ))
+
+			(call !Return (assoc
+				errors
+					[
+						(if task_id
+							"There is no currently ongoing task matching the specified task_id."
+							"There are currently no ongoing tasks."
+						)
+					]
+			))
+		)
+	)
+
+	;Method to update !progressMap by increasing the 'step' count for the specified task_id
+	;while also setting details and updating the 'total' number of step, if provided
+	!ProgressUpdate
+	(declare
+		(assoc
+			total .null
+			details .null
+		)
+
+		(assign_to_entities (assoc
+			!progressMap
+				(set
+					!progressMap
+					[task_id "details"] details
+					[task_id "step"] (+ 1 (get !progressMap [task_id "step"]))
+					[task_id "total"] (max total (get !progressMap [task_id "total"]))
+				)
+		))
+
+		(call !PrintProgress)
+	)
+
+	;clear out task_id if this method was not called internally
+	!ProgressClear
+	(if (not internal)
+		(assign_to_entities (assoc !progressMap (remove !progressMap task_id)))
+	)
+
+	;helper macro used in long running loops to increase 'num_progress_updates' and set progress detail to 'progress_detail_text'
+	;by first acquiring a lock on 'update_lock', accumlating progress, and then releasing 'update_lock'
+	!ProgressLockAndUpdate
+	(seq
+		;block until thread can get update_lock
+		(while (not (assign_if_equal "update_lock" 0 1)) )
+		(accum (assoc num_progress_updates 1 ))
+		(call !ProgressUpdate (assoc details progress_detail_text))
+		;release lock
+		(assign (assoc update_lock 0))
+	)
+
+
+	;Method to estimate the total number of steps a method will take and start the count for the specified task_id
+	;parameters:
+	; task_id: task id to track progress of a long running method. if unspecified, will be set to .null
+	; internal: flag, specfying whether this method was called by another long running task.  If .true, will exit out
+	;			immediatelly since that means the task was already estimated by the originally calling long running task.
+	; details: human readable details of what the current task is
+	; method: name of long running method
+	; params: an assoc of method-specific parameters used to determine the total number of steps this task may need to complete
+	!EstimateProgress
+	(declare
+		(assoc
+			task_id .null
+			internal .false
+			details .null
+			method ""
+			params {}
+		)
+
+		;don't update progress since it's already been initialized
+		(if internal (conclude))
+
+		(declare (assoc
+			total_steps
+				(if (= "reduce_data" method)
+					;will likely auto analyze after reduce,
+					(if (and
+							(not (get params "skip_auto_analyze"))
+							(< (get params "reduce_max_cases") (/ (get params "num_cases") 2.718281828459))
+							;approximate expected change of mass by taking the diff between current cases and how many should be remaining
+							(> (- (get params "num_cases") (get params "reduce_max_cases")) !autoAnalyzeThreshold)
+						)
+						(if (!= .null !savedAnalyzeParameterMap)
+							(+
+								14
+								;40k per update for a max of 10 updates
+								(min (ceil (/ (or (get !savedAnalyzeParameterMap "num_feature_probability_samples") 150000) 40000)) 10)
+								;50 features per update for a max of 10 updates
+								(min
+									(ceil (/
+										(or
+											(size (get !savedAnalyzeParameterMap "context_features"))
+											(size !trainedFeatures)
+										)
+										50
+									))
+									10
+								)
+								(+ (size (compute_on_contained_entities (query_exists !internalLabelImputed))))
+								(* 2 (+ (or (get !savedAnalyzeParameterMap "use_dynamic_deviations"))))
+								(if !computedFeaturesMap (* 2 (size !reactIntoFeaturesList)) 0)
+							)
+
+							;else
+							(+
+								14
+								;40k per update for a max of 10 updates
+								(min (ceil (/ 150000 40000)) 10)
+								;50 features per update for a max of 10 updates
+								(min (ceil (/ (size !trainedFeatures) 50)) 10)
+								(+ (size (compute_on_contained_entities (query_exists !internalLabelImputed))))
+								(if !computedFeaturesMap (* 2 (size !reactIntoFeaturesList)) 0)
+							)
+						)
+
+						13
+					)
+
+					(= "impute" method)
+					20
+
+					(= "combine_with_subtrainees" method)
+					(if (get params "skip_auto_analyze")
+						;3 overhead plus two for each subtrainee
+						(+ 3 (* 2 (get params "num_subtrainees")))
+
+						;else assume auto analyze will be run, add 25
+						(+ 28 (* 2 (get params "num_subtrainees")))
+					)
+
+					(or
+						(= "react" method)
+						(= "react_series" method)
+						(= "react_series_stationary" method)
+						(= "react_into_features" method)
+						(= "react_group" method)
+					)
+					;total is based on the number of reacts
+					(get params "total")
+
+					(= "analyze" method)
+					(seq
+						(if (get params "targetless")
+							(if (get params "reduce_only")
+								1
+
+								(+
+									1
+									;40k per update for a max of 10 updates
+									(min (ceil (/ (get params "num_feature_probability_samples") 40000)) 10)
+									;50 features per update for a max of 10 updates
+									(min (ceil (/ (get params "num_features") 50)) 10)
+									(+ (or (get params "has_imputed")))
+									(* 2 (+ (or (get params "has_dynamic_deviations"))))
+									(* 2 (get params "num_computed_features"))
+								)
+							)
+
+							;else targeted adds 1? step (full residuals) per action_feature
+							(get params "use_deviations")
+							(+ 1 (* 5 (get params "num_features")))
+
+							;else no deviations, only 2 steps
+							3
+						)
+					)
+
+					(= "react_aggregate" method)
+					(+
+						1
+						(or (get params "prediction_stats"))
+						(and (not (get params "prediction_stats")) (get params "feature_full_residuals"))
+						(or (get params "feature_deviations"))
+						(or (get params "relevant_values"))
+						(if (get params "missing_information") 3 0)
+						(if (get params "feature_robust_residuals")
+							(min (ceil (/ (get params "num_robust_residual_case_ids") 40000)) 10)
+							0
+						)
+						(if (get params "estimated_residual_lower_bound")
+							(+ 1 (min (ceil (/ (get params "num_robust_accuracy_contributions_samples") 40000)) 10))
+							0
+						)
+						(if (get params "feature_full_prediction_contributions")
+							(min (ceil (/ (get params "num_context_features") 10)) 10)
+							0
+						)
+						(if (get params "feature_full_accuracy_contributions")
+							(+ 1  (min (ceil (/ (get params "num_context_features") 10)) 10))
+							0
+						)
+						(if (get params "feature_robust_prediction_contributions")
+							(min (ceil (/ (get params "num_robust_prediction_contributions_case_ids") 100)) 10)
+							0
+						)
+						(if (get params "feature_robust_accuracy_contributions")
+							(+ 1 (min (ceil (/ (get params "num_robust_accuracy_contributions_samples") 40000)) 10))
+							0
+						)
+						(if (or
+								(get params "value_robust_accuracy_contributions")
+								(get params "value_robust_prediction_contributions")
+							)
+							(+ 1 (min (ceil (/ (get params "num_value_robust_contributions_case_ids") 40000)) 10))
+							0
+						)
+						(if (get params "value_robust_surprisal_asymmetry")
+							(+ 2 (min (ceil (/ (get params "num_value_robust_contributions_case_ids") 40000)) 10))
+							0
+						)
+					)
+
+				)
+		))
+
+		;if the task_id doesn't exist, create it
+		(if (not (contains_index !progressMap task_id))
+			(accum_to_entities (assoc
+				!progressMap
+					(associate
+						task_id
+							(set
+								(replace !progressTemplate)
+								"step" 1
+								"details" details
+								"total" total_steps
+							)
+					)
+			))
+
+			(call !ProgressUpdate (assoc
+				task_id task_id
+				total total_steps
+				details details
+			))
+		)
+
+		(call !PrintProgress)
+	)
+
+	;macro label to output progress, will be overwritten with the code from !printProgressCode
+	;if trainee was initialized with print_progress as .true
+	!PrintProgress
+	.null
+
+	;prints: [ task_id ] step / total  <Description>
+	!printProgressCode
+	(map
+		(lambda
+			(print "[" (if (current_index) (current_index) " ") "] " (get (current_value) "step") "/" (get (current_value) "total")  " " (get (current_value) "details")  "\n")
+		)
+		!progressMap
+	)
+}

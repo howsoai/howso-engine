@@ -218,7 +218,26 @@
 		(if robust
 			(call !RunRobustContributions)
 
-			(call !RunFullContributions)
+			(let
+				(assoc
+					num_features
+						(if run_on_local_model
+							0
+
+							(if (size details_context_features)
+								(size details_context_features)
+								(size context_set)
+							)
+						)
+				)
+				(declare (assoc
+					num_progress_updates 1
+					;one update every 10 (or more) features, for a max of 10 times
+					progress_update_size (max 10 (floor (/ num_features (min num_features 10))))
+					max_progress_updates (min (ceil (/ num_features 10)) 10)
+				))
+				(call !RunFullContributions)
+			)
 		)
 
 		;put the inactive features back into output with 0s
@@ -295,8 +314,21 @@
 			enabled_num_features_probability_map
 				(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size all_context_features) ))
 			num_features (size all_context_features)
-
 		)
+
+		(declare (assoc
+			update_lock 0
+			num_progress_updates 1
+			;one update every 100 (or more) cases, for a max of 10 times
+			progress_update_size (max 100 (floor (/ (size case_ids) (min (size case_ids) 10))))
+			max_progress_updates
+				(if run_on_local_model
+					0
+					(min (ceil (/ (size case_ids) 100)) 10)
+				)
+			progress_detail_text "Computing robust prediction contributions"
+		))
+
 		;iterate over all the local cases, for each case, react multiple times with a different robust context feature set each time
 		;for each react, store the reacted value for features that were used as contexts into each of those features' 'with feature' list
 		;and store that reacted value for feature that were not used into each of their 'without feature' list
@@ -313,6 +345,12 @@
 							local_case_reaction_pairs (list)
 							;save an inner version in this scope to update per case for time-series flows
 							context_features all_context_features
+						)
+
+						(if (= 0 (mod (current_index) progress_update_size))
+							(if (<= num_progress_updates max_progress_updates)
+								(call !ProgressLockAndUpdate)
+							)
 						)
 
 						(if !tsTimeFeature
@@ -413,6 +451,16 @@
 						feature (current_index 1)
 						filtered_context_features (indices (remove context_set (current_index 1)))
 						deltas (list)
+						feature_index 0
+					)
+
+					(if (= 0 (mod feature_index progress_update_size))
+						(if (<= num_progress_updates max_progress_updates)
+							(seq
+								(accum (assoc num_progress_updates 1 ))
+								(call !ProgressUpdate (assoc details "Computing full prediction contributions"))
+							)
+						)
 					)
 
 					(if derive_action_feature
@@ -423,6 +471,7 @@
 					)
 
 					(assign (assoc
+						feature_index (+ 1 feature_index)
 						deltas
 							(map
 								(lambda (let

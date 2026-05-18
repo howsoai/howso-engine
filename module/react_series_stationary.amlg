@@ -84,6 +84,9 @@
 			;flag, if set to true assumes provided categorical (nominal or ordinal) feature values already been substituted.
 			#{type "boolean"}
 			input_is_substituted .false
+			;Optional task_id to track progress of this long running operation. If unspecified, will use .null as the task_id.
+			#{type "string"}
+			task_id .null
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
@@ -189,6 +192,7 @@
 						action_features action_features
 						goal_features_map goal_features_map
 						weight_feature weight_feature
+						task_id task_id
 					))
 					{"action_features" action_features}
 				)
@@ -209,6 +213,26 @@
 			goal_features_map (assoc)
 			weight_feature .null
 		)
+		(declare (assoc
+			num_reacts (max (size series_context_values) (size series_id_values))
+		))
+		(declare (assoc
+			update_lock 0
+			num_progress_updates 1
+			;one update every 100 (or more) series, for a max of 10 times
+			progress_update_size (max 100 (floor (/ num_reacts (min num_reacts 10))))
+			max_progress_updates (min (ceil (/ num_reacts 100)) 10)
+			progress_detail_text "Executing a batch of stationary series reacts"
+		))
+
+		(call !EstimateProgress (assoc
+			task_id task_id
+			method "react_series_stationary"
+			details "React series stationary"
+			params {
+				"total" max_progress_updates
+			}
+		))
 
 		(declare (assoc
 			per_series_output
@@ -218,6 +242,13 @@
 							(assoc
 								individual_series (get series_context_values (current_index 1))
 								individual_series_ids (get series_id_values (current_index 1))
+							)
+
+							;update progress every 'progress_update_size' number of reacts
+							(if (= 0 (mod (current_index) progress_update_size))
+								(if (< num_progress_updates max_progress_updates)
+									(call !ProgressLockAndUpdate)
+								)
 							)
 
 							(call !ReactSeriesStationary (assoc
@@ -233,10 +264,12 @@
 						)
 					)
 					0
-					(- (max (size series_context_values) (size series_id_values)) 1)
+					(- num_reacts 1)
 					1
 				)
 		))
+
+		(call !ProgressClear)
 
 		;convert per_series_output to a dict of details key -> lists of values (one per series)
 		(map
