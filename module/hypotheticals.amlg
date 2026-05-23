@@ -1,8 +1,125 @@
 {
+	!ComputeReactRelevantValues
+	;helper method for react that compute the returned value for the "relevant_values" detail.
+	;if there are action features, boundary values are computed and integrated into the response for
+	;the relevant values detail.
+	(if (= 0 (size action_features))
+		;if no action features, just compute relevant values as normal
+		(call !ComputeReactRelevantValuesWithoutAction)
+
+		;if there is an action feature, compute boundary values and return relevant values based on returned boundaries
+		(call !ComputeReactRelevantValuesWithAction)
+	)
+
+	;helper macro for relevant values that computes the relevant values based on boundary values.
+	;Only used when action feature are specified.
+	!ComputeReactRelevantValuesWithAction
+	(let
+		(assoc
+			reported_boundary_values
+				(call !ComputeBoundaryValues (assoc
+					boundary_value_features
+						(if (~ [] (get details "relevant_values"))
+							(get details "relevant_values")
+							context_features
+						)
+					skip_decoding .true
+				))
+			reported_relevant_values (call !ComputeReactRelevantValuesWithoutAction)
+		)
+
+
+		;for nominal features, just return the boundary value found.
+		;for continuous features, return relevant values (+/- 1/2 deviations) for each computed boundary value.
+		(map
+			(lambda
+				(if (contains_index !categoricalFeaturesSet (current_index))
+					(if (!= .null (current_value))
+						;if a boundary value was found, make it the first returned value and add the other relevant values
+						(values (append [(current_value 1)] (get reported_relevant_values (current_index))) .true)
+
+						;use the relevant values if no boundary was found
+						(get reported_relevant_values (current_index))
+					)
+
+					;continuous has two sides of the boundary: [lower upper]
+					(let
+						(assoc
+							lower_bound (first (current_value 1))
+							upper_bound (last (current_value 1))
+
+							feature_deviation
+								(or
+									(get react_feature_deviations [(current_index 2) 0])
+									;use global value if the local one is null, pull deviation stored in featureResiduals because
+									;it'll be a single value whereas featureDeviations may or may not be a tuple
+									(get hyperparam_map ["featureResiduals" (current_index 2)])
+								)
+						)
+
+						(if (and
+								(= .null lower_bound)
+								(= .null upper_bound)
+							)
+							;if no boundary values are found, just use the standard relevant values
+							(get reported_relevant_values (current_index))
+
+							;otherwise return relevant values based on found boundaries
+							(let
+								(assoc
+									relevant_values
+										(append
+											(if lower_bound
+												(map
+													(lambda
+														(+
+															lower_bound
+															(* (current_value) feature_deviation)
+														)
+													)
+													[-2 -1 0 1 2]
+												)
+												[]
+											)
+
+											(if upper_bound
+												(map
+													(lambda
+														(+
+															upper_bound
+															(* (current_value) feature_deviation)
+														)
+													)
+													[-2 -1 0 1 2]
+												)
+												[]
+											)
+										)
+								)
+
+								(values
+									(call !ConvertToOutput (assoc
+										apply_bounds .true
+										features (range (current_index 1) 1 (size relevant_values) 1)
+										feature_values relevant_values
+									))
+									.true
+								)
+							)
+						)
+					)
+				)
+			)
+			reported_boundary_values
+		)
+	)
+
+
+
 	;helper method for the "relevant_values" detail of react.
 	; Returns a map of feature names to list of values that illustrate the range of values
 	; observed among the local data
-	!ComputeReactRelevantValues
+	!ComputeReactRelevantValuesWithoutAction
 	(declare
 		(assoc
 			closest_cases_map
@@ -48,184 +165,178 @@
 		))
 
 
-		(accum (assoc
-			output
+		(map
+			(lambda (let
 				(assoc
-					"relevant_values"
-					(map
-						(lambda (let
-							(assoc
-								feature (current_index 1)
-								is_categorical
-									(or
-										(contains_index !categoricalFeaturesSet (current_index 1))
-										(contains_index !editDistanceFeatureTypesMap (current_index 1))
-									)
-							)
+					feature (current_index 1)
+					is_categorical
+						(or
+							(contains_index !categoricalFeaturesSet (current_index 1))
+							(contains_index !editDistanceFeatureTypesMap (current_index 1))
+						)
+				)
 
-							(if is_categorical
-								;categorical flow:
-								;	Get the CAPs for the reaction based on nearest cases and return the most relevant
-								(let
-									(assoc
-										candidate_case_weights (values closest_cases_map)
-										candidate_case_values (get closest_cases_context_values_map feature)
-									)
+				(if is_categorical
+					;categorical flow:
+					;	Get the CAPs for the reaction based on nearest cases and return the most relevant
+					(let
+						(assoc
+							candidate_case_weights (values closest_cases_map)
+							candidate_case_values (get closest_cases_context_values_map feature)
+						)
 
-									(declare (assoc
-										categorical_action_probabilities_map
-											(zip
-												(lambda (+ (current_value 1) (current_value)))
-												candidate_case_values
-												candidate_case_weights
-											)
-									))
-
-									;sort each class by decreasing probability mass
-									(declare (assoc
-										sorted_classes
-											(sort
-												(lambda
-													(<
-														(get categorical_action_probabilities_map [(current_value 1)])
-														(get categorical_action_probabilities_map [(current_value 2)])
-													)
-												)
-												(indices categorical_action_probabilities_map)
-											)
-									))
-									(declare (assoc
-										sorted_probabilities (unzip categorical_action_probabilities_map sorted_classes)
-									))
-									(declare (assoc
-										num_classes_to_return
-											;structured data and edit distance features output up to 5 most relevant values like continuous features
-											(if (contains_index !editDistanceFeatureTypesMap feature)
-												(min 5 (size sorted_probabilities))
-
-												;else output all nominal classes that make up 95% of the probability mass among the local data
-												(while
-													(or
-														;(trunc) with a 0 returns the full list, so special skip-logic is needed
-														(= (current_index) 0)
-														(<
-															(apply "+" (trunc sorted_probabilities (current_index)))
-															0.95
-														)
-													)
-													.null
-
-													;once the cumulative sum is > 0.95, return the number of classes it took to get that sum
-													(+ (current_index) 1)
-												)
-											)
-									))
-
-									(call !ConvertToOutput (assoc
-										features (range feature 1 num_classes_to_return 1)
-										feature_values (trunc sorted_classes num_classes_to_return)
-									))
+						(declare (assoc
+							categorical_action_probabilities_map
+								(zip
+									(lambda (+ (current_value 1) (current_value)))
+									candidate_case_values
+									candidate_case_weights
 								)
+						))
 
-								;else continuous flow
-								(let
-									(assoc
-										local_mean_value
-											(generalized_mean
-												(get closest_cases_context_values_map feature)
-												1
-												(values closest_cases_map)
-											)
-										feature_deviation
-											(or
-												(get react_feature_deviations [feature 0])
-												;use global value if the local one is null, pull deviation stored in featureResiduals because
-												;it'll be a single value whereas featureDeviations may or may not be a tuple
-												(get hyperparam_map ["featureResiduals" feature])
-											)
-									)
-
-									;if local_mean_value is null, need to compute one that isn't
-									(if (= .null local_mean_value)
-										(let
-											(assoc
-												;tuple of [case_ids, case_weights, feature_values]
-												local_non_null_values_tuple
-													(compute_on_contained_entities
-														filtering_queries
-														;explicitly where this feature is not null
-														(query_not_equals feature .null)
-														(query_nearest_generalized_distance
-															k_parameter
-															context_features
-															context_values
-															p_parameter
-															feature_weights
-															!queryFeatureAttributeTypeMap
-															feature_deviations
-															(first action_features)
-															dt_parameter
-															(if valid_weight_feature weight_feature .null)
-															;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-															"fixed rand seed"
-															.null ;radius
-															!numericalPrecision
-															;output results as a tuple
-															[feature]
-														)
-													)
-											)
-											(assign (assoc
-												local_mean_value
-													(generalized_mean
-														(last local_non_null_values_tuple)
-														1
-														(normalize (get local_non_null_values_tuple 1))
-													)
-											))
+						;sort each class by decreasing probability mass
+						(declare (assoc
+							sorted_classes
+								(sort
+									(lambda
+										(<
+											(get categorical_action_probabilities_map [(current_value 1)])
+											(get categorical_action_probabilities_map [(current_value 2)])
 										)
 									)
+									(indices categorical_action_probabilities_map)
+								)
+						))
+						(declare (assoc
+							sorted_probabilities (unzip categorical_action_probabilities_map sorted_classes)
+						))
+						(declare (assoc
+							num_classes_to_return
+								;structured data and edit distance features output up to 5 most relevant values like continuous features
+								(if (contains_index !editDistanceFeatureTypesMap feature)
+									(min 5 (size sorted_probabilities))
 
-									;only return unique values. (Sometimes the process of bounding the values creates duplicate values.)
-									(values
-										(call !ConvertToOutput (assoc
-											apply_bounds .true
-											features (range feature 1 5 1)
-											feature_values
-												(if (and
-														(!= .null local_mean_value)
-														(!= .null feature_deviation)
-													)
-													;value - 2*deviation, value - deviation, value, value + deviation, value + 2*deviation
-													(map
-														(lambda
-															(+
-																local_mean_value
-																(* (current_value) feature_deviation)
-															)
-														)
-														[-2 -1 0 1 2]
-													)
+									;else output all nominal classes that make up 95% of the probability mass among the local data
+									(while
+										(or
+											;(trunc) with a 0 returns the full list, so special skip-logic is needed
+											(= (current_index) 0)
+											(<
+												(apply "+" (trunc sorted_probabilities (current_index)))
+												0.95
+											)
+										)
+										.null
 
-													;else the local value is a null, output 5 nulls
-													(range .null 1 5 1)
-												)
-										))
-										.true
+										;once the cumulative sum is > 0.95, return the number of classes it took to get that sum
+										(+ (current_index) 1)
 									)
 								)
-							)
-
-
 						))
-						(if (~ [] (get details "relevant_values"))
-							(zip (get details "relevant_values"))
 
-							(zip context_features)
+						(call !ConvertToOutput (assoc
+							features (range feature 1 num_classes_to_return 1)
+							feature_values (trunc sorted_classes num_classes_to_return)
+						))
+					)
+
+					;else continuous flow
+					(let
+						(assoc
+							local_mean_value
+								(generalized_mean
+									(get closest_cases_context_values_map feature)
+									1
+									(values closest_cases_map)
+								)
+							feature_deviation
+								(or
+									(get react_feature_deviations [feature 0])
+									;use global value if the local one is null, pull deviation stored in featureResiduals because
+									;it'll be a single value whereas featureDeviations may or may not be a tuple
+									(get hyperparam_map ["featureResiduals" feature])
+								)
+						)
+
+						;if local_mean_value is null, need to compute one that isn't
+						(if (= .null local_mean_value)
+							(let
+								(assoc
+									;tuple of [case_ids, case_weights, feature_values]
+									local_non_null_values_tuple
+										(compute_on_contained_entities
+											filtering_queries
+											;explicitly where this feature is not null
+											(query_not_equals feature .null)
+											(query_nearest_generalized_distance
+												k_parameter
+												context_features
+												context_values
+												p_parameter
+												feature_weights
+												!queryFeatureAttributeTypeMap
+												feature_deviations
+												(first action_features)
+												dt_parameter
+												(if valid_weight_feature weight_feature .null)
+												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+												"fixed rand seed"
+												.null ;radius
+												!numericalPrecision
+												;output results as a tuple
+												[feature]
+											)
+										)
+								)
+								(assign (assoc
+									local_mean_value
+										(generalized_mean
+											(last local_non_null_values_tuple)
+											1
+											(normalize (get local_non_null_values_tuple 1))
+										)
+								))
+							)
+						)
+
+						;only return unique values. (Sometimes the process of bounding the values creates duplicate values.)
+						(values
+							(call !ConvertToOutput (assoc
+								apply_bounds .true
+								features (range feature 1 5 1)
+								feature_values
+									(if (and
+											(!= .null local_mean_value)
+											(!= .null feature_deviation)
+										)
+										;value - 2*deviation, value - deviation, value, value + deviation, value + 2*deviation
+										(map
+											(lambda
+												(+
+													local_mean_value
+													(* (current_value) feature_deviation)
+												)
+											)
+											[-2 -1 0 1 2]
+										)
+
+										;else the local value is a null, output 5 nulls
+										(range .null 1 5 1)
+									)
+							))
+							.true
 						)
 					)
 				)
-		))
+
+
+			))
+			(if (~ [] (get details "relevant_values"))
+				(zip (get details "relevant_values"))
+
+				(zip context_features)
+			)
+		)
 	)
 
 	;helper method for the "relevant_values" detail of react_aggregate.
