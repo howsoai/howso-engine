@@ -325,6 +325,11 @@
 						)
 				)
 				(call !CalculateCaseResiduals (assoc robust_residuals .false accum_predicted_values .true))
+
+				(if (get details "feature_full_residual_convictions_for_case")
+					(call !CalculateLocalCaseFeatureResidualConvictions)
+				)
+
 				(accum (assoc
 					output
 						(assoc
@@ -338,9 +343,6 @@
 								)
 						)
 				))
-				(if (get details "feature_full_residual_convictions_for_case")
-					(call !CalculateLocalCaseFeatureResidualConvictions)
-				)
 			)
 		)
 	)
@@ -401,45 +403,18 @@
 		)
 	)
 
-	!CalculateLocalCaseFeatureValueSimilarityConviction
+	!CalculateLocalDensityConviction
 	(map
 		(lambda (let
-			(assoc
-				;the feature for which to compute the residual
-				residual_feature (current_index 1)
-				;context features without the residual feature
-				local_context_features (indices (remove context_map (current_index 1)))
-			)
+			(assoc residual_feature (current_index 1) )
 
+			;pull all the case values for this feature
 			(declare (assoc
-				local_cases_tuple
-					(compute_on_contained_entities
-						filtering_queries
-						(query_nearest_generalized_distance
-							(replace k_parameter)
-							(replace local_context_features)
-							(replace (unzip case_value_map local_context_features))
-							(replace p_parameter)
-							(replace feature_weights)
-							(replace !queryFeatureAttributeTypeMap)
-							(replace feature_deviations)
-							residual_feature
-							(replace dt_parameter)
-							(if valid_weight_feature (replace weight_feature) .null)
-							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-							"fixed rand seed"
-							.null
-							(replace !numericalPrecision)
-							residual_feature
-						)
+				values
+					(map
+						(lambda (retrieve_from_entity (current_value) residual_feature))
+						(first local_cases_tuple)
 					)
-			))
-
-			(declare (assoc
-				weights (normalize (get local_cases_tuple 1))
-				values (last local_cases_tuple)
-				residual (max (get case_residuals_map [residual_feature 0]) (get !cachedFeatureMinResidualMap residual_feature) )
-				max_ratio (if (~ 0 k_parameter) (max 10 k_parameter) (last k_parameter))
 			))
 
 			(if (contains_index !nominalsMap residual_feature)
@@ -469,7 +444,15 @@
 								;else local space got it completely wrong, set MAD to max residual
 								1
 							)
+						residual
+							(max
+								(abs (- 1 (or (get cap_map (get case_value_map residual_feature)))  ))
+								(get !cachedFeatureMinResidualMap residual_feature)
+							)
 					))
+
+					;overwrite the predicted value with this one
+					(accum (assoc predicted_case_values_map (associate residual_feature (first (index_max cap_map))) ))
 
 					(if (= 1 (size cap_map))
 						;got it 100% right, output a fixed large value (k) else very ratio
@@ -483,109 +466,144 @@
 					)
 				)
 
-				;if null was predicted or is the case value, compute ratio based on nulls
-				(if (or
-						(= .null (get case_value_map residual_feature))
-						(= .null (get predicted_case_values_map residual_feature))
-					)
-					(let
-						(assoc
-							null_weight
-								(or
-									(get
-										(zip
-											(lambda (+ (current_value) (current_value 1)))
-											values
-											weights
-										)
-										.null
+				(let
+					(assoc
+						residual_tuple
+							(call !InterpolateAndComputeDiffToCase (assoc
+								feature residual_feature
+								case_feature_value (get case_value_map residual_feature)
+								output_categorical_action_probabilities .true
+								candidate_cases_lists
+									(if (size non_null_indices)
+										[
+											(unzip (first local_cases_tuple) non_null_indices)
+											(unzip weights non_null_indices)
+											(unzip values non_null_indices)
+										]
+
+										[ (first local_cases_tuple) weights values ]
 									)
-									0
-								)
+								feature_is_nominal .false
+								feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap residual_feature)
+								feature_is_non_string_edit_distance
+									(and
+										(contains_index !editDistanceFeatureTypesMap residual_feature)
+										(!= "string_mixable" (get !editDistanceFeatureTypesMap feature))
+									)
+								compute_all_statistics .true
+								feature_has_continuous_nulls .false
+							))
+					)
+					(declare (assoc
+						residual (max (first residual_tuple) (get !cachedFeatureMinResidualMap residual_feature))
+					))
+
+					(accum (assoc predicted_case_values_map (associate residual_feature (last residual_tuple)) ))
+
+					;if null was predicted or is the case value, compute ratio based on nulls
+					(if (or
+							(= .null (get case_value_map residual_feature))
+							(= .null (last residual_tuple))
 						)
-
-						(if (= .null (get case_value_map residual_feature))
-							(if (>= null_weight approximately_one)
-								max_ratio
-
-								(= 0 null_weight)
-								(/ 1 max_ratio)
-
-								(/
-									null_weight
-									(- 1 null_weight)
-								)
+						(let
+							(assoc
+								null_weight
+									(or
+										(get
+											(zip
+												(lambda (+ (current_value) (current_value 1)))
+												values
+												weights
+											)
+											.null
+										)
+										0
+									)
 							)
 
-							;else case value is not null but was incorrectly predicted as null
-							(if (>= null_weight approximately_one)
-								(/ 1 max_ratio)
+							(if (= .null (get case_value_map residual_feature))
+								(if (>= null_weight approximately_one)
+									max_ratio
 
-								;if predicted as null, that means values account for < 50% of the probability mass
-								(/
-									(- 1 null_weight)
-									null_weight
+									(= 0 null_weight)
+									(/ 1 max_ratio)
+
+									(/
+										null_weight
+										(- 1 null_weight)
+									)
+								)
+
+								;else case value is not null but was incorrectly predicted as null
+								(if (>= null_weight approximately_one)
+									(/ 1 max_ratio)
+
+									;if predicted as null, that means values account for < 50% of the probability mass
+									(/
+										(- 1 null_weight)
+										null_weight
+									)
 								)
 							)
 						)
-					)
 
-					;else nulls aren't significant for this case, compute mad
-					(let
-						(assoc
-							mad
-								(if (contains_value values .null)
-									(let
-										(assoc
-											non_null_indices
-												(filter
-													(lambda (!= .null (get values (current_value)) ) )
-													(indices values)
-												)
-										)
-										(if (contains_index !editDistanceFeatureTypesMap residual_feature)
-											(call !ComputeWeightedMADEditDistance (assoc
-												vals (unzip values non_null_indices)
-												weights (unzip weights non_null_indices)
-												predicted_value (get predicted_case_values_map residual_feature)
-												feature residual_feature
-											))
-
-											(call !ComputeWeightedMAD (assoc
-												vals (unzip values non_null_indices)
-												weights (unzip weights non_null_indices)
-											))
+						;else nulls aren't significant for this case, compute mad
+						(let
+							(assoc
+								non_null_indices
+									(if (contains_value values .null)
+										(filter
+											(lambda (!= .null (get values (current_value)) ) )
+											(indices values)
 										)
 									)
-
+							)
+							(declare (assoc
+								mad
 									(if (contains_index !editDistanceFeatureTypesMap residual_feature)
 										(call !ComputeWeightedMADEditDistance (assoc
-											vals values
-											weights weights
+											vals
+												(if non_null_indices
+													(unzip values non_null_indices)
+													values
+												)
+											weights
+												(if non_null_cases
+													(unzip weights non_null_indices)
+													weights
+												)
 											predicted_value (get predicted_case_values_map residual_feature)
 											feature residual_feature
 										))
 
 										(call !ComputeWeightedMAD (assoc
-											vals values
-											weights weights
+											vals
+												(if non_null_indices
+													(unzip values non_null_indices)
+													values
+												)
+											weights
+												(if non_null_indices
+													(unzip weights non_null_indices)
+													weights
+												)
 										))
 									)
+							))
+
+							;if all values are the same (MAD is 0) and prediction was perfect (within min residual)
+							;output max_ratio
+							(if (and
+									(<= mad (get !cachedFeatureMinResidualMap residual_feature))
+									(<= residual (get !cachedFeatureMinResidualMap residual_feature))
 								)
-						)
+								max_ratio
 
-						;if all values are the same (MAD is 0) and prediction was perfect (within min residual)
-						;output max_ratio
-						(if (and
-								(<= mad (get !cachedFeatureMinResidualMap residual_feature))
-								(= residual (get !cachedFeatureMinResidualMap residual_feature))
-							)
-							max_ratio
-
-							;mad / residual
-							(/
-								(max mad (get !cachedFeatureMinResidualMap residual_feature))
-								residual
+								;mad / residual
+								(/
+									(max mad (get !cachedFeatureMinResidualMap residual_feature))
+									residual
+								)
 							)
 						)
 					)
@@ -607,12 +625,41 @@
 			approximately_one (- 1 (call !ComputePrecisionEpsilon))
 		)
 
+		(declare (assoc
+			local_cases_tuple
+				(compute_on_contained_entities
+					filtering_queries
+					(query_nearest_generalized_distance
+						(replace k_parameter)
+						context_features
+						(unzip case_value_map context_features)
+						p_parameter
+						(replace feature_weights)
+						(replace !queryFeatureAttributeTypeMap)
+						(replace feature_deviations)
+						.null ;residual_feature
+						(replace dt_parameter)
+						(if valid_weight_feature (replace weight_feature) .null)
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						.null
+						(replace !numericalPrecision)
+						(first context_features)
+					)
+				)
+		))
+
+		(declare (assoc
+			weights (normalize (get local_cases_tuple 1))
+			max_ratio (if (~ 0 k_parameter) (max 10 k_parameter) (last k_parameter))
+		))
+
 		(accum (assoc
 			output
 				(assoc
 					"feature_full_residual_convictions_for_case"
 						(append
-							(call !CalculateLocalCaseFeatureValueSimilarityConviction)
+							(call !CalculateLocalDensityConviction)
 							(map 1 inactive_features_zeros_map)
 						)
 				)
