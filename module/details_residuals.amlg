@@ -325,11 +325,6 @@
 						)
 				)
 				(call !CalculateCaseResiduals (assoc robust_residuals .false accum_predicted_values .true))
-
-				(if (get details "feature_full_residual_convictions_for_case")
-					(call !CalculateLocalCaseFeatureResidualConvictions)
-				)
-
 				(accum (assoc
 					output
 						(assoc
@@ -343,7 +338,15 @@
 								)
 						)
 				))
+
+				(if (get details "feature_full_residual_convictions_for_case")
+					(call !CalculateLocalCaseFeatureResidualConvictions)
+				)
 			)
+		)
+
+		(if (get details "feature_density_convictions_for_case")
+			(call !CalculateLocalCaseFeatureDensityConviction)
 		)
 	)
 
@@ -452,7 +455,7 @@
 					))
 
 					;overwrite the predicted value with this one
-					(accum (assoc predicted_case_values_map (associate residual_feature (first (index_max cap_map))) ))
+					(accum (assoc expected_case_values_map (associate residual_feature (first (index_max cap_map))) ))
 
 					(if (= 1 (size cap_map))
 						;got it 100% right, output a fixed large value (k) else very ratio
@@ -473,32 +476,25 @@
 								feature residual_feature
 								case_feature_value (get case_value_map residual_feature)
 								output_categorical_action_probabilities .true
-								candidate_cases_lists
-									(if (size non_null_indices)
-										[
-											(unzip (first local_cases_tuple) non_null_indices)
-											(unzip weights non_null_indices)
-											(unzip values non_null_indices)
-										]
-
-										[ (first local_cases_tuple) weights values ]
-									)
+								candidate_cases_lists [ (first local_cases_tuple) weights values ]
 								feature_is_nominal .false
 								feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap residual_feature)
 								feature_is_non_string_edit_distance
 									(and
 										(contains_index !editDistanceFeatureTypesMap residual_feature)
-										(!= "string_mixable" (get !editDistanceFeatureTypesMap feature))
+										(!= "string_mixable" (get !editDistanceFeatureTypesMap residual_feature))
 									)
+								feature_has_continuous_nulls (contains_index continuous_with_nulls_map residual_feature)
+								;setting this to true outputs the interpolated value as the last in the tuple, residual as the first
 								compute_all_statistics .true
-								feature_has_continuous_nulls .false
+
 							))
 					)
 					(declare (assoc
 						residual (max (first residual_tuple) (get !cachedFeatureMinResidualMap residual_feature))
 					))
 
-					(accum (assoc predicted_case_values_map (associate residual_feature (last residual_tuple)) ))
+					(accum (assoc expected_case_values_map (associate residual_feature (last residual_tuple)) ))
 
 					;if null was predicted or is the case value, compute ratio based on nulls
 					(if (or
@@ -572,7 +568,7 @@
 													(unzip weights non_null_indices)
 													weights
 												)
-											predicted_value (get predicted_case_values_map residual_feature)
+											predicted_value (get expected_case_values_map residual_feature)
 											feature residual_feature
 										))
 
@@ -614,15 +610,15 @@
 	)
 
 
-	!CalculateLocalCaseFeatureResidualConvictions
+	!CalculateLocalCaseFeatureDensityConviction
 	(declare
 		(assoc
 			feature_weights
-				(if (= .null (get hyperparam_map "featureMdaMap"))
+				;;;TODO: dig in, compare w similarity conviction and influential/similar cases
+				;(if (= .null (get hyperparam_map "featureMdaMap"))
 					(get hyperparam_map "featureWeights")
-					(get hyperparam_map "featureMdaMap")
-				)
-			approximately_one (- 1 (call !ComputePrecisionEpsilon))
+				;	(get hyperparam_map "featureMdaMap")
+				;)
 		)
 
 		(declare (assoc
@@ -631,8 +627,8 @@
 					filtering_queries
 					(query_nearest_generalized_distance
 						(replace k_parameter)
-						context_features
-						(unzip case_value_map context_features)
+						(indices case_value_map)
+						(values case_value_map)
 						p_parameter
 						(replace feature_weights)
 						(replace !queryFeatureAttributeTypeMap)
@@ -652,22 +648,50 @@
 		(declare (assoc
 			weights (normalize (get local_cases_tuple 1))
 			max_ratio (if (~ 0 k_parameter) (max 10 k_parameter) (last k_parameter))
+			approximately_one (- 1 (call !ComputePrecisionEpsilon))
+			expected_case_values_map
+				(if !inactiveFeaturesMap
+					!inactiveFeaturesMap
+					{}
+				)
+			continuous_with_nulls_map
+				(filter
+					(lambda (and
+						(not (contains_index !nominalsMap (current_index)))
+						(!= .false (get !featureNullRatiosMap [(current_index 1) "has_nulls"]))
+					))
+					(keep case_value_map action_features)
+				)
 		))
 
 		(accum (assoc
 			output
 				(assoc
-					"feature_full_residual_convictions_for_case"
+					"feature_density_convictions_for_case"
 						(append
 							(call !CalculateLocalDensityConviction)
 							(map 1 inactive_features_zeros_map)
 						)
 				)
 		))
+
+		(accum (assoc
+			output
+				(assoc
+					"expected_density_values_for_case"
+					(zip
+						(indices expected_case_values_map)
+						(call !ConvertToOutput (assoc
+							features (indices expected_case_values_map)
+							feature_values (values expected_case_values_map)
+						))
+					)
+				)
+		))
 	)
 
 
-	!CalculateLocalCaseFeatureResidualConvictions_original
+	!CalculateLocalCaseFeatureResidualConvictions
 	(declare
 		(assoc
 			action_features_map (keep case_value_map action_features)
