@@ -1145,15 +1145,26 @@
 		))
 	)
 
+	;Method to compute and output a pair of [local weighted mda, case weighted mda] for a specific case feature
+	;parameters:
+	; cases: list of local case ids
+	; values: list of local feature values
+	; weights: list of corresponding normalized weights (to the values)
+	; local_cases_maps: list of each local case's assoc of its similar cases of  case id -> weight
+	; is_edit_distance: flag, if true the MAD will be computed using edit_distance
+	; case_value: the value for the case whose case weighted MAD should be computed
+	; feature_has_nulls: flag, if true this feature may have nulls that will need to be filtered out
 	!ComputeCaseFeatureWeightedMADPair
 	(declare
 		(assoc
 			cases []
 			values []
 			weights []
-			case .null
+			local_cases_maps []
 			feature .null
 			is_edit_distance .false
+			case_value .null
+			feature_has_nulls .false
 		)
 
 		;cache feature value for all the cases in the local maps
@@ -1175,53 +1186,80 @@
 		(declare (assoc
 			weighted_avg_of_local_weighted_mads
 				(dot_product
-					(normalize weights)
+					weights
+					;list of
 					(map
 						(lambda (let
 							(assoc
-								values
+								neighbor_values
 									(map
 										(lambda (get all_local_cases_values_map (current_value)))
 										;local cases for
 										(indices (current_value 1))
 									)
-								weights (values (current_value 1))
+								neighbor_weights (values (current_value 1))
 								local_case_value (get all_local_cases_values_map (get cases (current_index 1)))
+							)
+
+							(if feature_has_nulls
+								(let
+									(assoc
+										non_null_indices
+											(if (contains_value neighbor_values .null)
+												(filter
+													(lambda (!= .null (get neighbor_values (current_value)) ) )
+													(indices neighbor_values)
+												)
+											)
+									)
+
+									;if there are no values in the local data (if it's all nulls), output the smallest possible value as the M.A.D.
+									(if (= [] non_null_indices)
+										(conclude (get !cachedFeatureMinResidualMap feature))
+									)
+
+									(if non_null_indices
+										(assign (assoc
+											neighbor_values (unzip neighbor_values non_null_indices)
+											neighbor_weights (unzip neighbor_weights non_null_indices)
+										))
+									)
+								)
 							)
 
 							;weighted average delta to local_case_value
 							(dot_product
-								(normalize weights)
+								(normalize neighbor_weights)
 								(if is_edit_distance
 									(map
 										(lambda
 											(edit_distance local_case_value (current_value) (get !codeFeatureDomainAttributesMap feature))
 										)
-										values
+										neighbor_values
 									)
-									(map (lambda (abs (- local_case_value (current_value)))) values )
+									(map (lambda (abs (- local_case_value (current_value)))) neighbor_values )
 								)
 							)
 						))
 						local_cases_maps
 					)
 				)
-			value (get case_value_map feature)
+
 		))
 
 		(declare (assoc
 			case_weighted_mad
 				(dot_product
-					(normalize weights)
+					weights
 					(if is_edit_distance
 						(map
 							(lambda
-								(edit_distance value (current_value) (get !codeFeatureDomainAttributesMap feature))
+								(edit_distance case_value (current_value) (get !codeFeatureDomainAttributesMap feature))
 							)
 							values
 						)
 
-						(map (lambda (abs (- (current_value) value))) values)
+						(map (lambda (abs (- (current_value) case_value))) values)
 					)
 				)
 		))
@@ -1232,40 +1270,6 @@
 		]
 	)
 
-
-	;helper method to compute weighted Mean Absolute Deviation for edit distance features given that a predicted_value is provided
-	;since predicted_value is the weighted mean of values given their weights, the MAD is thus the sum of the weighted deltas to that mean
-	;parameters:
-	; vals: the list of values to compute the MAD for
-	; weights: the list of corresponding weights for each value
-	; predicted_value: the pre-computed weighted mean value (i.e., the value resulting from vals and weights)
-	; feature: name of the edit distance feature, used to lookup feature specific attributes for computing edit distance
-	!ComputeWeightedMADEditDistance
-	(declare
-		(assoc
-			vals []
-			weights []
-			predicted_value []
-			feature .null
-		)
-
-		;no need to compute with 1 or less values
-		(if (<= (size vals) 1) (conclude 0) )
-
-		(declare (assoc
-			normalized_weights (normalize weights)
-			deltas
-				(map
-					(lambda
-						(edit_distance (current_value) predicted_value (get !codeFeatureDomainAttributesMap feature) )
-					)
-					vals
-				)
-		))
-
-		;output the mean absolute deviation as the sum of all the weighted deltas
-		(dot_product normalized_weights deltas)
-	)
 
 	;given a list of features, outputs a map of feature -> MAD for continuous (non edit distance) features that have nulls
 	!ConstructFeatureMADMap
