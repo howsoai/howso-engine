@@ -1145,7 +1145,7 @@
 		))
 	)
 
-	!ComputeCaseFeatureDC
+	!ComputeCaseFeatureWeightedMADPair
 	(declare
 		(assoc
 			cases []
@@ -1153,10 +1153,13 @@
 			weights []
 			case .null
 			feature .null
+			is_edit_distance .false
 		)
 
+		;TODO: precache feature values for all cases in local region
+
 		(declare (assoc
-			expected_delta
+			weighted_avg_of_local_weighted_mads
 				(dot_product
 					(normalize weights)
 					(map
@@ -1174,7 +1177,15 @@
 							;weighted average delta to local_case_value
 							(dot_product
 								(normalize weights)
-								(map (lambda (abs (- local_case_value (current_value)))) values )
+								(if is_edit_distance
+									(map
+										(lambda
+											(edit_distance local_case_value (current_value) (get !codeFeatureDomainAttributesMap feature))
+										)
+										values
+									)
+									(map (lambda (abs (- local_case_value (current_value)))) values )
+								)
 							)
 						))
 						local_cases_maps
@@ -1184,197 +1195,28 @@
 		))
 
 		(declare (assoc
-			actual_delta
+			case_weighted_mad
 				(dot_product
 					(normalize weights)
-					(map
-						(lambda (abs (- (current_value) value)))
-						values
-					)
-				)
-		))
-
-		[
-			expected_delta
-			actual_delta
-		]
-	)
-
-	!ComputeCaseTwoValuesDensity
-	(declare
-		(assoc
-			values []
-			case_value .null
-		)
-
-		(accum (assoc values case_value))
-
-		(declare (assoc
-			index_map (zip (indices values) values)
-			last_index (- (size values) 1)
-		))
-
-		;sort from smallest to largest
-		(declare (assoc
-			sorted_indices
-				(sort
-					(lambda (>
-						(get index_map (current_value))
-						(get index_map (current_value 1))
-					))
-					(indices index_map)
-				)
-		))
-
-		(assign (assoc values (unzip index_map sorted_indices) ))
-
-		(declare (assoc
-			case_value_post_sort_index (get (zip sorted_indices (indices values)) last_index)
-		))
-
-		(declare (assoc
-			two_closest_values_map
-				(map
-					(lambda (let
-						(assoc value (current_value 1))
-
-						(if (= 0 (current_index))
-							(generalized_mean [
-								(- (get values 1) value)
-								(- (get values 2) value)
-							])
-
-							(= last_index (current_index))
-							(generalized_mean [
-								(- value (get values (- last_index 1)) )
-								(- value (get values (- last_index 2)) )
-							])
-
-							(let
-								(assoc
-									min1
-										(min
-											(- value (get values (- (current_index 1) 1)) )
-											(- (get values (+ (current_index 1) 2)) value)
-										)
-									min2
-										(min
-											(if (> (current_index 1) 1)
-												(- value (get values (- (current_index 1) 2)) )
-											)
-											(- (get values (+ (current_index 1) 1)) value)
-										)
-								)
-								(generalized_mean [min1 min2])
+					(if is_edit_distance
+						(map
+							(lambda
+								(edit_distance value (current_value) (get !codeFeatureDomainAttributesMap feature))
 							)
-						)
-					))
-					(zip (indices values) values)
-				)
-		))
-
-		;mean, actual
-		[
-			(generalized_mean (values (remove two_closest_values_map case_value_post_sort_index)))
-			(get two_closest_values_map case_value_post_sort_index)
-		]
-	)
-
-	!ComputeCaseFeatureMAD
-	(declare
-		(assoc
-			values []
-			weights []
-			feature .null
-			continuous_with_nulls_map {}
-		)
-
-		(if (contains_index !nominalsMap feature)
-			(let
-				(assoc
-					cap_map
-						(zip
-							(lambda (+ (current_value) (current_value 1)))
 							values
-							weights
 						)
-				)
 
-				(apply "+" (values
-					(map
-						(lambda (* (current_value) (- 1 (current_value))))
-						cap_map
+						(map (lambda (abs (- (current_value) value))) values)
 					)
-				))
-			)
-
-			(let
-				(assoc
-					non_null_indices
-						(if (and
-								(contains_index continuous_with_nulls_map feature)
-								(contains_value values .null)
-							)
-							(filter
-								(lambda (!= .null (get values (current_value)) ) )
-								(indices values)
-							)
-						)
-					null_weight .null
 				)
+		))
 
-				;if there are nulls, non_null_indices will be specified
-				(if non_null_indices
-					(assign (assoc
-						null_weight
-							(or
-								(get
-									(zip
-										(lambda (+ (current_value) (current_value 1)))
-										values
-										weights
-									)
-									.null
-								)
-								0
-							)
-					))
-				)
-
-				(if (> null_weight 0.5)
-					(conclude (- 1 null_weight))
-				)
-
-				(if (contains_index !editDistanceFeatureTypesMap feature)
-					(call !ComputeWeightedMADEditDistance (assoc
-						vals
-							(if non_null_indices
-								(unzip values non_null_indices)
-								values
-							)
-						weights
-							(if non_null_cases
-								(unzip weights non_null_indices)
-								weights
-							)
-					))
-
-					(call !ComputeWeightedMAD (assoc
-						vals
-							(if non_null_indices
-								(unzip values non_null_indices)
-								values
-							)
-						weights
-							(if non_null_indices
-								(unzip weights non_null_indices)
-								weights
-							)
-					))
-				)
-			)
-		)
+		[
+			weighted_avg_of_local_weighted_mads
+			case_weighted_mad
+		]
 	)
+
 
 	;helper method to compute weighted Mean Absolute Deviation for edit distance features given that a predicted_value is provided
 	;since predicted_value is the weighted mean of values given their weights, the MAD is thus the sum of the weighted deltas to that mean
