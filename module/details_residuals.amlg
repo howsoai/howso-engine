@@ -338,10 +338,15 @@
 								)
 						)
 				))
+
 				(if (get details "feature_full_residual_convictions_for_case")
 					(call !CalculateLocalCaseFeatureResidualConvictions)
 				)
 			)
+		)
+
+		(if (get details "feature_density_convictions")
+			(call !CalculateLocalCaseFeatureDensityConviction)
 		)
 	)
 
@@ -369,7 +374,6 @@
 						features action_features
 						context_features context_features
 						case_ids [temp_case]
-						;;;focal_case ignore_case
 						robust_residuals robust_residuals
 						use_case_weights use_case_weights
 						weight_feature weight_feature
@@ -402,6 +406,317 @@
 	)
 
 
+	;helper method to compute and output feature_density_convictions as well as feature_average_local_mad and feature_local_mad
+	!CalculateLocalCaseFeatureDensityConviction
+	(declare
+		(assoc
+			feature_weights
+				(if (size (get hyperparam_map "featureMdaMap"))
+					(get hyperparam_map "featureMdaMap")
+					(get hyperparam_map "featureWeights")
+				)
+		)
+
+		(declare (assoc
+			local_cases_map
+				(compute_on_contained_entities
+					filtering_queries
+					(query_nearest_generalized_distance
+						(modify k_parameter)
+						(indices case_value_map)
+						(values case_value_map)
+						p_parameter
+						(modify feature_weights)
+						(modify !queryFeatureAttributeTypeMap)
+						(modify feature_deviations)
+						.null ;feature
+						(modify dt_parameter)
+						(if valid_weight_feature (modify weight_feature) .null)
+						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+						"fixed rand seed"
+						.null
+						(modify !numericalPrecision)
+					)
+				)
+		))
+
+		;list of local case maps for each of the nearest neighbors to the case
+		(declare (assoc
+			local_cases_maps
+				(map
+					(lambda
+						(compute_on_contained_entities
+							(query_not_in_entity_list [(current_value 1)])
+							filtering_queries
+							(query_nearest_generalized_distance
+								(modify k_parameter)
+								(indices case_value_map)
+								(retrieve_from_entity (current_value) (indices case_value_map))
+								p_parameter
+								(modify feature_weights)
+								(modify !queryFeatureAttributeTypeMap)
+								(modify feature_deviations)
+								.null ;feature
+								(modify dt_parameter)
+								(if valid_weight_feature (modify weight_feature) .null)
+								;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+								"fixed rand seed"
+								.null
+								(modify !numericalPrecision)
+							)
+						)
+					)
+					;all the local case ids
+					(indices local_cases_map)
+				)
+		))
+
+		(declare (assoc
+			weights (normalize (values local_cases_map))
+			approximately_one (- 1 (call !ComputePrecisionEpsilon))
+			local_avg_mad_map {}
+			local_mad_map {}
+			continuous_with_nulls_map
+				(filter
+					(lambda (and
+						(not (contains_index !nominalsMap (current_index)))
+						(!= .false (get !featureNullRatiosMap [(current_index 1) "has_nulls"]))
+					))
+					(keep case_value_map action_features)
+				)
+		))
+
+		(accum (assoc
+			output
+				(assoc
+					"feature_density_convictions"
+						(append
+							(call !CalculateLocalDensityConviction)
+							(map 1 inactive_features_zeros_map)
+						)
+				)
+		))
+
+		(accum (assoc
+			output
+				(assoc
+					"feature_average_local_mad" local_avg_mad_map
+					"feature_local_mad" local_mad_map
+				)
+		))
+	)
+
+
+	!CalculateLocalDensityConviction
+	(map
+		(lambda (let
+			(assoc
+				feature (current_index 1)
+				case_value (get case_value_map (current_index 1))
+			)
+
+			;pull all the case values for this feature
+			(declare (assoc
+				values
+					(map
+						(lambda (retrieve_from_entity (current_value) feature))
+						(indices local_cases_map)
+					)
+			))
+
+			(if (contains_index !nominalsMap feature)
+				(let
+					(assoc
+						cap_map
+							(zip
+								(lambda (+ (current_value) (current_value 1)))
+								values
+								weights
+							)
+					)
+					(declare (assoc
+						mad
+							(max
+								(apply "+" (values
+									(map
+										(lambda (* (current_value) (- 1 (current_value))))
+										cap_map
+									)
+								))
+								(get !cachedFeatureMinResidualMap feature)
+							)
+						residual
+							(max
+								(abs (- 1 (or (get cap_map case_value))  ))
+								(get !cachedFeatureMinResidualMap feature)
+							)
+					))
+
+
+					(accum (assoc
+						local_avg_mad_map (associate feature mad)
+						local_mad_map (associate feature residual)
+					))
+
+					;if there's only one value in the local data, either it's 100% right or 100% wrong
+					(if (= 1 (size cap_map))
+						(if (= (first (indices cap_map)) case_value)
+							.infinity
+							;else got it completely wrong
+							0
+						)
+
+						(/ mad residual)
+					)
+				)
+
+				;else continuous feature
+				(let
+					(assoc
+						has_local_nulls
+							(and
+								(contains_index continuous_with_nulls_map feature)
+								(or
+									(= .null case_value)
+									(contains_value values .null)
+								)
+							)
+					)
+
+					(declare (assoc
+						null_weight
+							(if has_local_nulls
+								(or
+									(get
+										(zip
+											(lambda (+ (current_value) (current_value 1)))
+											values
+											weights
+										)
+										.null
+									)
+									0
+								)
+
+								0
+							)
+					))
+
+					;if null is the case value or is majority weight of local data, compute conviction ratio based on nulls
+					(if (or
+							(> null_weight 0.5)
+							(= .null case_value)
+						)
+
+						;if case is null, higher null weight increases the conviction ratio
+						(if (= .null case_value)
+							(seq
+								(accum (assoc
+									local_avg_mad_map (associate feature null_weight)
+									local_mad_map (associate feature (- 1 null_weight))
+								))
+								(if (>= null_weight approximately_one)
+									.infinity
+
+									(= 0 null_weight)
+									0
+
+									(/
+										null_weight
+										(- 1 null_weight)
+									)
+								)
+							)
+
+							;else case was not null, higher null weight lowers the conviction ratio
+							(seq
+								(accum (assoc
+									local_avg_mad_map (associate feature (- 1 null_weight))
+									local_mad_map (associate feature null_weight)
+								))
+								;else case value is not null but was incorrectly predicted as null
+								(if (>= null_weight approximately_one)
+									0
+
+									;if predicted as null, that means values account for < 50% of the probability mass
+									(/
+										(- 1 null_weight)
+										null_weight
+									)
+								)
+							)
+						)
+
+
+						;else nulls aren't significant for this case, compute MAD
+						(let
+							(assoc
+								non_null_indices
+									(if has_local_nulls
+										(filter
+											(lambda (!= .null (get values (current_value)) ) )
+											(indices values)
+										)
+									)
+							)
+
+							(declare (assoc
+								feature_weighted_mad_pair
+									(call !ComputeCaseFeatureWeightedMADPair (assoc
+										cases
+											(if non_null_indices
+												(unzip (indices local_cases_map) non_null_indices)
+												(indices local_cases_map)
+											)
+										values
+											(if non_null_indices
+												(unzip values non_null_indices)
+												values
+											)
+										weights
+											(if non_null_indices
+												(unzip weights non_null_indices)
+												weights
+											)
+										local_cases_maps
+											(if non_null_indices
+												(unzip local_cases_maps non_null_indices)
+												local_cases_maps
+											)
+										feature feature
+										is_edit_distance (contains_index !editDistanceFeatureTypesMap feature)
+										case_value case_value
+										feature_has_nulls (contains_index continuous_with_nulls_map feature)
+									))
+							))
+							(declare (assoc
+								avg_local_mad (max (first feature_weighted_mad_pair) (get !cachedFeatureMinResidualMap feature))
+								local_mad (max (last feature_weighted_mad_pair) (get !cachedFeatureMinResidualMap feature))
+							))
+
+							(accum (assoc
+								local_avg_mad_map (associate feature avg_local_mad)
+								local_mad_map (associate feature local_mad)
+							))
+
+							;if all values are the same at or around 0, output 1
+							(if (and
+									(<= avg_local_mad (get !cachedFeatureMinResidualMap feature))
+									(<= local_mad (get !cachedFeatureMinResidualMap feature))
+								)
+								1
+
+								(/ avg_local_mad local_mad)
+							)
+						)
+					)
+				)
+			)
+		))
+		(keep case_value_map action_features)
+	)
+
+
 	!CalculateLocalCaseFeatureResidualConvictions
 	(declare
 		(assoc
@@ -409,7 +724,7 @@
 			global_residuals_map (get hyperparam_map "featureResiduals")
 		)
 
-		(assign (assoc
+		(declare (assoc
 			local_convictions_map
 				(map
 					(lambda
