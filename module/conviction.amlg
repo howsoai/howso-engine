@@ -995,7 +995,9 @@
 		)
 	)
 
-	;helper method for react_into_features/react to compute the residual contribution of a given case
+	;helper method for react_into_features/react to compute the residual contribution of a given case.
+	;This is computed as the average of surprisal across the given features where surprisal is computed as the
+	;prediction residual / the local residual estimated by the MAD (or other methods for incompatible feature types)
 	!ResidualContribution
 	(declare
 		(assoc
@@ -1019,9 +1021,18 @@
 							(assoc
 								context_values_map (remove case_values_map (current_value 1))
 								action_feature (current_value 1)
-								feature_is_nominal (contains_index !nominalsMap (current_value 1))
-								feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_value 1))
 							)
+
+							(declare (assoc
+								feature_is_nominal (contains_index !nominalsMap action_feature)
+								feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
+								feature_has_continuous_nulls
+									(and
+										(not (contains_index !nominalsMap action_feature))
+										(!= .false (get !featureNullRatiosMap [action_feature "has_nulls"]))
+									)
+								categorical_action_probabilities_map {}
+							))
 
 							(declare (assoc
 								candidate_cases_lists
@@ -1052,85 +1063,138 @@
 								case_value (get case_values_map (current_value 1))
 							))
 
-							(declare (assoc
-								caps_map
-									(if feature_is_nominal
-										(normalize (zip
-											(lambda (+ (current_value) (current_value 1)))
-											(last candidate_cases_lists) ;values
-											(get candidate_cases_lists 1) ;weights
-										))
-									)
-								num_influential_cases (size (first candidate_cases_lists))
-							))
-
-							(declare (assoc
-								interpolated_value
-									(if (not feature_is_nominal)
-										(call !InterpolateActionValues (assoc
-											action_feature action_feature
-											candidate_case_ids (first candidate_cases_lists)
-											candidate_case_weights (get candidate_cases_lists 1)
-											candidate_case_values (last candidate_cases_lists)
-										))
-									)
-								local_mad
-									(max
-										(if feature_is_nominal
-											(apply "+" (values
-												(map
-													(lambda (* (current_value) (- 1 (current_value))))
-													caps_map
-												)
+							(if feature_is_nominal
+								(declare
+									(assoc
+										caps_map
+											(normalize (zip
+												(lambda (+ (current_value) (current_value 1)))
+												(last candidate_cases_lists) ;values
+												(get candidate_cases_lists 1) ;weights
 											))
+									)
 
-											feature_is_edit_distance
-											;compute the average distance between each pair of feature values in the local area
-											(generalized_mean
-												(apply "append" (map
-													(lambda
-														;for each influential case, measure distance to all other influential case feature value's with greater index
-														(map
-															(lambda
-																(edit_distance (current_value 1) (current_value) (get !codeFeatureDomainAttributesMap action_feature))
-															)
-															(tail (last candidate_cases_lists) (- num_influential_cases 1 (current_index)))
+									(/
+										(if (contains_index caps_map [case_value])
+											;1 - CAP of correct class if class has a CAP
+											(- 1 (get caps_map [case_value]) )
+
+											;otherwise 1 - 0 = 1
+											1
+										)
+										;nominal MAD estimate. sum of p * (1-p)
+										(apply "+" (values
+											(map
+												(lambda (* (current_value) (- 1 (current_value))))
+												caps_map
+											)
+										))
+									)
+								)
+
+								;else continuous
+								(let
+									(assoc
+										influence_weights (get candidate_cases_lists 1)
+										influential_values (last candidate_cases_lists)
+										num_influential_cases (size (first candidate_cases_lists))
+
+										interpolated_value
+											(call !InterpolateActionValues (assoc
+												action_feature action_feature
+												candidate_case_ids (first candidate_cases_lists)
+												candidate_case_weights (get candidate_cases_lists 1)
+												candidate_case_values (last candidate_cases_lists)
+												output_categorical_action_probabilities feature_has_continuous_nulls
+											))
+									)
+
+									(if feature_has_continuous_nulls
+										;there may be nulls that require special handling
+										(declare
+											(assoc
+												null_indices
+													(if (contains_value influential_values .null)
+														(filter
+															(lambda (= .null (get influential_values (current_value)) ) )
+															(indices influential_values)
 														)
 													)
-													(trunc (last candidate_cases_lists))
-												))
+												null_probability_mass (get categorical_action_probabilities_map action_feature)
 											)
 
-											(call !ComputeMAD (assoc
-												vals (last candidate_cases_lists)
-											))
+											(if (and
+													(!= .null case_value)
+													(!= .null interpolated_value)
+												)
+												;if interpolated and case are non-null. Just remove nulls from local and continue
+												(assign (assoc
+													influential_values (remove influential_values null_indices)
+												))
+
+
+												;if the case value is null, the residual is 1 - null probability.
+												(= .null case_value)
+												(conclude
+													(/
+														(- 1 null_probability_mass)
+														(max
+															(* null_probability_mass (- 1 null_probability_mass))
+															(get !cachedFeatureMinResidualMap action_feature)
+														)
+													)
+												)
+
+												;else the case value is not null, but the interpolated value is. Then residual is 1 - non-null-probability = null probability.
+												;This is effectively the surprisal that the case is not null, rather than measuring surprisal at the value itself.
+												(conclude
+													(/
+														null_probability_mass
+														(max
+															(* null_probability_mass (- 1 null_probability_mass))
+															(get !cachedFeatureMinResidualMap action_feature)
+														)
+													)
+												)
+											)
 										)
-										(get !cachedFeatureMinResidualMap action_feature)
 									)
-							))
 
-							(if feature_is_nominal
-								;get surprisal for a residual on nominal values
-								(/
-									(if (contains_index caps_map [case_value])
-										;1 - CAP of correct class if class has a CAP
-										(- 1 (get caps_map [case_value]) )
+									(/
+										;feature residual
+										(if feature_is_edit_distance
+											(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
 
-										;otherwise 1 - 0 = 1
-										1
+											(abs (- interpolated_value case_value))
+										)
+										(max
+											;local expected residual estimate
+											(if feature_is_edit_distance
+												;average distance between two values in local space
+												(generalized_mean
+													(apply "append" (map
+														(lambda
+															;for each influential case, measure distance to all other influential case feature value's with greater index
+															(map
+																(lambda
+																	(edit_distance (current_value 1) (current_value) (get !codeFeatureDomainAttributesMap action_feature))
+																)
+																(tail influential_values (- num_influential_cases 1 (current_index)))
+															)
+														)
+														(trunc influential_values)
+													))
+												)
+												;unweighted MAD
+												(call !ComputeMAD (assoc
+													vals influential_values
+												))
+											)
+											(get !cachedFeatureMinResidualMap action_feature)
+										)
 									)
-									local_mad
 								)
 
-								;otherwise surprisal is (residual / local weighted MAD) for continuous values
-								(/
-									(if feature_is_edit_distance
-										(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
-
-										(abs (- interpolated_value case_value))
-									)
-									local_mad
-								)
 							)
 						)
 					)
@@ -1138,6 +1202,6 @@
 				)
 		))
 
-		(/ (apply "+" feature_surprisals) (size feature_surprisals))
+		(generalized_mean feature_surprisals)
 	)
 }
