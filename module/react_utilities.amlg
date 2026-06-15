@@ -1434,87 +1434,128 @@
 									(lambda (retrieve_from_entity (current_index) feature))
 									all_cases_neighbors_map
 								)
+							feature_is_nominal (contains_index !nominalsMap feature)
+							feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap feature)
+							feature_has_continuous_nulls
+								(and
+									(not (contains_index !nominalsMap feature))
+									(!= .false (get !featureNullRatiosMap [feature "has_nulls"]))
+								)
+						))
+
+						(declare (assoc
+							max_null_uncertainty
+								(if feature_has_continuous_nulls
+									(get baseline_hyperparameter_map "featureDeviations" [feature 1])
+								)
 						))
 
 						(map
 							(lambda (let
-								(assoc neighbors_map (current_value 1) )
-								(if (contains_index !nominalsMap feature)
+								(assoc
+									neighbors_map (current_value 1)
+									influential_values (unzip case_feature_value_map (indices (current_value 1)))
+								)
+								(if feature_is_nominal
 									(let
 										(assoc
 											cap_map
 												(zip
 													(lambda (+ (current_value) (current_value 1)))
 													;values
-													(unzip case_feature_value_map (indices neighbors_map))
+													influential_values
 													;weights
 													(normalize (values neighbors_map))
 												)
 										)
 
 										(max
-											(apply "+" (values
+											(apply "+"
 												(map
 													(lambda (* (current_value) (- 1 (current_value))))
 													cap_map
 												)
-											))
+											)
 											(get !cachedFeatureMinResidualMap feature)
 										)
 									)
 
-									;else continuous, TODO: handle nulls and edit features
-									;unweighted mad
-									(call !ComputeMAD (assoc
-										vals (unzip case_feature_value_map (indices neighbors_map))
-									))
+									;else continuous feature
+									(if feature_has_continuous_nulls
+										(let
+											(assoc
+												case_value (get case_feature_value_map [(current_index 2) feature])
+											)
+											(declare (assoc
+												has_local_nulls
+													(or
+														(= .null case_value)
+														(contains_value influential_values .null)
+													)
+											))
 
-										; ;weighted mad
-										; (call !ComputeWeightedMAD (assoc
-										; 	vals (unzip case_feature_value_map (indices neighbors_map))
-										; 	weights (values neighbors_map)
-										; ))
+											(declare (assoc
+												null_weight
+													(if has_local_nulls
+														(or
+															(get
+																(zip
+																	(lambda (+ (current_value) (current_value 1)))
+																	;values
+																	influential_values
+																	;weights
+																	(normalize (values neighbors_map))
+																)
+																.null
+															)
+															0
+														)
 
-										; ;unweighted mad including case value
-										; (call !ComputeMAD (assoc
-										; 	vals
-										; 		(append
-										; 			(unzip case_feature_value_map (indices neighbors_map))
-										; 			(get case_feature_value_map (current_index 2))
-										; 		)
-										; ))
+														0
+													)
+											))
 
-										; ;unweighted mad including case value
-										; (call !ComputeWeightedMAD (assoc
-										; 	vals
-										; 		(append
-										; 			(unzip case_feature_value_map (indices neighbors_map))
-										; 			(get case_feature_value_map (current_index 2))
-										; 		)
-										; 	weights (append (values neighbors_map) 1)
-										; ))
+											(if (= .null case_value)
+												[
+													;value MAD is null because it isn't relevant to this case and will be replaced with global avg MAD
+													.null
+													;null MAD is max_null_uncertainty * (1 - null weight)
+													(max
+														(* max_null_uncertainty (- 1 null_weight))
+														(/ 1 (+ 0.5 num_cases))
+													)
+												]
 
-										; ;residual
-										; (abs (-
-										; 	(dot_product
-										; 		(unzip case_feature_value_map (indices neighbors_map))
-										; 		(normalize (values neighbors_map))
-										; 	)
-										; 	(get case_feature_value_map (current_index 1))
-										; ))
+												;else value isn't null but all local data is null
+												(= 1 null_weight)
+												[
+													;value MAD is null because it cannot be computed and will be replaced with global avg MAD
+													.null
+													;set null MAD to null so it can be replaced with global avg MAD below
+													.null
+												]
 
-										; ;residual including case value
-										; (abs (-
-										; 	(dot_product
-										; 		(append
-										; 			(unzip case_feature_value_map (indices neighbors_map))
-										; 			(get case_feature_value_map (current_index 1))
-										; 		)
-										; 		(normalize (append (values neighbors_map) 1))
-										; 	)
-										; 	(get case_feature_value_map (current_index 1))
-										; ))
+												;else value isn't null but some of the local influential_values might be
+												[
+													(call !ComputeContinuousFeatureMAD (assoc
+														influential_values (filter influential_values)
+														action_feature feature
+														feature_is_edit_distance feature_is_edit_distance
+													))
+													;set null MAD to null so it can be replaced with global avg MAD below
+													.null
+												]
 
+											)
+										)
+
+										;else there are no nulls in this feature, compute MAD
+										(call !ComputeContinuousFeatureMAD (assoc
+											influential_values influential_values
+											action_feature feature
+											feature_is_edit_distance feature_is_edit_distance
+										))
+									)
 								)
 							))
 							all_cases_neighbors_map
@@ -1530,6 +1571,32 @@
 					(lambda (concat (current_value) "_mad"))
 					(indices features_cases_mad_map)
 				)
+			;map of continuous features that have nulls
+			continuous_with_nulls_map
+				(filter
+					(lambda (and
+						(not (contains_index !nominalsMap (current_index)))
+						(!= .false (get !featureNullRatiosMap [(current_index 1) "has_nulls"]))
+					))
+					(zip features)
+				)
+		))
+
+		(declare (assoc
+			average_mad_map
+				(map
+					(lambda
+						(if (contains_index continuous_with_nulls_map (current_index))
+							[
+								(generalized_mean (map (lambda (first (current_value))) (current_value)) )
+								(generalized_mean (map (lambda (last (current_value))) (current_value)) )
+							]
+
+							(generalized_mean (current_value))
+						)
+					)
+					features_cases_mad_map
+				)
 		))
 
 
@@ -1540,24 +1607,52 @@
 				(assign_to_entities case_id (zip
 					mad_features
 					(map
-						(lambda (get (current_value) case_id))
+						(lambda (let
+							(assoc feature (get mad_features (current_index 1)) )
+
+							(if (contains_index continuous_with_nulls_map feature)
+								(let
+									(assoc case_mad_pair (get (current_value 1) case_id))
+
+									;if the pair has a null, replace it with the appropriate average mad
+									(if (and
+											(= .null (first case_mad_pair))
+											(= .null (last case_mad_pair))
+										)
+										[
+											(get average_mad_map [feature 0])
+											(get average_mad_map [feature 1])
+										]
+
+										;else only the value mad is missing
+										(= .null (first case_mad_pair))
+										[
+											(get average_mad_map [feature 0])
+											(last case_mad_pair)
+										]
+
+										;else only the null mad is missing
+										(= .null (last case_mad_pair))
+										[
+											(first case_mad_pair)
+											(get average_mad_map [feature 1])
+										]
+
+										;else no need to update any nulls
+										case_mad_pair
+									)
+								)
+
+								(get (current_value) case_id)
+							)
+
+						))
 						(values features_cases_mad_map)
 					)
 				))
 			))
 			all_cases_neighbors_map
 		)
-
-		(declare (assoc
-			average_mad_map
-				(map
-					(lambda
-						(generalized_mean (current_value))
-						;(generalized_mean (map (lambda (first (current_value))) (current_value)) )
-					)
-					features_cases_mad_map
-				)
-		))
 
 		(accum "baseline_hyperparameter_map"
 			"deviationPercentMap"
@@ -1567,11 +1662,18 @@
 						(if (contains_index !nominalsMap feature)
 							1
 
+							;this feature has null deviations
 							(~ [] (current_value))
-							(/
-								(first (current_value))
-								(get average_mad_map feature)
-							)
+							[
+								(/
+									(first (current_value 1))
+									(get average_mad_map [feature 0])
+								)
+								(/
+									(last (current_value 1))
+									(get average_mad_map [feature 1])
+								)
+							]
 
 							(/ (current_value) (get average_mad_map feature))
 						)
