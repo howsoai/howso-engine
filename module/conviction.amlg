@@ -28,6 +28,9 @@
 			;true or string, if true will use default value of "distance_contribution" for feature name
 			#{type ["boolean" "string"]}
 			distance_contribution .null
+			;true or string, if true will use default value of "residual_contribution" for feature name
+			#{type ["boolean" "string"]}
+			residual_contribution .null
 			;true or string, if true will use default value of "similarity_conviction" for feature name. If computing
 			;similarity condition for the entire dataset, then distance contribution will also be computed and stored
 			;if it is not already stored as feature. If overwite is true, then DC will be computed and overwritten.
@@ -83,7 +86,7 @@
 		;if no parameters specified, do nothing
 		(if
 			(= .null
-			   familiarity_conviction_addition familiarity_conviction_removal distance_contribution
+			   familiarity_conviction_addition familiarity_conviction_removal distance_contribution residual_contribution
 			   p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy clustering
 			)
 			(conclude (call !Return))
@@ -105,6 +108,9 @@
 		(if (= .true distance_contribution)
 			(assign (assoc distance_contribution "distance_contribution"))
 		)
+		(if (= .true residual_contribution)
+			(assign (assoc residual_contribution "residual_contribution"))
+		)
 		(if (= .true similarity_conviction)
 			(assign (assoc similarity_conviction "similarity_conviction"))
 		)
@@ -125,6 +131,7 @@
 		)
 		(if distance_contribution (accum (assoc num_steps 1)) )
 		(if similarity_conviction (accum (assoc num_steps (if distance_contribution 1 2) )) )
+		(if residual_contribution (accum (assoc num_steps 1)) )
 		(if influence_weight_entropy (accum (assoc num_steps 1)) )
 
 		(if clustering
@@ -161,7 +168,7 @@
 			(and
 				(not overwrite)
 				(or
-					familiarity_conviction_addition familiarity_conviction_removal distance_contribution
+					familiarity_conviction_addition familiarity_conviction_removal distance_contribution residual_contribution
 					p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy clustering
 				)
 			)
@@ -174,7 +181,7 @@
 								(contains_value !reactIntoFeaturesList (current_value))
 							)
 							(filter [
-								familiarity_conviction_addition familiarity_conviction_removal distance_contribution
+								familiarity_conviction_addition familiarity_conviction_removal distance_contribution residual_contribution
 								p_value_of_addition p_value_of_removal similarity_conviction influence_weight_entropy clustering
 							])
 						)
@@ -239,6 +246,7 @@
 						"p_value_of_addition" p_value_of_addition
 						"p_value_of_removal" p_value_of_removal
 						"distance_contribution" distance_contribution
+						"residual_contribution" residual_contribution
 						"similarity_conviction" similarity_conviction
 						"influence_weight_entropy" influence_weight_entropy
 					)
@@ -728,6 +736,48 @@
 			)
 		)
 
+		(if residual_contribution
+			(seq
+				(call !ProgressUpdate (assoc details "Computing residual contributions"))
+				(let
+					(assoc
+						residual_contribution_map
+							||(map
+								(lambda
+									(call !ResidualContribution (assoc
+										features features
+										feature_values (unzip (current_value 1) features)
+										use_case_weights use_case_weights
+										weight_feature weight_feature
+										dataset_size dataset_size
+										case_id (current_index 1)
+									))
+								)
+								;pull all relevant feature values for the cases
+								;assoc of case id -> assoc of feature -> values
+								(if (= .null case_ids)
+									(compute_on_contained_entities (map (lambda (query_exists (current_value))) features))
+
+									(compute_on_contained_entities
+										(query_in_entity_list case_ids)
+										(map (lambda (query_exists (current_value))) features)
+									)
+								)
+							)
+					)
+
+					(call !StoreCaseValues (assoc
+						label_name residual_contribution
+						case_values_map residual_contribution_map
+					))
+
+					(if (not (contains_value !reactIntoFeaturesList residual_contribution))
+						(accum_to_entities (assoc !reactIntoFeaturesList residual_contribution))
+					)
+				)
+			)
+		)
+
 		(call !ProgressClear)
 
 		;update the known features to include these
@@ -871,8 +921,9 @@
 				(contained_entities
 					(if case_id
 						(query_not_in_entity_list [case_id] )
-						filtering_queries
+						[]
 					)
+					filtering_queries
 					(query_nearest_generalized_distance
 						(max k_parameter_value !regionalMinSize)
 						features
@@ -943,5 +994,257 @@
 			"similarity_conviction" (/ (generalized_mean local_distance_contributions_map) case_dc)
 			"distance_contribution" case_dc
 		)
+	)
+
+	;helper method for react_into_features/react to compute the residual contribution of a given case.
+	;This is computed as the average of surprisal across the given features where surprisal is computed as the
+	;prediction residual / the local residual estimated by the MAD (or other methods for incompatible feature types)
+	!ResidualContribution
+	(declare
+		(assoc
+			features []
+			feature_values []
+			filtering_queries []
+			use_case_weights .false
+			weight_feature ".none"
+			dataset_size .null
+			case_id .null
+		)
+
+		(declare (assoc
+			case_values_map (zip features feature_values)
+		))
+
+		(declare (assoc
+			feature_surprisals
+				(map
+					(lambda
+						(let
+							(assoc
+								context_values_map (remove case_values_map (current_value 1))
+								action_feature (current_value 1)
+							)
+
+							(declare (assoc
+								feature_is_nominal (contains_index !nominalsMap action_feature)
+								feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap action_feature)
+								feature_has_continuous_nulls
+									(and
+										(not (contains_index !nominalsMap action_feature))
+										(!= .false (get !featureNullRatiosMap [action_feature "has_nulls"]))
+									)
+								categorical_action_probabilities_map {}
+							))
+
+							(declare (assoc
+								candidate_cases_lists
+									(compute_on_contained_entities
+										(if case_id
+											(query_not_in_entity_list [case_id] )
+											[]
+										)
+										filtering_queries
+										(query_nearest_generalized_distance
+											(get hyperparam_map "k")
+											(indices context_values_map)
+											(values context_values_map)
+											(get hyperparam_map "p")
+											feature_weights
+											!queryFeatureAttributeTypeMap
+											(get hyperparam_map "featureDeviations")
+											action_feature ;weight_selection
+											(get hyperparam_map "dt")
+											(if use_case_weights weight_feature .null)
+											;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+											"fixed rand seed"
+											.null ;radius
+											!numericalPrecision
+											action_feature
+										)
+									)
+								case_value (get case_values_map (current_value 1))
+							))
+
+							(if feature_is_nominal
+								(declare
+									(assoc
+										caps_map
+											(normalize (zip
+												(lambda (+ (current_value) (current_value 1)))
+												(last candidate_cases_lists) ;values
+												(get candidate_cases_lists 1) ;weights
+											))
+									)
+
+									(if (= 1 (size caps_map))
+										;if there is only one class represented, find the nearest case of a different class
+										;and update the caps_map accordingly
+										(assign (assoc
+											caps_map
+												(let
+													(assoc
+														extra_candidate_case_lists
+															(compute_on_contained_entities
+																(if case_id
+																	(query_not_in_entity_list [case_id] )
+																	[]
+																)
+																filtering_queries
+																(query_not_equals action_feature (first (indices caps_map)))
+																(query_nearest_generalized_distance
+																	1 ;just the singular nearest case
+																	(indices context_values_map)
+																	(values context_values_map)
+																	(get hyperparam_map "p")
+																	feature_weights
+																	!queryFeatureAttributeTypeMap
+																	(get hyperparam_map "featureDeviations")
+																	action_feature ;weight_selection
+																	(get hyperparam_map "dt")
+																	(if use_case_weights weight_feature .null)
+																	;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+																	"fixed rand seed"
+																	.null ;radius
+																	!numericalPrecision
+																	action_feature
+																)
+															)
+													)
+
+													(normalize (zip
+														(lambda (+ (current_value) (current_value 1)))
+														(append (last candidate_cases_lists) (last extra_candidate_case_lists)) ;values
+														(append (get candidate_cases_lists 1) (get extra_candidate_case_lists 1)) ;values
+													))
+												)
+										))
+									)
+
+									(/
+										(if (contains_index caps_map [case_value])
+											;1 - CAP of correct class if class has a CAP
+											(- 1 (get caps_map [case_value]) )
+
+											;otherwise 1 - 0 = 1
+											1
+										)
+										;nominal MAD estimate. sum of p * (1-p)
+										(max
+											(apply "+"
+												(map
+													(lambda (* (current_value) (- 1 (current_value))))
+													caps_map
+												)
+											)
+											(get !cachedFeatureMinResidualMap action_feature)
+										)
+									)
+								)
+
+								;else continuous
+								(let
+									(assoc
+										influence_weights (get candidate_cases_lists 1)
+										influential_values (last candidate_cases_lists)
+
+										interpolated_value
+											(call !InterpolateActionValues (assoc
+												action_feature action_feature
+												candidate_case_ids (first candidate_cases_lists)
+												candidate_case_weights (get candidate_cases_lists 1)
+												candidate_case_values (last candidate_cases_lists)
+												;if feature has nulls, enabling the output_caps flag will accumulate the null probability mass
+												;to categorical_action_probabilities_map
+												output_categorical_action_probabilities feature_has_continuous_nulls
+											))
+									)
+
+									(if feature_has_continuous_nulls
+										;there may be nulls that require special handling
+										(declare
+											(assoc
+												null_indices
+													(if (contains_value influential_values .null)
+														(filter
+															(lambda (= .null (get influential_values (current_value)) ) )
+															(indices influential_values)
+														)
+														[]
+													)
+												null_probability_mass (get categorical_action_probabilities_map action_feature)
+											)
+
+											(if (and
+													(!= .null case_value)
+													(!= .null interpolated_value)
+													(size null_indices)
+												)
+												;if interpolated and case are non-null. Just remove nulls from local and continue
+												(assign (assoc
+													influential_values (remove influential_values null_indices)
+												))
+
+
+												;if the case value is null, the residual is 1 - null probability.
+												(= .null case_value)
+												(conclude
+													(/
+														(- 1 null_probability_mass)
+														(max
+															;sum of p*q for null-axis CAPs
+															(* 2 null_probability_mass (- 1 null_probability_mass))
+															(/ 1 (+ 0.5 dataset_size))
+														)
+													)
+												)
+
+												;else the case value is not null, but the interpolated value is. Then residual is 1 - non-null-probability = null probability.
+												;This is effectively the surprisal that the case is not null, rather than measuring surprisal at the value itself.
+												(= .null interpolated_value)
+												(conclude
+													(/
+														null_probability_mass
+														(max
+															;sum of p*q for null-axis CAPs
+															(* 2 null_probability_mass (- 1 null_probability_mass))
+															(/ 1 (+ 0.5 dataset_size))
+														)
+													)
+												)
+											)
+										)
+									)
+
+									(/
+										;feature residual
+										(if feature_is_edit_distance
+											(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
+
+											(abs (- interpolated_value case_value))
+										)
+										(max
+											;local expected residual estimate
+											(if feature_is_edit_distance
+												(call !ComputeEditDistanceMAD (assoc
+													vals influential_values
+												))
+
+												(call !ComputeMAD (assoc
+													vals influential_values
+												))
+											)
+											(get !cachedFeatureMinResidualMap action_feature)
+										)
+									)
+								)
+
+							)
+						)
+					)
+					features
+				)
+		))
+
+		(generalized_mean feature_surprisals)
 	)
 }
