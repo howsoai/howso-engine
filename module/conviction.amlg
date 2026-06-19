@@ -996,6 +996,18 @@
 		)
 	)
 
+	;params:
+	;	surprisal: residual / deviation
+	!ConvertResidualSurprisal
+	(* -1 (log
+		(-
+			1
+			;probability
+			(exp (* -1 surprisal))
+		)
+	))
+
+
 	;helper method for react_into_features/react to compute the residual contribution of a given case.
 	;This is computed as the average of surprisal across the given features where surprisal is computed as the
 	;prediction residual / the local residual estimated by the MAD (or other methods for incompatible feature types)
@@ -1016,7 +1028,7 @@
 		))
 
 		(declare (assoc
-			feature_surprisals
+			feature_surprisal_tuples
 				(map
 					(lambda
 						(let
@@ -1034,6 +1046,7 @@
 										(!= .false (get !featureNullRatiosMap [action_feature "has_nulls"]))
 									)
 								categorical_action_probabilities_map {}
+								feature_deviation (get hyperparam_map ["featureResiduals" action_feature])
 							))
 
 							(declare (assoc
@@ -1120,25 +1133,36 @@
 										))
 									)
 
-									(/
-										(if (contains_index caps_map [case_value])
-											;1 - CAP of correct class if class has a CAP
-											(- 1 (get caps_map [case_value]) )
+									[
+										(call !ConvertResidualSurprisal (assoc
+											surprisal
+												(/
+													(if (contains_index caps_map [case_value])
+														;1 - CAP of correct class if class has a CAP
+														(- 1 (get caps_map [case_value]) )
 
-											;otherwise 1 - 0 = 1
-											1
-										)
-										;nominal MAD estimate. sum of p * (1-p)
-										(max
-											(apply "+"
-												(map
-													(lambda (* (current_value) (- 1 (current_value))))
-													caps_map
+														;otherwise 1 - 0 = 1
+														1
+													)
+													feature_deviation
 												)
-											)
-											(get !cachedFeatureMinResidualMap action_feature)
-										)
-									)
+										))
+										(call !ConvertResidualSurprisal (assoc
+											surprisal
+												(/
+													(max
+														(apply "+"
+															(map
+																(lambda (* (current_value) (- 1 (current_value))))
+																caps_map
+															)
+														)
+														(get !cachedFeatureMinResidualMap action_feature)
+													)
+													feature_deviation
+												)
+										))
+									]
 								)
 
 								;else continuous
@@ -1215,27 +1239,39 @@
 										)
 									)
 
-									(/
-										;feature residual
-										(if feature_is_edit_distance
-											(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
+									[
+										(call !ConvertResidualSurprisal (assoc
+											surprisal
+												(/
+													;feature residual
+													(if feature_is_edit_distance
+														(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
 
-											(abs (- interpolated_value case_value))
-										)
-										(max
-											;local expected residual estimate
-											(if feature_is_edit_distance
-												(call !ComputeEditDistanceMAD (assoc
-													vals influential_values
-												))
+														(abs (- interpolated_value case_value))
+													)
+													feature_deviation
+												)
+										))
+										(call !ConvertResidualSurprisal (assoc
+											surprisal
+												(/
+													(max
+														;local expected residual estimate
+														(if feature_is_edit_distance
+															(call !ComputeEditDistanceMAD (assoc
+																vals influential_values
+															))
 
-												(call !ComputeMAD (assoc
-													vals influential_values
-												))
-											)
-											(get !cachedFeatureMinResidualMap action_feature)
-										)
-									)
+															(call !ComputeMAD (assoc
+																vals influential_values
+															))
+														)
+														(get !cachedFeatureMinResidualMap action_feature)
+													)
+													feature_deviation
+												)
+										))
+									]
 								)
 
 							)
@@ -1245,6 +1281,11 @@
 				)
 		))
 
-		(generalized_mean feature_surprisals)
+		(declare (assoc
+			total_case_residual_surprisals (apply "+" (map (lambda (first (current_value))) feature_surprisal_tuples))
+			total_neighborhood_mad_surprisals (apply "+" (map (lambda (last (current_value))) feature_surprisal_tuples))
+		))
+
+		(/ total_case_residual_surprisals total_neighborhood_mad_surprisals)
 	)
 }
