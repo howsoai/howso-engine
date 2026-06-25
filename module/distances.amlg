@@ -444,9 +444,6 @@
 			;which features to use when computing case distances. If unspecified uses all features.
 			#{type "list" values "string"}
 			features .null
-			;if specified, returns case distances of the local data relative to these values, ignores case_indices parameter.
-			#{type "list"}
-			feature_values .null
 			;if specified, uses targeted hyperparameters used to predict this action_feature, otherwise uses targetless hyperparameters.
 			#{type "string"}
 			action_feature .null
@@ -489,20 +486,16 @@
 		)
 		(call !ValidateParameters)
 
-		(declare (assoc
-			error_text
-				(if (and feature_values features (!= (size features) (size feature_values)))
-					"Specified features must be of same length as feature_values."
+		(if (and (!= .null case_indices) (<= (size case_indices) 1) )
+			(conclude (call !Return (assoc
+				errors (list "If providing case_indices, must provide at least 2 cases for computation.")
+			)))
+		)
 
-					(and (!= .null case_indices) (<= (size case_indices) 1) )
-					"If providing case_indices, must provide at least 2 cases for computation."
-				)
+		(declare (assoc
 			;local variables, should not be passed in as a parameter
 			valid_weight_feature .false
 		))
-		(if error_text
-			(conclude (call !Return (assoc errors (list error_text) )) )
-		)
 
 		(if (= .null features)
 			(assign (assoc features !trainedFeatures))
@@ -538,39 +531,7 @@
 			dt_value (get hyperparam_map "dt")
 		))
 
-		(if feature_values
-			;local data of case_ids
-			(assign (assoc
-				case_ids
-					(contained_entities
-						(query_nearest_generalized_distance
-							k_value
-							features
-							(if !hasFeaturesNeedEncodingFromInput
-								(call !ConvertFromInput (assoc
-									feature_values feature_values
-									features features
-								))
-
-								;else use values as-is
-								feature_values
-							)
-							p_value
-							feature_weights
-							!queryFeatureAttributeTypeMap
-							feature_deviations
-							.null
-							dt_value
-							(if valid_weight_feature weight_feature .null)
-							(rand)
-							.null ;radius
-							!numericalPrecision
-						)
-					)
-			))
-
-			;else user specified case_indices
-			(> (size case_indices) 1)
+		(if (> (size case_indices) 1)
 			(assign (assoc
 				case_ids
 					(map
@@ -998,131 +959,4 @@
 		)
 	)
 
-
-	;Returns an assoc with case distances, containing a list of case session indices and a list of lists (matrix) of the computed distances.
-	#{read_only .true idempotent .true}
-	get_distances_sparse
-	(declare
-		#returns {
-		# 	type "assoc"
-		#	additional_indices .false
-		# 	indices {
-		# 		"column_case_indices" {
-		# 			ref "CaseIndices"
-		# 			description "The case indices of the cases represented by the columns of the distance matrix."
-		# 		}
-		# 		"row_case_indices" {
-		# 			ref "CaseIndices"
-		# 			description "The case indices of the cases represented by the columns of the distance matrix."
-		# 		}
-		# 		"distances" {
-		# 			type "list"
-		#			required .true
-		# 			values {
-		# 				type "list"
-		# 				values "number"
-		# 			}
-		# 			description "The case indices of the cases represented by the columns of the distance matrix."
-		# 		}
-		# 	}
-		# }
-		(assoc
-			;which features to use when computing case distances. If unspecified uses all features.
-			#{type "list" values "string"}
-			features .null
-			;if specified, uses targeted hyperparameters used to predict this action_feature, otherwise uses targetless hyperparameters.
-			#{type "string"}
-			action_feature .null
-			;list of pair (list) of session id and index, where index is the original 0-based session_training_index of the case as it was
-			;	trained. If specified, returns pairwise distances for all of these cases. Ignored if feature_values is provided. If neither feature_values nor
-			;	case_indices is specified, runs on the full dataset.
-			#{ref "CaseIndices"}
-			case_indices .null
-			;name of feature whose values to use as case weights
-			#{type "string"}
-			weight_feature ".case_weight"
-			;flag, if set to true will scale influence weights by each case's weight_feature weight. If unspecified,
-			;	case weights will be used if the trainee has them.
-			#{ref "UseCaseWeights"}
-			use_case_weights .null
-		)
-		(call !ValidateParameters)
-
-		(declare (assoc
-			error_text
-				(if (and feature_values features (!= (size features) (size feature_values)))
-					"Specified features must be of same length as feature_values."
-
-					(and (!= .null case_indices) (<= (size case_indices) 1) )
-					"If providing case_indices, must provide at least 2 cases for computation."
-				)
-			;local variables, should not be passed in as a parameter
-			valid_weight_feature .false
-		))
-		(if error_text
-			(conclude (call !Return (assoc errors (list error_text) )) )
-		)
-
-		(if (= .null features)
-			(assign (assoc features !trainedFeatures))
-		)
-
-		;if user doesn't want to use case weights, change weight_feature to '.none'
-		(if (not use_case_weights)
-			(assign (assoc weight_feature ".none"))
-		)
-
-		(declare (assoc
-			hyperparam_map
-				(call !GetHyperparameters (assoc
-					context_features features
-					feature (if action_feature action_feature)
-					weight_feature weight_feature
-				))
-			row_case_ids (list)
-			column_case_ids (list)
-			session_indices_map (assoc)
-			column_case_indices .null
-			row_case_indices .null
-		))
-
-		(call !UpdateCaseWeightParameters)
-
-		(declare (assoc
-			feature_weights (get hyperparam_map "featureWeights")
-			feature_deviations (get hyperparam_map "featureDeviations")
-			p_value (get hyperparam_map "p")
-			k_value (get hyperparam_map "k")
-			dt_value (get hyperparam_map "dt")
-		))
-
-		(if (~ [] k_value)
-			(assign (assoc k_value (last k_value) ))
-		)
-
-		(declare (assoc
-			case_ids
-				(if (> (size case_indices) 1)
-					(map
-						(lambda (let
-							(assoc
-								session (first (current_value 1))
-								case_index (last (current_value 1))
-							)
-
-							;if session_indices_map doesn't have this session, add it
-							(if (not (contains_index session_indices_map session))
-								(accum (assoc session_indices_map (associate session (retrieve_from_entity session ".indices_map")) ))
-							)
-
-							(get session_indices_map (list session case_index))
-						))
-						case_indices
-					)
-
-					;else all cases
-					(call !AllCases)
-				)
-		))
-	)
 }
