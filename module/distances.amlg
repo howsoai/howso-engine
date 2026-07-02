@@ -422,12 +422,24 @@
 		#	additional_indices .false
 		# 	indices {
 		# 		"column_case_indices" {
-		# 			ref "CaseIndices"
-		# 			description "The case indices of the cases represented by the columns of the distance matrix."
+		# 			any_of [{ref "CaseIndices"} {type "list" values {ref "CaseIndices"}}]
+		# 			description (concat
+		#				"The case indices of the cases represented by the columns of the distance matrix. This is a 2D list of case indices when "
+		#				"computing sparse distances and 1D list of case indices otherwise."
+		#			)
+		# 		}
+		# 		"column_numeric_indices" {
+		# 			type "list"
+		#			values {type "list" values "number"}
+		# 			description (concat
+		#				"The 2-d list of numeric column indices for the distance entries returned for each row in distances. Only returned for sparse distances. "
+		#				"The returned numeric indices indicate the numeric column index for each nearest case returned for each row, allowing the sparse distances "
+		#				"to be paged and not require the full set of case_indices to be returned before session-index tuples can be resolved to their numeric index in the matrix."
+		#			)
 		# 		}
 		# 		"row_case_indices" {
 		# 			ref "CaseIndices"
-		# 			description "The case indices of the cases represented by the columns of the distance matrix."
+		# 			description "The case indices of the cases represented by the rows of the distance matrix."
 		# 		}
 		# 		"distances" {
 		# 			type "list"
@@ -436,7 +448,7 @@
 		# 				type "list"
 		# 				values "number"
 		# 			}
-		# 			description "The case indices of the cases represented by the columns of the distance matrix."
+		# 			description "The full two-dimensional list of distances."
 		# 		}
 		# 	}
 		# }
@@ -444,9 +456,6 @@
 			;which features to use when computing case distances. If unspecified uses all features.
 			#{type "list" values "string"}
 			features .null
-			;if specified, returns case distances of the local data relative to these values, ignores case_indices parameter.
-			#{type "list"}
-			feature_values .null
 			;if specified, uses targeted hyperparameters used to predict this action_feature, otherwise uses targetless hyperparameters.
 			#{type "string"}
 			action_feature .null
@@ -462,13 +471,23 @@
 			;	case weights will be used if the trainee has them.
 			#{ref "UseCaseWeights"}
 			use_case_weights .null
-			;starting column index of the full matrix of cases for which to compute distances. default value is 0
+			;The number of nearest cases to return distance for if sparse is true.
+			#{type "number" min 1}
+			num_nearest_neighbors 20
+			;flag, if true, then the returned distance matrix will be sparsified,
+			;with "distances" being of shape (n, k) where "row_case_indices" will define the case indices for each row and
+			;"column_case_indices" will be a 2d list with the nearest case indices corresponding to each distance defined for each row.
+			#{type "boolean"}
+			sparse .true
+			;starting column index of the full matrix of cases for which to compute distances. default value is 0. This parameter is ignored
+			;if sparse is true.
 			#{type "number"}
 			column_offset 0
-			;starting row index of the full matrix of cases for which to compute distances. default value is 0
+			;starting row index of the full matrix of cases for which to compute distances. default value is 0.
 			#{type "number"}
 			row_offset 0
-			;number of columns to compute in the matrix.  If unspecified, is set to the same number as all the cases.
+			;number of columns to compute in the matrix.  If unspecified, is set to the same number as all the cases. This parameter is ignored
+			;if sparse is true.
 			#{type "number"}
 			column_count .null
 			;number of rows to compute in the matrix.  If unspecified, is set to the same number as all the cases.
@@ -477,20 +496,16 @@
 		)
 		(call !ValidateParameters)
 
-		(declare (assoc
-			error_text
-				(if (and feature_values features (!= (size features) (size feature_values)))
-					"Specified features must be of same length as feature_values."
+		(if (and (!= .null case_indices) (<= (size case_indices) 1) )
+			(conclude (call !Return (assoc
+				errors (list "If providing case_indices, must provide at least 2 cases for computation.")
+			)))
+		)
 
-					(and (!= .null case_indices) (<= (size case_indices) 1) )
-					"If providing case_indices, must provide at least 2 cases for computation."
-				)
+		(declare (assoc
 			;local variables, should not be passed in as a parameter
 			valid_weight_feature .false
 		))
-		(if error_text
-			(conclude (call !Return (assoc errors (list error_text) )) )
-		)
 
 		(if (= .null features)
 			(assign (assoc features !trainedFeatures))
@@ -526,39 +541,7 @@
 			dt_value (get hyperparam_map "dt")
 		))
 
-		(if feature_values
-			;local data of case_ids
-			(assign (assoc
-				case_ids
-					(contained_entities
-						(query_nearest_generalized_distance
-							k_value
-							features
-							(if !hasFeaturesNeedEncodingFromInput
-								(call !ConvertFromInput (assoc
-									feature_values feature_values
-									features features
-								))
-
-								;else use values as-is
-								feature_values
-							)
-							p_value
-							feature_weights
-							!queryFeatureAttributeTypeMap
-							feature_deviations
-							.null
-							dt_value
-							(if valid_weight_feature weight_feature .null)
-							(rand)
-							.null ;radius
-							!numericalPrecision
-						)
-					)
-			))
-
-			;else user specified case_indices
-			(> (size case_indices) 1)
+		(if (> (size case_indices) 1)
 			(assign (assoc
 				case_ids
 					(map
@@ -586,8 +569,20 @@
 			(assign (assoc case_ids (call !AllCases) ))
 		)
 
+		(declare (assoc num_cases (size case_ids) ))
+
+		;both of these methods end in the appropriate Return call.
+		(if sparse
+			(call !ComputeSparseGetDistances)
+
+			(call !ComputeDenseGetDistances)
+		)
+	)
+
+	;helper for get_distances when not computing sparse distances
+	!ComputeDenseGetDistances
+	(seq
 		(declare (assoc
-			num_cases (size case_ids)
 			column_row_are_same .true
 		))
 
@@ -697,6 +692,118 @@
 				)
 		))
 	)
+
+	;helper for get_distances when computing sparse distances
+	!ComputeSparseGetDistances
+	(seq
+		(if (= .null row_count)
+			(assign (assoc row_count num_cases))
+		)
+
+		;if user custom-specified offsets or sizes:
+		(if (or (> row_offset 0) (!= row_count num_cases))
+			(seq
+				;size can't exceed dimension of matrix
+				(assign (assoc
+					row_count (min row_count (- num_cases row_offset))
+				))
+				(assign (assoc
+					row_case_ids (unzip case_ids (range row_offset (+ row_offset (- row_count 1))))
+				))
+			)
+
+			;else iterate over the all of the cases
+			(assign (assoc
+				row_case_ids case_ids
+			))
+		)
+
+		;If case indices were not given, this variable is not populated yet for the case_ids that will be computed
+		(if (not (size case_indices))
+			(assign (assoc
+				case_indices
+					(map
+						(lambda
+							;pair of: session, session training index
+							(retrieve_from_entity (current_value) (list !internalLabelSession !internalLabelSessionTrainingIndex))
+						)
+						case_ids
+					)
+			))
+		)
+
+		;construct maps of case_id -> session-index tuples and
+		;case_id -> numeric index to be used for the column_numeric_indices return value
+		(declare (assoc
+			case_id_to_case_index_map (zip case_ids case_indices)
+			case_id_to_index_map (zip case_ids (indices case_ids))
+		))
+
+		(if (= .null num_nearest_neighbors)
+			(assign (assoc
+				num_nearest_neighbors
+					(if (~ [] k_value)
+						(last k_value)
+						k_value
+					)
+			))
+		)
+
+		;for each case being computed, compute its nearest `num_nearest_neighbors` neighbors among available cases
+		(declare (assoc
+			nearest_case_id_distances_pairs
+				||(map
+					(lambda
+						(compute_on_contained_entities
+							(query_in_entity_list case_ids)
+							(query_not_in_entity_list [(current_value 1)])
+							(query_nearest_generalized_distance
+								num_nearest_neighbors
+								features
+								(retrieve_from_entity (current_value) features)
+								p_value
+								feature_weights
+								!queryFeatureAttributeTypeMap
+								feature_deviations
+								.null
+								(if (= "surprisal_to_prob" dt_value) "surprisal" 1)
+								(if valid_weight_feature weight_feature .null)
+								"fixed rand seed"
+								.null ;radius
+								!numericalPrecision
+								.true
+							)
+						)
+					)
+					row_case_ids
+				)
+		))
+
+		(call !Return (assoc
+			payload
+				(assoc
+					"distances" (map (lambda (last (current_value))) nearest_case_id_distances_pairs)
+					"row_case_indices" (unzip case_id_to_case_index_map row_case_ids)
+					"column_case_indices"
+						;convert nearest case-ids to their session-index tuples
+						(map
+							(lambda
+								(unzip case_id_to_case_index_map (first (current_value)))
+							)
+							nearest_case_id_distances_pairs
+						)
+					"column_numeric_indices"
+						;convert nearest case-ids to their numeric index (matching that of the row index for each case-id)
+						(map
+							(lambda
+								(unzip case_id_to_index_map (first (current_value)))
+							)
+							nearest_case_id_distances_pairs
+						)
+				)
+		))
+	)
+
 
 	;given a list of entity ids, determine the minimum distance between
 	; all of those cases. Returns the minimum entity distance.
@@ -871,4 +978,5 @@
 			)
 		)
 	)
+
 }
