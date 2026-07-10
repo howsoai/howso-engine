@@ -582,15 +582,53 @@
 								num_nulls (size (contained_entities (query_equals feature .null) ))
 							))
 
-							(assoc
-								;true means there are nulls, false means no nulls, null means unknown whether there are nulls
-								"has_nulls" (> num_nulls 0)
-								"null_residual"
-									(if (!= .null (- max min))
-										(- max min)
-										0
+							(append
+								(assoc
+									;true means there are nulls, false means no nulls, null means unknown whether there are nulls
+									"has_nulls" (> num_nulls 0)
+									"null_residual"
+										(if (!= .null (- max min))
+											(- max min)
+											0
+										)
+									"num_nulls" num_nulls
+								)
+								;possible extra time-series information regarding nulls
+								(if (and
+										!tsTimeFeature
+										(or
+											(get !featureAttributes [feature "ts_order"])
+											(get !featureAttributes [feature "max_row_lag"])
+										)
 									)
-								"num_nulls" num_nulls
+									;if the time-series feature is derived using previous rows. Separately count
+									;the number of nulls that are not within cases where feature values cannot be defined
+									;because there are not enough preceding rows. Nulls in derived features where
+									;there are not enough preceding rows are sometimes referred to as part of the
+									;"Null Triangle", see below.
+									;Feat, Feat Lag 1, Feat Lag 2, .series_index
+									;1     .null       .null       0
+									;2     1           .null       1
+									;3     2           3           2
+									{
+										"has_non_time_nulls"
+											(>
+												(size (contained_entities
+													(query_greater_or_equal_to
+														".series_index"
+														(or
+															(get !featureAttributes [feature "ts_order"])
+															(get !featureAttributes [feature "max_row_lag"])
+														)
+													)
+													(query_equals feature .null)
+												))
+												0
+											)
+									}
+									;else add nothing
+									{}
+								)
 							)
 						))
 						(zip features)
@@ -676,7 +714,7 @@
 		)
 
 	;outputs all marginal stats (min, max, median, mean, mode, count, uniques, mean_absdev, variance, stddev, skew, kurtosis, entropy)
-	;for all features in the format of feature -> assoc stat -> value. The marginal stats can be computed for a subset of the data using condition, precision, and num_cases
+	;for features in the format of feature -> assoc stat -> value. The marginal stats can be computed for a subset of the data using condition, precision, and num_cases
 	#{idempotent .true}
 	get_marginal_stats
 	(declare
@@ -707,6 +745,10 @@
 		# 	}
 		# }
 		(assoc
+			;list of feature names for which to compute marginal statistics. If unspecified, computes
+			;marginal stats for all trained features.
+			#{type "list" values "string"}
+			features .null
 			;name of case weight feature
 			#{type "string"}
 			weight_feature .null
@@ -735,19 +777,32 @@
 			(assign (assoc weight_feature ".none"))
 		)
 
+		(if (= .null features)
+			(assign (assoc features !trainedFeatures))
+		)
+
 		(call !Return (assoc
 			payload
 				(if (= .null condition)
 					(seq
-						;if marginal stats haven't been computed yet, compute them here
-						(if (not (contains_index !featureMarginalStatsMap weight_feature))
+						;if marginal stats haven't been computed yet or any of the desired features'
+						;marginal stats have not been computed, compute them here.
+						(if (or
+								(not (contains_index !featureMarginalStatsMap weight_feature))
+								;true if not all features are in the MarginalStatsMap
+								(!=
+									(size features)
+									(size (keep (get !featureMarginalStatsMap weight_feature) features))
+								)
+							)
 							(call !CalculateMarginalStats (assoc
 								weight_feature (if (!= ".none" weight_feature) weight_feature)
+								features features
 							))
 						)
 
 						;get the stats for the specified weight_feature
-						(get !featureMarginalStatsMap weight_feature)
+						(keep (get !featureMarginalStatsMap weight_feature) features)
 					)
 
 					;else we have a condition
@@ -764,6 +819,7 @@
 						(call !CalculateMarginalStats (assoc
 							weight_feature weight_feature
 							filtering_queries (list (query_in_entity_list case_ids))
+							features features
 						))
 					)
 				)
@@ -779,195 +835,195 @@
 	; store_stats: optional, flag, default to true. when false will output stats without caching them
 	; features: optional, list of features to compute stats for, if unspecified uses default !trainedFeatures
 	!CalculateMarginalStats
-		(declare
-			(assoc
-				weight_feature .null
-				filtering_queries (list)
-				store_stats .true
-				features !trainedFeatures
-			)
+	(declare
+		(assoc
+			weight_feature .null
+			filtering_queries (list)
+			store_stats .true
+			features !trainedFeatures
+		)
 
-			(declare (assoc
-				stats
-					||(map
-						(lambda (let
-							(assoc
-								feature (current_index 1)
+		(declare (assoc
+			stats
+				||(map
+					(lambda (let
+						(assoc
+							feature (current_index 1)
 
-								min .null
-								max .null
-								mean .null
-								median .null
-								percentile_25 .null
-								percentile_75 .null
-								mean_absdev .null
-								variance .null
-								stddev .null
-								skew .null
-								kurtosis .null
-								entropy .null
-								feature_is_continuous (not (contains_index !nominalsMap (current_index 1)))
-							)
+							min .null
+							max .null
+							mean .null
+							median .null
+							percentile_25 .null
+							percentile_75 .null
+							mean_absdev .null
+							variance .null
+							stddev .null
+							skew .null
+							kurtosis .null
+							entropy .null
+							feature_is_continuous (not (contains_index !nominalsMap (current_index 1)))
+						)
 
-							(if feature_is_continuous
-								(seq
-									(assign (assoc
-										min
-											(retrieve_from_entity
-												(first (contained_entities
-													filtering_queries
-													(query_min feature 1)
-												))
-												feature
-											)
-										max
-											(retrieve_from_entity
-												(first (contained_entities
-													filtering_queries
-													(query_max feature 1)
-												))
-												feature
-											)
-										mean
+						(if feature_is_continuous
+							(seq
+								(assign (assoc
+									min
+										(retrieve_from_entity
+											(first (contained_entities
+												filtering_queries
+												(query_min feature 1)
+											))
+											feature
+										)
+									max
+										(retrieve_from_entity
+											(first (contained_entities
+												filtering_queries
+												(query_max feature 1)
+											))
+											feature
+										)
+									mean
+										(compute_on_contained_entities
+											filtering_queries
+											(query_not_equals feature .null)
+											;calculate arithmetic average
+											(query_generalized_mean feature 1 weight_feature)
+										)
+									median
+										(compute_on_contained_entities filtering_queries (query_quantile feature 0.5 weight_feature))
+									percentile_25
+										(compute_on_contained_entities filtering_queries (query_quantile feature 0.25 weight_feature))
+									percentile_75
+										(compute_on_contained_entities filtering_queries (query_quantile feature 0.75 weight_feature))
+								))
+
+								(assign (assoc
+									mean_absdev
+										(compute_on_contained_entities
+											filtering_queries
+											(query_not_equals feature .null)
+											(query_generalized_mean feature 1 weight_feature mean .true .true)
+										)
+									variance
+										(compute_on_contained_entities
+											filtering_queries
+											(query_not_equals feature .null)
+											(query_generalized_mean feature 2 weight_feature mean .true)
+										)
+								))
+
+								(assign (assoc
+									stddev (sqrt variance)
+									skew
+										(/
 											(compute_on_contained_entities
 												filtering_queries
 												(query_not_equals feature .null)
-												;calculate arithmetic average
-												(query_generalized_mean feature 1 weight_feature)
+												(query_generalized_mean feature 3 weight_feature mean .true)
 											)
-										median
-											(compute_on_contained_entities filtering_queries (query_quantile feature 0.5 weight_feature))
-										percentile_25
-											(compute_on_contained_entities filtering_queries (query_quantile feature 0.25 weight_feature))
-										percentile_75
-											(compute_on_contained_entities filtering_queries (query_quantile feature 0.75 weight_feature))
-									))
-
-									(assign (assoc
-										mean_absdev
-											(compute_on_contained_entities
-												filtering_queries
-												(query_not_equals feature .null)
-												(query_generalized_mean feature 1 weight_feature mean .true .true)
-											)
-										variance
-											(compute_on_contained_entities
-												filtering_queries
-												(query_not_equals feature .null)
-												(query_generalized_mean feature 2 weight_feature mean .true)
-											)
-									))
-
-									(assign (assoc
-										stddev (sqrt variance)
-										skew
+											(pow variance 1.5)
+										)
+									kurtosis
+										(-
 											(/
 												(compute_on_contained_entities
 													filtering_queries
 													(query_not_equals feature .null)
-													(query_generalized_mean feature 3 weight_feature mean .true)
+													(query_generalized_mean feature 4 weight_feature mean .true)
 												)
-												(pow variance 1.5)
+												(pow variance 2)
 											)
-										kurtosis
-											(-
-												(/
-													(compute_on_contained_entities
-														filtering_queries
-														(query_not_equals feature .null)
-														(query_generalized_mean feature 4 weight_feature mean .true)
-													)
-													(pow variance 2)
-												)
-												3
-											)
-									))
-								)
-							)
-
-							(declare (assoc
-								mode
-									(compute_on_contained_entities
-										filtering_queries
-										(query_not_equals feature .null)
-										(query_mode feature weight_feature)
-									)
-								count
-									(size
-										(contained_entities
-											filtering_queries
-											(query_not_equals feature .null)
-										)
-									)
-								uniques
-									(size
-										(remove
-											(contained_entities
-												filtering_queries
-												(query_value_masses feature .null)
-											)
-											[.null]
-										)
-									)
-							))
-
-							(if (not feature_is_continuous)
-								(assign (assoc
-									entropy
-										(let
-											(assoc
-												class_counts_map
-													(remove
-														(compute_on_contained_entities
-															filtering_queries
-															(query_value_masses feature weight_feature)
-														)
-														[.null]
-													)
-											)
-											(entropy
-												(normalize class_counts_map)
-											)
+											3
 										)
 								))
 							)
+						)
 
-							;output assoc of marginal stats for the feature
-							(assoc
-								min min
-								max max
-								mean mean
-								median median
-								percentile_25 percentile_25
-								percentile_75 percentile_75
-								mode mode
-								count count
-								uniques uniques
-								mean_absdev mean_absdev
-								variance variance
-								stddev stddev
-								skew skew
-								kurtosis kurtosis
-								entropy entropy
-							)
+						(declare (assoc
+							mode
+								(compute_on_contained_entities
+									filtering_queries
+									(query_not_equals feature .null)
+									(query_mode feature weight_feature)
+								)
+							count
+								(size
+									(contained_entities
+										filtering_queries
+										(query_not_equals feature .null)
+									)
+								)
+							uniques
+								(size
+									(remove
+										(contained_entities
+											filtering_queries
+											(query_value_masses feature .null)
+										)
+										[.null]
+									)
+								)
 						))
-						(zip features)
-					)
+
+						(if (not feature_is_continuous)
+							(assign (assoc
+								entropy
+									(let
+										(assoc
+											class_counts_map
+												(remove
+													(compute_on_contained_entities
+														filtering_queries
+														(query_value_masses feature weight_feature)
+													)
+													[.null]
+												)
+										)
+										(entropy
+											(normalize class_counts_map)
+										)
+									)
+							))
+						)
+
+						;output assoc of marginal stats for the feature
+						(assoc
+							min min
+							max max
+							mean mean
+							median median
+							percentile_25 percentile_25
+							percentile_75 percentile_75
+							mode mode
+							count count
+							uniques uniques
+							mean_absdev mean_absdev
+							variance variance
+							stddev stddev
+							skew skew
+							kurtosis kurtosis
+							entropy entropy
+						)
+					))
+					(zip features)
+				)
+		))
+
+		(if (= .null weight_feature)
+			(assign (assoc weight_feature ".none"))
+		)
+
+		(if (and store_stats (= (list) filtering_queries))
+			(accum_to_entities (assoc
+				!featureMarginalStatsMap (associate weight_feature stats)
 			))
 
-			(if (= .null weight_feature)
-				(assign (assoc weight_feature ".none"))
-			)
-
-			(if (and store_stats (= (list) filtering_queries))
-				(accum_to_entities (assoc
-					!featureMarginalStatsMap (associate weight_feature stats)
-				))
-
-				;else this was conditioned, return the marginal stats
-				stats
-			)
+			;else this was conditioned, return the marginal stats
+			stats
 		)
+	)
 
 
 	;outputs all unique values and the mass of each value given the trained data and possible conditions
