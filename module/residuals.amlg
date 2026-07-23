@@ -629,6 +629,8 @@
 			num_features (size context_features)
 		))
 
+
+
 		;the number of features that will be used as contexts is random for every react, following a binomial distribution.
 		;since at least one feature must be predicted, the most number of features that can be used for any react is
 		;'(num_features - 1)'  therefore a binomial distribution for '(num_features - 1)' can be used to precompute the
@@ -641,35 +643,13 @@
 		;with the tail probability for the last feature cut off.
 		;
 		;This creates the binomial probabilities map for enabling 0 to (num_features - 1) features, given num_features.
-		(declare (assoc
-			enabled_num_features_probability_map (normalize (call !ComputeNumEnabledFeaturesProbabilitiesMap))
-			all_features_map (zip features)
-			feature_deviations
-				(if custom_residuals_map
-					custom_residuals_map
-					(get hyperparam_map "featureDeviations")
-				)
-			;list, length of case_ids, each item will be a list of residual values, one per feature
-			case_residuals_lists (list)
-			;don't need to compute ordinal diff when estimating residual lower bounds, treat them all as continuous
-			ordinal_feature_set (if (not estimating_residual_lower_bound) !ordinalFeaturesSet)
-
-			;map of continuous features that have nulls
-			continuous_with_nulls_map (call !BuildContinuousWithNullsMap (assoc features features))
-			progress_detail_text (if in_analyze "Analysis: Computing robust residuals" "Computing robust residuals")
-
-			;;;DEBUG ONLY
-			ddeltas []
-			with_deltas []
-			without_deltas []
-			with2_deltas []
-			without2_deltas []
-			ac_delta_feature "A3"
-			ac_prediction_feature "sum"
-			ac_feat_idx (get (zip features (indices features)) "sum")
-		))
-
-		(declare (assoc
+		(assign (assoc enabled_num_features_probability_map (normalize (call !ComputeNumEnabledFeaturesProbabilitiesMap)) ))
+		(assign (assoc
+			inv_prob_map
+				(normalize (map
+					(lambda (/ 1 (current_value)))
+					enabled_num_features_probability_map
+				))
 			;1-based inverse weights for residauls without 1 feature (no target)
 			inv_prob_map_with
 				(normalize (map
@@ -702,6 +682,33 @@
 						(zip (range 0 (- num_features 2)))
 					)
 				))
+		))
+
+		(declare (assoc
+			all_features_map (zip features)
+			feature_deviations
+				(if custom_residuals_map
+					custom_residuals_map
+					(get hyperparam_map "featureDeviations")
+				)
+			;list, length of case_ids, each item will be a list of residual values, one per feature
+			case_residuals_lists (list)
+			;don't need to compute ordinal diff when estimating residual lower bounds, treat them all as continuous
+			ordinal_feature_set (if (not estimating_residual_lower_bound) !ordinalFeaturesSet)
+
+			;map of continuous features that have nulls
+			continuous_with_nulls_map (call !BuildContinuousWithNullsMap (assoc features features))
+			progress_detail_text (if in_analyze "Analysis: Computing robust residuals" "Computing robust residuals")
+
+			;;;DEBUG ONLY
+			ddeltas []
+			with_deltas []
+			without_deltas []
+			with2_deltas []
+			without2_deltas []
+			ac_delta_feature "A3"
+			ac_prediction_feature "sum"
+			ac_feat_idx (get (zip features (indices features)) "sum")
 		))
 
 		;total_samples will be set if this is being run from AutoConvergeRobustResiduals which runs multiple iterations of this method
@@ -1052,7 +1059,7 @@
 						; 	))
 						; )
 
-						[out_diffs (get inv_prob_map_with (size react_context_features)) (get inv_prob_map_without (size react_context_features)) ]
+						[out_diffs (size react_context_features)]
 
 					))
 					case_ids
@@ -1087,15 +1094,28 @@
 					))
 					features
 				)
-			case_residuals_weights_without
+			case_residuals_num_context_features
 				(map
 					(lambda (last (current_value)))
 					case_residuals_lists
 				)
+		))
+
+		(assign (assoc
+			case_residuals_weights
+				(map
+					(lambda (get inv_prob_map (current_value)))
+					case_residuals_num_context_features
+				)
+			case_residuals_weights_without
+				(map
+					(lambda (get inv_prob_map_without (current_value)))
+					case_residuals_num_context_features
+				)
 			case_residuals_weights_with
 				(map
-					(lambda (get (current_value) 1))
-					case_residuals_lists
+					(lambda (get inv_prob_map_with (current_value)))
+					case_residuals_num_context_features
 				)
 		))
 
@@ -2071,8 +2091,8 @@
 								(+ (or
 									(if (contains_index continuous_with_nulls_map (get features (current_index 1)))
 										;average value residuals from the pair of [value residual, null residual]
-										(generalized_mean (map (lambda (first (current_value))) (current_value 1)))
-										(generalized_mean (current_value 1))
+										(generalized_mean (map (lambda (first (current_value))) (current_value 1)) 1 case_residuals_weights)
+										(generalized_mean (current_value 1) 1 case_residuals_weights)
 									)
 								))
 								(size (filter (current_value 1)))
@@ -2082,6 +2102,7 @@
 					)
 				)
 			first_residuals_lists feature_residuals_lists
+			total_num_features_per_residual case_residuals_num_context_features
 			done .false
 			total_samples num_samples
 		))
@@ -2162,8 +2183,8 @@
 												(+ (or
 													(if (contains_index continuous_with_nulls_map (get features (current_index 1)))
 														;average value residuals from the pair of [value residual, null residual]
-														(generalized_mean (map (lambda (first (current_value))) (current_value 1)))
-														(generalized_mean (current_value 1))
+														(generalized_mean (map (lambda (first (current_value))) (current_value 1)) 1 case_residuals_weights)
+														(generalized_mean (current_value 1) 1 case_residuals_weights)
 													)
 												))
 												(size (filter (current_value 1)))
@@ -2206,6 +2227,9 @@
 						(assign (assoc previous_residuals_map residuals_map))
 					)
 
+					;accumulate all the num of context context features for each residual
+					(assign (assoc total_num_features_per_residual (append total_num_features_per_residual case_residuals_num_context_features) ))
+
 					;accumulate all the residuals lists for all the features into one big list into (previous_result)
 					(map
 						(lambda (append (first (current_value)) (last (current_value)) ))
@@ -2219,6 +2243,24 @@
 				)
 		))
 
+		;update total weight corrections lists
+		(assign (assoc
+			case_residuals_weights
+				(map
+					(lambda (get inv_prob_map (current_value)))
+					total_num_features_per_residual
+				)
+			case_residuals_weights_without
+				(map
+					(lambda (get inv_prob_map_without (current_value)))
+					total_num_features_per_residual
+				)
+			case_residuals_weights_with
+				(map
+					(lambda (get inv_prob_map_with (current_value)))
+					total_num_features_per_residual
+				)
+		))
 	)
 
 }
