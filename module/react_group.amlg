@@ -277,21 +277,6 @@
 			))
 		)
 
-		;if features need to be encoded, overwrite the values in the new_cases list with the encoded values
-		(if (and (size new_cases) !hasFeaturesNeedEncodingFromInput (not skip_encoding))
-			(assign (assoc
-				new_cases
-					(map
-						(lambda
-							(call !ConvertFromInput (assoc
-								feature_values (current_value 1)
-								features features
-							))
-						)
-						new_cases
-					)
-			))
-		)
 
 		;if user doesn't want to use case weights, change weight_feature to '.none'
 		(if (= .false use_case_weights)
@@ -346,6 +331,123 @@
 			(assign (assoc closest_k (- dataset_size 2)))
 		)
 
+		;if given new cases, they may need to be encoded or have time-series features derived.
+		(if (size new_cases)
+			(if !tsTimeFeature
+				;if its a time series trainee,  see about deriving the time series features for the new cases
+				(let
+					(assoc
+						feature_index_map (zip features (indices features))
+						series_id_features (get !tsFeaturesMap "series_id_features")
+					)
+
+					;true if all series_id_features are in `features`. otherwise cannot derive if series id values are not known
+					(if (= (size series_id_features) (size (keep feature_index_map series_id_features)))
+						(let
+							(assoc
+								series_id_feature_indices (unzip feature_index_map series_id_features)
+								features_to_retrieve
+									;get all the time-series features except the TS built-ins.
+									(filter
+										(lambda
+											(and
+												;no built-ins
+												(not (contains_value
+													[".series_index" ".reverse_series_index" ".time_to_horizon"
+													".synchronous_counter" ".synchronous_counter_lag_1"]
+													(current_value)
+												))
+												;one of given features or a feature derived from one of them
+												(or
+													(contains_value features (current_value))
+													(contains_value features (get !derivedFeaturesMap (current_value)))
+												)
+											)
+										)
+										!trainedFeatures
+									)
+							)
+
+							(declare (assoc
+								group_id_value_tuples_set
+									(zip (map
+										(lambda (unzip (current_value) series_id_feature_indices))
+										new_cases
+									))
+							))
+
+							(assign (assoc
+								new_cases
+									(if (= 1 (size group_id_value_tuples_set))
+										;there is only one series represented in the group
+										(call !DeriveUntrainedSeriesData (assoc
+											series_data_features features
+											series_data new_cases
+											features_to_retrieve features_to_retrieve
+										))
+
+										;otherwise there are multiple. Derive for each individually and append together
+										(apply "append" (map
+											(lambda
+												(call !DeriveUntrainedSeriesData (assoc
+													series_data_features features
+													features_to_retrieve features_to_retrieve
+													series_data
+														;get the cases from new_cases that match the currently iterated series id values
+														(filter
+															(lambda (=
+																(current_index 2)
+																(unzip (current_value) series_id_feature_indices)
+															))
+															new_cases
+														)
+												))
+											)
+											group_id_value_tuples_set
+										))
+									)
+							))
+
+							;update features to match the new order and feature values now in new_cases
+							(assign (assoc
+								features features_to_retrieve
+							))
+						)
+
+						;else just encode if needed
+						(and !hasFeaturesNeedEncodingFromInput (not skip_encoding))
+						(assign (assoc
+							new_cases
+								(map
+									(lambda
+										(call !ConvertFromInput (assoc
+											feature_values (current_value 1)
+											features features
+										))
+									)
+									new_cases
+								)
+						))
+					)
+				)
+
+				;if features need to be encoded, overwrite the values in the new_cases list with the encoded values
+				(and !hasFeaturesNeedEncodingFromInput (not skip_encoding))
+				(assign (assoc
+					new_cases
+						(map
+							(lambda
+								(call !ConvertFromInput (assoc
+									feature_values (current_value 1)
+									features features
+								))
+							)
+							new_cases
+						)
+				))
+			)
+		)
+
 		;cache average case entropies and distance contributions if necessary
 		(if (and familiarity_conviction_addition (= .null !averageCaseEntropyAddition) )
 			(call !CacheAverageCaseEntropyAddition)
@@ -358,6 +460,7 @@
 		(if (and distance_contributions (= .null !averageCaseDistanceContribution) )
 			(call !CacheAverageCaseDistanceContribution)
 		)
+
 
 		;get the case_ids, creating if necessary
 		(declare (assoc
