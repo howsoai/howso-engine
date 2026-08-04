@@ -30,6 +30,398 @@
 		)
 	)
 
+	;Transforms an accuracy contribution into dimensionless information using
+	;the LK expected distance between equal-scale Laplace uncertainties. Both
+	;inputs have the target feature's units; the return is dimensionless.
+	!ComputeCausalContributionInformation
+	(declare
+		(assoc accuracy_contribution 0 robust_residual 0)
+
+		(if (<= robust_residual 0)
+			0
+
+			(let (assoc bounded_contribution (max accuracy_contribution 0))
+				(-
+					(/
+						(+
+							bounded_contribution
+							(*
+								0.5
+								(exp (/ (- bounded_contribution) robust_residual))
+								(+ (* 3 robust_residual) bounded_contribution)
+							)
+						)
+						robust_residual
+					)
+					1.5
+				)
+			)
+		)
+	)
+
+	;Returns the dimensionless baseline causal asymmetry of an unordered pair.
+	;Each directed contribution is first scaled by a residual in matching target
+	;units, so their difference is valid across heterogeneous features.
+	!ComputeCausalPairStrength
+	(declare
+		(assoc
+			first_feature ""
+			second_feature ""
+			baseline_ac_map (assoc)
+			robust_residual_map (assoc)
+		)
+
+		(abs (-
+			(call !ComputeCausalContributionInformation (assoc
+				accuracy_contribution (first (get baseline_ac_map [first_feature second_feature]))
+				robust_residual (first (get robust_residual_map first_feature))
+			))
+			(call !ComputeCausalContributionInformation (assoc
+				accuracy_contribution (first (get baseline_ac_map [second_feature first_feature]))
+				robust_residual (first (get robust_residual_map second_feature))
+			))
+		))
+	)
+
+	;Returns the expected target residual for samples from one exact coalition.
+	;Stored residuals and the return have the target feature's units. Coalition
+	;indices and feature indices are dimensionless. A target used as its own
+	;context is excluded because that is a substitutability measurement rather
+	;than a prediction residual.
+	!ComputeCausalCoalitionResidualMean
+	(declare
+		(assoc
+			target_residuals []
+			case_indices []
+			has_nullable_continuous_target .false
+		)
+
+		(declare (assoc
+			residual_values
+				(map
+					(lambda
+						(if (= .false (first (current_value)))
+							(if has_nullable_continuous_target
+								(if (last (current_value)) (first (last (current_value))))
+								(last (current_value))
+							)
+						)
+					)
+					(unzip target_residuals case_indices)
+				)
+		))
+
+		(if has_nullable_continuous_target
+			(call !ComputeCausalResidualMean (assoc residual_values residual_values))
+			(generalized_mean residual_values)
+		)
+	)
+
+	;Measures the direct accuracy contribution of source_feature_index to
+	;target_feature_index. The unscreened arm averages over order-respecting
+	;coalitions; features below both endpoints are excluded because conditioning on a
+	;shared effect opens a collider. A named screener measures the exact singleton
+	;context with and without the source. The return has target feature units; feature,
+	;coalition, and sample indices are dimensionless.
+	!ComputeDirectCausalAccuracyContribution
+	(declare
+		(assoc
+			source_feature_index 0
+			target_feature_index 0
+			screening_feature_index .null
+			all_sample_indices []
+			coalition_sizes []
+			sample_feature_residuals_lists []
+			forbidden_feature_indices []
+			has_nullable_continuous_target .false
+		)
+
+		(declare (assoc
+			source_residuals (get sample_feature_residuals_lists source_feature_index)
+			target_residuals (get sample_feature_residuals_lists target_feature_index)
+			has_screening_feature (!= .null screening_feature_index)
+			screening_residuals
+				(if (!= .null screening_feature_index)
+					(get sample_feature_residuals_lists screening_feature_index)
+					[]
+				)
+		))
+
+		(declare (assoc
+			case_indices_with_source
+				(filter
+					(lambda (let
+						(assoc sample_index (current_value 1))
+						(and
+							(= .true (get source_residuals [sample_index 0]))
+							(= .false (get target_residuals [sample_index 0]))
+							(= 0 (size (filter
+								(lambda (= .true (get sample_feature_residuals_lists [(current_value 1) sample_index 0])))
+								forbidden_feature_indices
+							)))
+							(or
+								(not has_screening_feature)
+								(and
+									(= 2 (get coalition_sizes sample_index))
+									(= .true (get screening_residuals [sample_index 0]))
+								)
+							)
+						)
+					))
+					all_sample_indices
+				)
+			case_indices_without_source
+				(filter
+					(lambda (let
+						(assoc sample_index (current_value 1))
+						(and
+							(= .false (get source_residuals [sample_index 0]))
+							(= .false (get target_residuals [sample_index 0]))
+							(= 0 (size (filter
+								(lambda (= .true (get sample_feature_residuals_lists [(current_value 1) sample_index 0])))
+								forbidden_feature_indices
+							)))
+							(if has_screening_feature
+								(and
+									(= 1 (get coalition_sizes sample_index))
+									(= .true (get screening_residuals [sample_index 0]))
+								)
+								(< (get coalition_sizes sample_index) (- (size sample_feature_residuals_lists) 2))
+							)
+						)
+					))
+					all_sample_indices
+				)
+		))
+
+		(-
+			(call !ComputeCausalCoalitionResidualMean (assoc
+				target_residuals target_residuals
+				case_indices case_indices_without_source
+				has_nullable_continuous_target has_nullable_continuous_target
+			))
+			(call !ComputeCausalCoalitionResidualMean (assoc
+				target_residuals target_residuals
+				case_indices case_indices_with_source
+				has_nullable_continuous_target has_nullable_continuous_target
+			))
+		)
+	)
+
+	;Builds direct causal accuracy contributions on one selected coalition support.
+	;For an intermediate feature to screen a pair, both legs through it must be
+	;stronger than the pair, the ordinal form of the data-processing bound on inherited
+	;information. If more than one path qualifies, the widest path is the cut because it
+	;carries the most inherited information. A downstream shared effect is excluded only
+	;for an upstream-half pair when an incident leg is stronger, preventing collider
+	;opening without stripping low-depth weak edges of useful contexts. Contributions have
+	;target-feature units; information is in nats and strengths are dimensionless.
+	!ComputeCausallyScreenedACMatrix
+	(declare
+		(assoc
+			causal_sample_features []
+			causal_residual_samples []
+			causal_baseline_ac_map (assoc)
+			causal_feature_mi_map (assoc)
+			causal_robust_residual_map (assoc)
+		)
+
+		(declare (assoc
+			sample_feature_indices_map (zip causal_sample_features (indices causal_sample_features))
+			num_residual_samples (size (first causal_residual_samples))
+			median_feature_information (quantile (values causal_feature_mi_map) 0.5)
+		))
+		(declare (assoc
+			causal_sample_indices (range 0 (- num_residual_samples 1))
+		))
+		(declare (assoc
+			causal_coalition_sizes
+				(map
+					(lambda (let
+						(assoc sample_index (current_value 1))
+						(size (filter
+							(lambda (= .true (get (current_value) [sample_index 0])))
+							causal_residual_samples
+						))
+					))
+					causal_sample_indices
+				)
+		))
+		(map
+			(lambda (let
+				(assoc
+					target_feature (current_index 1)
+					target_feature_index (get sample_feature_indices_map (current_index 1))
+					baseline_target_map (current_value 1)
+				)
+				(map
+					(lambda (let
+						(assoc
+							source_feature (current_index 1)
+							baseline_ac_tuple (current_value 1)
+						)
+						(if (or
+								(= source_feature target_feature)
+								(not (contains_index sample_feature_indices_map source_feature))
+								(not (contains_index sample_feature_indices_map target_feature))
+							)
+							baseline_ac_tuple
+
+							(let
+								(assoc
+									source_feature_index (get sample_feature_indices_map source_feature)
+									pair_strength
+										(call !ComputeCausalPairStrength (assoc
+											first_feature source_feature
+											second_feature target_feature
+											baseline_ac_map causal_baseline_ac_map
+											robust_residual_map causal_robust_residual_map
+										))
+									lower_endpoint_information
+										(min
+											(get causal_feature_mi_map source_feature)
+											(get causal_feature_mi_map target_feature)
+										)
+									upper_endpoint_information
+										(max
+											(get causal_feature_mi_map source_feature)
+											(get causal_feature_mi_map target_feature)
+										)
+									has_nullable_continuous_target
+										(and
+											(not (contains_index !nominalsMap target_feature))
+											(!= .false (get !featureNullRatiosMap [target_feature "has_nulls"]))
+											(> (get causal_robust_residual_map [target_feature 1]) 0)
+										)
+								)
+								(declare (assoc
+									intermediate_features
+										(filter
+											(lambda (and
+												(!= (current_value) source_feature)
+												(!= (current_value) target_feature)
+												(> (get causal_feature_mi_map (current_value)) lower_endpoint_information)
+												(< (get causal_feature_mi_map (current_value)) upper_endpoint_information)
+												(> (call !ComputeCausalPairStrength (assoc
+													first_feature source_feature
+													second_feature (current_value 1)
+													baseline_ac_map causal_baseline_ac_map
+													robust_residual_map causal_robust_residual_map
+												)) pair_strength)
+												(> (call !ComputeCausalPairStrength (assoc
+													first_feature target_feature
+													second_feature (current_value 1)
+													baseline_ac_map causal_baseline_ac_map
+													robust_residual_map causal_robust_residual_map
+												)) pair_strength)
+											))
+											causal_sample_features
+										)
+									forbidden_features
+										(filter
+											(lambda (and
+												(!= (current_value) source_feature)
+												(!= (current_value) target_feature)
+												(> lower_endpoint_information median_feature_information)
+												(< (get causal_feature_mi_map (current_value)) lower_endpoint_information)
+												(> (max
+													(call !ComputeCausalPairStrength (assoc
+														first_feature source_feature
+														second_feature (current_value 1)
+														baseline_ac_map causal_baseline_ac_map
+														robust_residual_map causal_robust_residual_map
+													))
+													(call !ComputeCausalPairStrength (assoc
+														first_feature target_feature
+														second_feature (current_value 1)
+														baseline_ac_map causal_baseline_ac_map
+														robust_residual_map causal_robust_residual_map
+													))
+												) pair_strength)
+											))
+											causal_sample_features
+										)
+								))
+								(declare (assoc
+									widest_path_strength
+										(if (size intermediate_features)
+											(apply "max" (map
+												(lambda (min
+													(call !ComputeCausalPairStrength (assoc
+														first_feature source_feature
+														second_feature (current_value 1)
+														baseline_ac_map causal_baseline_ac_map
+														robust_residual_map causal_robust_residual_map
+													))
+													(call !ComputeCausalPairStrength (assoc
+														first_feature target_feature
+														second_feature (current_value 1)
+														baseline_ac_map causal_baseline_ac_map
+														robust_residual_map causal_robust_residual_map
+													))
+												))
+												intermediate_features
+											))
+										)
+								))
+								(declare (assoc
+									screening_feature
+										(if (size intermediate_features)
+											(first (filter
+												(lambda (=
+													(min
+														(call !ComputeCausalPairStrength (assoc
+															first_feature source_feature
+															second_feature (current_value 1)
+															baseline_ac_map causal_baseline_ac_map
+															robust_residual_map causal_robust_residual_map
+														))
+														(call !ComputeCausalPairStrength (assoc
+															first_feature target_feature
+															second_feature (current_value 1)
+															baseline_ac_map causal_baseline_ac_map
+															robust_residual_map causal_robust_residual_map
+														))
+													)
+													widest_path_strength
+												))
+												intermediate_features
+											))
+											.null
+										)
+									forbidden_feature_indices
+										(unzip sample_feature_indices_map forbidden_features)
+								))
+								(if (and (= .null screening_feature) (= 0 (size forbidden_features)))
+									baseline_ac_tuple
+
+									(modify baseline_ac_tuple 0
+										(call !ComputeDirectCausalAccuracyContribution (assoc
+											source_feature_index source_feature_index
+											target_feature_index target_feature_index
+											screening_feature_index
+												(if (= .null screening_feature)
+													.null
+													(get sample_feature_indices_map screening_feature)
+												)
+											all_sample_indices causal_sample_indices
+											coalition_sizes causal_coalition_sizes
+											sample_feature_residuals_lists causal_residual_samples
+											forbidden_feature_indices forbidden_feature_indices
+											has_nullable_continuous_target has_nullable_continuous_target
+										))
+									)
+								)
+							)
+						)
+					))
+					baseline_target_map
+				)
+			))
+			causal_baseline_ac_map
+		)
+	)
+
 	;helper method for CalculateFeatureResiduals to calculate 'superfull' local accurate residuals
 	!ComputeDeviations
 	(seq
@@ -1376,7 +1768,16 @@
 
 		{
 			"feature_mi_map" feature_marginal_distinguishability_map
-			"feature_ac_map" (if output_robust_acs (get residuals_map "feature_ac_map" ))
+			"feature_ac_map"
+				(if output_robust_acs
+					(call !ComputeCausallyScreenedACMatrix (assoc
+						causal_sample_features (get residuals_map "causal_sample_features")
+						causal_residual_samples (get residuals_map "causal_residual_samples")
+						causal_baseline_ac_map (get residuals_map "feature_ac_map")
+						causal_feature_mi_map feature_marginal_distinguishability_map
+						causal_robust_residual_map (get residuals_map "residual_map")
+					))
+				)
 			"feature_rr_map"
 				(if output_robust_residuals
 					(if (size (get residuals_map "residual_map" ))
