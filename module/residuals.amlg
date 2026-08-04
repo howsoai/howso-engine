@@ -1,5 +1,81 @@
 ;Contains methods for computing and outputting residuals.
 {
+	;Selects a coalition by stratifying the exact power-set mass.
+	;sample_index and num_samples are dimensionless counts. probability_map contains
+	;dimensionless binomial probability masses indexed by the number of features.
+	!SelectStratifiedCoalition
+	(declare
+		(assoc
+			context_features []
+			probability_map (assoc)
+			sample_index 0
+			num_samples 1
+		)
+
+		(declare (assoc
+			total_probability_mass (apply "+" probability_map)
+			;The midpoint of this sample's equal-mass stratum, in [0, 1].
+			stratum_quantile (/ (+ (mod sample_index num_samples) 0.5) num_samples)
+			cumulative_probability_mass 0
+			previous_probability_mass 0
+			selected_size 0
+			selected_size_found .false
+		))
+
+		(while (and (not selected_size_found) (< (current_index) (size probability_map)))
+			(assign "previous_probability_mass" cumulative_probability_mass)
+			(assign "cumulative_probability_mass"
+				(+ cumulative_probability_mass (get probability_map (current_index)))
+			)
+			(if (<= (* stratum_quantile total_probability_mass) cumulative_probability_mass)
+				(assign (assoc
+					selected_size (current_index 1)
+					selected_size_found .true
+				))
+			)
+		)
+
+		(if (not selected_size_found)
+			(assign (assoc selected_size (- (size probability_map) 1)))
+		)
+
+		(declare (assoc
+			;Position within the selected cardinality's probability mass, in [0, 1].
+			combination_quantile
+				(/
+					(- (* stratum_quantile total_probability_mass) previous_probability_mass)
+					(get probability_map selected_size)
+				)
+			remaining_slots selected_size
+			candidate_index 0
+			selected_features []
+			available_features 0
+			candidate_inclusion_mass 0
+		))
+
+		;Inverse-transform a uniform quantile over the combinations of selected_size.
+		;At each candidate, remaining_slots / available_features is the exact mass
+		;of combinations whose next member is that candidate, so no power set is stored.
+		(while (> remaining_slots 0)
+			(assign "available_features" (- (size context_features) candidate_index))
+			(assign "candidate_inclusion_mass" (/ remaining_slots available_features))
+			(if (< combination_quantile candidate_inclusion_mass)
+				(seq
+					(accum (assoc selected_features [(get context_features candidate_index)]))
+					(assign "combination_quantile" (/ combination_quantile candidate_inclusion_mass))
+					(accum (assoc remaining_slots -1))
+				)
+
+				(assign "combination_quantile"
+					(/ (- combination_quantile candidate_inclusion_mass) (- 1 candidate_inclusion_mass))
+				)
+			)
+			(accum (assoc candidate_index 1))
+		)
+
+		selected_features
+	)
+
 	;iterate over the specified deviation_features_map and output maximum knwown residuals for each feature
 	!ComputeMaxResiduals
 	(map
@@ -671,6 +747,8 @@
 					(lambda (let
 						(assoc
 							case_id (current_value 1)
+							;Dimensionless position in the complete robust sample stream.
+							sample_index (+ total_samples (current_index 1))
 							;map of feature -> value for all the case values
 							case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
 							time_series_filter_query (list)
@@ -696,21 +774,33 @@
 							))
 						)
 
-						;filter out a random number of context features
+						;Select a context-feature coalition.
 						(declare (assoc
 							react_context_features
-								(rand
-									context_features
-									;number of features to enable is probabilistically weighted
-									(if (and !tsTimeFeature (!= (size context_features) num_features))
-										(rand
-											(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features) ))
-										)
+								(if (= "missing_information" estimating_residual_lower_bound)
+									;Accuracy contribution is an expectation over the power set.
+									;Integrate the known coalition mass by equal-probability strata.
+									(call !SelectStratifiedCoalition (assoc
+										context_features context_features
+										probability_map
+											(if (and !tsTimeFeature (!= (size context_features) num_features))
+												(call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features)))
+												enabled_num_features_probability_map
+											)
+										sample_index sample_index
+										num_samples (size case_ids)
+									))
 
-										(rand enabled_num_features_probability_map)
+									(rand
+										context_features
+										;number of features to enable is probabilistically weighted
+										(if (and !tsTimeFeature (!= (size context_features) num_features))
+											(rand (call !ComputeNumEnabledFeaturesProbabilitiesMap (assoc num_features (size context_features))))
+											(rand enabled_num_features_probability_map)
+										)
+										;unique random features (not with replacement)
+										.true
 									)
-									;unique random features (not with replacement)
-									.true
 								)
 						))
 
