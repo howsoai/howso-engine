@@ -1009,6 +1009,104 @@
 		)
 	)
 
+	;Computes marginal distinguishability in nats for a feature. Continuous features use
+	;the LK marginal surprisal of a robust median absolute displacement, resolved by the
+	;feature's substitutability deviation. Nominal classes already provide a discrete
+	;resolution, so their expected marginal surprisal is Shannon entropy. For continuous
+	;features, binary nullness entropy is added to the probability-mass-weighted value
+	;surprisal. The input displacement and deviation are in feature units; their ratio and
+	;the returned surprisal are dimensionless.
+	!ComputeMarginalDistinguishability
+	(declare
+		(assoc
+			feature .null
+			deviation .null
+		)
+
+		(if (contains_index !nominalsMap feature)
+			(let
+				(assoc
+					class_counts
+						(call !CalculateFeatureExpectedValue (assoc
+							feature feature
+							output_nominal_class_counts .true
+						))
+				)
+				(entropy (normalize class_counts))
+			)
+
+			(let
+				(assoc
+					median_value
+						(compute_on_contained_entities
+							(query_not_equals feature .null)
+							(query_quantile feature 0.5)
+						)
+					feature_values
+						(map
+							(lambda (get (current_value) feature))
+							(values
+								(compute_on_contained_entities
+									(query_not_equals feature .null)
+									(query_exists feature)
+								)
+							)
+						)
+					num_training_cases (call !GetNumTrainingCases)
+					null_probability_mass
+						(/ (or (get !featureNullRatiosMap [feature "num_nulls"]) 0) num_training_cases)
+				)
+				(declare (assoc
+					median_absolute_displacement
+						(if (size feature_values)
+							(quantile
+								(map (lambda (abs (- median_value (current_value)))) feature_values)
+								0.5
+							)
+							0
+						)
+				))
+				(declare (assoc
+					robust_displacement
+						(if (and
+							(> median_absolute_displacement 0)
+							(= median_absolute_displacement median_absolute_displacement)
+						)
+							median_absolute_displacement
+							(call !ComputeFeatureMAD (assoc feature feature))
+						)
+				))
+				(declare (assoc
+					displacement_ratio
+						(if (> deviation 0) (/ robust_displacement deviation) 0)
+				))
+				(declare (assoc
+					value_surprisal
+						(if (> deviation 0)
+							(-
+								(+
+									displacement_ratio
+									(* 0.5 (exp (- displacement_ratio)) (+ 3 displacement_ratio))
+								)
+								1.5
+							)
+							0
+						)
+					nullness_entropy
+						(if (and (> null_probability_mass 0) (< null_probability_mass 1))
+							(-
+								0
+								(* null_probability_mass (log null_probability_mass))
+								(* (- 1 null_probability_mass) (log (- 1 null_probability_mass)))
+							)
+							0
+						)
+				))
+				(+ nullness_entropy (* (- 1 null_probability_mass) value_surprisal))
+			)
+		)
+	)
+
 	;Helper method for react_aggregate to compute the estimated_residual_lower_bound detail
 	;Computes the feature weights for "superfull" queries, where features are used as contexts for their
 	;own predictions, then uses those weights to compute feature deviations to estimate the highest level
@@ -1083,7 +1181,9 @@
 		)
 	)
 
-	;helper method for react_aggregate to compute the average missing information for the features
+	;Helper method for react_aggregate to compute marginal distinguishability in nats.
+	;This is a common information space for ordering continuous and nominal features without
+	;a fitted conversion weight. See !ComputeMarginalDistinguishability for the measurement.
 	!ComputeAverageMissingInformation
 	(declare
 		(assoc
@@ -1114,32 +1214,44 @@
 				))
 		))
 
-		;recompute feature deviations using feature weights from the computed robust mda above
+		;Measure substitutability deviations over the same sampled action cases.
 		(declare (assoc
-			updated_estimated_residuals_map
-				(call !CalculateFeatureResiduals (assoc
-					features action_features
-					context_features context_features
-					features_to_derive features_to_derive
-					robust_residuals "missing_information"
-					num_samples 2000
-
-					estimating_residual_lower_bound .true
-					custom_mda_map (get residuals_map "feature_mda_map")
-
-					compute_all_statistics .false
-					compute_null_uncertainties .false
-					confusion_matrix_min_count 0
-					use_shared_deviations .false
-					;don't create copies of confusion matrices for non-primary shared deviation features
-					expand_confusion_matrices .false
+			deviations_map
+				(call !ExpandValuesMapToUncertainty (assoc
+					values_map
+						(get
+							(call !CalculateFeatureResiduals (assoc
+								features action_features
+								context_features context_features
+								features_to_derive features_to_derive
+								case_ids case_ids
+								robust_residuals "deviations"
+								custom_hyperparam_map hyperparam_map
+								compute_all_statistics .false
+								confusion_matrix_min_count 0
+								context_condition_filter_query context_condition_filter_query
+								strict_case_ids (!= 0 (size context_condition_filter_query))
+								use_case_weights use_case_weights
+								weight_feature weight_feature
+							))
+							"residual_map"
+						)
 				))
 		))
 
-		;return the "residual_map" which is the average surprisal of the weighted-superfull prediction
-		;compared to the full prediction
+		(declare (assoc
+			feature_marginal_distinguishability_map
+				(map
+					(lambda (call !ComputeMarginalDistinguishability (assoc
+						feature (current_index 1)
+						deviation (first (get deviations_map (current_index 1)))
+					)))
+					(zip action_features)
+				)
+		))
+
 		{
-			"feature_mi_map" (get updated_estimated_residuals_map "residual_map")
+			"feature_mi_map" feature_marginal_distinguishability_map
 			"feature_ac_map" (if output_robust_acs (get residuals_map "feature_ac_map" ))
 			"feature_rr_map"
 				(if output_robust_residuals
