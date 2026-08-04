@@ -43,14 +43,10 @@
 			;will additionally compute and store distance contributions and similarity convictions while respecting the overwrite flag.
 			#{type ["boolean" "string"]}
 			clustering .null
-			;similarity conviction threshold of cases considered for expansion of a cluster, only cases with similarity conviction
-			;equal to or greater than this value will be considered to be clustered in the same cluster as their neighbors.
+			;Smallest mass (number) of cases needed that can be considered an individual cluster.
+			;When unspecified is dynamically computed based on dataset, but will always be at least 3.
 			#{type "number" exclusive_min 0}
-			clustering_expansion_threshold 0.5
-			;The initially unclustered candidate cases' distance contribution needs to be less than this value times the
-			;max distance contribution from their nearest cluster to be included in that cluster.
-			#{type "number" exclusive_min 0}
-			clustering_inclusion_relative_threshold 1.5
+			clustering_min_cluster_mass .null
 			;flag, if set to true, will enable auto_analyze and analyze with these specified features computing their values.
 			;note: if clustering, analyze will not include the clustered feature
 			;   Only applicable when reacting for the entire dataset,  when case_ids is null.
@@ -202,7 +198,25 @@
 		)
 
 		(if (= .null features)
-			(assign (assoc features !trainedFeatures))
+			(assign (assoc
+				features
+					(if !tsTimeFeature
+						(filter
+							(lambda
+								;no omniscient built-ins (no built-ins aside from .series_index)
+								(not (contains_value
+									[".reverse_series_index" ".time_to_horizon"
+									".synchronous_counter" ".synchronous_counter_lag_1"]
+									(current_value)
+								))
+							)
+							!trainedFeatures
+						)
+
+						;otherwise all features
+						!trainedFeatures
+					)
+			))
 		)
 
 		;flag set to true if similarity_conviction was requested without distance_contribution
@@ -281,7 +295,21 @@
 			))
 		)
 
-		(if (and analyze (= .null case_ids))
+		(declare (assoc
+			hyperparam_map
+				(call !GetHyperparameters (assoc
+					feature .null
+					context_features features
+					weight_feature weight_feature
+				))
+			dataset_size (call !GetNumTrainingCases)
+		))
+
+		;This must be above the below block that populates
+		;!computedFeaturesMap so the weight_feature key is correct.
+		(call !UpdateCaseWeightParameters)
+
+		(if (= .null case_ids)
 			(seq
 				(assign_to_entities (assoc
 					!computedFeaturesMap
@@ -299,10 +327,11 @@
 									(modify computed_map "distance_contribution" .false)
 									computed_map
 								)
+							"analyze" analyze
 							"context_features" features
 							"weight_feature" (if use_case_weights weight_feature)
 						)
-					!autoAnalyzeEnabled .true
+					!autoAnalyzeEnabled analyze
 					!queryFeatureAttributeTypeMap (append !queryFeatureAttributeTypeMap (zip (values computed_map) {"difference_type" "continuous" "data_type" "number"}) )
 				))
 
@@ -313,18 +342,6 @@
 				))
 			)
 		)
-
-		(declare (assoc
-			hyperparam_map
-				(call !GetHyperparameters (assoc
-					feature .null
-					context_features features
-					weight_feature weight_feature
-				))
-			dataset_size (call !GetNumTrainingCases)
-		))
-
-		(call !UpdateCaseWeightParameters)
 
 		(declare (assoc
 			feature_weights
@@ -339,7 +356,14 @@
 			;get the min k if using dynamic k
 			k_parameter_value (if (~ 0 (get hyperparam_map "k")) (get hyperparam_map "k") (get hyperparam_map ["k" 1]) )
 			case_to_dc_map .null
+
+			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
+			max_lag_index_value .null
 		))
+		(if ts_feature_lag_amount_map
+			(assign (assoc max_lag_index_value (apply "max" ts_feature_lag_amount_map) ))
+		)
+
 
 		;output a warning when trainee has not been analyzed (using default hyperparameters w/o residuals)
 		(if (and
@@ -720,7 +744,7 @@
 							"feature" clustering
 							"distance_contribution_feature" distance_contribution
 							"similarity_conviction_feature" similarity_conviction
-							"clustering_inclusion_relative_threshold" clustering_inclusion_relative_threshold
+							"clustering_min_cluster_mass" clustering_min_cluster_mass
 						)
 				))
 				(accum_to_entities (assoc
@@ -891,13 +915,14 @@
 				;was computed and stored into 'case_to_dc_map' earlier in the flow.  This method is being called for each case,
 				;thus if case_id is specified, this is part of computing similarity_conviction on the entire dataset,
 				;and 'case_to_dc_map' already exists, pull distance contribution value from 'case_to_dc_map' instead of computing it
-				(if case_id
+				(if (and case_id (contains_index case_to_dc_map case_id))
 					(get case_to_dc_map case_id)
 
 					;else compute distance contribution for the provided case feature_values
 					(first
 						(compute_on_contained_entities
 							filtering_queries
+							(if case_id (query_not_in_entity_list [case_id]) [])
 							(query_distance_contributions
 								(get hyperparam_map "k")
 								features
@@ -945,7 +970,7 @@
 
 		(declare (assoc
 			local_distance_contributions_map
-				(if case_id
+				(if (and case_id (contains_index case_to_dc_map case_id))
 					(zip local_cases (unzip case_to_dc_map local_cases))
 
 					(or
@@ -1241,7 +1266,16 @@
 							)
 						)
 					)
-					features
+					(if (and !tsTimeFeature (contains_index case_values_map ".series_index"))
+						;if time-series and we have the .series_index of the case, then we can only compute
+						;surprisals for the defined features (outside of the null triangle)
+						(call !FilterContextsBySeriesIndex (assoc
+							all_context_features features
+							series_index (get case_values_map ".series_index")
+						))
+
+						features
+					)
 				)
 		))
 
