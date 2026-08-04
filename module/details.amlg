@@ -81,7 +81,7 @@
 		(if (= .null filtering_queries)
 			(assign (assoc filtering_queries (list)))
 		)
-		(if (and case_indices preserve_feature_values)
+		(if (and case_indices (size preserve_feature_values))
 			(seq
 				(assign (assoc
 					preserve_case_id
@@ -162,10 +162,17 @@
 			k_parameter_value (if (~ 0 (get hyperparam_map "k")) (get hyperparam_map "k") (get hyperparam_map ["k" 1]) )
 			local_cases_tuple .null
 			react_feature_deviations .null
+			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
+			max_lag_index_value .null
+		))
+		(if ts_feature_lag_amount_map
+			(assign (assoc max_lag_index_value (apply "max" ts_feature_lag_amount_map) ))
+		)
 
+		(declare (assoc
 			;flag to represent whether computed features defined in the computedFeaturesMap can have their values retrieved for existing cases
 			;rather than computed
-			can_use_computed_feature_values
+			can_use_computed_contribution_values
 				(and
 					;if computing SC for an existing case when it already was computed and stored
 					;from react_into_features with the same parameters, instead just retrieve it
@@ -173,7 +180,10 @@
 					;no extra specified constraints
 					(= .null constraints)
 					(=
-						(zip features)
+						(if (get details "contributions_context_features")
+							(zip (get details "contributions_context_features"))
+							(zip features)
+						)
 						(zip (get !computedFeaturesMap "context_features"))
 					)
 					(if use_case_weights
@@ -265,21 +275,48 @@
 							(if (and
 									;if computing SC for an existing case when it already was computed and stored
 									;from react_into_features with the same parameters, instead just retrieve it
-									can_use_computed_feature_values
+									can_use_computed_contribution_values
 									(contains_index (get !computedFeaturesMap "computed_map") "similarity_conviction")
 									(!= .null (retrieve_from_entity existing_case_id (get !computedFeaturesMap ["computed_map" "similarity_conviction"]) ))
 
 								)
 								(retrieve_from_entity existing_case_id (get !computedFeaturesMap ["computed_map" "similarity_conviction"]) )
 
+								(and
+									;if the case was clustered, then DC and SC were already computed using the context features.
+									;if those context features match what should be used to compute the SC, then pull the previously
+									;computed value
+									(contains_index details "non_clustered_similarity_conviction")
+									(=
+										(zip context_features)
+										(if (get details "contributions_context_features")
+											(zip (get details "contributions_context_features"))
+											(zip features)
+										)
+									)
+								)
+								(get details "non_clustered_similarity_conviction")
+
 								;otherwise compute it
 								(get
 									(call !SimilarityConviction (assoc
-										features features
-										feature_values (unzip case_values_map features)
+										features
+											(if (get details "contributions_context_features")
+												(get details "contributions_context_features")
+												features
+											)
+										feature_values
+											(unzip
+												case_values_map
+												(if (get details "contributions_context_features")
+													(get details "contributions_context_features")
+													features
+												)
+											)
 										filtering_queries filtering_queries
 										use_case_weights use_case_weights
 										weight_feature weight_feature
+										case_id ignore_case
 										distance_contribution_feature (get !storedDistanceContributionsFeatureMap (apply "concat" (sort features)))
 									))
 									"similarity_conviction"
@@ -470,19 +507,31 @@
 							(if (and
 									;if computing RC for an existing case when it already was computed and stored
 									;from react_into_features with the same parameters, instead just retrieve it
-									can_use_computed_feature_values
+									can_use_computed_contribution_values
 									(contains_index (get !computedFeaturesMap "computed_map") "residual_contribution")
 									(!= .null (retrieve_from_entity existing_case_id (get !computedFeaturesMap ["computed_map" "residual_contribution"]) ))
 								)
 								(retrieve_from_entity existing_case_id (get !computedFeaturesMap ["computed_map" "residual_contribution"]) )
 
 								(call !ResidualContribution (assoc
-									features features
-									feature_values (unzip case_values_map features)
+									features
+										(if (get details "contributions_context_features")
+											(get details "contributions_context_features")
+											features
+										)
+									feature_values
+										(unzip
+											case_values_map
+											(if (get details "contributions_context_features")
+												(get details "contributions_context_features")
+												features
+											)
+										)
 									use_case_weights use_case_weights
 									weight_feature weight_feature
 									dataset_size dataset_size
 									filtering_queries filtering_queries
+									case_id ignore_case
 								))
 							)
 					)
@@ -497,20 +546,46 @@
 							(if (and
 									;if computing DC for an existing case when it already was computed and stored
 									;from react_into_features with the same parameters, instead just retrieve it
-									can_use_computed_feature_values
+									can_use_computed_contribution_values
 									(contains_index (get !computedFeaturesMap "computed_map") "distance_contribution")
 									(!= .null (retrieve_from_entity existing_case_id (get !computedFeaturesMap ["computed_map" "distance_contribution"]) ))
 								)
 								(retrieve_from_entity existing_case_id (get !computedFeaturesMap ["computed_map" "distance_contribution"]) )
 
+								(and
+									;if the case was clustered, then DC and SC were already computed using the context features.
+									;if those context features match what should be used to compute the DC, then pull the previously
+									;computed value
+									(contains_index details "non_clustered_distance_contribution")
+									(=
+										(zip context_features)
+										(if (get details "contributions_context_features")
+											(zip (get details "contributions_context_features"))
+											(zip features)
+										)
+									)
+								)
+								(get details "non_clustered_distance_contribution")
+
 								;otherwise compute it
 								(first
 									(compute_on_contained_entities
 										filtering_queries
+										(if ignore_case (query_not_in_entity_list [ignore_case]) [])
 										(query_distance_contributions
 											k_parameter
-											features
-											[(unzip case_values_map features)]
+											;optionally use the given context features, or all the features
+											(if (get details "contributions_context_features")
+												(get details "contributions_context_features")
+												features
+											)
+											[(unzip
+												case_values_map
+												(if (get details "contributions_context_features")
+													(get details "contributions_context_features")
+													features
+												)
+											)]
 											p_parameter
 											feature_weights
 											!queryFeatureAttributeTypeMap
@@ -525,17 +600,6 @@
 									)
 								)
 							)
-					)
-			))
-		)
-
-		;action dc and sc were computed, output them in details
-		(if (contains_index details "non_clustered_distance_contribution")
-			(accum (assoc
-				output
-					(assoc
-						"non_clustered_distance_contribution" (get details "non_clustered_distance_contribution")
-						"non_clustered_similarity_conviction" (get details "non_clustered_similarity_conviction")
 					)
 			))
 		)
