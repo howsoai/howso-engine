@@ -416,7 +416,7 @@
 	(declare
 		(assoc
 			;don't need to do the last iteration if running reduce_only flow
-			num_iterations (if reduce_only 3 4)
+			num_iterations (if reduce_only 3 5)
 			iteration 0
 			data_params_map (assoc)
 		)
@@ -460,9 +460,24 @@
 		)
 
 		;when calculating IRW and LK deviations, compute the initial residual values if necessary
+		;TODO: 25907 investigate improving initial deviations for nominals algorithmically
 		(if (= .null initial_residual_values_map)
 			(assign (assoc
-				initial_residual_values_map (call !ComputeInitialResiduals)
+				initial_residual_values_map
+					(map
+						(lambda
+							;reduce nominal deviations by an order of magnitude so that
+							;a) they aren't as drastically different from other nominal features
+							;	without this scaling all nominals deviations would be between 0.25 (2 classes)
+							;	and 0.5, higher value as number of classes increases
+							;b) they are on a more similar relative scale to initial continuous deviations
+							(if (contains_index !nominalsMap (current_index))
+								(/ (current_value) 10  )
+								(current_value)
+							)
+						)
+						(call !ComputeInitialResiduals)
+					)
 			))
 		)
 
@@ -479,7 +494,16 @@
 
 			;compute mda on last iteration, but only if not doing a reduce_only analyze
 			(assign (assoc
-				computation_type (and (= reduce_only .false) (= iteration (- num_iterations 1)) )
+				computation_type
+					(if reduce_only
+						"deviations"
+
+						;last iteration computes feature probabilities
+						(= iteration (- num_iterations 1))
+						"robust_mda"
+
+						"deviations"
+					)
 			))
 
 			(assign (assoc
@@ -501,9 +525,9 @@
 							feature_residuals_map
 								(call !CalculateFeatureResiduals (assoc
 									features features
-									robust_residuals (if computation_type "robust_mda" "deviations")
+									robust_residuals computation_type
 									num_samples
-										(if computation_type
+										(if (= "robust_mda" computation_type)
 											num_feature_probability_samples
 
 											;the deviations query uses all features "superfull", there's no need to sample more
@@ -512,7 +536,7 @@
 										)
 									custom_data_params_map baseline_data_parameters_map
 									;must compute confusion matrix to use sparse deviation matrix, but not when computing mda
-									compute_all_statistics (and use_sdm (not computation_type))
+									compute_all_statistics (and use_sdm (= "deviations" computation_type))
 									;don't sparsify the confusion matrix so that SDM can be computed using full counts
 									confusion_matrix_min_count 0
 									use_shared_deviations .true
@@ -527,7 +551,7 @@
 					)
 			))
 
-			(if computation_type
+			(if (= "robust_mda" computation_type)
 				(accum (assoc
 					baseline_data_parameters_map
 						(assoc
