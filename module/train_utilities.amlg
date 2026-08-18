@@ -35,12 +35,12 @@
 		)
 	)
 
-	;set specified feature weights for inactive features in all hyperparameter maps (!defaultHyperparameters and !hyperparameterMetadataMap)
+	;set specified feature weights for inactive features in all dataset parameter maps (!defaultDataParametersMap and !dataParametersMap)
 	;If weights haven't been defined yet, set them to 0 for invacitves and 1 for actives
 	;If already defined, will overwrite the weight of the specified features in feature_weights_map
 	;
 	;parameters:
-	; features_weights_map: assoc of feature -> weight to overwrite in all hyperparameter sets
+	; features_weights_map: assoc of feature -> weight to overwrite in all dataset parameter sets
 	!SetInactiveFeatureWeights
 	(declare
 		(assoc
@@ -48,7 +48,7 @@
 		)
 
 		(declare (assoc
-			updated_hp_maps
+			updated_dp_maps
 				(map
 					(lambda
 						(rewrite
@@ -63,12 +63,12 @@
 											num_features (size !trainedFeatures)
 										)
 
-										;if there is a featureMdaMap specified, temporarily set the weight of activated features to be 1/num_features
+										;if there is a featureProbabilitiesMap specified, temporarily set the weight of activated features to be 1/num_features
 										;if features_weights_map value is 1, so that they can be used in queries until the dataset is reanalyzed
 										;otherwise set it to 0
 										(declare (assoc
 											scaled_features_weights_map
-												(if (size (get (current_value 1) "featureMdaMap"))
+												(if (size (get (current_value 1) "featureProbabilitiesMap"))
 													(map
 														(lambda (/ (current_value) num_features) )
 														features_weights_map
@@ -87,10 +87,10 @@
 
 											(if scaled_features_weights_map
 												(assoc
-													"featureMdaMap"
+													"featureProbabilitiesMap"
 														(map
 															(lambda (append (current_value) scaled_features_weights_map))
-															(get (current_value 1) "featureMdaMap")
+															(get (current_value 1) "featureProbabilitiesMap")
 														)
 													;temporarily set the deviations of activated features to be initial values
 													;so that they can be used in queries until the dataset is reanalyzed
@@ -113,13 +113,13 @@
 							(current_value)
 						)
 					)
-					(list !defaultHyperparameters !hyperparameterMetadataMap)
+					(list !defaultDataParametersMap !dataParametersMap)
 				)
 		))
 
 		(assign_to_entities (assoc
-			!defaultHyperparameters (first updated_hp_maps)
-			!hyperparameterMetadataMap (last updated_hp_maps)
+			!defaultDataParametersMap (first updated_dp_maps)
+			!dataParametersMap (last updated_dp_maps)
 		))
 	)
 
@@ -169,7 +169,7 @@
 	;parameters:
 	; editing_existing_cases: boolean, default false. If true this method is being called from cases
 	;		being edited and thus !inactiveFeaturesMap may be being added to or removed from and
-	;		all the features are already defined in hyperparameters.
+	;		all the features are already defined in dataset parameters.
 	!UpdateInactiveFeatures
 	(declare
 		(assoc editing_existing_cases .false )
@@ -278,8 +278,8 @@
 	!ComputeRebalanceCaseWeights
 	(let
 		(assoc
-			hyperparam_map
-				(call !GetHyperparameters (assoc
+			data_params_map
+				(call !GetDataParameters (assoc
 					context_features features
 					weight_feature (if !autoAblationEnabled !autoAblationWeightFeature ".case_weight")
 				))
@@ -287,11 +287,11 @@
 		(declare (assoc
 			dataset_size (call !GetNumTrainingCases)
 			weight_feature (if !autoAblationEnabled !autoAblationWeightFeature ".case_weight")
-			feature_weights (get hyperparam_map "featureWeights")
-			feature_deviations  (get hyperparam_map "featureDeviations")
-			dt_parameter (get hyperparam_map "dt")
-			p_parameter (get hyperparam_map "p")
-			query_closest_k (get hyperparam_map "k")
+			feature_weights (get data_params_map "featureWeights")
+			feature_deviations  (get data_params_map "featureDeviations")
+			dt_parameter (get data_params_map "dt")
+			p_parameter (get data_params_map "p")
+			query_closest_k (get data_params_map "k")
 			rebalance_feature_indices  (unzip (zip features (indices features)) !continuousRebalanceFeatures)
 			continuous_rebalance_features !continuousRebalanceFeatures
 			nominal_rebalance_features !nominalRebalanceFeatures
@@ -429,8 +429,8 @@
 	!ComputeFeaturesDuringTrain
 	(let
 		(assoc
-			hyperparam_map
-				(call !GetHyperparameters (assoc
+			data_params_map
+				(call !GetDataParameters (assoc
 					context_features features
 					weight_feature
 						(or
@@ -448,17 +448,18 @@
 					(get !computedFeaturesMap "weight_feature")
 					(if !autoAblationEnabled !autoAblationWeightFeature ".none")
 				)
-			feature_weights (get hyperparam_map "featureWeights")
-			feature_deviations  (get hyperparam_map "featureDeviations")
-			dt_parameter (get hyperparam_map "dt")
-			p_parameter (get hyperparam_map "p")
-			query_closest_k (get hyperparam_map "k")
+			feature_weights (get data_params_map "featureWeights")
+			feature_deviations  (get data_params_map "featureDeviations")
+			dt_parameter (get data_params_map "dt")
+			p_parameter (get data_params_map "p")
+			query_closest_k (get data_params_map "k")
 		))
 
 		(declare (assoc
 			use_case_weights (or (!= .null (get !computedFeaturesMap "weight_feature")) (!= weight_feature ".none"))
 			computed_feature_indices (unzip (zip train_features (indices train_features)) computed_context_features)
 			dc_feature_name (get computed_map "distance_contribution")
+			compute_residual_contribution (contains_index computed_map "residual_contribution")
 			compute_similarity_conviction (contains_index computed_map "similarity_conviction")
 			compute_fc_addition (contains_index computed_map "familiarity_conviction_addition")
 			compute_pval_addition (contains_index computed_map "p_value_of_addition")
@@ -616,6 +617,26 @@
 		))
 
 		(declare (assoc
+			residual_contribution_values
+				(if compute_residual_contribution
+					||(map
+						(lambda (let
+							(assoc case_values (unzip (current_value 1) computed_feature_indices) )
+
+							(call !ResidualContribution (assoc
+								features computed_context_features
+								feature_values case_values
+								weight_feature weight_feature
+								use_case_weights use_case_weights
+								dataset_size dataset_size
+							))
+						))
+						cases
+					)
+				)
+		))
+
+		(declare (assoc
 			influence_weight_entropies
 				(if influence_weight_entropy_name
 					||(map
@@ -670,6 +691,7 @@
 					(if compute_pval_addition (get computed_map "p_value_of_addition") [])
 					(if compute_fc_removal (get computed_map "familiarity_conviction_removal") [])
 					(if compute_pval_removal (get computed_map "p_value_of_removal") [])
+					(if compute_residual_contribution (get computed_map "residual_contribution") [])
 					(if influence_weight_entropy_name influence_weight_entropy_name [])
 				)
 			has_dc (or dc_feature_name compute_similarity_conviction)
@@ -710,6 +732,10 @@
 								(unzip (get familiarity_conviction_tuples (current_index)) fc_feature_indices)
 								[]
 							)
+							(if compute_residual_contribution
+								(get residual_contribution_values (current_index))
+								[]
+							)
 							(if influence_weight_entropy_name
 								(get influence_weight_entropies (current_index))
 								[]
@@ -736,6 +762,10 @@
 							)
 							(if has_fc
 								(unzip (get familiarity_conviction_tuples (current_index)) fc_feature_indices)
+								[]
+							)
+							(if compute_residual_contribution
+								(get residual_contribution_values (current_index))
 								[]
 							)
 							(if influence_weight_entropy_name

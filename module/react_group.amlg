@@ -5,9 +5,8 @@
 	; output an assoc react key -> list of corresponding values from each individual group.
 	; example output for 2 groups:
 	; (assoc
-	; 	"base_model_average_distance_contribution" (list 4.0 4.1)
-	;	"combined_model_average_distance_contribution" (list 4.05 3.9)
 	;	"distance_contributions" (list 4.5 3.2)
+	;	"similarity_conviction" (list 0.8 1.3)
 	; )
 	#{long_running .true statistically_idempotent .true}
 	react_group
@@ -39,16 +38,16 @@
 			;a list of assocs defining conditions that each select a collection of cases to react to.
 			#{type "list" values {ref "Condition"} min_size 1}
 			conditions .null
-			;calculate and output familiarity conviction of adding the specified new_cases in the output assoc
+			;calculate and output familiarity conviction of adding the specified new_cases
 			#{type "boolean"}
 			familiarity_conviction_addition .false
-			;calculate and output familiarity conviction of removing the specified new_cases in the output assoc
+			;calculate and output familiarity conviction of removing the specified new_cases
 			#{type "boolean"}
 			familiarity_conviction_removal .false
-			;calculate and output the KL divergence of adding the specified new_cases in the output assoc
+			;calculate and output the KL divergence of adding the specified new_cases
 			#{type "boolean"}
 			kl_divergence_addition .false
-			;calculate and output the KL divergence of removing the specified new_cases in the output assoc
+			;calculate and output the KL divergence of removing the specified new_cases
 			#{type "boolean"}
 			kl_divergence_removal .false
 			;if true will output p value of addition
@@ -60,10 +59,10 @@
 			;calculate and output the mean similarity conviction of cases in each group
 			#{type "boolean"}
 			similarity_conviction .false
-			;calculate and output distance contribution ratios in the output assoc
+			;calculate and output average distance contribution of each group holding out other cases in the group
 			#{type "boolean"}
 			distance_contributions .false
-			;calculate and output residual contribution ratios in the output assoc
+			;calculate and output average residual contribution of each group
 			#{type "boolean"}
 			residual_contributions .false
 			;flag, if set to true will scale influence weights by each case's weight_feature weight.
@@ -284,8 +283,8 @@
 		)
 
 		(declare (assoc
-			hyperparam_map
-				(call !GetHyperparameters (assoc
+			data_params_map
+				(call !GetDataParameters (assoc
 					feature .null
 					context_features features
 					weight_feature weight_feature
@@ -296,8 +295,7 @@
 			output_influential_cases .null
 			output_caps_map .null
 			feature_full_residuals_map .null
-			combined_average_distance_contribution .null
-			avg_new_cases_distance_contribution .null
+			cases_avg_distance_contribution .null
 			avg_new_cases_residual_contribution .null
 			new_case_entropies_value .null
 			average_new_cases_conviction_addition .null
@@ -314,14 +312,14 @@
 		(declare (assoc
 			feature_weights
 				;only overwrite with inactive features if feature weights already exist
-				(if (and (size !inactiveFeaturesMap) (size (get hyperparam_map "featureWeights")))
+				(if (and (size !inactiveFeaturesMap) (size (get data_params_map "featureWeights")))
 					(append
-						(get hyperparam_map "featureWeights")
+						(get data_params_map "featureWeights")
 						(map 1 !inactiveFeaturesMap)
 					)
 				)
-			feature_deviations (get hyperparam_map "featureDeviations")
-			closest_k (get hyperparam_map "k")
+			feature_deviations (get data_params_map "featureDeviations")
+			closest_k (get data_params_map "k")
 			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
 			max_lag_index_value .null
 		))
@@ -639,9 +637,7 @@
 			)
 			(if distance_contributions
 				(assoc
-					"distance_contribution" avg_new_cases_distance_contribution
-					"base_model_average_distance_contribution" !averageCaseDistanceContribution
-					"combined_model_average_distance_contribution" combined_average_distance_contribution
+					"distance_contribution" cases_avg_distance_contribution
 				)
 				(assoc)
 			)
@@ -668,12 +664,12 @@
 						closest_k
 						features
 						.null
-						(get hyperparam_map "p")
+						(get data_params_map "p")
 						feature_weights
 						!queryFeatureAttributeTypeMap
 						feature_deviations
 						.null
-						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
 						(if valid_weight_feature weight_feature .null)
 						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
 						"fixed rand seed"
@@ -698,12 +694,12 @@
 						closest_k
 						features
 						.null
-						(get hyperparam_map "p")
+						(get data_params_map "p")
 						feature_weights
 						!queryFeatureAttributeTypeMap
 						feature_deviations
 						.null
-						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
 						(if valid_weight_feature weight_feature .null)
 						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
 						"fixed rand seed"
@@ -729,12 +725,12 @@
 						closest_k
 						features
 						.null
-						(get hyperparam_map "p")
+						(get data_params_map "p")
 						feature_weights
 						!queryFeatureAttributeTypeMap
 						feature_deviations
 						.null
-						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
 						(if valid_weight_feature weight_feature .null)
 						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
 						"fixed rand seed"
@@ -751,34 +747,28 @@
 
 	;Helper method to compute dataset avg distance contribution and new cases' avg distance contribution
 	!ComputeNewCasesDistanceContributions
-	(let
-		(assoc
-			combined_distance_contributions_map
-				(compute_on_contained_entities
-					||(query_entity_distance_contributions
-						closest_k
-						features
-						.null
-						(get hyperparam_map "p")
-						feature_weights
-						!queryFeatureAttributeTypeMap
-						feature_deviations
-						.null
-						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
-						(if valid_weight_feature weight_feature .null)
-						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-						"fixed rand seed"
-						.null ;radius
-						!numericalPrecision
-					)
+	(assign (assoc
+		cases_avg_distance_contribution
+			(generalized_mean (compute_on_contained_entities
+				filtering_queries
+				||(query_entity_distance_contributions
+					closest_k
+					features
+					case_ids
+					(get data_params_map "p")
+					feature_weights
+					!queryFeatureAttributeTypeMap
+					feature_deviations
+					.null
+					(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
+					(if valid_weight_feature weight_feature .null)
+					;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+					"fixed rand seed"
+					.null ;radius
+					!numericalPrecision
 				)
-		)
-
-		(assign (assoc
-			combined_average_distance_contribution (generalized_mean combined_distance_contributions_map)
-			avg_new_cases_distance_contribution (generalized_mean (unzip combined_distance_contributions_map case_ids))
-		))
-	)
+			))
+	))
 
 	;Helper method to compute average residual contribution for a group of cases
 	!ComputeNewCasesResidualContributions
@@ -813,12 +803,12 @@
 						closest_k
 						features
 						case_ids
-						(get hyperparam_map "p")
+						(get data_params_map "p")
 						feature_weights
 						!queryFeatureAttributeTypeMap
 						feature_deviations
 						.null
-						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
 						(if valid_weight_feature weight_feature .null)
 						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
 						"fixed rand seed"
@@ -857,12 +847,12 @@
 						closest_k
 						features
 						case_ids
-						(get hyperparam_map "p")
+						(get data_params_map "p")
 						feature_weights
 						!queryFeatureAttributeTypeMap
 						feature_deviations
 						.null
-						(if (= (get hyperparam_map "dt") "surprisal_to_prob") "surprisal" (get hyperparam_map "dt") )
+						(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
 						(if valid_weight_feature weight_feature .null)
 						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
 						"fixed rand seed"
@@ -1200,10 +1190,10 @@
 																			(compute_on_contained_entities
 																				(query_in_entity_list (trunc
 																					(current_value)
-																					(if (~ 0 (get hyperparam_map "k"))
-																						(get hyperparam_map "k")
+																					(if (~ 0 (get data_params_map "k"))
+																						(get data_params_map "k")
 																						;else get the min value from dynamic k
-																						(get hyperparam_map ["k" 1])
+																						(get data_params_map ["k" 1])
 																					)
 																				))
 																				(query_max_difference action_feature (get !cyclicFeaturesMap action_feature))
