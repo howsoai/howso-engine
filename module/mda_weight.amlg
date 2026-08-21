@@ -1530,19 +1530,83 @@
 		)
 	)
 
-	;Computes the dimensionless prediction uncertainty remaining above a feature's
-	;substitutability floor. robust_residual and deviation have matching feature units for
-	;continuous features and are both error probabilities for nominal features.
-	!ComputeCausalMissingCertainty
+	;Returns the maximum-entropy residual entropy for a nominal prediction error.
+	;Subject only to error_probability and num_classes, the residual distribution
+	;has entropy h(error) + error * ln(num_classes - 1). error_probability is a
+	;dimensionless probability, num_classes is a dimensionless count, and the return
+	;is in nats.
+	!ComputeCausalNominalResidualEntropy
 	(declare
 		(assoc
-			robust_residual 0
-			deviation 0
+			error_probability 0
+			num_classes 0
 		)
 
-		(if (> deviation 0)
-			(max (/ robust_residual deviation) 0)
+		(if (> num_classes 1)
+			(let (assoc
+				bounded_error
+					(min
+						(max error_probability 0)
+						(- 1 (/ 1 num_classes))
+					)
+			)
+				(+
+					(if (and (> bounded_error 0) (< bounded_error 1))
+						(-
+							0
+							(* bounded_error (log bounded_error))
+							(* (- 1 bounded_error) (log (- 1 bounded_error)))
+						)
+						0
+					)
+					(* bounded_error (log (- num_classes 1)))
+				)
+			)
 			0
+		)
+	)
+
+	;Computes the fraction of marginal prediction uncertainty which remains after
+	;coalition-integrated prediction. The marginal reference is the expected residual
+	;of the feature's empty-context prediction from its empirical probability masses.
+	;For continuous features, robust_residual and empty_residual are MAEs in matching
+	;feature units and their ratio is dimensionless. For nominal features, both are
+	;dimensionless error probabilities; their maximum-entropy residual entropies are
+	;differenced in nats and exponentiated, yielding the dimensionless probability of
+	;the uncertainty remaining. A larger return therefore indicates greater exogeneity.
+	!ComputeCausalPredictiveIrreducibility
+	(declare
+		(assoc
+			feature .null
+			robust_residual 0
+			empty_residual 0
+		)
+
+		(if (contains_index !nominalsMap feature)
+			(let (assoc
+				num_classes
+					(size
+						(call !CalculateFeatureExpectedValue (assoc
+							feature feature
+							output_nominal_class_counts .true
+						))
+					)
+			)
+				(exp (-
+					(call !ComputeCausalNominalResidualEntropy (assoc
+						error_probability robust_residual
+						num_classes num_classes
+					))
+					(call !ComputeCausalNominalResidualEntropy (assoc
+						error_probability empty_residual
+						num_classes num_classes
+					))
+				))
+			)
+			(if (> empty_residual 0)
+				(max (/ robust_residual empty_residual) 0)
+				0
+			)
 		)
 	)
 
@@ -1738,13 +1802,13 @@
 		)
 	)
 
-	;Helper method for react_aggregate to compute causal exogeneity. When both continuous
-	;and nominal geometries have a peer population, prediction uncertainty above the
-	;substitutability floor is divided by that geometry's median marginal information
-	;capacity. This yields dimensionless missing certainty per expected nat, so prediction
-	;content is comparable across geometries without a fitted conversion weight. A singleton
-	;geometry cannot identify expected capacity separately from its sole feature; in that
-	;case marginal distinguishability remains the observable fallback.
+	;Helper method for react_aggregate to compute causal exogeneity. Exogeneity is the
+	;fraction of empty-context prediction uncertainty remaining under robust coalition
+	;prediction. The empty-context residual is the exact expectation from the empirical
+	;feature distribution, and nominal errors are compared in maximum-entropy residual-
+	;information space. The result is dimensionless and commensurable without peer features.
+	;Marginal distinguishability remains a separate measurement used to screen mediated and
+	;confounded pairs.
 	!ComputeAverageMissingInformation
 	(declare
 		(assoc
@@ -1825,105 +1889,79 @@
 				)
 		))
 		(declare (assoc
-			nominal_causal_features
-				(filter
-					(lambda (contains_index !nominalsMap (current_value)))
-					action_features
-				)
+			causal_sample_features (get residuals_map "causal_sample_features")
+			causal_residual_samples (get residuals_map "causal_residual_samples")
 			continuous_causal_features
 				(filter
 					(lambda (not (contains_index !nominalsMap (current_value))))
 					action_features
 				)
+			has_nominal_causal_features
+				(> (size (filter
+					(lambda (contains_index !nominalsMap (current_value)))
+					action_features
+				)) 0)
+			has_continuous_causal_features
+				(> (size (filter
+					(lambda (not (contains_index !nominalsMap (current_value))))
+					action_features
+				)) 0)
 		))
 		(declare (assoc
-			can_calibrate_causal_geometries
-				(and
-					(> (size nominal_causal_features) 1)
-					(> (size continuous_causal_features) 1)
-				)
-		))
-		(declare (assoc
-			feature_capacity_normalized_exogeneity_map
-				(if can_calibrate_causal_geometries
-					(let
+			feature_predictive_irreducibility_map
+				(if (and has_nominal_causal_features has_continuous_causal_features)
+				(map
+					(lambda (let
 						(assoc
-							nominal_expected_information
-								(quantile
-									(values (keep feature_marginal_distinguishability_map nominal_causal_features))
-									0.5
-								)
-							continuous_expected_information
-								(quantile
-									(values (keep feature_marginal_distinguishability_map continuous_causal_features))
-									0.5
-								)
+							feature (current_index 1)
 						)
-						(map
-							(lambda (let
-								(assoc
-									feature (current_index 1)
-									expected_information
-										(if (contains_index !nominalsMap (current_index 1))
-											nominal_expected_information
-											continuous_expected_information
-										)
-								)
-								(if (> expected_information 0)
-									(/
-										(call !ComputeCausalMissingCertainty (assoc
-											robust_residual
-												(first (get (get residuals_map "residual_map") feature))
-											deviation (first (get deviations_map feature))
-										))
-										expected_information
-									)
-									0
-								)
-							))
-							(zip action_features)
-						)
-					)
+						(call !ComputeCausalPredictiveIrreducibility (assoc
+							feature feature
+							robust_residual (first (get (get residuals_map "residual_map") feature))
+							empty_residual (call !ComputeFeatureMAD (assoc feature feature))
+						))
+					))
+					(zip action_features)
+				)
 					feature_marginal_distinguishability_map
 				)
 		))
 		(declare (assoc
-			;The calibrated exogeneity values establish the common cross-geometry
-			;scale. Within a geometry, assign those same values by marginal-information
-			;quantile. This preserves the measured exogeneity distribution while retaining
-			;the locally valid effect-capacity ordering; no signals are averaged.
+			;Predictive irreducibility establishes the common cross-geometry scale.
+			;Continuous marginal-information order remains locally valid for effect
+			;capacity, so assign the measured continuous values by that order. Nominal
+			;values remain on their measured scale: rank transfer would promote a rare
+			;binary feature solely because its substitutability log odds are large.
 			feature_causal_exogeneity_map
-				(if can_calibrate_causal_geometries
+				(if (and has_nominal_causal_features has_continuous_causal_features)
 					(map
 						(lambda (let
-							(assoc
-								feature (current_index 1)
-								geometry_features
-									(if (contains_index !nominalsMap (current_index 1))
-										nominal_causal_features
-										continuous_causal_features
-									)
-							)
-							(declare (assoc
-								marginal_information_rank
-									(size (filter
-										(lambda (<
-											(get feature_marginal_distinguishability_map (current_value))
-											(get feature_marginal_distinguishability_map feature)
+							(assoc feature (current_index 1))
+							(if (contains_index !nominalsMap feature)
+								(get feature_predictive_irreducibility_map feature)
+
+								(let (assoc
+									marginal_information_rank
+										(size (filter
+											(lambda (<
+												(get feature_marginal_distinguishability_map (current_value))
+												(get feature_marginal_distinguishability_map feature)
+											))
+											continuous_causal_features
 										))
-										geometry_features
-									))
-								sorted_geometry_exogeneity
-									(sort (values (keep
-										feature_capacity_normalized_exogeneity_map
-										geometry_features
-									)))
-							))
-							(get sorted_geometry_exogeneity marginal_information_rank)
+									sorted_continuous_irreducibility
+										(sort (values (keep
+											feature_predictive_irreducibility_map
+											continuous_causal_features
+										)))
+								)
+									(get sorted_continuous_irreducibility marginal_information_rank)
+								)
+							)
 						))
 						(zip action_features)
 					)
-					feature_capacity_normalized_exogeneity_map
+					feature_predictive_irreducibility_map
 				)
 		))
 
