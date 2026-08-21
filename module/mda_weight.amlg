@@ -1489,6 +1489,22 @@
 		)
 	)
 
+	;Computes the dimensionless prediction uncertainty remaining above a feature's
+	;substitutability floor. robust_residual and deviation have matching feature units for
+	;continuous features and are both error probabilities for nominal features.
+	!ComputeCausalMissingCertainty
+	(declare
+		(assoc
+			robust_residual 0
+			deviation 0
+		)
+
+		(if (> deviation 0)
+			(max (/ robust_residual deviation) 0)
+			0
+		)
+	)
+
 	;Computes marginal distinguishability in nats for a feature. Continuous features use
 	;the LK marginal surprisal of a robust Laplace MAD estimate, resolved by the feature's
 	;substitutability deviation. The MAD estimate is the mean central-half absolute
@@ -1681,9 +1697,13 @@
 		)
 	)
 
-	;Helper method for react_aggregate to compute marginal distinguishability in nats.
-	;This is a common information space for ordering continuous and nominal features without
-	;a fitted conversion weight. See !ComputeMarginalDistinguishability for the measurement.
+	;Helper method for react_aggregate to compute causal exogeneity. When both continuous
+	;and nominal geometries have a peer population, prediction uncertainty above the
+	;substitutability floor is divided by that geometry's median marginal information
+	;capacity. This yields dimensionless missing certainty per expected nat, so prediction
+	;content is comparable across geometries without a fitted conversion weight. A singleton
+	;geometry cannot identify expected capacity separately from its sole feature; in that
+	;case marginal distinguishability remains the observable fallback.
 	!ComputeAverageMissingInformation
 	(declare
 		(assoc
@@ -1763,9 +1783,111 @@
 					(zip action_features)
 				)
 		))
+		(declare (assoc
+			nominal_causal_features
+				(filter
+					(lambda (contains_index !nominalsMap (current_value)))
+					action_features
+				)
+			continuous_causal_features
+				(filter
+					(lambda (not (contains_index !nominalsMap (current_value))))
+					action_features
+				)
+		))
+		(declare (assoc
+			can_calibrate_causal_geometries
+				(and
+					(> (size nominal_causal_features) 1)
+					(> (size continuous_causal_features) 1)
+				)
+		))
+		(declare (assoc
+			feature_capacity_normalized_exogeneity_map
+				(if can_calibrate_causal_geometries
+					(let
+						(assoc
+							nominal_expected_information
+								(quantile
+									(values (keep feature_marginal_distinguishability_map nominal_causal_features))
+									0.5
+								)
+							continuous_expected_information
+								(quantile
+									(values (keep feature_marginal_distinguishability_map continuous_causal_features))
+									0.5
+								)
+						)
+						(map
+							(lambda (let
+								(assoc
+									feature (current_index 1)
+									expected_information
+										(if (contains_index !nominalsMap (current_index 1))
+											nominal_expected_information
+											continuous_expected_information
+										)
+								)
+								(if (> expected_information 0)
+									(/
+										(call !ComputeCausalMissingCertainty (assoc
+											robust_residual
+												(first (get (get residuals_map "residual_map") feature))
+											deviation (first (get deviations_map feature))
+										))
+										expected_information
+									)
+									0
+								)
+							))
+							(zip action_features)
+						)
+					)
+					feature_marginal_distinguishability_map
+				)
+		))
+		(declare (assoc
+			;The calibrated exogeneity values establish the common cross-geometry
+			;scale. Within a geometry, assign those same values by marginal-information
+			;quantile. This preserves the measured exogeneity distribution while retaining
+			;the locally valid effect-capacity ordering; no signals are averaged.
+			feature_causal_exogeneity_map
+				(if can_calibrate_causal_geometries
+					(map
+						(lambda (let
+							(assoc
+								feature (current_index 1)
+								geometry_features
+									(if (contains_index !nominalsMap (current_index 1))
+										nominal_causal_features
+										continuous_causal_features
+									)
+							)
+							(declare (assoc
+								marginal_information_rank
+									(size (filter
+										(lambda (<
+											(get feature_marginal_distinguishability_map (current_value))
+											(get feature_marginal_distinguishability_map feature)
+										))
+										geometry_features
+									))
+								sorted_geometry_exogeneity
+									(sort (values (keep
+										feature_capacity_normalized_exogeneity_map
+										geometry_features
+									)))
+							))
+							(get sorted_geometry_exogeneity marginal_information_rank)
+						))
+						(zip action_features)
+					)
+					feature_capacity_normalized_exogeneity_map
+				)
+		))
 
 		{
-			"feature_mi_map" feature_marginal_distinguishability_map
+			"feature_mi_map" feature_causal_exogeneity_map
 			"feature_ac_map"
 				(if output_robust_acs
 					(call !ComputeCausallyScreenedACMatrix (assoc
