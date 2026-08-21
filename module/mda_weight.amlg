@@ -121,7 +121,9 @@
 	;target_feature_index. The unscreened arm averages over order-respecting
 	;coalitions; features below both endpoints are excluded because conditioning on a
 	;shared effect opens a collider. A named screener measures the exact singleton
-	;context with and without the source. The return has target feature units; feature,
+	;context with and without the source. measure_marginal_context instead measures the
+	;empty context against the source alone, giving the contribution of the source with no
+	;other column competing. The return has target feature units; feature,
 	;coalition, and sample indices are dimensionless.
 	!ComputeDirectCausalAccuracyContribution
 	(declare
@@ -134,6 +136,7 @@
 			sample_feature_residuals_lists []
 			forbidden_feature_indices []
 			has_nullable_continuous_target .false
+			measure_marginal_context .false
 		)
 
 		(declare (assoc
@@ -159,11 +162,14 @@
 								(lambda (= .true (get sample_feature_residuals_lists [(current_value 1) sample_index 0])))
 								forbidden_feature_indices
 							)))
-							(or
-								(not has_screening_feature)
-								(and
-									(= 2 (get coalition_sizes sample_index))
-									(= .true (get screening_residuals [sample_index 0]))
+							(if measure_marginal_context
+								(= 1 (get coalition_sizes sample_index))
+								(or
+									(not has_screening_feature)
+									(and
+										(= 2 (get coalition_sizes sample_index))
+										(= .true (get screening_residuals [sample_index 0]))
+									)
 								)
 							)
 						)
@@ -181,12 +187,15 @@
 								(lambda (= .true (get sample_feature_residuals_lists [(current_value 1) sample_index 0])))
 								forbidden_feature_indices
 							)))
-							(if has_screening_feature
-								(and
-									(= 1 (get coalition_sizes sample_index))
-									(= .true (get screening_residuals [sample_index 0]))
+							(if measure_marginal_context
+								(= 0 (get coalition_sizes sample_index))
+								(if has_screening_feature
+									(and
+										(= 1 (get coalition_sizes sample_index))
+										(= .true (get screening_residuals [sample_index 0]))
+									)
+									(< (get coalition_sizes sample_index) (- (size sample_feature_residuals_lists) 2))
 								)
-								(< (get coalition_sizes sample_index) (- (size sample_feature_residuals_lists) 2))
 							)
 						)
 					))
@@ -215,11 +224,15 @@
 	;carries the most inherited information. The directly measured contribution is scaled
 	;by pair strength / widest-path strength: this is the fraction of the intermediary's
 	;information capacity that the pair itself can carry under the data-processing bound.
-	;On collider-free support, the capacity-scaled direct contribution cannot exceed the
-	;unscreened total contribution, which already contains both direct and inherited
-	;information. Each direction is first bounded in target units; after the matrix is built,
-	;the pair is also bounded in causal-information space so unequal directional reductions
-	;cannot create asymmetry during screening.
+	;Accuracy contributions are non-increasing in the conditioning context, so on
+	;collider-free support the contribution measured in the screening context cannot exceed
+	;the marginal contribution measured with no context at all. That marginal contribution is
+	;the ceiling: it is all the uncertainty in the target the source can remove by itself, so
+	;it bounds conditional sampling noise while being measured with nothing else in the
+	;context to substitute for either endpoint. It bounds the measurement, before the
+	;capacity fraction, which is a separate attribution of that measurement to the pair.
+	;Screening legitimately enlarges a pair's asymmetry when it removes a substitute, so the
+	;unscreened asymmetry is not an upper bound on the screened one and is not imposed as one.
 	;A downstream shared effect is excluded only
 	;for an upstream-half pair when an incident leg is stronger, preventing collider
 	;opening without stripping low-depth weak edges of useful contexts. Contributions have
@@ -397,10 +410,19 @@
 									(if (and (= .null screening_feature) (= 0 (size forbidden_features)))
 									baseline_ac_tuple
 
-										(modify baseline_ac_tuple 0
-											(min
-												(first baseline_ac_tuple)
-												(*
+										(let
+											(assoc
+												marginal_accuracy_contribution
+													(call !ComputeDirectCausalAccuracyContribution (assoc
+														source_feature_index source_feature_index
+														target_feature_index target_feature_index
+														measure_marginal_context .true
+														all_sample_indices causal_sample_indices
+														coalition_sizes causal_coalition_sizes
+														sample_feature_residuals_lists causal_residual_samples
+														has_nullable_continuous_target has_nullable_continuous_target
+													))
+												direct_accuracy_contribution
 													(call !ComputeDirectCausalAccuracyContribution (assoc
 														source_feature_index source_feature_index
 														target_feature_index target_feature_index
@@ -415,6 +437,13 @@
 														forbidden_feature_indices forbidden_feature_indices
 														has_nullable_continuous_target has_nullable_continuous_target
 													))
+											)
+											(modify baseline_ac_tuple 0
+												(*
+													(if (> marginal_accuracy_contribution 0)
+														(min marginal_accuracy_contribution direct_accuracy_contribution)
+														direct_accuracy_contribution
+													)
 													screening_capacity_fraction
 												)
 											)
@@ -429,57 +458,7 @@
 				causal_baseline_ac_map
 				)
 		)
-		;Screening may only remove causal information from a pair. Independent directional
-		;caps do not guarantee this because unequal reductions can enlarge their difference.
-		;If that happens, retain the unscreened pair, whose information includes both direct
-		;and inherited paths, rather than allowing conditional sampling to create an edge.
-		(map
-			(lambda (let
-				(assoc
-					target_feature (current_index 1)
-					screened_target_map (current_value 1)
-				)
-				(map
-					(lambda (let
-						(assoc
-							source_feature (current_index 1)
-							screened_ac_tuple (current_value 1)
-						)
-						(if (or
-								(= source_feature target_feature)
-								(not (contains_index sample_feature_indices_map source_feature))
-								(not (contains_index sample_feature_indices_map target_feature))
-							)
-							screened_ac_tuple
-
-							(let (assoc
-								baseline_pair_strength
-									(call !ComputeCausalPairStrength (assoc
-										first_feature source_feature
-										second_feature target_feature
-										baseline_ac_map causal_baseline_ac_map
-										robust_residual_map causal_robust_residual_map
-									))
-								screened_pair_strength
-									(call !ComputeCausalPairStrength (assoc
-										first_feature source_feature
-										second_feature target_feature
-										baseline_ac_map screened_ac_map
-										robust_residual_map causal_robust_residual_map
-									))
-							)
-								(if (> screened_pair_strength baseline_pair_strength)
-									(get causal_baseline_ac_map [target_feature source_feature])
-									screened_ac_tuple
-								)
-							)
-						)
-					))
-					screened_target_map
-				)
-			))
-			screened_ac_map
-		)
+		screened_ac_map
 	)
 
 	;helper method for CalculateFeatureResiduals to calculate 'superfull' local accurate residuals
