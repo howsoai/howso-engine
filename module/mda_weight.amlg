@@ -1083,7 +1083,92 @@
 		)
 	)
 
-	;helper method for react_aggregate to compute the average missing information for the features
+	;Returns the maximum-entropy residual entropy for a nominal prediction error.
+	;Subject only to error_probability and num_classes, the residual distribution
+	;has entropy h(error) + error * ln(num_classes - 1). error_probability is a
+	;dimensionless probability, num_classes is a dimensionless count, and the return
+	;is in nats.
+	!ComputeCausalNominalResidualEntropy
+	(declare
+		(assoc
+			error_probability 0
+			num_classes 0
+		)
+
+		(if (> num_classes 1)
+			(let (assoc
+				bounded_error
+					(min
+						(max error_probability 0)
+						(- 1 (/ 1 num_classes))
+					)
+			)
+				(+
+					(if (and (> bounded_error 0) (< bounded_error 1))
+						(-
+							0
+							(* bounded_error (log bounded_error))
+							(* (- 1 bounded_error) (log (- 1 bounded_error)))
+						)
+						0
+					)
+					(* bounded_error (log (- num_classes 1)))
+				)
+			)
+			0
+		)
+	)
+
+	;Computes the fraction of marginal prediction uncertainty which remains after
+	;coalition-integrated prediction. The marginal reference is the expected residual
+	;of the feature's empty-context prediction from its empirical probability masses.
+	;For continuous features, robust_residual and empty_residual are MAEs in matching
+	;feature units and their ratio is dimensionless. For nominal features, both are
+	;dimensionless error probabilities; their maximum-entropy residual entropies are
+	;differenced in nats and exponentiated, yielding the dimensionless probability of
+	;the uncertainty remaining. A larger return therefore indicates greater exogeneity.
+	!ComputeCausalPredictiveIrreducibility
+	(declare
+		(assoc
+			feature .null
+			robust_residual 0
+			empty_residual 0
+		)
+
+		(if (contains_index !nominalsMap feature)
+			(let (assoc
+				num_classes
+					(size
+						(call !CalculateFeatureExpectedValue (assoc
+							feature feature
+							output_nominal_class_counts .true
+						))
+					)
+			)
+				(exp (-
+					(call !ComputeCausalNominalResidualEntropy (assoc
+						error_probability robust_residual
+						num_classes num_classes
+					))
+					(call !ComputeCausalNominalResidualEntropy (assoc
+						error_probability empty_residual
+						num_classes num_classes
+					))
+				))
+			)
+			(if (> empty_residual 0)
+				(max (/ robust_residual empty_residual) 0)
+				0
+			)
+		)
+	)
+
+	;helper method for react_aggregate to compute the average missing information for the features.
+	;Missing information is the fraction of empty-context prediction uncertainty which remains
+	;under robust coalition prediction. The empty-context residual is the exact expectation from
+	;the empirical feature distribution, and nominal errors are compared in maximum-entropy
+	;residual-information space. The result is dimensionless and commensurable across mixed
+	;feature types without needing a peer population of the same type.
 	!ComputeAverageMissingInformation
 	(declare
 		(assoc
@@ -1114,32 +1199,30 @@
 				))
 		))
 
-		;recompute feature deviations using feature weights from the computed robust mda above
+		;Normalise each feature's robust residual against its own empty-context residual, so no
+		;peer population of the same feature type is needed to make the values commensurable.
 		(declare (assoc
-			updated_estimated_residuals_map
-				(call !CalculateFeatureResiduals (assoc
-					features action_features
-					context_features context_features
-					features_to_derive features_to_derive
-					robust_residuals "missing_information"
-					num_samples 2000
-
-					estimating_residual_lower_bound .true
-					custom_mda_map (get residuals_map "feature_mda_map")
-
-					compute_all_statistics .false
-					compute_null_uncertainties .false
-					confusion_matrix_min_count 0
-					use_shared_deviations .false
-					;don't create copies of confusion matrices for non-primary shared deviation features
-					expand_confusion_matrices .false
-				))
+			feature_predictive_irreducibility_map
+				(map
+					(lambda (let
+						(assoc
+							feature (current_index 1)
+						)
+						(call !ComputeCausalPredictiveIrreducibility (assoc
+							feature feature
+							robust_residual
+								(first (get (get residuals_map "residual_map") feature))
+							empty_residual (call !ComputeFeatureMAD (assoc feature feature))
+						))
+					))
+					(zip action_features)
+				)
 		))
 
-		;return the "residual_map" which is the average surprisal of the weighted-superfull prediction
-		;compared to the full prediction
+		;return the fraction of each feature's marginal prediction uncertainty which remains
+		;after robust coalition prediction
 		{
-			"feature_mi_map" (get updated_estimated_residuals_map "residual_map")
+			"feature_mi_map" feature_predictive_irreducibility_map
 			"feature_ac_map" (if output_robust_acs (get residuals_map "feature_ac_map" ))
 			"feature_rr_map"
 				(if output_robust_residuals
