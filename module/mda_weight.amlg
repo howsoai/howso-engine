@@ -836,8 +836,17 @@
 		)
 	)
 
+	;Returns the variance of a coalition-cell sample mean under the maximum-entropy
+	;Laplace distribution characterized by its observed MAD. The input summary is
+	;[mean, count, MAD]; the result is in squared target-feature units.
+	!ComputeCausalResidualMeanVariance
+	(declare {residual_summary [0 0 0]}
+		(/ (* 2 (last residual_summary) (last residual_summary))
+			(get residual_summary 1))
+	)
+
 	;Measures how much a predictor's accuracy contribution to a target changes when
-	;a conditioner is present, and the predictor's contribution without the
+	;a conditioner is present, plus the predictor's contribution with and without the
 	;conditioner. Contributions and uncertainties are in target-feature units; the
 	;robust residual used to normalize them is returned in the same units.
 	!ComputeCausalDirectionalInteractionInformation
@@ -906,15 +915,21 @@
 							)
 						)
 					sampling_uncertainty
-						(+
-							(/ (last without_predictor_without_conditioner)
-								(sqrt (get without_predictor_without_conditioner 1)))
-							(/ (last with_predictor_without_conditioner)
-								(sqrt (get with_predictor_without_conditioner 1)))
-							(/ (last without_predictor_with_conditioner)
-								(sqrt (get without_predictor_with_conditioner 1)))
-							(/ (last with_predictor_with_conditioner)
-								(sqrt (get with_predictor_with_conditioner 1)))
+						(sqrt
+							(+
+								(call !ComputeCausalResidualMeanVariance {
+									residual_summary without_predictor_without_conditioner
+								})
+								(call !ComputeCausalResidualMeanVariance {
+									residual_summary with_predictor_without_conditioner
+								})
+								(call !ComputeCausalResidualMeanVariance {
+									residual_summary without_predictor_with_conditioner
+								})
+								(call !ComputeCausalResidualMeanVariance {
+									residual_summary with_predictor_with_conditioner
+								})
+							)
 						)
 					marginal_contribution
 						(-
@@ -922,11 +937,20 @@
 							(first with_predictor_without_conditioner)
 						)
 					marginal_uncertainty
-						(+
-							(/ (last without_predictor_without_conditioner)
-								(sqrt (get without_predictor_without_conditioner 1)))
-							(/ (last with_predictor_without_conditioner)
-								(sqrt (get with_predictor_without_conditioner 1)))
+						(sqrt
+							(+
+								(call !ComputeCausalResidualMeanVariance {
+									residual_summary without_predictor_without_conditioner
+								})
+								(call !ComputeCausalResidualMeanVariance {
+									residual_summary with_predictor_without_conditioner
+								})
+							)
+						)
+					conditional_contribution
+						(-
+							(first without_predictor_with_conditioner)
+							(first with_predictor_with_conditioner)
 						)
 				))
 
@@ -936,18 +960,20 @@
 					robust_residual
 					marginal_contribution
 					marginal_uncertainty
+					conditional_contribution
 				]
 			)
-			[0 0 0 0 0]
+			[0 0 0 0 0 0]
 		)
 	)
 
 	;Measure one possible collider. Of the two mathematically equivalent endpoint
 	;estimates, select the one with lower dimensionless sampling uncertainty. The
-	;supported interaction is in nats; positive values support a collider, negative
-	;values support a non-collider, and zero is unidentified. Endpoint information
-	;is in nats and is positive when the endpoints are already predictively adjacent,
-	;which makes a mixed-type triple's center unidentifiable.
+	;supported interaction is a dimensionless robust-residual ratio; positive values
+	;support a collider, negative values support a non-collider, and zero is
+	;unidentified. Endpoint support is also dimensionless. Conditioned contribution
+	;information is in nats and measures predictive information remaining between the
+	;endpoints after conditioning on the possible center.
 	!ComputeCausalColliderCandidate
 	(declare
 		{
@@ -958,16 +984,18 @@
 			endpoint_b_contribution 0
 		}
 		(declare {
-			information_a [0 0 0 0 0]
-			information_b [0 0 0 0 0]
-			selected_information [0 0 0 0 0]
+			information_a [0 0 0 0 0 0]
+			information_b [0 0 0 0 0 0]
+			selected_information [0 0 0 0 0 0]
 			interaction 0
 			uncertainty 0
 			robust_residual 0
 			marginal_contribution 0
 			marginal_uncertainty 0
+			conditional_contribution 0
 			supported_information 0
 			endpoint_information 0
+			conditional_information 0
 			candidate_strength 0
 		}
 			(assign "information_a"
@@ -1004,7 +1032,8 @@
 				uncertainty (get selected_information 1)
 				robust_residual (get selected_information 2)
 				marginal_contribution (get selected_information 3)
-				marginal_uncertainty (last selected_information)
+				marginal_uncertainty (get selected_information 4)
+				conditional_contribution (last selected_information)
 			})
 			(assign "supported_information"
 				(if (and (> robust_residual 0) (> interaction uncertainty))
@@ -1022,6 +1051,12 @@
 					(/ (- marginal_contribution marginal_uncertainty) robust_residual)
 					0
 				)
+			)
+			(assign "conditional_information"
+				(call !ComputeCausalContributionInformation {
+					contribution (max conditional_contribution 0)
+					robust_residual robust_residual
+				})
 			)
 			(assign "candidate_strength"
 				(min
@@ -1049,6 +1084,7 @@
 				)
 				candidate_strength
 				endpoint_information
+				conditional_information
 			]
 		)
 	)
