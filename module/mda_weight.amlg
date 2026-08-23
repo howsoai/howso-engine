@@ -741,6 +741,341 @@
 		)
 	)
 
+	;Convert a non-negative accuracy contribution in target-feature units into
+	;information relative to the target's robust residual. The return is in nats.
+	!ComputeCausalContributionInformation
+	(declare {contribution 0 robust_residual 0}
+		(if (and (> contribution 0) (> robust_residual 0))
+			(max
+				(-
+					(/
+						(+
+							contribution
+							(*
+								0.5
+								(exp (- 0 (/ contribution robust_residual)))
+								(+ (* 3 robust_residual) contribution)
+							)
+						)
+						robust_residual
+					)
+					1.5
+				)
+				0
+			)
+			0
+		)
+	)
+
+	;Computes a residual mean for one cell of a coalition-conditioned comparison.
+	;The residual mean is in target-feature units and the count is dimensionless.
+	!ComputeCausalConditionalResidualMean
+	(declare
+		(assoc
+			target_index 0
+			predictor_index 0
+			conditioner_index 0
+			predictor_used .false
+			conditioner_used .false
+		)
+
+		(declare (assoc
+			target_samples (get feature_residuals_lists target_index)
+			predictor_samples (get feature_residuals_lists predictor_index)
+			conditioner_samples (get feature_residuals_lists conditioner_index)
+		))
+
+		(declare (assoc
+			cell_indices
+				(filter
+					(lambda
+						(and
+							(= .false (first (get target_samples (current_value))))
+							(= predictor_used
+								(first (get predictor_samples (current_value)))
+							)
+							(= conditioner_used
+								(first (get conditioner_samples (current_value)))
+							)
+						)
+					)
+					all_sample_indices
+				)
+		))
+
+		(declare (assoc
+			cell_residuals
+				(filter
+					(map
+						(lambda (let
+							(assoc residual
+								(last (get target_samples (current_value 1)))
+							)
+							(if (= "list" (get_type_string residual))
+								(first residual)
+								residual
+							)
+						))
+						cell_indices
+					)
+				)
+		))
+
+		[
+			(if (size cell_residuals) (generalized_mean cell_residuals))
+			(size cell_residuals)
+		]
+	)
+
+	;Measures how much a predictor's accuracy contribution to a target changes when
+	;a conditioner is present. The interaction and uncertainty are in target-feature
+	;units; the robust residual used to normalize them is returned in the same units.
+	!ComputeCausalDirectionalInteractionInformation
+	(declare
+		(assoc
+			predictor_index 0
+			target_index 0
+			conditioner_index 0
+		)
+
+		(declare (assoc
+			without_predictor_without_conditioner
+				(call !ComputeCausalConditionalResidualMean (assoc
+					target_index target_index
+					predictor_index predictor_index
+					conditioner_index conditioner_index
+					predictor_used .false
+					conditioner_used .false
+				))
+			with_predictor_without_conditioner
+				(call !ComputeCausalConditionalResidualMean (assoc
+					target_index target_index
+					predictor_index predictor_index
+					conditioner_index conditioner_index
+					predictor_used .true
+					conditioner_used .false
+				))
+			without_predictor_with_conditioner
+				(call !ComputeCausalConditionalResidualMean (assoc
+					target_index target_index
+					predictor_index predictor_index
+					conditioner_index conditioner_index
+					predictor_used .false
+					conditioner_used .true
+				))
+			with_predictor_with_conditioner
+				(call !ComputeCausalConditionalResidualMean (assoc
+					target_index target_index
+					predictor_index predictor_index
+					conditioner_index conditioner_index
+					predictor_used .true
+					conditioner_used .true
+				))
+		))
+
+		(if (and
+				(> (last without_predictor_without_conditioner) 0)
+				(> (last with_predictor_without_conditioner) 0)
+				(> (last without_predictor_with_conditioner) 0)
+				(> (last with_predictor_with_conditioner) 0)
+			)
+			(let (assoc
+				robust_residual
+					(first (get feature_robust_residuals_map (get features target_index)))
+			)
+				(declare (assoc
+					interaction
+						(-
+							(-
+								(first without_predictor_with_conditioner)
+								(first with_predictor_with_conditioner)
+							)
+							(-
+								(first without_predictor_without_conditioner)
+								(first with_predictor_without_conditioner)
+							)
+						)
+					sampling_uncertainty
+						(*
+							robust_residual
+							(+
+								(/ 1 (sqrt (last without_predictor_without_conditioner)))
+								(/ 1 (sqrt (last with_predictor_without_conditioner)))
+								(/ 1 (sqrt (last without_predictor_with_conditioner)))
+								(/ 1 (sqrt (last with_predictor_with_conditioner)))
+							)
+						)
+				))
+
+				[interaction sampling_uncertainty robust_residual]
+			)
+			[0 0 0]
+		)
+	)
+
+	;Measure one possible collider. Of the two mathematically equivalent endpoint
+	;estimates, select the one with lower dimensionless sampling uncertainty. The
+	;supported interaction is in nats; positive values support a collider, negative
+	;values support a non-collider, and zero is unidentified.
+	!ComputeCausalColliderCandidate
+	(declare
+		{
+			center_index 0
+			endpoint_a_index 0
+			endpoint_b_index 0
+			endpoint_a_contribution 0
+			endpoint_b_contribution 0
+		}
+		(declare {
+			information_a [0 0 0]
+			information_b [0 0 0]
+			selected_information [0 0 0]
+			interaction 0
+			uncertainty 0
+			robust_residual 0
+			supported_information 0
+			candidate_strength 0
+		}
+			(assign "information_a"
+				(call !ComputeCausalDirectionalInteractionInformation {
+					predictor_index endpoint_a_index
+					target_index endpoint_b_index
+					conditioner_index center_index
+				})
+			)
+			(assign "information_b"
+				(call !ComputeCausalDirectionalInteractionInformation {
+					predictor_index endpoint_b_index
+					target_index endpoint_a_index
+					conditioner_index center_index
+				})
+			)
+			(assign "selected_information"
+				(if (and
+						(> (last information_a) 0)
+						(or
+							(<= (last information_b) 0)
+							(<
+								(/ (get information_a 1) (last information_a))
+								(/ (get information_b 1) (last information_b))
+							)
+						)
+					)
+					information_a
+					information_b
+				)
+			)
+			(assign {
+				interaction (first selected_information)
+				uncertainty (get selected_information 1)
+				robust_residual (last selected_information)
+			})
+			(assign "supported_information"
+				(if (and (> robust_residual 0) (> interaction uncertainty))
+					(/ (- interaction uncertainty) robust_residual)
+					(and (> robust_residual 0) (< interaction (- 0 uncertainty)))
+					(/ (+ interaction uncertainty) robust_residual)
+					0
+				)
+			)
+			(assign "candidate_strength"
+				(min
+					(call !ComputeCausalContributionInformation {
+						contribution endpoint_a_contribution
+						robust_residual
+							(first (get feature_robust_residuals_map (get features center_index)))
+					})
+					(call !ComputeCausalContributionInformation {
+						contribution endpoint_b_contribution
+						robust_residual
+							(first (get feature_robust_residuals_map (get features center_index)))
+					})
+				)
+			)
+
+			[
+				(get features center_index)
+				(get features endpoint_a_index)
+				(get features endpoint_b_index)
+				supported_information
+				(if (= selected_information information_a)
+					(get features endpoint_b_index)
+					(get features endpoint_a_index)
+				)
+				candidate_strength
+			]
+		)
+	)
+
+	;Measure every pair of positive accuracy contributors to each possible center.
+	;Zero is the natural information boundary, so no tuned cutoff or graph-size rule
+	;selects the candidates. The decision layer resolves alternative centers.
+	!ComputeCausalColliderInformation
+	(declare {raw_ac_map {}}
+		(declare {
+			collider_information []
+			positive_predictor_indices []
+			center_index 0
+			predictor_index 0
+			endpoint_a_position 0
+			endpoint_b_position 0
+			endpoint_a_index 0
+			endpoint_b_index 0
+			endpoint_a_contribution 0
+			endpoint_b_contribution 0
+			all_sample_indices (range 0 (size (first feature_residuals_lists)))
+		}
+			(while (< center_index (size features))
+				(assign {positive_predictor_indices [] predictor_index 0})
+				(while (< predictor_index (size features))
+					(if (and
+							(!= predictor_index center_index)
+							(>
+								(first (get raw_ac_map [
+									(get features center_index)
+									(get features predictor_index)
+								]))
+								0
+							)
+						)
+						(accum {positive_predictor_indices [predictor_index]})
+					)
+					(accum {predictor_index 1})
+				)
+
+				(assign "endpoint_a_position" 0)
+				(while (< endpoint_a_position (- (size positive_predictor_indices) 1))
+					(assign "endpoint_a_index" (get positive_predictor_indices endpoint_a_position))
+					(assign "endpoint_a_contribution" (first (get raw_ac_map [
+						(get features center_index)
+						(get features endpoint_a_index)
+					])))
+					(assign "endpoint_b_position" (+ endpoint_a_position 1))
+					(while (< endpoint_b_position (size positive_predictor_indices))
+						(assign "endpoint_b_index" (get positive_predictor_indices endpoint_b_position))
+						(assign "endpoint_b_contribution" (first (get raw_ac_map [
+							(get features center_index)
+							(get features endpoint_b_index)
+						])))
+						(accum {collider_information [
+							(call !ComputeCausalColliderCandidate {
+								center_index center_index
+								endpoint_a_index endpoint_a_index
+								endpoint_b_index endpoint_b_index
+								endpoint_a_contribution endpoint_a_contribution
+								endpoint_b_contribution endpoint_b_contribution
+							})
+						]})
+						(accum {endpoint_b_position 1})
+					)
+					(accum {endpoint_a_position 1})
+				)
+				(accum {center_index 1})
+			)
+			collider_information
+		)
+	)
+
 	!ComputeRobustTargetlessMDA
 	(declare
 		(assoc features features )
@@ -1176,6 +1511,7 @@
 			context_features []
 			case_ids []
 			features_to_derive []
+			output_causal_collider_information .false
 		)
 
 		;compute robust mda using the feature itself in the predictions
@@ -1189,6 +1525,7 @@
 					case_ids case_ids
 
 					estimating_residual_lower_bound "missing_information"
+					output_causal_collider_information output_causal_collider_information
 
 					compute_all_statistics .false
 					compute_null_uncertainties .false
@@ -1224,6 +1561,7 @@
 		{
 			"feature_mi_map" feature_predictive_irreducibility_map
 			"feature_ac_map" (if output_robust_acs (get residuals_map "feature_ac_map" ))
+			"causal_collider_information" (get residuals_map "causal_collider_information")
 			"feature_rr_map"
 				(if output_robust_residuals
 					(if (size (get residuals_map "residual_map" ))
