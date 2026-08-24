@@ -1405,8 +1405,11 @@
 									))
 
 									(if (contains_index !nominalsMap feature)
-										;if nominal, get CAPs for full and weighted-superfull predictions and
-										;measure KL divergence between two distributions
+										;if nominal, get CAPs for full and weighted-superfull predictions and take the
+										;expectation of the feature's sparse deviation matrix (SDM) surprisal over the
+										;two distributions. Unlike a KL divergence between the two CAP maps, this is in
+										;nats of the same kind the continuous branch below measures, and it shares that
+										;branch's zero: two identical point-mass predictions score exactly 0.
 										(let
 											(assoc
 												full_caps_map
@@ -1435,13 +1438,13 @@
 													)
 											))
 
-											;KL div from full CAPs to weighted-superfull CAPS
-											(entropy
-												(normalize (append all_represented_classes_min_prob_map full_caps_map))
-												(normalize (append all_represented_classes_min_prob_map weighted_superfull_caps_map))
-												-1
-												1
-											)
+											;expected SDM surprisal of the weighted-superfull CAPs given the full CAPs
+											(call !ExpectedSDMSurprisalBetweenCaps (assoc
+												full_caps_map
+													(normalize (append all_represented_classes_min_prob_map full_caps_map))
+												weighted_superfull_caps_map
+													(normalize (append all_represented_classes_min_prob_map weighted_superfull_caps_map))
+											))
 										)
 
 										;if continuous, get the surprisal of the difference (LK-ed) between full
@@ -1635,6 +1638,175 @@
 			)
 	))
 
+	;helper method for !AccumulateMissingInformation that measures, in nats, how much the
+	;weighted-superfull nominal prediction disagrees with the full nominal prediction.
+	;Takes the expectation of the feature's sparse deviation matrix (SDM) surprisal over the
+	;two predicted class distributions:
+	;    sum over c of sum over c' of  p(c) * q(c') * s(c, c')
+	;where p is the full CAP, q is the weighted-superfull CAP, and s is the same surprisal
+	;transform the query engine applies to SDM entries when it measures nominal distance in
+	;surprisal space:
+	;    s(c, c)  = 0
+	;    s(c, c') = max(0, ln(prob_class_given_match(c)) - ln(prob_class_given_nonmatch(c, c')))
+	;Because s(c, c) is identically 0, the per-class baseline "sum over c of p(c) * s(c, c)"
+	;that makes exact agreement score 0 is already folded into s, so two identical point-mass
+	;predictions score exactly 0 with nothing left to subtract. That is the same zero the
+	;continuous branch reaches by subtracting its 1.5 nat assumption.
+	;If the feature has no SDM (too few predictions, or analyzed with use_sdm .false) this
+	;falls back to the KL divergence between the two CAP maps.
+	;expects 'feature' to be a nominal and 'orig_data_params_map' to be in scope
+	!ExpectedSDMSurprisalBetweenCaps
+	(declare
+		(assoc
+			;the full prediction's categorical action probabilities, already completed over the
+			;union of both predictions' classes and normalized
+			full_caps_map (assoc)
+			;the weighted-superfull prediction's categorical action probabilities, same classes
+			weighted_superfull_caps_map (assoc)
+		)
+
+		(declare (assoc
+			;a nominal feature's stored deviation is either a plain number, or, when a SDM was
+			;computed during analyze, the tuple [sdm] or [sdm value<->null null<->null], where the
+			;sdm is itself the pair [matrix unknown_class_deviation]
+			feature_deviation_entry (get orig_data_params_map ["featureDeviations" feature])
+		))
+
+		(declare (assoc
+			sdm_matrix (if (~ (list) feature_deviation_entry) (get feature_deviation_entry [0 0]) )
+			;deviation the query engine falls back to when a class has no row in the matrix
+			sdm_unknown_class_deviation (if (~ (list) feature_deviation_entry) (get feature_deviation_entry [0 1]) )
+		))
+
+		;no SDM for this feature, fall back to the KL divergence between the two CAP maps
+		(if (not (~ (assoc) sdm_matrix))
+			(conclude (entropy full_caps_map weighted_superfull_caps_map -1 1) )
+		)
+
+		(declare (assoc
+			;total number of classes trained for this feature. The query engine spreads a SDM row's
+			;leftover probability over the classes that the row does not name.
+			num_feature_classes
+				(max
+					(size (get !expectedValuesMap [weight_feature feature "class_counts"]))
+					(size sdm_matrix)
+				)
+		))
+
+		(apply "+" (values
+			(map
+				(lambda (let
+					(assoc
+						actual_class (current_index 1)
+						actual_class_probability (current_value 1)
+						row_entry (get sdm_matrix (current_index 1))
+					)
+
+					(declare (assoc
+						;a SDM row is either the assoc of the deviations it names explicitly, or the
+						;pair [assoc of named deviations, default deviation for the unnamed classes]
+						row_map
+							(if (~ (list) row_entry)
+								(first row_entry)
+
+								(~ (assoc) row_entry)
+								row_entry
+
+								(assoc)
+							)
+						row_default_deviation (if (~ (list) row_entry) (last row_entry) )
+						;this class has no row at all, so the query engine treats the nominal as
+						;universally symmetric using the feature's unknown-class deviation
+						row_is_absent (= .null row_entry)
+					))
+
+					(declare (assoc
+						;the leftover probability is divided among the classes the row does not name,
+						;and never by less than one
+						num_nonmatching_classes (max 1 (- num_feature_classes (max 1 (size row_map))) )
+					))
+
+					(declare (assoc
+						;probability of observing this class given that the case really is this class
+						prob_class_given_match
+							(if (contains_index row_map actual_class)
+								(- 1 (get row_map actual_class))
+
+								(!= .null row_default_deviation)
+								(- 1 row_default_deviation)
+
+								(- 1 (or sdm_unknown_class_deviation 0))
+							)
+					))
+
+					(*
+						actual_class_probability
+						(apply "+" (values
+							(map
+								(lambda (let
+									(assoc
+										;bound to names here because the parameters of a call are not
+										;evaluated in this map's iteration scope, so (current_index) is
+										;not available inside the call below
+										predicted_class (current_index 1)
+										predicted_class_probability (current_value 1)
+									)
+
+									;exact agreement contributes nothing. This is the per-class baseline
+									;that puts this measure on the continuous branch's zero.
+									(if (= actual_class predicted_class)
+										0
+
+										(*
+											predicted_class_probability
+											(call !SDMNonmatchSurprisal (assoc
+												prob_class_given_match prob_class_given_match
+												prob_class_given_nonmatch
+													(if (contains_index row_map predicted_class)
+														(- 1 (get row_map predicted_class))
+
+														row_is_absent
+														(/ (or sdm_unknown_class_deviation 0) num_nonmatching_classes)
+
+														(!= .null row_default_deviation)
+														(/ (- 1 row_default_deviation) num_nonmatching_classes)
+
+														0
+													)
+											))
+										)
+									)
+								))
+								weighted_superfull_caps_map
+							)
+						))
+					)
+				))
+				full_caps_map
+			)
+		))
+	)
+
+	;helper method for !ExpectedSDMSurprisalBetweenCaps that returns the surprisal, in nats, of
+	;observing a class other than the actual one, over and above the surprisal of a match. This
+	;mirrors what the query engine computes for a nominal non-match in surprisal space, including
+	;its clamp to zero when the match is no more likely than the non-match.
+	!SDMNonmatchSurprisal
+	(declare
+		(assoc
+			prob_class_given_match 0
+			prob_class_given_nonmatch 0
+		)
+
+		(if (and
+				(> prob_class_given_nonmatch 0)
+				(> prob_class_given_match prob_class_given_nonmatch)
+			)
+			(- (log prob_class_given_match) (log prob_class_given_nonmatch))
+
+			0
+		)
+	)
 	;query_macro for !AccumulateMissingInformation
 	;requires the typical gamut of variables used in residuals flows
 	;specifically needs:
