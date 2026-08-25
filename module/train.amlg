@@ -58,64 +58,22 @@
 			(assign (assoc session "none"))
 		)
 
-
-		(if (size !autoHierarchyIds)
-			(let
-				(assoc
-					predicted_clusters
-						||(map
-							(lambda (first
-								(call !ReactDiscriminative (assoc
-									context_features features
-									context_values (current_value 1)
-									action_features [".cluster_id"]
-									skip_encoding .true
-									skip_decoding .true
-									return_action_values_only .true
-								))
+		(declare (assoc
+			predicted_clusters
+				(if (and !autoHierarchyEnabled (size !autoHierarchyIds))
+					||(map
+						(lambda (first
+							(call !ReactDiscriminative (assoc
+								context_features features
+								context_values (current_value 1)
+								action_features [".cluster_id"]
+								return_action_values_only .true
 							))
-							cases
-						)
-				)
-
-				(map
-					(lambda (let
-						(assoc cluster_id (current_value 1))
-
-						(declare (assoc
-							cluster_indices
-								(filter
-									(lambda (= cluster_id (get predicted_clusters (current_value))))
-									(indices predicted_clusters)
-								)
 						))
-
-						(call_entity [!traineeContainer (concat "child" cluster_id)] "train" (assoc
-							features features
-							cases (unzip cases cluster_indices)
-							session session
-						))
-					))
-					(values predicted_clusters .true)
-				)
-
-
-				(map
-					(lambda
-						(print
-							"child" (current_value) ": "
-							(get
-								(call_entity [!traineeContainer (concat "child" (current_value 1))] "get_num_training_cases")
-								[1 "payload" "count"]
-							) "\n"
-						)
+						cases
 					)
-					!autoHierarchyIds
 				)
-
-				(conclude (call !Return)) ;;TODO: add appropriate output, total trained from above train call?
-			)
-		)
+		))
 
 		(assign (assoc
 			accumulate_weight_feature
@@ -514,6 +472,71 @@
 		(assign_to_entities session (assoc
 			".next_trained_index" (+ next_trained_index (size cases))
 		))
+
+		(if (and !autoHierarchyEnabled (size ablated_indices_list))
+			(seq
+				;only keep the ablated cases
+				(assign (assoc cases (keep cases ablated_indices_list) ))
+
+				(if (= 0 (size !autoHierarchyIds))
+					(seq
+						(call !make_hierarchy)
+
+						(assign (assoc
+							predicted_clusters
+								||(map
+									(lambda (first
+										(call !ReactDiscriminative (assoc
+											context_features features
+											context_values (current_value 1)
+											action_features [".cluster_id"]
+											return_action_values_only .true
+										))
+									))
+									cases
+								)
+						))
+					)
+
+					;else hierarchy already exists, only keep those predicted_clusters matching the ablated cases
+					(assign (assoc predicted_clusters (keep predicted_clusters ablated_indices_list)))
+				)
+
+				(map
+					(lambda (let
+						(assoc cluster_id (current_value 1))
+
+						(declare (assoc
+							cluster_indices
+								(filter
+									(lambda (= cluster_id (get predicted_clusters (current_value))))
+									(indices predicted_clusters)
+								)
+						))
+
+						(call_entity [!traineeContainer (concat "child" cluster_id)] "train" (assoc
+							features features
+							cases (unzip cases cluster_indices)
+							session session
+						))
+					))
+					(values predicted_clusters .true)
+				)
+
+				(map
+					(lambda
+						(print
+							"child" (current_value) ": "
+							(get
+								(call_entity [!traineeContainer (concat "child" (current_value 1))] "get_num_training_cases")
+								[1 "payload" "count"]
+							) "\n"
+						)
+					)
+					!autoHierarchyIds
+				)
+			)
+		)
 
 		(call !ProgressClear)
 		(accum_to_entities (assoc !revision 1))
@@ -1099,6 +1122,11 @@
 			))
 		)
 
+		;prepend cluster id feature to features
+		(if (and !autoHierarchyEnabled (size predicted_clusters))
+			(assign (assoc ablate_train_features (append ".cluster_id" ablate_train_features) ))
+		)
+
 		;create the cases
 		(declare (assoc
 			output_cases
@@ -1117,6 +1145,12 @@
 									))
 							))
 						)
+
+						;prepend cluster id to values
+						(if (and !autoHierarchyEnabled (size predicted_clusters))
+							(assign (assoc feature_values (append (get predicted_clusters (current_value 1)) feature_values) ))
+						)
+
 						(if rebalance_weights
 							(seq
 								(accum (assoc
