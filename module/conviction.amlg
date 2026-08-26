@@ -1018,6 +1018,12 @@
 
 		(declare (assoc
 			case_values_map (zip features feature_values)
+			dbl_precision_epsilon
+				(call !ComputePrecisionEpsilon (assoc
+					context_features features
+					action_features []
+					derived_context_features []
+				))
 		))
 
 		(declare (assoc
@@ -1151,7 +1157,6 @@
 									(assoc
 										influence_weights (get candidate_cases_lists 1)
 										influential_values (last candidate_cases_lists)
-
 										interpolated_value
 											(call !InterpolateActionValues (assoc
 												action_feature action_feature
@@ -1162,6 +1167,68 @@
 												;to categorical_action_probabilities_map
 												output_categorical_action_probabilities feature_has_continuous_nulls
 											))
+									)
+
+									(declare (assoc
+										local_mad_estimate
+											;local expected residual estimate
+											(if feature_is_edit_distance
+												(call !ComputeEditDistanceMAD (assoc
+													vals influential_values
+												))
+
+												(call !ComputeMAD (assoc
+													vals influential_values
+												))
+											)
+									))
+
+									(if (< local_mad_estimate dbl_precision_epsilon)
+										;if all influential values are the same, then the MAD estimate will fall over.
+										;instead, find the nearest case with a different value and update the MAD estimate
+										(assign (assoc
+											local_mad_estimate
+												(let
+													(assoc
+														extra_candidate_case_lists
+															(compute_on_contained_entities
+																(if case_id
+																	(query_not_in_entity_list [case_id] )
+																	[]
+																)
+																filtering_queries
+																(query_not_equals action_feature (first influential_values))
+																(query_nearest_generalized_distance
+																	1 ;just the singular nearest case
+																	(indices context_values_map)
+																	(values context_values_map)
+																	(get data_params_map "p")
+																	feature_weights
+																	!queryFeatureAttributeTypeMap
+																	(get data_params_map "featureDeviations")
+																	action_feature ;weight_selection
+																	(get data_params_map "dt")
+																	(if use_case_weights weight_feature .null)
+																	;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+																	"fixed rand seed"
+																	.null ;radius
+																	!numericalPrecision
+																	action_feature
+																)
+															)
+													)
+
+													(if feature_is_edit_distance
+														(call !ComputeEditDistanceMAD (assoc
+															vals (append influential_values (last extra_candidate_case_lists))
+														))
+
+														(call !ComputeMAD (assoc
+															vals (append influential_values (last extra_candidate_case_lists))
+														))
+													)
+												)
+										))
 									)
 
 									(if feature_has_continuous_nulls
@@ -1228,16 +1295,7 @@
 											(abs (- interpolated_value case_value))
 										)
 										(max
-											;local expected residual estimate
-											(if feature_is_edit_distance
-												(call !ComputeEditDistanceMAD (assoc
-													vals influential_values
-												))
-
-												(call !ComputeMAD (assoc
-													vals influential_values
-												))
-											)
+											local_mad_estimate
 											(get !cachedFeatureMinResidualMap action_feature)
 										)
 									)
