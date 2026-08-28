@@ -1,7 +1,37 @@
 ;Contains methods for discriminative (prediction) reacting.
 {
 
-	ReactDiscriminative (call !ReactDiscriminative)
+	ReactDiscriminative
+		(call !ReactDiscriminative (assoc
+			output_raw_influential_cases_only output_raw_influential_cases_only
+			context_features          context_features
+			context_values            context_values
+			action_features           action_features
+			action_values             action_values
+			details                   details
+			skip_encoding             skip_encoding
+			skip_decoding             skip_decoding
+			num_features_returned     num_features_returned
+			extra_features            extra_features
+			match_on_context_features match_on_context_features
+			ignore_case               ignore_case
+			focal_case                focal_case
+			tie_break_random_seed     tie_break_random_seed
+			allow_nulls               allow_nulls
+			return_action_values_only return_action_values_only
+			force_targetless          force_targetless
+			data_params_map           data_params_map
+			weight_feature            weight_feature
+			use_case_weights          use_case_weights
+			case_indices              case_indices
+			leave_case_out            leave_case_out
+			goal_features_map         goal_features_map
+			preserve_feature_values   preserve_feature_values
+			new_case_threshold        new_case_threshold
+			has_dependent_features    has_dependent_features
+			impute_react              impute_react
+			filtering_queries         filtering_queries
+		))
 
 	;reacts to the context specified: computes the next action from replays given the current context
 	; context_features: list of context features
@@ -354,51 +384,128 @@
 				))
 
 				;if single cluster, just react against that one cluster
-				(map
-					(lambda (let
-						(assoc subtrainee_id (concat !traineeId "_sub" (current_index 1)) )
-						;explicitly pass in all the parameters into react
-						(call_entity [!traineeContainer subtrainee_id] "ReactDiscriminative" (assoc
-							output_raw_influential_cases_only .true
-							context_features          context_features
-							context_values            context_values
-							action_features           action_features
-							action_values             action_values
-							details                   details
-							skip_encoding             skip_encoding
-							skip_decoding             skip_decoding
-							num_features_returned     num_features_returned
-							extra_features            extra_features
-							match_on_context_features match_on_context_features
-							ignore_case               ignore_case
-							focal_case                focal_case
-							tie_break_random_seed     tie_break_random_seed
-							allow_nulls               allow_nulls
-							return_action_values_only return_action_values_only
-							force_targetless          force_targetless
-							data_params_map           data_params_map
-							weight_feature            weight_feature
-							use_case_weights          use_case_weights
-							case_indices              case_indices
-							leave_case_out            leave_case_out
-							goal_features_map         goal_features_map
-							preserve_feature_values   preserve_feature_values
-							new_case_threshold        new_case_threshold
-							has_dependent_features    has_dependent_features
-							impute_react              impute_react
-							filtering_queries         filtering_queries
-						))
+				(if (= 1 (size cap))
+					(call_entity [!traineeContainer (concat !traineeId "_sub" (first (indices cap)))] "ReactDiscriminative" (assoc
+						context_features          context_features
+						context_values            context_values
+						action_features           action_features
+						action_values             action_values
+						details                   details
+						skip_encoding             skip_encoding
+						skip_decoding             skip_decoding
+						num_features_returned     num_features_returned
+						extra_features            extra_features
+						match_on_context_features match_on_context_features
+						ignore_case               ignore_case
+						focal_case                focal_case
+						tie_break_random_seed     tie_break_random_seed
+						allow_nulls               allow_nulls
+						return_action_values_only return_action_values_only
+						force_targetless          force_targetless
+						data_params_map           data_params_map
+						weight_feature            weight_feature
+						use_case_weights          use_case_weights
+						case_indices              case_indices
+						leave_case_out            leave_case_out
+						goal_features_map         goal_features_map
+						preserve_feature_values   preserve_feature_values
+						new_case_threshold        new_case_threshold
+						has_dependent_features    has_dependent_features
+						impute_react              impute_react
+						filtering_queries         filtering_queries
 					))
-					cap
+
+					;else iterpolate among the involved clusters, union of all the raw influences
+					(let
+						(assoc
+							relevant_cluster_cases_map
+								(map
+									(lambda (let
+										(assoc subtrainee_id (concat !traineeId "_sub" (current_index 1)) )
+										(get
+											(call_entity [!traineeContainer subtrainee_id] "ReactDiscriminative" (assoc
+												output_raw_influential_cases_only .true
+												context_features          context_features
+												context_values            context_values
+												action_features           action_features
+												action_values             action_values
+												details                   details
+												skip_encoding             skip_encoding
+												skip_decoding             skip_decoding
+												num_features_returned     num_features_returned
+												extra_features            extra_features
+												match_on_context_features match_on_context_features
+												ignore_case               ignore_case
+												focal_case                focal_case
+												tie_break_random_seed     tie_break_random_seed
+												allow_nulls               allow_nulls
+												return_action_values_only return_action_values_only
+												force_targetless          force_targetless
+												data_params_map           data_params_map
+												weight_feature            weight_feature
+												use_case_weights          use_case_weights
+												case_indices              case_indices
+												leave_case_out            leave_case_out
+												goal_features_map         goal_features_map
+												preserve_feature_values   preserve_feature_values
+												new_case_threshold        new_case_threshold
+												has_dependent_features    has_dependent_features
+												impute_react              impute_react
+												filtering_queries         filtering_queries
+											))
+											["action_values" 0]
+										)
+									))
+									cap
+								)
+						)
+
+						(declare (assoc
+							combined_influences_map
+								;combine all the subtrainee cases and influences into one assoc where the indices are pair of [subtrainee_id case_id]
+								(apply "append" (values
+									(map
+										(lambda (let
+											(assoc sub_id (concat !traineeId "_sub" (current_index 1)) )
+
+											;change the assoc indices to be a pair such that the assoc is now [subtrainee_id case_id] -> influence weight
+											(zip
+												(map (lambda [sub_id (current_value 1)] ) (indices (current_value)))
+												(values (current_value))
+											)
+										))
+										relevant_cluster_cases_map
+									)
+								))
+							k_parameter (get data_params_map "k")
+						))
+
+						;sort subtrainee cases by their influences
+						(declare (assoc
+							sub_cases
+								(sort
+									(lambda
+										(<
+											(get combined_influences_map [(current_value 1)])
+											(get combined_influences_map [(current_value 2)])
+										)
+									)
+									(indices combined_influences_map)
+								)
+						))
+
+						(call !DynamicBandwidthFilterAndInterpolate (assoc
+							action_feature (first action_features)
+							sub_cases sub_cases
+							probs (unzip combined_influences_map sub_cases)
+							marginal_cutoff (if (~ [] k_parameter) (first k_parameter) )
+							min_k (if (~ [] k_parameter) (get k_parameter 1) )
+							static_k (if (~ 0 k_parameter) k_parameter)
+						))
+					)
 				)
-
-					;else TOOD: call react against all the needed custers and weigh results according to their CAPs?
-					;or according to the union of all the raw influences from all the clusters?
-
-
 			)
 		)
-
 
 		;if there are dependent context features, and the action is dependent, precompute all residuals for dependent continuous features
 		(if dependent_features_map
