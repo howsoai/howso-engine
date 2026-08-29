@@ -1,0 +1,99 @@
+;Tests progress reporting for long running methods.
+;
+;Progress entries are normally removed by !ProgressClear before a method returns, so they cannot be
+;observed after the fact. react_into_features is the exception: it calls !ProgressClear *before*
+;kicking off its targetless analyze via !Analyze (conviction.amlg), and !Analyze does not clear.
+;That leaves the analyze's progress entry in !progressMap once the call returns, which is what lets
+;this test inspect how many steps a targetless analyze actually reported.
+(seq
+	(assign_to_entities (load "unit_test.amlg"))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_progress.amlg" retries 1))
+
+	(declare
+		(assoc
+			progress .null
+			features (list "height" "width" "length" "tart" "sweet" "weight")
+			fruit_data
+				(list
+					;		"h" 	"w" 	"l" 	"tart" 	"sweet" "weight"
+					(list 	1 		.7 		1 		.3 		.40		1)
+					(list 	1.1 	.6 		.7		.4 		.45 	.8)
+					(list 	.6 		.4 		.5 		.5 		.42 	1.2)
+					(list 	.7 		.5 		.6 		.45		.49 	1.1)
+
+					(list 	1.5		1.5		1.5		.8 		.4		2)
+					(list 	2.1 	1.6 	2.7		.72		.55 	3)
+					(list 	2.6		2.7		2.2		.7		.52 	3.5)
+					(list 	3.6		3.1		3.5 	.77 	.54 	4.5)
+
+					(list 	2 		1 		3 		.05		.60		3)
+					(list 	2.1 	1.1		4.7		.1 		.65 	4)
+					(list 	2.6		1.1		5.4 	.05		.69 	5.5)
+					(list 	3.1		1.2		7 		0 		.62 	7)
+
+					(list 	1.4 	1.7 	1.5		.22		.68		2.4)
+					(list 	2.1 	1.6 	2.3		.21		.75 	2.9)
+					(list 	2.5		2.4		2.3		.26		.72 	3.2)
+					(list 	2.9 	2.8 	2.7		.23		.70	 	3.9)
+
+					(list 	4.5 	5.0		5.1		.1 		.80		8)
+					(list 	5.1 	6.2		6.7		.15		.65 	12)
+					(list 	6.9 	7.1 	7.5		.13 	.71 	14.5)
+					(list 	8.6 	7.4 	8.5		.14 	.78 	18)
+				)
+		)
+	)
+
+	(call_entity "howso" "train" (assoc
+		features features
+		cases fruit_data
+		session "unit_test"
+	))
+
+
+;VERIFY get_progress WITH NO ONGOING TASK
+	(print "get_progress errors when the task_id is unknown: ")
+	(call assert_same (assoc
+		obs (get (call_entity "howso" "get_progress" (assoc task_id "ut_progress")) 0)
+		exp 0
+	))
+
+
+;VERIFY TARGETLESS ANALYZE PROGRESS
+	;the analyze kicked off here is targetless, and its progress entry outlives the call (see header)
+	(call_entity "howso" "react_into_features" (assoc
+		features features
+		familiarity_conviction_addition .true
+		analyze .true
+		overwrite .true
+		task_id "ut_progress"
+	))
+
+	(assign (assoc
+		progress (get (call_entity "howso" "get_progress" (assoc task_id "ut_progress")) [1 "payload"])
+	))
+
+	(print "targetless analyze leaves a progress entry: ")
+	(call assert_not_null (assoc obs progress))
+
+	(print
+		"observed targetless analyze progress: " (get progress "step") "/" (get progress "total")
+		"  (" (get progress "details") ")\n"
+	)
+
+	;!ConvergeTargetless reports one step per convergence pass (4 passes when not reduce_only), and
+	;!ComputeRobustTargetlessMDA contributes at least one more. Without the per-pass reporting the
+	;three "deviations" passes are silent and this total lands at 1.
+	(print "targetless analyze reports a step per convergence pass: ")
+	(call assert_true (assoc obs (>= (get progress "step") 5)))
+
+	;!EstimateProgress must budget at least as many steps as the flow actually emits, otherwise a
+	;progress bar built from these values runs past 100%.
+	(print "steps emitted do not exceed the estimated total: ")
+	(call assert_true (assoc obs (<= (get progress "step") (get progress "total"))))
+
+	(call exit_if_failures (assoc msg "Targetless analyze progress"))
+
+
+	(call exit_if_failures (assoc msg unit_test_name ))
+)
