@@ -3,14 +3,23 @@
 	;automatically analyze the dataset using stored parameters from previous analyze calls
 	#{long_running .true statistically_idempotent .true}
 	auto_analyze
-	(let
-		(assoc saved_analyze_parameters_map (retrieve_from_entity "!savedAnalyzeParameterMap"))
+	(declare
+		(assoc
+			;Optional task_id to track progress of this long running operation. If unspecified, will use .null as the task_id.
+			#{type "string"}
+			task_id .null
+		)
+
+		(declare (assoc saved_analyze_parameters_map (retrieve_from_entity "!savedAnalyzeParameterMap") ))
 
 		;if this is called before regular analyze, analyze the dataset as targetless
 		(if (= .null saved_analyze_parameters_map)
-			(call analyze (assoc context_features !trainedFeatures))
+			(call analyze (assoc
+				context_features !trainedFeatures
+				task_id task_id
+			))
 
-			(call analyze saved_analyze_parameters_map)
+			(call analyze (append saved_analyze_parameters_map {"task_id" task_id}) )
 		)
 	)
 
@@ -93,7 +102,7 @@
 			;defaults to a rate of 1.05, increasing by 5% until the delta between residuals is less than 'convergence_threshold'.
 			#{type "number" min 1}
 			convergence_samples_growth_rate 1.05
-			;The minumum size of the first batch of cases used when dynamically sampling robust residuals used to determine feature probabilities
+			;The minimum size of the first batch of cases used when dynamically sampling robust residuals used to determine feature probabilities
 			;	Default of 5000
 			#{type "number" min 1}
 			convergence_min_size 5000
@@ -234,7 +243,7 @@
 		(if (!= "targetless" targeted_model)
 			(let
 				(assoc
-					;remove possible duplicates from all_features while mantaining order of features
+					;remove possible duplicates from all_features while maintaining order of features
 					all_features (values (append context_features action_features) .true)
 				)
 
@@ -564,8 +573,6 @@
 	; action_features: list of action features to analyze for
 	; num_analysis_samples: optional. number of cases to sample during analysis. only applies for k_folds = 1
 	; num_deviation_samples: optional. initial number of samples to use for computing residuals
-	; derived_auto_analyzed: optional, if true, will set the 'derivedAutoAnalyzed' parameter to true in the dataset parameter set,
-	;			denoting that these parameters were auto-analyzed during derive features flow.
 	!AnalyzeDataParameters
 	(declare
 		(assoc
@@ -609,7 +616,7 @@
 		(call !EstimateProgress (assoc
 			task_id task_id
 			method "analyze"
-			details "Analyzing"
+			details "Initializing analysis"
 			internal internal
 			params {
 				"targetless" (= "targetless" targeted_model)
@@ -650,7 +657,7 @@
 
 		(call !GridSearch)
 
-		(call !ProgressUpdate (assoc details "Analysis: Computing feature weights"))
+		(call !ProgressUpdate (assoc details "Computing feature weights"))
 		(call !ComputeAndUseWeights)
 		(call !TestAccuracyAndKeepOrRevertDataParameters)  ;w or w/o weights
 
@@ -666,11 +673,11 @@
 		))
 
 		(call !ConvergeResiduals (assoc use_deviations .true))
-		(call !ProgressUpdate (assoc details "Analysis: Updating parameters"))
+		(call !ProgressUpdate (assoc details "Updating parameters"))
 		(call !GridSearch)
 
 		;now with weights
-		(call !ProgressUpdate (assoc details "Analysis: Computing feature weights with deviations"))
+		(call !ProgressUpdate (assoc details "Computing feature weights with deviations"))
 		(call !ComputeAndUseWeights)
 		(call !TestAccuracyAndKeepOrRevertDataParameters) ;deviations w or w/o weights
 
@@ -1081,7 +1088,6 @@
 	;wrapper method to grid searches dataset parameters and backs up the results into previous_analyzed_dp_map
 	!GridSearch
 	(seq
-		(set_rand_seed sampling_random_seed)
 		(assign (assoc
 			analyzed_dp_map
 				(call !ComputeResidualsAcrossParametersAndSelectOptimal (assoc

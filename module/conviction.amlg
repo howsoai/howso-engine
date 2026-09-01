@@ -117,6 +117,20 @@
 			(assign (assoc clustering ".cluster_id"))
 		)
 
+		(declare (assoc
+			dataset_size (call !GetNumTrainingCases)
+			;need to cache computed DC values to be able to approximate any of these listed computations during future train calls
+			cache_values (or familiarity_conviction_addition p_value_of_addition familiarity_conviction_removal p_value_of_removal)
+		))
+		(declare (assoc
+			num_reacts (if (= .null case_ids) dataset_size (size case_ids))
+		))
+		(declare (assoc
+			;one update every 10000 (or more) cases, for a max of 10 times for SC and RContrib flows
+			progress_update_size (max 10000 (floor (/ num_reacts (min num_reacts 10))))
+			max_progress_updates (min (ceil (/ num_reacts 10000)) 10)
+		))
+
 		(if familiarity_conviction_addition (accum (assoc num_steps 1)) )
 		(if familiarity_conviction_removal  (accum (assoc num_steps 1)) )
 		(if p_value_of_addition
@@ -125,9 +139,9 @@
 		(if p_value_of_removal
 			(if familiarity_conviction_removal .null (accum (assoc num_steps 1)) )
 		)
-		(if distance_contribution (accum (assoc num_steps 1)) )
-		(if similarity_conviction (accum (assoc num_steps (if distance_contribution 1 2) )) )
-		(if residual_contribution (accum (assoc num_steps 1)) )
+		(if (or distance_contribution cache_values) (accum (assoc num_steps 1)) )
+		(if similarity_conviction (accum (assoc num_steps (+ max_progress_updates (if distance_contribution 0 1)) )) )
+		(if residual_contribution (accum (assoc num_steps max_progress_updates)) )
 		(if influence_weight_entropy (accum (assoc num_steps 1)) )
 		(if clustering (accum (assoc num_steps 1)) )
 
@@ -135,9 +149,9 @@
 			task_id task_id
 			internal internal
 			method "react_into_features"
-			details "Reacting into features"
+			details .null
 			params {
-				"total" (+ 1 num_steps)
+				"total" num_steps
 			}
 		))
 
@@ -231,7 +245,6 @@
 		)
 
 		(declare (assoc
-			cache_values .false
 			;create assoc of type of computation -> stored feature name
 			computed_map
 				(filter
@@ -260,17 +273,17 @@
 							(map
 								(lambda
 									(if (or (= "p_value_of_addition" (current_value)) (= "p_value_of_removal" (current_value)))
-										{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" 1} }
+										{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" 1} "computed" .true }
 
 										;else convictions, entropy and distance contribution ranges are 0 to infinity
-										{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" .infinity} }
+										{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" .infinity}  "computed" .true }
 									)
 								)
 								(indices computed_map)
 							)
 						)
 						(if clustering
-							(associate clustering {"type" "nominal" "data_type" "number" })
+							(associate clustering {"type" "nominal" "data_type" "number" "computed" .true })
 							{}
 						)
 					)
@@ -284,7 +297,6 @@
 					context_features features
 					weight_feature weight_feature
 				))
-			dataset_size (call !GetNumTrainingCases)
 		))
 
 		;This must be above the below block that populates
@@ -292,37 +304,29 @@
 		(call !UpdateCaseWeightParameters)
 
 		(if (= .null case_ids)
-			(seq
-				(assign_to_entities (assoc
-					!computedFeaturesMap
-						(assoc
-							"computed_features"
-								(values
-									;don't use distance_contribution as a feature for analysis if only similarity_conviction was explicitly specified
-									(if only_similiarity_conviction
-										(remove computed_map "distance_contribution")
-										computed_map
-									)
-								)
-							"computed_map"
+			(assign_to_entities (assoc
+				!computedFeaturesMap
+					(assoc
+						"computed_features"
+							(values
+								;don't use distance_contribution as a feature for analysis if only similarity_conviction was explicitly specified
 								(if only_similiarity_conviction
-									(modify computed_map "distance_contribution" .false)
+									(remove computed_map "distance_contribution")
 									computed_map
 								)
-							"analyze" analyze
-							"context_features" features
-							"weight_feature" (if use_case_weights weight_feature)
-						)
-					!autoAnalyzeEnabled analyze
-					!queryFeatureAttributeTypeMap (append !queryFeatureAttributeTypeMap (zip (values computed_map) {"difference_type" "continuous" "data_type" "number"}) )
-				))
-
-				;need to cache computed values to be able to approximate any of these listed computations during future train calls
-				(assign (assoc
-					cache_values
-						(or familiarity_conviction_addition p_value_of_addition familiarity_conviction_removal p_value_of_removal)
-				))
-			)
+							)
+						"computed_map"
+							(if only_similiarity_conviction
+								(modify computed_map "distance_contribution" .false)
+								computed_map
+							)
+						"analyze" analyze
+						"context_features" features
+						"weight_feature" (if use_case_weights weight_feature)
+					)
+				!autoAnalyzeEnabled analyze
+				!queryFeatureAttributeTypeMap (append !queryFeatureAttributeTypeMap (zip (values computed_map) {"difference_type" "continuous" "data_type" "number"}) )
+			))
 		)
 
 		(declare (assoc
@@ -642,8 +646,12 @@
 		)
 
 		(if similarity_conviction
-			(seq
-				(call !ProgressUpdate (assoc details "Computing similarity convictions"))
+			(let
+				(assoc
+					num_progress_updates 1
+					progress_detail_text "Computing similarity convictions"
+				)
+
 				(if existing_distance_contribution
 					(declare (assoc
 						case_to_dc_map
@@ -659,32 +667,34 @@
 				)
 				(declare (assoc
 					similarity_convictions_map
-						||(map
-							(lambda
-								(get
-									(call !SimilarityConviction (assoc
-										features features
-										feature_values (unzip (current_value 1) features)
-										use_case_weights use_case_weights
-										weight_feature weight_feature
-										case_id (current_index 1)
-										distance_contribution_feature distance_contribution
-									))
-									"similarity_conviction"
-								)
-							)
-							;pull all relevant feature values for the cases
-							;assoc of case id -> assoc of feature -> values
-							(if (= .null case_ids)
-								(compute_on_contained_entities (map (lambda (query_exists (current_value))) features))
-
-								(compute_on_contained_entities
-									(query_in_entity_list case_ids)
-									(map (lambda (query_exists (current_value))) features)
-								)
+						(zip
+							(if (= .null case_ids) (call !AllCases) case_ids)
+							||(map
+								(lambda (seq
+									;update progress every 'progress_update_size' number of reacts
+									(if (= 0 (mod (current_index) progress_update_size))
+										(if (< num_progress_updates max_progress_updates)
+											(call !ProgressLockAndUpdate)
+										)
+									)
+									(get
+										(call !SimilarityConviction (assoc
+											features features
+											feature_values (retrieve_from_entity (current_value 1) features)
+											use_case_weights use_case_weights
+											weight_feature weight_feature
+											case_id (current_value 1)
+											distance_contribution_feature distance_contribution
+										))
+										"similarity_conviction"
+									)
+								))
+								(if (= .null case_ids) (call !AllCases) case_ids)
 							)
 						)
 				))
+
+				(call !ProgressUpdate (assoc details progress_detail_text))
 
 				(call !StoreCaseValues (assoc
 					label_name similarity_conviction
@@ -741,34 +751,40 @@
 		)
 
 		(if residual_contribution
-			(seq
-				(call !ProgressUpdate (assoc details "Computing residual contributions"))
+			(let
+				(assoc
+					num_progress_updates 1
+					progress_detail_text "Computing residual contributions"
+				)
+
 				(let
 					(assoc
 						residual_contribution_map
-							||(map
-								(lambda
-									(call !ResidualContribution (assoc
-										features features
-										feature_values (unzip (current_value 1) features)
-										use_case_weights use_case_weights
-										weight_feature weight_feature
-										dataset_size dataset_size
-										case_id (current_index 1)
+							(zip
+								(if (= .null case_ids) (call !AllCases) case_ids)
+								||(map
+									(lambda (seq
+										;update progress every 'progress_update_size' number of reacts
+										(if (= 0 (mod (current_index) progress_update_size))
+											(if (< num_progress_updates max_progress_updates)
+												(call !ProgressLockAndUpdate)
+											)
+										)
+										(call !ResidualContribution (assoc
+											features features
+											feature_values (retrieve_from_entity (current_value 1) features)
+											use_case_weights use_case_weights
+											weight_feature weight_feature
+											dataset_size dataset_size
+											case_id (current_value 1)
+										))
 									))
-								)
-								;pull all relevant feature values for the cases
-								;assoc of case id -> assoc of feature -> values
-								(if (= .null case_ids)
-									(compute_on_contained_entities (map (lambda (query_exists (current_value))) features))
-
-									(compute_on_contained_entities
-										(query_in_entity_list case_ids)
-										(map (lambda (query_exists (current_value))) features)
-									)
+									(if (= .null case_ids) (call !AllCases) case_ids)
 								)
 							)
 					)
+
+					(call !ProgressUpdate (assoc details progress_detail_text))
 
 					(call !StoreCaseValues (assoc
 						label_name residual_contribution
@@ -808,6 +824,8 @@
 				))
 			)
 		)
+
+		(call !ProgressClear)
 
 		(accum_to_entities (assoc !revision 1))
 
@@ -1077,7 +1095,13 @@
 											(normalize (zip
 												(lambda (+ (current_value) (current_value 1)))
 												(last candidate_cases_lists) ;values
-												(get candidate_cases_lists 1) ;weights
+												;weights
+												(if (= 0 (apply "+" (get candidate_cases_lists 1)))
+													;if all weights are zero, use uniform weights
+													(map 1 (get candidate_cases_lists 1))
+													;original weights
+													(get candidate_cases_lists 1)
+												)
 											))
 									)
 
@@ -1119,7 +1143,18 @@
 													(normalize (zip
 														(lambda (+ (current_value) (current_value 1)))
 														(append (last candidate_cases_lists) (last extra_candidate_case_lists)) ;values
-														(append (get candidate_cases_lists 1) (get extra_candidate_case_lists 1)) ;values
+														;weights
+														(let
+															(assoc
+																combined_weights (append (get candidate_cases_lists 1) (get extra_candidate_case_lists 1))
+															)
+
+															;if all weights are zero, pass uniform weights
+															(if (= 0 (apply "+" combined_weights))
+																(map 1 combined_weights)
+																combined_weights
+															)
+														)
 													))
 												)
 										))
@@ -1151,7 +1186,6 @@
 									(assoc
 										influence_weights (get candidate_cases_lists 1)
 										influential_values (last candidate_cases_lists)
-
 										interpolated_value
 											(call !InterpolateActionValues (assoc
 												action_feature action_feature
@@ -1220,14 +1254,8 @@
 										)
 									)
 
-									(/
-										;feature residual
-										(if feature_is_edit_distance
-											(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
-
-											(abs (- interpolated_value case_value))
-										)
-										(max
+									(declare (assoc
+										local_mad_estimate
 											;local expected residual estimate
 											(if feature_is_edit_distance
 												(call !ComputeEditDistanceMAD (assoc
@@ -1238,6 +1266,72 @@
 													vals influential_values
 												))
 											)
+									))
+
+									(if (< local_mad_estimate (get !cachedFeatureMinResidualMap action_feature))
+										;if all influential values are the same, then the MAD estimate will fall over.
+										;instead, find the nearest case with a different value and update the MAD estimate
+										(assign (assoc
+											local_mad_estimate
+												(let
+													(assoc
+														extra_candidate_case_lists
+															(compute_on_contained_entities
+																(if case_id
+																	(query_not_in_entity_list [case_id] )
+																	[]
+																)
+																filtering_queries
+																(query_not_between
+																	action_feature
+																	(- (first influential_values) (get !cachedFeatureHalfMinGapMap action_feature))
+																	(+ (first influential_values) (get !cachedFeatureHalfMinGapMap action_feature))
+																)
+																(if feature_has_continuous_nulls
+																	(query_not_equals action_feature .null)
+																)
+																(query_nearest_generalized_distance
+																	1 ;just the singular nearest case
+																	(indices context_values_map)
+																	(values context_values_map)
+																	(get data_params_map "p")
+																	feature_weights
+																	!queryFeatureAttributeTypeMap
+																	(get data_params_map "featureDeviations")
+																	action_feature ;weight_selection
+																	(get data_params_map "dt")
+																	(if use_case_weights weight_feature .null)
+																	;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+																	"fixed rand seed"
+																	.null ;radius
+																	!numericalPrecision
+																	action_feature
+																)
+															)
+													)
+
+													(if feature_is_edit_distance
+														(call !ComputeEditDistanceMAD (assoc
+															vals (append influential_values (last extra_candidate_case_lists))
+														))
+
+														(call !ComputeMAD (assoc
+															vals (append influential_values (last extra_candidate_case_lists))
+														))
+													)
+												)
+										))
+									)
+
+									(/
+										;feature residual
+										(if feature_is_edit_distance
+											(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
+
+											(abs (- interpolated_value case_value))
+										)
+										(max
+											local_mad_estimate
 											(get !cachedFeatureMinResidualMap action_feature)
 										)
 									)

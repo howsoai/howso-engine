@@ -46,29 +46,18 @@
 		))
 
 		(if (and estimating_residual_lower_bound (size custom_mda_map))
-			(seq
-				(assign (assoc
-					single_query_per_case .false
-					;use feature weights for each feature being predicted
-					per_feature_weights .true
-					;limit the number of cases (reacts) per feature to a minimum of 50 cases per feature
-					num_test_cases
-						(min
-							num_test_cases
-							(max 50 (/ 10000 (size features)))
-						)
-					data_params_map (modify data_params_map "featureProbabilitiesMap" custom_mda_map)
-				))
-
-				(if custom_residuals_map
-					(assign (assoc
-						data_params_map
-							(modify data_params_map "featureDeviations"
-								(append (get data_params_map "featureDeviations") custom_residuals_map)
-							)
-					))
-				)
-			)
+			(assign (assoc
+				single_query_per_case .false
+				;use feature weights for each feature being predicted
+				per_feature_weights .true
+				;limit the number of cases (reacts) per feature to a minimum of 50 cases per feature
+				num_test_cases
+					(min
+						num_test_cases
+						(max 50 (/ 10000 (size features)))
+					)
+				data_params_map (modify data_params_map "featureProbabilitiesMap" custom_mda_map)
+			))
 		)
 
 		;iterate over each case and accumulate residuals for all the feature(s)
@@ -154,7 +143,7 @@
 												.null
 												dt_parameter
 												(if valid_weight_feature weight_feature .null)
-												tie_break_random_seed
+												(rand) ;tie_break_random_seed
 												.null ;radius
 												!numericalPrecision
 											)
@@ -313,7 +302,7 @@
 														.null
 														dt_parameter
 														(if valid_weight_feature weight_feature .null)
-														tie_break_random_seed
+														(rand) ;tie_break_random_seed
 														.null ;radius
 														!numericalPrecision
 													)
@@ -349,7 +338,7 @@
 		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
 		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
 		(assign (assoc
-			feature_residuals_lists (call !TransposeResidualLists)
+			feature_residuals_lists (call !TransposeResidualLists (assoc leave_nulls_in_results .false))
 		))
 	)
 
@@ -746,7 +735,6 @@
 		(assoc features features )
 
 		(assign (assoc
-			update_lock 0
 			num_progress_updates 1
 			;one update every 50 (or more) features, for a max of 10 times
 			progress_update_size (max 50 (floor (/ (size features) (min (size features) 10))))
@@ -755,12 +743,11 @@
 					0
 					(min (ceil (/ (size features) 50)) 10)
 				)
-			progress_detail_text (if in_analyze "Analysis: Computing A.C. matrix" "Computing A.C. matrix")
 		))
 
 		;update progress here because tehre are less than 50 features and it won't be updated during the actual compute
 		(if (= 1 max_progress_updates)
-			(call !ProgressUpdate (assoc details progress_detail_text))
+			(call !ProgressUpdate (assoc details "Computing accuracy contribution matrix"))
 		)
 
 		(declare (assoc all_sample_indices (range 0 (- (size (first feature_residuals_lists)) 1)) ))
@@ -1056,7 +1043,6 @@
 					;don't create copies of confusion matrices for non-primary shared deviation features
 					expand_confusion_matrices .false
 				))
-			dbl_precision_epsilon (call !ComputePrecisionEpsilon)
 		))
 
 		;output the smallest computed residual
@@ -1073,7 +1059,7 @@
 				)
 
 				;if smallest_residual is 0, replace with cached min residual, otherwise output the computed value
-				(if (<= smallest_residual dbl_precision_epsilon)
+				(if (<= smallest_residual (get !cachedFeatureMinResidualMap (current_index)))
 					(get !cachedFeatureMinResidualMap (current_index))
 					smallest_residual
 				)
@@ -1214,7 +1200,6 @@
 		(declare (assoc max_num_reacts (* num_test_cases (size features)) ))
 
 		(declare (assoc
-			update_lock 0
 			num_progress_updates 1
 			;one update every 40000 (or more) reacts, for a max of 10 times
 			progress_update_size
@@ -1225,7 +1210,7 @@
 					(/ max_num_reacts (min max_num_reacts 10))
 				)
 			max_progress_updates (min (ceil (/ max_num_reacts (/ 40000 (size features)))) 10)
-			progress_detail_text "Computing Missing Information"
+			progress_detail_text "Computing missing information"
 		))
 
 		(call !AccumulateMissingInformation)
@@ -1233,7 +1218,7 @@
 		;transpose (turn columns into rows) case_residuals_lists into a list the length of features
 		;where each value matches a feature, and is comprised of each feature's residuals, then filter out nulls
 		(assign (assoc
-			feature_residuals_lists (call !TransposeResidualLists)
+			feature_residuals_lists (call !TransposeResidualLists (assoc leave_nulls_in_results .false))
 			;need to have at least 2.5% (that's a value of 50 using default sample of 2000) non-null values for a feature
 			min_value_count (ceil (* 0.025 (size case_ids)))
 		))
@@ -1290,7 +1275,7 @@
 								(map
 									(lambda (append (first (current_value)) (last (current_value))))
 									feature_residuals_lists
-									(call !TransposeResidualLists)
+									(call !TransposeResidualLists (assoc leave_nulls_in_results .false))
 								)
 						))
 					)
@@ -1413,13 +1398,21 @@
 													(normalize (zip
 														(lambda (+ (current_value) (current_value 1)))
 														(last full_candidate_cases_lists)
-														(get full_candidate_cases_lists 1)
+														(if (= 0 (apply "+" (get full_candidate_cases_lists 1)))
+															;if influence weights are zero, use uniform weights
+															(map 1 (get full_candidate_cases_lists 1))
+															(get full_candidate_cases_lists 1)
+														)
 													))
 												weighted_superfull_caps_map
 													(normalize (zip
 														(lambda (+ (current_value) (current_value 1)))
 														(last superfull_candidate_cases_lists)
-														(get superfull_candidate_cases_lists 1)
+														(if (= 0 (apply "+" (get superfull_candidate_cases_lists 1)))
+															;if influence weights are zero, use uniform weights
+															(map 1 (get superfull_candidate_cases_lists 1))
+															(get superfull_candidate_cases_lists 1)
+														)
 													))
 											)
 
@@ -1680,7 +1673,7 @@
 			feature
 			dt_parameter
 			(if valid_weight_feature weight_feature .null)
-			tie_break_random_seed
+			(rand) ;tie_break_random_seed
 			.null ;radius
 			!numericalPrecision
 			feature
