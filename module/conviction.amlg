@@ -1095,7 +1095,13 @@
 											(normalize (zip
 												(lambda (+ (current_value) (current_value 1)))
 												(last candidate_cases_lists) ;values
-												(get candidate_cases_lists 1) ;weights
+												;weights
+												(if (= 0 (apply "+" (get candidate_cases_lists 1)))
+													;if all weights are zero, use uniform weights
+													(map 1 (get candidate_cases_lists 1))
+													;original weights
+													(get candidate_cases_lists 1)
+												)
 											))
 									)
 
@@ -1137,7 +1143,18 @@
 													(normalize (zip
 														(lambda (+ (current_value) (current_value 1)))
 														(append (last candidate_cases_lists) (last extra_candidate_case_lists)) ;values
-														(append (get candidate_cases_lists 1) (get extra_candidate_case_lists 1)) ;values
+														;weights
+														(let
+															(assoc
+																combined_weights (append (get candidate_cases_lists 1) (get extra_candidate_case_lists 1))
+															)
+
+															;if all weights are zero, pass uniform weights
+															(if (= 0 (apply "+" combined_weights))
+																(map 1 combined_weights)
+																combined_weights
+															)
+														)
 													))
 												)
 										))
@@ -1169,7 +1186,6 @@
 									(assoc
 										influence_weights (get candidate_cases_lists 1)
 										influential_values (last candidate_cases_lists)
-
 										interpolated_value
 											(call !InterpolateActionValues (assoc
 												action_feature action_feature
@@ -1238,14 +1254,8 @@
 										)
 									)
 
-									(/
-										;feature residual
-										(if feature_is_edit_distance
-											(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
-
-											(abs (- interpolated_value case_value))
-										)
-										(max
+									(declare (assoc
+										local_mad_estimate
 											;local expected residual estimate
 											(if feature_is_edit_distance
 												(call !ComputeEditDistanceMAD (assoc
@@ -1256,6 +1266,72 @@
 													vals influential_values
 												))
 											)
+									))
+
+									(if (< local_mad_estimate (get !cachedFeatureMinResidualMap action_feature))
+										;if all influential values are the same, then the MAD estimate will fall over.
+										;instead, find the nearest case with a different value and update the MAD estimate
+										(assign (assoc
+											local_mad_estimate
+												(let
+													(assoc
+														extra_candidate_case_lists
+															(compute_on_contained_entities
+																(if case_id
+																	(query_not_in_entity_list [case_id] )
+																	[]
+																)
+																filtering_queries
+																(query_not_between
+																	action_feature
+																	(- (first influential_values) (get !cachedFeatureHalfMinGapMap action_feature))
+																	(+ (first influential_values) (get !cachedFeatureHalfMinGapMap action_feature))
+																)
+																(if feature_has_continuous_nulls
+																	(query_not_equals action_feature .null)
+																)
+																(query_nearest_generalized_distance
+																	1 ;just the singular nearest case
+																	(indices context_values_map)
+																	(values context_values_map)
+																	(get data_params_map "p")
+																	feature_weights
+																	!queryFeatureAttributeTypeMap
+																	(get data_params_map "featureDeviations")
+																	action_feature ;weight_selection
+																	(get data_params_map "dt")
+																	(if use_case_weights weight_feature .null)
+																	;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+																	"fixed rand seed"
+																	.null ;radius
+																	!numericalPrecision
+																	action_feature
+																)
+															)
+													)
+
+													(if feature_is_edit_distance
+														(call !ComputeEditDistanceMAD (assoc
+															vals (append influential_values (last extra_candidate_case_lists))
+														))
+
+														(call !ComputeMAD (assoc
+															vals (append influential_values (last extra_candidate_case_lists))
+														))
+													)
+												)
+										))
+									)
+
+									(/
+										;feature residual
+										(if feature_is_edit_distance
+											(edit_distance interpolated_value case_value (get !codeFeatureDomainAttributesMap action_feature))
+
+											(abs (- interpolated_value case_value))
+										)
+										(max
+											local_mad_estimate
 											(get !cachedFeatureMinResidualMap action_feature)
 										)
 									)
