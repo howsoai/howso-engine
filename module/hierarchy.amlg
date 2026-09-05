@@ -203,7 +203,10 @@
 
 		(if (!= .null result)
 			(seq
-				(call_entity trainee_path "initialize" (assoc trainee_id child_id))
+				(call_entity trainee_path "initialize" (assoc
+					trainee_id child_id
+					filepath (or filepath (retrieve_from_entity "filepath"))
+				))
 
 				(call !AddChildTraineeReferences (assoc
 					child_id child_id
@@ -1360,9 +1363,12 @@
 						)
 
 						(call create_subtrainee (assoc
+							filepath (retrieve_from_entity "filepath")
 							path [subtrainee_id]
 							child_id subtrainee_id
 						))
+
+						(set_entity_permissions [!traineeContainer subtrainee_id] .true)
 
 						;copy cases into corresponding subtrainee
 						(declare (assoc
@@ -1371,32 +1377,64 @@
 						(declare (assoc
 							case_features (indices (remove (retrieve_entity_root (first cases))  [".session" ".session_training_index" ".cluster_id"]))
 						))
-						(call_entity [!traineeContainer subtrainee_id] "train" (assoc
-							features case_features
-							cases
-								(map
-									(lambda (retrieve_from_entity (current_value) case_features))
+
+						(call_entity [!traineeContainer subtrainee_id] "set_feature_attributes" (assoc
+							feature_attributes (keep !featureAttributes case_features)
+						))
+
+						;subtrainees can automatically subdivide into their own hierarchies as necessary but at a factor of 4x size of this trainee
+						(call_entity [!traineeContainer subtrainee_id] "set_auto_ablation_params" (assoc
+							auto_ablation_enabled .true
+							min_num_cases !autoAblationMinNumCases
+							clustering_min_cluster_mass !autoHierarchyClusteringMinMass
+							auto_hierarchy_enabled .true
+						))
+
+;;;	(call_entity [!traineeContainer subtrainee_id] "prep_hierarchy_subtrainee")
+
+						;if there are more cases than ablation thershold, split into: train min amount, analyze, train remainder
+						(if (> (size cases) !autoAblationMinNumCases)
+							(seq
+								(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+									features case_features
 									cases
-								)
-							session "none"
-							;allow training on reserved features to preserve all case data
-							allow_training_reserved_features .true
-						))
+										(map
+											(lambda (retrieve_from_entity (current_value) case_features))
+											(trunc cases !autoAblationMinNumCases)
+										)
+									session "none"
+									;allow training on reserved features to preserve all case data
+									allow_training_reserved_features .true
+								))
 
-						;copy all the attributes into subtrainee
-						(assign_entity_roots [!traineeContainer subtrainee_id] (retrieve_entity_root))
+								(call_entity [!traineeContainer subtrainee_id] "analyze")
 
-						(call_entity [!traineeContainer subtrainee_id] "set_parent_id" (assoc
-							parent_id !traineeId
-							is_contained .true
-						))
-						(call_entity [!traineeContainer subtrainee_id] "set_trainee_id" (assoc trainee_id subtrainee_id))
+								(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+									features case_features
+									cases
+										(map
+											(lambda (retrieve_from_entity (current_value) case_features))
+											(tail cases (- !autoAblationMinNumCases))
+										)
+									session "none"
+									;allow training on reserved features to preserve all case data
+									allow_training_reserved_features .true
+								))
+							)
 
-						;;;todo: remove this so subtrainees can automatically subdivide into their own hierarchies
-						(call_entity [!traineeContainer subtrainee_id] "set_auto_ablation_params" (assoc auto_ablation_enabled .false))
-
-						;clear out hierarchy on the subtrainee since everything else was copied
-						(call_entity [!traineeContainer subtrainee_id] "prep_hierarchy_subtrainee")
+							;else train all the cases into the subtrainee
+							(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+								features case_features
+								cases
+									(map
+										(lambda (retrieve_from_entity (current_value) case_features))
+										cases
+									)
+								session "none"
+								;allow training on reserved features to preserve all case data
+								allow_training_reserved_features .true
+							))
+						)
 
 						;output id
 						subtrainee_id
@@ -1410,9 +1448,7 @@
 
 	prep_hierarchy_subtrainee
 	(assign_to_entities (assoc
-		!containedTraineeIdToNameMap (assoc)
-		!containedTraineeNameToIdMap (assoc)
-		!childTraineeIsContainedMap (assoc)
+		;copy data params ? data paths? cached residuals / expected
 	))
 
 	;Helper method to create the actual full contained entity path by interleaving !traineeContainer with each name in the path

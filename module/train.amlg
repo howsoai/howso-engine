@@ -506,7 +506,10 @@
 
 				(map
 					(lambda (let
-						(assoc cluster_id (current_value 1))
+						(assoc
+							cluster_id (current_value 1)
+							subtrainee_id (concat !traineeId "_sub" (current_value 1))
+						)
 
 						(declare (assoc
 							cluster_indices
@@ -514,13 +517,53 @@
 									(lambda (= cluster_id (get predicted_clusters (current_value))))
 									(indices predicted_clusters)
 								)
+							num_cases_in_subtrainee
+								(get
+									(call_entity [!traineeContainer subtrainee_id] "get_num_training_cases")
+									["1" "payload" "count"]
+								)
 						))
 
-						(call_entity [!traineeContainer (concat !traineeId "_sub" cluster_id)] "train" (assoc
-							features features
-							cases (unzip cases cluster_indices)
-							session session
-						))
+						;training enough cases that the subtrainee should be split into its own hierarchy
+						;split cluster_indices into however many needed to reach min num cases
+						;analyze
+						;train the remainder
+						(if (and
+								;the trainee doesn't have enough cases in it already
+								(< num_cases_in_subtrainee !autoAblationMinNumCases)
+								(>= (+ num_cases_in_subtrainee (size cluster_indices)) !autoAblationMinNumCases)
+							)
+							(let
+								(assoc
+									cases_for_subtrainee (unzip cases cluster_indices)
+									;number of cases to reach the ablation/hierarchy threshold
+									first_train_amount (- !autoAblationMinNumCases num_cases_in_subtrainee)
+								)
+(print "enabling hierarchy for " subtrainee_id "\n")
+								(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+									features features
+									;train only the initial set of cases needed to reach the threshold
+									cases (trunc cases_for_subtrainee first_train_amount)
+									session session
+								))
+
+								(call_entity [!traineeContainer subtrainee_id] "analyze")
+
+								(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+									features features
+									;everything but that initial set of cases
+									cases (tail cases_for_subtrainee (- first_train_amount))
+									session session
+								))
+							)
+
+							;else train the cases into the subtrainee
+							(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+								features features
+								cases (unzip cases cluster_indices)
+								session session
+							))
+						)
 					))
 					(values predicted_clusters .true)
 				)
