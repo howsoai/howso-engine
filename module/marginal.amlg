@@ -82,7 +82,7 @@
 					;assoc of feature value -> how many times it's encountered
 					(assoc
 						;iterate over all feature values for this feature, storing the number of times each feature value has been encountered
-						feature_value_count_map
+						feature_value_masses_map
 							(compute_on_contained_entities
 								(if (= .null case_ids)
 									(query_exists !internalLabelSession)
@@ -106,7 +106,7 @@
 
 					;store count of nulls as .null into the map
 					(if feature_null_count
-						(accum (assoc feature_value_count_map (assoc .null feature_null_count)))
+						(accum (assoc feature_value_masses_map (assoc .null feature_null_count)))
 					)
 
 					;store the value into cache if needed, specifically every time this method is called on the whole dataset,
@@ -147,6 +147,79 @@
 									)
 									(assign (assoc mean_absolute_deviation (generalized_mean errors) ))
 								)
+
+								;else do the gini impurity to be the MAD for standard nominals
+								(if (and
+										!tsTimeFeature
+										(or
+											(get !featureAttributes [feature "max_row_lag"])
+											(get !featureAttributes [feature "ts_order"])
+										)
+									)
+									;if its a TS derived feature, need to account for triangle nulls
+									(let
+										(assoc
+											num_lags_needed
+												(or
+													(get !featureAttributes [feature "max_row_lag"])
+													(get !featureAttributes [feature "ts_order"])
+												)
+										)
+
+										(declare (assoc
+											num_natural_nulls
+												(size (contained_entities
+													(query_exists feature)
+													(query_equals feature .null)
+													;time series derived features only consider cases outside the null triangle at the start of a series
+													;e.g., a lag of 2 feature, will only consider nulls from cases with index >= 2
+													(query_greater_or_equal_to ".series_index" num_lags_needed)
+												))
+										))
+
+										(declare (assoc
+											non_triangle_value_masses_map (modify feature_value_masses_map .null num_natural_nulls)
+										))
+										(declare (assoc
+											total_weight (apply "+" feature_value_masses_map)
+										))
+
+										(assign (assoc
+											mean_absolute_deviation
+												(apply "+" (map
+													(lambda
+														(*
+															(/ (current_value) total_weight)
+															(- 1 (/ (current_value) total_weight))
+														)
+													)
+													(values non_triangle_value_masses_map)
+												))
+										))
+									)
+
+
+									;otherwise standard nominal, can do use value counts as they are
+									(let
+										(assoc
+											total_weight (apply "+" feature_value_masses_map)
+										)
+
+										(assign (assoc
+											mean_absolute_deviation
+												(apply "+" (map
+													(lambda
+														(*
+															(/ (current_value) total_weight)
+															(- 1 (/ (current_value) total_weight))
+														)
+													)
+													(values feature_value_masses_map)
+												))
+										))
+									)
+
+								)
 							)
 
 							(if (not output_instead_of_store)
@@ -157,7 +230,7 @@
 											(list weight_feature_key feature)
 											(append
 												(assoc
-													"class_counts" feature_value_count_map
+													"class_counts" feature_value_masses_map
 													"expected_value" feature_mode
 												)
 												(if mean_absolute_deviation
@@ -175,7 +248,7 @@
 						(conclude
 							(append
 								(assoc
-									"class_counts" feature_value_count_map
+									"class_counts" feature_value_masses_map
 									"expected_value" feature_mode
 								)
 								(if mean_absolute_deviation
@@ -188,7 +261,7 @@
 
 					;if the output is just the counts of each nominal class, then output that map
 					(if output_nominal_class_counts
-						feature_value_count_map
+						feature_value_masses_map
 
 						;else, figure out which nominal value has the highest count and output that one as the expected
 						(if (= .null feature_mode)
