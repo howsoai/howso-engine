@@ -1069,6 +1069,126 @@
 		)
 	)
 
+	;No context makes every donor equally relevant. Interpolate once over the
+	;population using the same type-aware predictor as ordinary reactions.
+	;In particular, code features need interpolation, not an arithmetic mean.
+	!ComputeCausalMarginalRisks
+	(declare {population_case_ids (call !AllCases)}
+		(declare {population_weights
+			(if valid_weight_feature
+				(map (lambda (retrieve_from_entity (current_value) weight_feature)) population_case_ids)
+				(map 1 population_case_ids))})
+		(zip action_features
+			(map (lambda (let {
+				feature (current_value 1)
+				feature_is_nominal (contains_index !nominalsMap (current_value 1))
+				feature_is_edit_distance (contains_index !editDistanceFeatureTypesMap (current_value 1))
+				feature_has_continuous_nulls .false
+				compute_all_statistics .false
+				categorical_action_probabilities_map {}
+			}
+				(if (not (size (contained_entities (query_equals feature .null))))
+					(let {interpolated_value (call !InterpolateActionValues {
+						action_feature feature
+						candidate_case_ids population_case_ids
+						candidate_case_weights population_weights
+						candidate_case_values (map (lambda (retrieve_from_entity (current_value) feature)) population_case_ids)
+						output_categorical_action_probabilities .true
+						output_influence_weights .false
+						allow_nulls .false
+					})}
+						(if (!= .null interpolated_value)
+							(list (generalized_mean (map
+								(lambda (call !ComputeDiffTuple {
+									case_feature_value (retrieve_from_entity (current_value 1) feature)
+									case_or_predicted_is_null .false
+								}))
+								endpoint_case_ids
+							)))
+						)
+					)
+				)
+			)) action_features)
+		)
+	)
+
+	;Allocation of relative-entropy coding cost along target-feature erasure.
+	;U uses the stock global prediction, F uses analysed target weights,
+	;and B uses the stock plain-weight Banzhaf policy.
+	;D(Exp(a)||Exp(b)) = log(b/a) + a/b - 1 nats for mean loss a,b.
+	;All feature types use the SAME positive-loss reference law, not a law of values.
+	;Each standardized exponential source has entropy 1 nat. Include it in
+	;both code costs: (late-early)/(2+late+early) is dimensionless, in (-1,1).
+	;This is an experimental direction measurement; MIR and prediction stay unchanged.
+	!ComputeErasureInformation
+	(declare
+		(assoc
+			coalition_risks (get output "feature_robust_residuals")
+			empty_risks .null
+			full_risks .null
+			;Integrate fixed-context losses over the eligible empirical population.
+			;For weighted or goal-directed samples preserve the supplied measure.
+			endpoint_case_ids
+				(if (or valid_weight_feature (size goal_features_map))
+					case_ids
+					(call !AllCases (assoc query_conditions action_condition_filter_query)))
+		)
+		(if (= .null coalition_risks)
+			(assign "coalition_risks"
+				(get (call !CalculateFeatureResiduals (assoc
+					features action_features
+					context_features context_features
+					case_ids case_ids
+					robust_residuals .true
+					custom_data_params_map custom_data_params_map
+					compute_all_statistics .false
+					compute_null_uncertainties .false
+				)) "residual_map")
+			)
+		)
+		(assign "empty_risks" (call !ComputeCausalMarginalRisks))
+		(assign "full_risks"
+			(get (call !CalculateFeatureResiduals (assoc
+				features action_features
+				context_features context_features
+				case_ids endpoint_case_ids
+				strict_case_ids .true
+				robust_residuals .false
+				custom_data_params_map custom_data_params_map
+				compute_all_statistics .false
+				compute_null_uncertainties .false
+			)) "residual_map")
+		)
+		(map
+			(lambda (let
+				(assoc
+					feature (current_index 1)
+					empty_risk (first (get empty_risks (current_index 1)))
+					full_risk (first (get full_risks (current_index 1)))
+					coalition_risk (first (current_value 1))
+				)
+				(if (and (> empty_risk 0) (> full_risk 0) (> coalition_risk 0)
+					(not (size (contained_entities (query_equals feature .null)))))
+					(let {
+						early (max 0 (- (+ (log (/ coalition_risk empty_risk)) (/ empty_risk coalition_risk)) 1))
+						late (max 0 (- (+ (log (/ full_risk coalition_risk)) (/ coalition_risk full_risk)) 1))
+					}
+						{
+							"value" (/ (- late early) (+ 2 late early))
+							"early" early
+							"late" late
+							"empty" empty_risk
+							"full" full_risk
+							"coalition" coalition_risk
+						}
+					)
+				)
+
+			))
+			coalition_risks
+		)
+	)
+
 	;helper method for react_aggregate to compute the average missing information for the features
 	!ComputeAverageMissingInformation
 	(declare
