@@ -1069,6 +1069,41 @@
 		)
 	)
 
+	;Conditional information between two independent binary selectors given donor identity.
+	;Selectors: plain/learned feature weights and hidden/revealed target value.
+	;I(policy; revelation | donor) is in [0, log(2)] nats for every feature type.
+	!ComputeProvenanceInformation
+	(let (assoc
+		plain_hidden (call !MissingInformationQuery (assoc
+			query_context_features full_context_features
+			feature_weights (get orig_data_params_map "featureWeights")))
+		plain_revealed (call !MissingInformationQuery (assoc
+			query_context_features superfull_context_features
+			feature_weights (get orig_data_params_map "featureWeights")))
+	)
+		(declare (assoc policies (map (lambda (let (assoc candidates (current_value 1))
+			(normalize (zip (first candidates)
+				(if (= 0 (apply "+" (get candidates 1)))
+					(map 1 (get candidates 1)) (get candidates 1))))
+		)) (list plain_hidden plain_revealed full_candidate_cases_lists superfull_candidate_cases_lists))))
+		(if (contains_value (map (lambda (size (current_value))) policies) 0) (conclude .null))
+		(* 0.25 (apply "+" (map (lambda (let
+			(assoc donor (current_value 1))
+			(declare (assoc probabilities (map (lambda (or (get (current_value) donor) 0)) policies)))
+			(declare (assoc total (apply "+" probabilities)
+				row0 (+ (get probabilities 0) (get probabilities 1))
+				row1 (+ (get probabilities 2) (get probabilities 3))
+				col0 (+ (get probabilities 0) (get probabilities 2))
+				col1 (+ (get probabilities 1) (get probabilities 3))))
+			(apply "+" (map (lambda (let (assoc probability (current_value 1) index (current_index 1))
+				(if (> probability 0)
+					(* probability (- (+ (log probability) (log total))
+						(+ (log (if (< index 2) row0 row1)) (log (if (= 0 (mod index 2)) col0 col1)))))
+					0)
+			)) probabilities))
+		)) (indices (apply "append" policies)))))
+	)
+
 	;helper method for react_aggregate to compute the average missing information for the features
 	!ComputeAverageMissingInformation
 	(declare
@@ -1126,6 +1161,7 @@
 		;compared to the full prediction
 		{
 			"feature_mi_map" (get updated_estimated_residuals_map "residual_map")
+			"provenance_information" (get updated_estimated_residuals_map "provenance_information")
 			"feature_ac_map" (if output_robust_acs (get residuals_map "feature_ac_map" ))
 			"feature_rr_map"
 				(if output_robust_residuals
@@ -1291,6 +1327,7 @@
 	;Differences in nominal predictions are measured via the KL divergence between the two CAP maps
 	;Differences in continuous predictions are measured by converting the differences to surprisal by dividing by the deviations and scaling with the LK metric.
 	!AccumulateMissingInformation
+	(seq
 	(assign (assoc
 		case_residuals_lists
 			||(map
@@ -1298,6 +1335,7 @@
 					(assoc
 						;assoc of all features to their residual values
 						feature_residual_map (assoc)
+						case_provenance_map (assoc)
 						case_id (current_value 1)
 						;map of feature -> value for all the case values
 						case_values_map (zip case_features (retrieve_from_entity (current_value 1) case_features) )
@@ -1388,6 +1426,10 @@
 												feature_weights (get orig_data_params_map ["featureProbabilitiesMap"])
 											))
 									))
+
+									(if (get details "provenance_information")
+										(assign "case_provenance_map" (modify case_provenance_map feature (call !ComputeProvenanceInformation)))
+									)
 
 									(if (contains_index !nominalsMap feature)
 										;if nominal, get CAPs for full and weighted-superfull predictions and
@@ -1619,7 +1661,10 @@
 					))
 
 					;return the computed values as a list
-					(unzip feature_residual_map features)
+					(if (get details "provenance_information")
+						(list (unzip feature_residual_map features) (unzip case_provenance_map features))
+						(unzip feature_residual_map features)
+					)
 				))
 				(if (and per_feature_weights (< num_test_cases (size case_ids)) )
 					(rand case_ids num_test_cases .true)
@@ -1627,6 +1672,14 @@
 				)
 			)
 	))
+
+		(if (get details "provenance_information")
+			(seq
+				(accum "case_provenance_lists" (map (lambda (last (current_value))) case_residuals_lists))
+				(assign "case_residuals_lists" (map (lambda (first (current_value))) case_residuals_lists))
+			)
+		)
+	)
 
 	;query_macro for !AccumulateMissingInformation
 	;requires the typical gamut of variables used in residuals flows
