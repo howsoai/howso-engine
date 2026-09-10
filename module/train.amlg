@@ -57,21 +57,27 @@
 		(if (= .null session)
 			(assign (assoc session "none"))
 		)
-
+(print !traineeId " training " (size cases) " ablation: " !autoAblationEnabled  " subs: " (size !autoHierarchyIds) "\n")
 		(declare (assoc
 			predicted_clusters
 				(if (and !autoHierarchyEnabled !autoAblationEnabled)
-					||(map
-						(lambda (first
-							(call !ReactDiscriminative (assoc
-								context_features features
-								context_values (current_value 1)
-								action_features [".cluster_id"]
-								return_action_values_only .true
-								use_case_weights .true
+					(if (> (size !autoHierarchyIds) 1)
+						||(map
+							(lambda (first
+								(call !ReactDiscriminative (assoc
+									context_features features
+									context_values (current_value 1)
+									action_features [".cluster_id"]
+									return_action_values_only .true
+									use_case_weights .true
+								))
 							))
-						))
-						cases
+							cases
+						)
+
+						;else only one cluster
+						(= (size !autoHierarchyIds) 1)
+						(map 0 cases) ;;;;TODO: verify that it's always 0
 					)
 				)
 		))
@@ -497,7 +503,7 @@
 				(declare (assoc
 					cluster_ids_map (compute_on_contained_entities (query_value_masses ".cluster_id"))
 				))
-
+(print !traineeId ": " num_cases " " cluster_ids_map "\n")
 				;if cases were clustered into multiple clusters
 				(if (or
 						(>= (size cluster_ids_map) 3)
@@ -507,11 +513,13 @@
 						)
 					)
 					(seq
-						(call !MakeHierarchy (assoc cluster_ids_map cluster_ids_map))
-
-						;enable auto ablation and create hierarchy so that
+						;enable auto ablation and create hierarchy after making hierarchy so that
 						;future trained cases are trained into subtrainees
 						(assign_to_entities (assoc !autoAblationEnabled .true))
+
+						(call !MakeHierarchy (assoc
+							cluster_ids_map cluster_ids_map
+						))
 					)
 				)
 			)
@@ -529,17 +537,23 @@
 						;else predict which cluster each ablated case should go into
 						(assign (assoc
 							predicted_clusters
-								||(map
-									(lambda (first
-										(call !ReactDiscriminative (assoc
-											context_features features
-											context_values (current_value 1)
-											action_features [".cluster_id"]
-											return_action_values_only .true
-											use_case_weights .true
+								(if (> (size !autoHierarchyIds) 1)
+									||(map
+										(lambda (first
+											(call !ReactDiscriminative (assoc
+												context_features features
+												context_values (current_value 1)
+												action_features [".cluster_id"]
+												return_action_values_only .true
+												use_case_weights .true
+											))
 										))
-									))
-									cases
+										cases
+									)
+
+									;else only one cluster
+									(= (size !autoHierarchyIds) 1)
+									(map 0 cases) ;;;;TODO: verify that it's always 0
 								)
 						))
 					)
@@ -593,42 +607,28 @@
 
 								(call_entity [!traineeContainer subtrainee_id] "analyze")
 
-								(call_entity [!traineeContainer subtrainee_id] "train" (assoc ;;;TODO: chunk cases
-									features features
-									;everything but that initial set of cases
-									cases (tail cases_for_subtrainee (- first_train_amount))
-									session session
+								(call !TrainSubtraineeCasesInChunks (assoc
+									remaining_cases (tail cases_for_subtrainee (- first_train_amount))
+									case_features features
+									cases_are_ids .false
 								))
 							)
 
 							;else train the cases into the subtrainee
-							(call_entity [!traineeContainer subtrainee_id] "train" (assoc ;;;TODO: chunk cases
-								features features
-								cases (unzip cases cluster_indices)
-								session session
+							(call !TrainSubtraineeCasesInChunks (assoc
+								remaining_cases (unzip cases cluster_indices)
+								case_features features
+								cases_are_ids .false
 							))
 						)
 					))
 					(values predicted_clusters .true)
 				)
-
-;;;debug
-(map
-	(lambda
-		(print (current_value) " trained: "
-			(get
-				(call_entity [!traineeContainer (current_value 1)] "get_num_training_cases")
-				[1 "payload" "count"]
-			) "\n"
-		)
-	)
-	!autoHierarchyIds
-)
 			)
 		)
 
 		(accum_to_entities (assoc !revision 1))
-
+(print !traineeId " num_trained: " (size new_case_ids) " num_ablated: " (size ablated_indices_list) " into: " (values predicted_clusters .true) "\n")
 		;return response
 		(call !Return (assoc
 			warnings (if (size warnings) (indices warnings))
