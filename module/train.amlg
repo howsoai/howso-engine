@@ -53,6 +53,60 @@
 
 		(call !ValidateParameters)
 
+
+		(declare (assoc num_cases (call !GetNumTrainingCases) ))
+
+		;if going to be training more cases that are allowed to fit into a dataset, split the training data
+		(if (and
+				!autoHierarchyEnabled
+				(> (+ num_cases (size cases)) !autoAblationMaxNumCases)
+				(not (and train_weights_only accumulate_weight_feature))
+			)
+			(let
+				(assoc
+					num_new (size cases)
+					payload [1 {"payload" {"num_trained" 0 "ablated_indices" [] "status" .null}}]
+					new_payload .null
+					start 0
+					end -1
+				)
+
+				(while (> num_new 0)
+					(assign (assoc
+						num_cases (call !GetNumTrainingCases)
+						num_to_train (min (- !autoAblationMaxNumCases num_cases) num_new)
+						start (+ end 1)
+						end (+ start num_to_train -1)
+						new_payload
+							(call !train (assoc
+								;;;TODO: don't split time series in middle of a series
+								cases (unzip cases (range start end))
+								features features
+								derived_features derived_features
+								session session
+								series series
+								input_is_substituted input_is_substituted
+								allow_training_reserved_features allow_training_reserved_features
+								skip_auto_analyze skip_auto_analyze
+								skip_reduce_data skip_reduce_data
+								start_index start_index
+							))
+
+						start_index (if start_index (+ start_index num_to_train))
+						num_new (- num_new num_to_train)
+					))
+
+					;accumulate payload
+					(call !AccumulateTrainPayloads)
+
+					;stop train on errors
+					(if (= 0 (first payload)) (conclude) )
+				)
+
+				(conclude payload)
+			)
+		)
+
 		;unsure that session is set to some string value
 		(if (= .null session)
 			(assign (assoc session "none"))
@@ -61,23 +115,17 @@
 		(declare (assoc
 			predicted_clusters
 				(if (and !autoHierarchyEnabled !autoAblationEnabled)
-					(if (> (size !autoHierarchyIds) 1)
-						||(map
-							(lambda (first
-								(call !ReactDiscriminative (assoc
-									context_features features
-									context_values (current_value 1)
-									action_features [".cluster_id"]
-									return_action_values_only .true
-									use_case_weights .true
-								))
+					||(map
+						(lambda (first
+							(call !ReactDiscriminative (assoc
+								context_features features
+								context_values (current_value 1)
+								action_features [".cluster_id"]
+								return_action_values_only .true
+								use_case_weights .true
 							))
-							cases
-						)
-
-						;else only one cluster
-						(= (size !autoHierarchyIds) 1)
-						(map 0 cases) ;;;;TODO: verify that it's always 0
+						))
+						cases
 					)
 				)
 		))
@@ -327,8 +375,6 @@
 			)
 		)
 
-		(declare (assoc num_cases (call !GetNumTrainingCases) ))
-
 		(declare (assoc
 			skip_ablation (call !CanTrainAblationBeSkipped)
 			;if accumulating weight feature, store the index of that weight feature
@@ -484,48 +530,76 @@
 			num_cases (call !GetNumTrainingCases)
 		))
 
-		;hierarchy is enabled but not auto ablation, meaning this is a single cluster subtrainee,
-		;check if it can be split into multiple clusters
-		(if (and
-				!autoHierarchyEnabled
-				(not !autoAblationEnabled)
-				(>= num_cases !autoAblationMinNumCases)
-				(= 0 (size !autoHierarchyIds))
-			)
-			(seq
-				(call react_into_features (assoc
-					clustering .true
-					clustering_min_cluster_mass (ceil (* num_cases !autoHierarchyClusteringRatio))
-					use_case_weights .false
-					overwrite .true
-				))
+		(if (and !autoHierarchyEnabled (>= num_cases !autoAblationMaxNumCases))
+			(let
+				(assoc
+					reduce_payload
+						(call reduce_data (assoc
+							features features
+							skip_auto_analyze .true
+							internal .true
+							remove_case_into_storage .true
+						))
+				)
+
+				(if (= 0 (size !autoHierarchyIds))
+					(call react_into_features (assoc
+						clustering .true
+						clustering_min_cluster_mass (ceil (* num_cases !autoHierarchyClusteringRatio))
+						use_case_weights .true
+					))
+				)
 
 				(declare (assoc
-					cluster_ids_map (compute_on_contained_entities (query_value_masses ".cluster_id"))
-				))
-(print !traineeId ": " num_cases " " cluster_ids_map "\n")
-				;if cases were clustered into multiple clusters
-				(if (or
-						(>= (size cluster_ids_map) 3)
-						(and
-							(= (size cluster_ids_map) 2)
-							(not (contains_index cluster_ids_map 0))
-						)
-					)
-					(seq
-						;enable auto ablation and create hierarchy after making hierarchy so that
-						;future trained cases are trained into subtrainees
-						(assign_to_entities (assoc !autoAblationEnabled .true))
+					subtrainee_ids
+						(if (= 0 (size !autoHierarchyIds))
+							(map
+								(lambda (concat !traineeId "_sub" (current_value)) )
+								(indices (compute_on_contained_entities (query_value_masses ".cluster_id")))
+							)
 
-						(call !MakeHierarchy (assoc
-							cluster_ids_map cluster_ids_map
-						))
+							!autoHierarchyIds
+						)
+				))
+
+				(if (= 0 (size !autoHierarchyIds))
+					(seq
+						(map
+							(lambda (let
+								(assoc subtrainee_id (current_value 1))
+								(call create_subtrainee (assoc
+									filepath (retrieve_from_entity "filepath")
+									path [subtrainee_id]
+									child_id subtrainee_id
+								))
+
+								(set_entity_permissions [!traineeContainer subtrainee_id] .true)
+
+								(call_entity [!traineeContainer subtrainee_id] "set_feature_attributes" (assoc
+									feature_attributes (keep !featureAttributes features)
+								))
+
+								(call_entity [!traineeContainer subtrainee_id] "set_auto_ablation_params" (assoc
+									;auto_ablation_enabled .false
+									min_num_cases !autoAblationMinNumCases
+									hierarchy_clustering_ratio !autoHierarchyClusteringRatio
+									auto_hierarchy_enabled .true
+								))
+							))
+							subtrainee_ids
+						)
+						(assign_to_entities (assoc !autoHierarchyIds (sort subtrainee_ids) ))
 					)
 				)
+
+				;;;TODO: predict clusters for all cases in (contained_entities !reducedCasesStorage)
+				;;;TODO: train subtrainees
+				;;;TODO: remove !reducedCasesStorage
 			)
+		)
 
 			;else hierarchy and ablation are enabled, ablated cases are trained into subtrainees
-			(and !autoHierarchyEnabled (size ablated_indices_list))
+		(if	(and !autoHierarchyEnabled (size ablated_indices_list))
 			(seq
 				;only keep the ablated cases
 				(assign (assoc cases (keep cases ablated_indices_list) ))
