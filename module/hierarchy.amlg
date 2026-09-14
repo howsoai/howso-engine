@@ -1273,133 +1273,147 @@
 	)
 
 	!MakeHierarchy
-	(declare
-		(assoc
-			cluster_ids_map .null
+	(seq
+
+		;if subtrainees have not been created yet, trainee should be analyzed if it hasn't been analyzed yet
+		(if (and (= 0 (size !autoHierarchyIds)) (= .null !savedAnalyzeParameterMap))
+			(call analyze)
+
+			!autoAnalyzeEnabled
+			(call !Analyze !savedAnalyzeParameterMap)
 		)
 
-		(if (= .null cluster_ids_map)
-			(seq
-				(call react_into_features (assoc
-					clustering .true
-					clustering_min_cluster_mass (ceil (* num_cases !autoHierarchyClusteringRatio))
-					use_case_weights .false
-				))
-
-				(assign (assoc
-					cluster_ids_map (compute_on_contained_entities (query_value_masses ".cluster_id"))
-				))
-			)
-		)
-;;;debug
-(print !traineeId " clustered: " cluster_ids_map  "\n")
-
-		;don't analyze for clusters if unable to cluster cases into two or more
-		(if (not (or
-				(= 1 (size cluster_ids_map))
-				;only 1 actual cluster with some unclustered
-				(and
-					(= 2 (size cluster_ids_map))
-					(contains_index cluster_ids_map 0)
-				)
-			))
-			;analyze with .cluster_id as a feature
-			(if (!= .null !savedAnalyzeParameterMap)
-				(seq
-					(assign_to_entities (assoc
-						!savedAnalyzeParameterMap
-							(modify
-								!savedAnalyzeParameterMap
-								"context_features"
-								(append (get !savedAnalyzeParameterMap "context_features") ".cluster_id")
-							)
-					))
-					;prevent calling react_into_features during the analyze()
-					(call !Analyze (append
-						!savedAnalyzeParameterMap
-						(assoc "from_react_into_features" .true)
-					))
-				)
-
-				(call !Analyze (assoc
-					targeted_model "targetless"
-					context_features (concat !trainedFeatures ".cluster_id")
-					weight_feature
-						(if (and !autoAblationEnabled !autoAblationWeightFeature)
-							!autoAblationWeightFeature
-							weight_feature
-						)
-					use_case_weights (or (and !autoAblationEnabled !autoAblationWeightFeature) use_case_weights)
-					k_folds 1
-					;prevent calling react_into_features during the analyze()
-					from_react_into_features .true
-				))
-			)
-		)
 		(call !ProgressClear (assoc
 			internal .false
 			task_id .null
 		))
 
-		;there are unclustered cases, forcibly move them into clusters
-		(if (and (contains_index cluster_ids_map 0) (> (size cluster_ids_map) 1))
-			(let
-				(assoc
-					unclustered_cases (contained_entities (query_equals ".cluster_id" 0))
-				)
-
-				(declare (assoc
-					forced_clusters
-						;if there's only 1 actual cluster and a set of unclustered, move all the unclustered into the one cluster
-						(if (= 2 (size cluster_ids_map))
-							(let
-								(assoc cluster_id (first (indices (remove cluster_ids_map 0))) )
-								(map cluster_id unclustered_cases)
-							)
-
-							||(map
-								(lambda (first
-									(call !ReactDiscriminative (assoc
-										context_features !trainedFeatures
-										context_values (retrieve_from_entity (current_value 1) !trainedFeatures)
-										action_features [".cluster_id"]
-										return_action_values_only .true
-										use_case_weights !autoAblationEnabled
-										filtering_queries [(query_not_equals ".cluster_id" 0) (query_not_in_entity_list [(current_value 3)])]
-									))
-								))
-								unclustered_cases
-							)
-						)
+		(declare (assoc
+			reduce_payload
+				(call reduce_data (assoc
+					features features
+					skip_auto_analyze .true
+					internal .true
+					remove_cases_into_storage .true
 				))
-
-				;update cluster id for each unclustered case
-				(map
-					(lambda
-						(assign_to_entities (current_index) (assoc ".cluster_id" (current_value 1)))
-					)
-					(zip unclustered_cases forced_clusters)
-				)
-			)
-		)
-
-		(assign (assoc
-			cluster_ids_map (compute_on_contained_entities (query_value_masses ".cluster_id"))
 		))
-;;;debug
-(print "updated: " cluster_ids_map  "\n")
 
-
-		;create and populate subtrainees, one per cluster
 		(declare (assoc
 			subtrainee_ids
-				(map
-					(lambda (let
-						(assoc
-							cluster_id (current_value 1)
-							subtrainee_id (concat !traineeId "_sub" (current_value 1))
+				(if (= 0 (size !autoHierarchyIds))
+					(seq
+						(call react_into_features (assoc
+							clustering .true
+							clustering_min_cluster_mass (ceil (* num_cases !autoHierarchyClusteringRatio))
+							use_case_weights .true
+						))
+
+						(if (!= .null !savedAnalyzeParameterMap)
+							(seq
+								(assign_to_entities (assoc
+									!savedAnalyzeParameterMap
+										(modify !savedAnalyzeParameterMap
+											"context_features" (append (get !savedAnalyzeParameterMap "context_features") ".cluster_id")
+											"use_case_weights" .true
+											"weight_feature" ".case_weight"
+										)
+								))
+								;prevent calling react_into_features during the analyze()
+								(call !Analyze (append
+									!savedAnalyzeParameterMap
+									(assoc "from_react_into_features" .true)
+								))
+							)
+
+							(call !Analyze (assoc
+								targeted_model "targetless"
+								context_features (concat !trainedFeatures ".cluster_id")
+								weight_feature
+									(if (and !autoAblationEnabled !autoAblationWeightFeature)
+										!autoAblationWeightFeature
+										weight_feature
+									)
+								use_case_weights .true
+								k_folds 1
+								;prevent calling react_into_features during the analyze()
+								from_react_into_features .true
+							))
 						)
 
+						(call !ProgressClear (assoc
+							internal .false
+							task_id .null
+						))
+
+						(map
+							(lambda (concat !traineeId "_sub" (current_value)) )
+							(indices (compute_on_contained_entities (query_value_masses ".cluster_id")))
+						)
+					)
+
+					;else use the already created subtrainee ids
+					!autoHierarchyIds
+				)
+		))
+
+		(if (= 0 (size !autoHierarchyIds))
+			(let
+				(assoc
+					cluster_ids (indices (compute_on_contained_entities (query_value_masses ".cluster_id")))
+				)
+
+				(if (and (contains_value cluster_ids 0) (> (size cluster_ids) 1))
+					(let
+						(assoc
+							unclustered_cases (contained_entities (query_equals ".cluster_id" 0))
+						)
+
+						(declare (assoc
+							forced_clusters
+								;if there's only 1 actual cluster and a set of unclustered, move all the unclustered into the one cluster
+								(if (= 2 (size cluster_ids_map))
+									(let
+										(assoc cluster_id (first (indices (remove cluster_ids_map 0))) )
+										(map cluster_id unclustered_cases)
+									)
+
+									||(map
+										(lambda (first
+											(call !ReactDiscriminative (assoc
+												context_features !trainedFeatures
+												context_values (retrieve_from_entity (current_value 1) !trainedFeatures)
+												action_features [".cluster_id"]
+												return_action_values_only .true
+												use_case_weights .true
+												filtering_queries [(query_not_equals ".cluster_id" 0) (query_not_in_entity_list [(current_value 3)])]
+											))
+										))
+										unclustered_cases
+									)
+								)
+						))
+
+						;update cluster id for each unclustered case
+						(map
+							(lambda
+								(assign_to_entities (current_index) (assoc ".cluster_id" (current_value 1)))
+							)
+							(zip unclustered_cases forced_clusters)
+						)
+
+						(assign (assoc
+							subtrainee_ids
+								(map
+									(lambda (concat !traineeId "_sub" (current_value)) )
+									(indices (compute_on_contained_entities (query_value_masses ".cluster_id")))
+								)
+						))
+					)
+				)
+
+				(map
+					(lambda (let
+						(assoc subtrainee_id (current_value 1))
 						(call create_subtrainee (assoc
 							filepath (retrieve_from_entity "filepath")
 							path [subtrainee_id]
@@ -1408,176 +1422,151 @@
 
 						(set_entity_permissions [!traineeContainer subtrainee_id] .true)
 
-						;copy cases into corresponding subtrainee
-						(declare (assoc
-							cases (contained_entities (query_equals ".cluster_id" cluster_id))
-						))
-						(declare (assoc
-							case_features
-								(indices (remove
-									(retrieve_entity_root (first cases))
-									[".session" ".session_training_index" ".cluster_id" ".case_weight" ".influence_weight_entropy"]
-								))
-						))
-
 						(call_entity [!traineeContainer subtrainee_id] "set_feature_attributes" (assoc
-							feature_attributes (keep !featureAttributes case_features)
+							feature_attributes (keep !featureAttributes features)
 						))
 
-						;do not enable auto ablation if there's only one subtrainee (cluster) until that one subtrainee is ready for its on hierearchy
-						(if (= 1 (size cluster_ids_map))
-							(call_entity [!traineeContainer subtrainee_id] "set_auto_ablation_params" (assoc
-								auto_ablation_enabled .false
-								min_num_cases !autoAblationMinNumCases
-								hierarchy_clustering_ratio !autoHierarchyClusteringRatio
-								auto_hierarchy_enabled .true
-							))
-
-							;subtrainees can automatically subdivide into their own hierarchies as necessary but at a factor of 4x size of this trainee
-							(call_entity [!traineeContainer subtrainee_id] "set_auto_ablation_params" (assoc
-								auto_ablation_enabled .true
-								min_num_cases !autoAblationMinNumCases
-								hierarchy_clustering_ratio !autoHierarchyClusteringRatio
-								auto_hierarchy_enabled .true
-							))
-						)
-
-						;if there are more cases than ablation thershold, split into: train min amount, analyze, train remainder
-						(if (> (size cases) !autoAblationMinNumCases)
-							(seq
-								(call_entity [!traineeContainer subtrainee_id] "train" (assoc
-									features case_features
-									cases
-										(map
-											(lambda (retrieve_from_entity (current_value) case_features))
-											(trunc cases !autoAblationMinNumCases)
-										)
-									session "none"
-									;allow training on reserved features to preserve all case data
-									allow_training_reserved_features .true
-								))
-
-								(call_entity [!traineeContainer subtrainee_id] "analyze")
-
-								;split the remaining cases into chunks enabling checking whether this one subtrainee can be clustered
-								(if (= 1 (size cluster_ids_map))
-									(call !TrainSubtraineeCasesInChunks (assoc
-										remaining_cases (tail cases (- !autoAblationMinNumCases))
-									))
-
-									;else train the remaining cases in a single call
-									(call_entity [!traineeContainer subtrainee_id] "train" (assoc
-										features case_features
-										cases
-											(map
-												(lambda (retrieve_from_entity (current_value) case_features))
-												(tail cases (- !autoAblationMinNumCases))
-											)
-										session "none"
-										;allow training on reserved features to preserve all case data
-										allow_training_reserved_features .true
-									))
-								)
-							)
-
-							;else train all the cases into the subtrainee
-							(if (= 1 (size cluster_ids_map))
-								(call !TrainSubtraineeCasesInChunks (assoc
-									remaining_cases cases
-								))
-
-								(call_entity [!traineeContainer subtrainee_id] "train" (assoc
-									features case_features
-									cases
-										(map
-											(lambda (retrieve_from_entity (current_value) case_features))
-											cases
-										)
-									session "none"
-									;allow training on reserved features to preserve all case data
-									allow_training_reserved_features .true
-								))
-							)
-						)
-
-						;output id
-						subtrainee_id
+						(call_entity [!traineeContainer subtrainee_id] "set_auto_ablation_params" (assoc
+							;auto_ablation_enabled .false
+							min_num_cases !autoAblationMinNumCases
+							hierarchy_clustering_ratio !autoHierarchyClusteringRatio
+							auto_hierarchy_enabled .true
+						))
 					))
-					(indices cluster_ids_map)
+					subtrainee_ids
+				)
+
+				(assign_to_entities (assoc !autoHierarchyIds (sort subtrainee_ids) ))
+			)
+		)
+
+		(declare (assoc
+			reduced_cases_values
+				(map
+					(lambda (retrieve_from_entity [!reducedCasesStorage (current_value 1)] features))
+					(contained_entities !reducedCasesStorage)
 				)
 		))
 
-		(assign_to_entities (assoc !autoHierarchyIds (sort subtrainee_ids) ))
+		;train subtrainees
+		(call !TrainSubtraineeClusterIndices (assoc
+			cases reduced_cases_values
+			;predict clusters for all cases in (contained_entities !reducedCasesStorage)
+			predicted_clusters
+				||(map
+					(lambda (first
+						(call !ReactDiscriminative (assoc
+							context_features features
+							context_values (current_value 1)
+							action_features [".cluster_id"]
+							return_action_values_only .true
+							use_case_weights .true
+						))
+					))
+					reduced_cases_values
+				)
+		))
+
+		;ensure ablation is enabled going forward
+		(assign (assoc !autoAblationEnabled .true))
+
+		;remove !reducedCasesStorage
+		(destroy_entities !reducedCasesStorage)
 	)
 
-	;Trains sub trainee using growing chunks of remaining_cases
-	;assumes cases are specified as entity ids, if cases_are_ids is set to false, remaining_cases are rows of feature values instead
-	!TrainSubtraineeCasesInChunks
-	(declare
-		(assoc
-			remaining_cases []
-			cases_are_ids .true
-		)
-		;number of train chunks needed to train all the data if every chunk doubles in size
-		;starting with the first chunk of size 2 * !autoAblationMinNumCases
-		(declare (assoc
-			num_train_chunks (ceil (- (log (size remaining_cases) 2) (log !autoAblationMinNumCases 2)))
-			start 0
-			end -1
-			num_remaining_cases (size remaining_cases)
-			chunk_size !autoAblationMinNumCases
-		))
-
-		(if (> num_train_chunks 0)
-			(while (< (current_index) num_train_chunks)
-				(assign (assoc
-					chunk_size (* 2 chunk_size)
-					start (+ end 1)
-				))
-				(assign (assoc
-					end (+ start (- chunk_size 1))
-				))
-				(if (>= end num_remaining_cases)
-					(assign (assoc end (- num_remaining_cases 1) ))
-				)
-
-				(call_entity [!traineeContainer subtrainee_id] "train" (assoc
-					features case_features
-					cases
-						(if cases_are_ids
-							(map
-								(lambda (retrieve_from_entity (current_value) case_features))
-								(unzip remaining_cases (range start end))
-							)
-
-							;else remaining_cases are already rows of feature values
-							(unzip remaining_cases (range start end))
-						)
-					session "none"
-					;allow training on reserved features to preserve all case data
-					allow_training_reserved_features .true
-				))
+	!TrainSubtraineeClusterIndices
+	(map
+		(lambda (let
+			(assoc
+				cluster_id (current_value 1)
+				subtrainee_id (concat !traineeId "_sub" (current_value 1))
+				cluster_indices
+					(filter
+						(lambda (= cluster_id (get predicted_clusters (current_value))))
+						(indices predicted_clusters)
+					)
 			)
 
-			;else no chunking is needed, just train the remainder
 			(call_entity [!traineeContainer subtrainee_id] "train" (assoc
-				features case_features
-				cases
-					(if cases_are_ids
-						(map
-							(lambda (retrieve_from_entity (current_value) case_features))
-							remaining_cases
-						)
-
-						;else remaining_cases are already rows of feature values
-						remaining_cases
-					)
+				features features
+				cases (unzip cases cluster_indices)
 				session "none"
 				;allow training on reserved features to preserve all case data
 				allow_training_reserved_features .true
 			))
-		)
+		))
+		(values predicted_clusters .true)
 	)
+
+
+	; ;Trains sub trainee using growing chunks of remaining_cases
+	; ;assumes cases are specified as entity ids, if cases_are_ids is set to false, remaining_cases are rows of feature values instead
+	; !TrainSubtraineeCasesInChunks
+	; (declare
+	; 	(assoc
+	; 		remaining_cases []
+	; 		cases_are_ids .true
+	; 	)
+	; 	;number of train chunks needed to train all the data if every chunk doubles in size
+	; 	;starting with the first chunk of size 2 * !autoAblationMinNumCases
+	; 	(declare (assoc
+	; 		num_train_chunks (ceil (- (log (size remaining_cases) 2) (log !autoAblationMinNumCases 2)))
+	; 		start 0
+	; 		end -1
+	; 		num_remaining_cases (size remaining_cases)
+	; 		chunk_size !autoAblationMinNumCases
+	; 	))
+
+	; 	(if (> num_train_chunks 0)
+	; 		(while (< (current_index) num_train_chunks)
+	; 			(assign (assoc
+	; 				chunk_size (* 2 chunk_size)
+	; 				start (+ end 1)
+	; 			))
+	; 			(assign (assoc
+	; 				end (+ start (- chunk_size 1))
+	; 			))
+	; 			(if (>= end num_remaining_cases)
+	; 				(assign (assoc end (- num_remaining_cases 1) ))
+	; 			)
+
+	; 			(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+	; 				features case_features
+	; 				cases
+	; 					(if cases_are_ids
+	; 						(map
+	; 							(lambda (retrieve_from_entity (current_value) case_features))
+	; 							(unzip remaining_cases (range start end))
+	; 						)
+
+	; 						;else remaining_cases are already rows of feature values
+	; 						(unzip remaining_cases (range start end))
+	; 					)
+	; 				session "none"
+	; 				;allow training on reserved features to preserve all case data
+	; 				allow_training_reserved_features .true
+	; 			))
+	; 		)
+
+	; 		;else no chunking is needed, just train the remainder
+	; 		(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+	; 			features case_features
+	; 			cases
+	; 				(if cases_are_ids
+	; 					(map
+	; 						(lambda (retrieve_from_entity (current_value) case_features))
+	; 						remaining_cases
+	; 					)
+
+	; 					;else remaining_cases are already rows of feature values
+	; 					remaining_cases
+	; 				)
+	; 			session "none"
+	; 			;allow training on reserved features to preserve all case data
+	; 			allow_training_reserved_features .true
+	; 		))
+	; 	)
+	; )
 
 	;Helper method to create the actual full contained entity path by interleaving !traineeContainer with each name in the path
 	!ConvertNamePathToEntityPath

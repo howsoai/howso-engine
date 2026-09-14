@@ -78,7 +78,7 @@
 						start (+ end 1)
 						end (+ start num_to_train -1)
 						new_payload
-							(call !train (assoc
+							(call train (assoc
 								;;;TODO: don't split time series in middle of a series
 								cases (unzip cases (range start end))
 								features features
@@ -531,173 +531,18 @@
 		))
 
 		(if (and !autoHierarchyEnabled (>= num_cases !autoAblationMaxNumCases))
-			(let
-				(assoc
-					reduce_payload
-						(call reduce_data (assoc
-							features features
-							skip_auto_analyze .true
-							internal .true
-							remove_case_into_storage .true
-						))
-				)
-
-				(if (= 0 (size !autoHierarchyIds))
-					(call react_into_features (assoc
-						clustering .true
-						clustering_min_cluster_mass (ceil (* num_cases !autoHierarchyClusteringRatio))
-						use_case_weights .true
-					))
-				)
-
-				(declare (assoc
-					subtrainee_ids
-						(if (= 0 (size !autoHierarchyIds))
-							(map
-								(lambda (concat !traineeId "_sub" (current_value)) )
-								(indices (compute_on_contained_entities (query_value_masses ".cluster_id")))
-							)
-
-							!autoHierarchyIds
-						)
-				))
-
-				(if (= 0 (size !autoHierarchyIds))
-					(seq
-						(map
-							(lambda (let
-								(assoc subtrainee_id (current_value 1))
-								(call create_subtrainee (assoc
-									filepath (retrieve_from_entity "filepath")
-									path [subtrainee_id]
-									child_id subtrainee_id
-								))
-
-								(set_entity_permissions [!traineeContainer subtrainee_id] .true)
-
-								(call_entity [!traineeContainer subtrainee_id] "set_feature_attributes" (assoc
-									feature_attributes (keep !featureAttributes features)
-								))
-
-								(call_entity [!traineeContainer subtrainee_id] "set_auto_ablation_params" (assoc
-									;auto_ablation_enabled .false
-									min_num_cases !autoAblationMinNumCases
-									hierarchy_clustering_ratio !autoHierarchyClusteringRatio
-									auto_hierarchy_enabled .true
-								))
-							))
-							subtrainee_ids
-						)
-						(assign_to_entities (assoc !autoHierarchyIds (sort subtrainee_ids) ))
-					)
-				)
-
-				;;;TODO: predict clusters for all cases in (contained_entities !reducedCasesStorage)
-				;;;TODO: train subtrainees
-				;;;TODO: remove !reducedCasesStorage
-			)
+			(call !MakeHierarchy)
 		)
 
-			;else hierarchy and ablation are enabled, ablated cases are trained into subtrainees
+		;hierarchy and ablation are enabled, ablated cases are trained into subtrainees
 		(if	(and !autoHierarchyEnabled (size ablated_indices_list))
 			(seq
-				;only keep the ablated cases
-				(assign (assoc cases (keep cases ablated_indices_list) ))
+				;only keep the ablated cases and only those predicted_clusters matching the ablated cases
+				(assign (assoc
+					predicted_clusters (keep predicted_clusters ablated_indices_list)
+				))
 
-				(if (= 0 (size !autoHierarchyIds))
-					(seq
-						(call !MakeHierarchy)
-
-						;else predict which cluster each ablated case should go into
-						(assign (assoc
-							predicted_clusters
-								(if (> (size !autoHierarchyIds) 1)
-									||(map
-										(lambda (first
-											(call !ReactDiscriminative (assoc
-												context_features features
-												context_values (current_value 1)
-												action_features [".cluster_id"]
-												return_action_values_only .true
-												use_case_weights .true
-											))
-										))
-										cases
-									)
-
-									;else only one cluster
-									(= (size !autoHierarchyIds) 1)
-									(map 0 cases) ;;;;TODO: verify that it's always 0
-								)
-						))
-					)
-
-					;else hierarchy already exists, only keep those predicted_clusters matching the ablated cases
-					(assign (assoc predicted_clusters (keep predicted_clusters ablated_indices_list)))
-				)
-
-				(map
-					(lambda (let
-						(assoc
-							cluster_id (current_value 1)
-							subtrainee_id (concat !traineeId "_sub" (current_value 1))
-						)
-
-						(declare (assoc
-							cluster_indices
-								(filter
-									(lambda (= cluster_id (get predicted_clusters (current_value))))
-									(indices predicted_clusters)
-								)
-							num_cases_in_subtrainee
-								(get
-									(call_entity [!traineeContainer subtrainee_id] "get_num_training_cases")
-									["1" "payload" "count"]
-								)
-						))
-
-						;training enough cases that the subtrainee should be split into its own hierarchy
-						;split cluster_indices into however many needed to reach min num cases
-						;analyze
-						;train the remainder
-						(if (and
-								;the trainee doesn't have enough cases in it already
-								(< num_cases_in_subtrainee !autoAblationMinNumCases)
-								(>= (+ num_cases_in_subtrainee (size cluster_indices)) !autoAblationMinNumCases)
-							)
-							(let
-								(assoc
-									cases_for_subtrainee (unzip cases cluster_indices)
-									;number of cases to reach the ablation/hierarchy threshold
-									first_train_amount (- !autoAblationMinNumCases num_cases_in_subtrainee)
-								)
-(print "enabling hierarchy for " subtrainee_id "\n")
-								(call_entity [!traineeContainer subtrainee_id] "train" (assoc
-									features features
-									;train only the initial set of cases needed to reach the threshold
-									cases (trunc cases_for_subtrainee first_train_amount)
-									session session
-								))
-
-								(call_entity [!traineeContainer subtrainee_id] "analyze")
-
-								(call !TrainSubtraineeCasesInChunks (assoc
-									remaining_cases (tail cases_for_subtrainee (- first_train_amount))
-									case_features features
-									cases_are_ids .false
-								))
-							)
-
-							;else train the cases into the subtrainee
-							(call !TrainSubtraineeCasesInChunks (assoc
-								remaining_cases (unzip cases cluster_indices)
-								case_features features
-								cases_are_ids .false
-							))
-						)
-					))
-					(values predicted_clusters .true)
-				)
+				(call !TrainSubtraineeClusterIndices (assoc cases (keep cases ablated_indices_list) ))
 			)
 		)
 
