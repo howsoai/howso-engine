@@ -30,6 +30,7 @@
 		has_dependent_features    has_dependent_features
 		impute_react              impute_react
 		filtering_queries         filtering_queries
+		use_enabled_hierarchy 	  use_enabled_hierarchy
 	)
 
 	ReactDiscriminative (call !ReactDiscriminative @(target .true "!ReactDiscriminativeParameters") )
@@ -112,6 +113,7 @@
 			has_dependent_features !hasDependentFeatures
 			impute_react .false
 			filtering_queries (list)
+			use_enabled_hierarchy .true
 
 			;local variables, should not be passed in as a parameter
 			valid_weight_feature .false
@@ -365,7 +367,7 @@
 		))
 
 
-		(if (and !autoHierarchyEnabled (size !autoHierarchyIds) (!= ".cluster_id" (first action_features)))
+		(if (and use_enabled_hierarchy !autoHierarchyEnabled (size !autoHierarchyIds) (!= ".cluster_id" (first action_features)))
 			(let
 				(assoc
 					clustering_prediction
@@ -377,6 +379,8 @@
 							skip_decoding .true
 							details { "categorical_action_probabilities" .true}
 							use_case_weights .true
+							output_raw_influential_cases_only .false
+							use_enabled_hierarchy .false
 						))
 				)
 
@@ -384,38 +388,41 @@
 					cap (get clustering_prediction ["categorical_action_probabilities" ".cluster_id"])
 				))
 
-				;if single cluster, just react against that one cluster
 				(conclude
-					(if (= 1 (size cap))
-						(call_entity [!traineeContainer (concat !traineeId "_sub" (first (indices cap)))]
-							"ReactDiscriminative"
-							@(target .true "!ReactDiscriminativeParameters")
+					;iterpolate among the involved clusters, union of all the raw influences
+					(let
+						(assoc
+							relevant_cluster_cases_map
+								(map
+									(lambda (let
+										(assoc subtrainee_id (concat !traineeId "_sub" (current_index 1)) )
+										(get
+											(call_entity [!traineeContainer subtrainee_id]
+												"ReactDiscriminative"
+												(modify
+													@(target .true "!ReactDiscriminativeParameters")
+													"output_raw_influential_cases_only" .true
+												)
+											)
+											["action_values" 0]
+										)
+									))
+									cap
+								)
+							local_cases_map
+								(call !ReactDiscriminative
+									(modify
+										@(target .true "!ReactDiscriminativeParameters")
+										"output_raw_influential_cases_only" .true
+										"use_enabled_hierarchy" .false
+										"use_case_weights" .true
+									)
+								)
 						)
 
-						;else iterpolate among the involved clusters, union of all the raw influences
-						(let
-							(assoc
-								relevant_cluster_cases_map
-									(map
-										(lambda (let
-											(assoc subtrainee_id (concat !traineeId "_sub" (current_index 1)) )
-											(get
-												(call_entity [!traineeContainer subtrainee_id]
-													"ReactDiscriminative"
-													(modify
-														@(target .true "!ReactDiscriminativeParameters")
-														"output_raw_influential_cases_only" .true
-													)
-												)
-												["action_values" 0]
-											)
-										))
-										cap
-									)
-							)
-
-							(declare (assoc
-								combined_influences_map
+						(declare (assoc
+							combined_influences_map
+								(append
 									;combine all the subtrainee cases and influences into one assoc where the indices are pair of [subtrainee_id case_id]
 									(apply "append" (values
 										(map
@@ -424,30 +431,37 @@
 
 												;change the assoc indices to be a pair such that the assoc is now [subtrainee_id case_id] -> influence weight
 												(zip
-													(map (lambda [sub_id (current_value 1)] ) (indices (current_value)))
+													(map (lambda (append sub_id (current_value )) ) (indices (current_value)))
 													(values (current_value))
 												)
 											))
 											relevant_cluster_cases_map
 										)
 									))
-								k_parameter (get data_params_map "k")
-							))
+									(get local_cases_map ["action_values" 0])
+								)
+							k_parameter (get data_params_map "k")
+						))
 
-							;sort subtrainee cases by their influences
-							(declare (assoc
-								sub_cases
-									(sort
-										(lambda
-											(<
-												(get combined_influences_map [(current_value 1)])
-												(get combined_influences_map [(current_value 2)])
-											)
+						;sort subtrainee cases by their influences
+						(declare (assoc
+							sub_cases
+								(sort
+									(lambda
+										(<
+											(get combined_influences_map [(current_value 1)])
+											(get combined_influences_map [(current_value 2)])
 										)
-										(indices combined_influences_map)
 									)
-							))
+									(indices combined_influences_map)
+								)
+						))
 
+						;output only the 20 most relevant cases
+						(if output_raw_influential_cases_only
+							(keep combined_influences_map (trunc sub_cases 20))
+
+							;else interpolate between the results
 							(call !DynamicBandwidthFilterAndInterpolate (assoc
 								action_feature (first action_features)
 								sub_cases sub_cases
@@ -458,6 +472,7 @@
 							))
 						)
 					)
+
 				)
 			)
 		)
