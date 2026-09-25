@@ -8,6 +8,9 @@
 			;Optional task_id to track progress of this long running operation. If unspecified, will use .null as the task_id.
 			#{type "string"}
 			task_id .null
+			;optional flag, if true analyzes all subtrainees in hierarchy
+			#{type "boolean"}
+			full_hierarchy .false
 		)
 
 		(declare (assoc saved_analyze_parameters_map (retrieve_from_entity "!savedAnalyzeParameterMap") ))
@@ -19,7 +22,13 @@
 				task_id task_id
 			))
 
-			(call analyze (append saved_analyze_parameters_map {"task_id" task_id}) )
+			(call analyze
+				(append
+					saved_analyze_parameters_map
+					{"task_id" task_id}
+					{"full_hierarchy" full_hierarchy}
+				)
+			)
 		)
 	)
 
@@ -116,6 +125,9 @@
 			;Defaults to .false, assuming this will be called by an external API/user.
 			#{type "boolean"}
 			internal .false
+			;optional flag, if true analyzes all subtrainees in hierarchy
+			#{type "boolean"}
+			full_hierarchy .false
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
@@ -563,6 +575,29 @@
 				))
 			)
 		)
+
+		(if (and full_hierarchy !autoHierarchyEnabled !autoAblationEnabled)
+			(map
+				(lambda (let
+					(assoc
+						sub_hierarchy
+							(get
+								(call_entity [!traineeContainer (current_value 2)] "get_hierarchy" (assoc
+									internal_only .true
+								))
+								[1 "payload" "children"]
+							)
+					)
+					;only need to analyze subtrainee if they have their own subtrainees
+					(if (size sub_hierarchy)
+						(call_entity [!traineeContainer (current_value 1)] "auto_analyze" (assoc
+							full_hierarchy .true
+						))
+					)
+				))
+				!autoHierarchyIds
+			)
+		)
 	)
 
 	;called on none or one action feature at a time by Analyze()
@@ -861,6 +896,16 @@
 			))
 		)
 
+		;full_hierarchy analyze should automatically include .cluster_id if there are subtrainees
+		(if (and full_hierarchy !autoHierarchyEnabled !autoAblationEnabled)
+			(if (= 0 (size context_features))
+				(assign (assoc context_features (append !trainedFeatures ".cluster_id") ))
+
+				(not (contains_value context_features ".cluster_id"))
+				(accum (assoc context_features ".cluster_id"))
+			)
+		)
+
 		;if there are computed features that are to be analyzed (e.g., 'similarity_conviction') append them to context_features
 		(if (size (get !computedFeaturesMap "computed_features"))
 			(assign (assoc
@@ -1023,37 +1068,45 @@
 				)
 		))
 
-		;check if auto analysis is enabled and the analysis threshold should be increased
-		(if (and
-				!autoAnalyzeEnabled
-				(>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
-			)
-			(let
-				(assoc
-					total_case_mass
-						(if use_case_weights
-							(compute_on_contained_entities
-								(query_not_equals weight_feature .null)
-								(query_sum weight_feature)
-							)
+		(declare (assoc
+			total_case_mass
+				(if use_case_weights
+					(compute_on_contained_entities
+						(query_not_equals weight_feature .null)
+						(query_sum weight_feature)
+					)
 
-							;else it's 1 per case, thus the total mass is num_cases
-							num_cases
+					;else it's 1 per case, thus the total mass is num_cases
+					num_cases
+				)
+		))
+
+		;if there are cases that were reduced to storage prior to this analyze call, count them as well
+		(if (size (contained_entities !reducedCasesStorage))
+			(accum (assoc
+				total_case_mass (size (contained_entities !reducedCasesStorage))
+			))
+		)
+
+		(assign_to_entities (assoc
+			!autoAnalyzeThreshold
+				(if !autoAnalyzeEnabled
+					;!autoAnalyzeThreshold is a delta from the previous threshold.
+					;if several case deletions cause the above formula to return < 0, default
+					; to the default !autoAnalyzeThreshold.
+					(max
+						(- (* total_case_mass !autoAnalyzeGrowthFactorAmount) !autoAnalyzeThreshold)
+						100
+					)
+
+					;else auto analyze is not enabled, this analyze was called 'out of cycle' of auto analyze
+					;update the threshold relative to the current dataset mass
+					(max
+						(- (* total_case_mass !autoAnalyzeGrowthFactorAmount) total_case_mass)
+						100
 					)
 				)
-
-				(assign_to_entities (assoc
-					!autoAnalyzeThreshold
-						;!autoAnalyzeThreshold is a delta from the previous threshold.
-						;if several case deletions cause the above formula to return < 0, default
-						; to the default !autoAnalyzeThreshold.
-						(max
-							(- (* total_case_mass !autoAnalyzeGrowthFactorAmount) !autoAnalyzeThreshold)
-							100
-						)
-				))
-			)
-		)
+		))
 
 		;reset !dataMassChangeSinceLastAnalyze since we are now analyzing
 		(assign_to_entities (assoc !dataMassChangeSinceLastAnalyze 0.0 ))

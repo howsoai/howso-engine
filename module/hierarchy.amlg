@@ -13,8 +13,17 @@
 			;path to this trainee as a list of path labels
 			#{ref "TraineePath"}
 			path_list []
+			;flag, default to false. if set to true will only output simplified internal hierarchy
+			#{type "boolean"}
+			internal_only .false
 		)
-		(call !Return (assoc payload (call !GetHierarchy) ))
+		(call !Return (assoc
+			payload
+				(if internal_only
+					(call !GetInternalHierarchy)
+					(call !GetHierarchy)
+				)
+		))
 	)
 
 	;Returns the full entity path to a child trainee provided its unique trainee id if it is contained in the hierarchy.
@@ -203,7 +212,10 @@
 
 		(if (!= .null result)
 			(seq
-				(call_entity trainee_path "initialize" (assoc trainee_id child_id))
+				(call_entity trainee_path "initialize" (assoc
+					trainee_id child_id
+					filepath (or filepath (retrieve_from_entity "filepath"))
+				))
 
 				(call !AddChildTraineeReferences (assoc
 					child_id child_id
@@ -1245,7 +1257,10 @@
 			(assign (assoc entity_path_id id))
 		)
 
-		(call_entity [!traineeContainer entity_path_id] "set_parent_id" (assoc parent_id !traineeId))
+		(call_entity [!traineeContainer entity_path_id] "set_parent_id" (assoc
+			parent_id !traineeId
+			is_contained .true
+		))
 
 		(accum_to_entities (assoc
 			!containedTraineeNameToIdMap (associate entity_path_id id)
@@ -1257,12 +1272,370 @@
 		(call !Return)
 	)
 
+	!ReduceIntoHierarchy
+	(seq
+
+		;if subtrainees have not been created yet, trainee should be analyzed if it hasn't been analyzed yet
+		(if (and (= 0 (size !autoHierarchyIds)) (= .null !savedAnalyzeParameterMap))
+			(call analyze (assoc "internal" .true))
+		)
+
+		(declare (assoc
+			;flag set to true if subtrainees will need to be created
+			create_subtrainees (= 0 (size !autoHierarchyIds))
+
+			;copy of this trainee's parameters that would be copied to newly created subtrainees
+			trainee_dataparams_map (retrieve_from_entity "!dataParametersMap")
+			trainee_dataparams_paths (retrieve_from_entity "!!dataParametersPaths")
+			trainee_marginal_stats_map (retrieve_from_entity "!featureMarginalStatsMap")
+			trainee_expected_values_map (retrieve_from_entity "!expectedValuesMap")
+		))
+
+		(declare (assoc
+			reduce_payload
+				(call reduce_data (assoc
+					features features
+					skip_auto_analyze .true
+					internal .true
+					remove_cases_into_storage .true
+				))
+		))
+
+		;hierarchy max depth level has been reached
+		(if (and create_subtrainees (= !autoHierarchyDepthLevel !autoHierarchyMaxDepth))
+			(seq
+				(assign_to_entities (assoc
+					!autoHierarchyCaseLoadMap
+						{
+							"self" (call !GetNumTrainingCases)
+							"total" (+ (get !autoHierarchyCaseLoadMap "total") (size cases))
+						}
+				))
+
+				(if (not !autoHierarchyDepthReached)
+					(seq
+						;update analyze parameters with case_weights and enable auto ablation
+						(assign_to_entities (assoc
+							!savedAnalyzeParameterMap
+								(modify !savedAnalyzeParameterMap
+									"use_case_weights" .true
+									"weight_feature" ".case_weight"
+								)
+							!autoAblationEnabled .true
+							!autoHierarchyDepthReached .true
+						))
+
+						(call !Analyze (append
+							!savedAnalyzeParameterMap
+							(assoc
+								"from_react_into_features" .true
+								"internal" .true
+							)
+						))
+					)
+				)
+
+				;remove !reducedCasesStorage
+				(destroy_entities !reducedCasesStorage)
+				(conclude)
+			)
+		)
+
+		;create subtrainees from clusters if they haven't beet created yet
+		(declare (assoc
+			subtrainee_ids
+				(if create_subtrainees
+					(seq
+						(call react_into_features (assoc
+							clustering .true
+							clustering_min_cluster_mass (ceil (* num_cases !autoHierarchyClusteringRatio))
+							use_case_weights .true
+							internal .true
+						))
+
+						;ensure ablation is enabled going forward for this trainee
+						(assign_to_entities (assoc !autoAblationEnabled .true))
+
+						(assign_to_entities (assoc
+							!savedAnalyzeParameterMap
+								(modify !savedAnalyzeParameterMap
+									"context_features" (append (get !savedAnalyzeParameterMap "context_features") ".cluster_id")
+									"use_case_weights" .true
+									"weight_feature" ".case_weight"
+								)
+						))
+						;prevent calling react_into_features during the analyze()
+						(call !Analyze (append
+							!savedAnalyzeParameterMap
+							(assoc
+								"from_react_into_features" .true
+								"internal" .true
+							)
+						))
+
+						(map
+							(lambda (concat !traineeId "_sub" (current_value)) )
+							(indices (compute_on_contained_entities (query_value_masses ".cluster_id")))
+						)
+					)
+
+					;else re-analyze after the latest reduce if needed and use the already created subtrainee ids
+					(seq
+						(if (>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
+							(call !Analyze (append
+								!savedAnalyzeParameterMap
+								(assoc
+									;prevent calling react_into_features during the analyze()
+									"from_react_into_features" .true
+									"internal" .true
+									"full_hierarchy" .true
+								)
+							))
+						)
+
+						!autoHierarchyIds
+					)
+				)
+		))
+
+		;create subtrainees
+		(if create_subtrainees
+			(let
+				(assoc
+					cluster_ids (indices (compute_on_contained_entities (query_value_masses ".cluster_id")))
+				)
+
+				;combine unclustered cases into existing clusters
+				(if (and (contains_value cluster_ids 0) (> (size cluster_ids) 1))
+					(let
+						(assoc
+							unclustered_cases (contained_entities (query_equals ".cluster_id" 0))
+						)
+
+						(declare (assoc
+							forced_clusters
+								;if there's only 1 actual cluster and a set of unclustered, move all the unclustered into the one cluster
+								(if (= 2 (size cluster_ids_map))
+									(let
+										(assoc cluster_id (first (indices (remove cluster_ids_map 0))) )
+										(map cluster_id unclustered_cases)
+									)
+
+									||(map
+										(lambda (first
+											(call !ReactDiscriminative (assoc
+												context_features !trainedFeatures
+												context_values (retrieve_from_entity (current_value 1) !trainedFeatures)
+												action_features [".cluster_id"]
+												return_action_values_only .true
+												use_case_weights .true
+												filtering_queries [(query_not_equals ".cluster_id" 0) (query_not_in_entity_list [(current_value 3)])]
+											))
+										))
+										unclustered_cases
+									)
+								)
+						))
+
+						;update cluster id for each unclustered case
+						(map
+							(lambda
+								(assign_to_entities (current_index) (assoc ".cluster_id" (current_value 1)))
+							)
+							(zip unclustered_cases forced_clusters)
+						)
+
+						(assign (assoc
+							subtrainee_ids
+								(map
+									(lambda (concat !traineeId "_sub" (current_value)) )
+									(indices (compute_on_contained_entities (query_value_masses ".cluster_id")))
+								)
+						))
+					)
+				)
+
+				;if there are more clusters than allowed, redistribute the smallest clusters among the larger ones
+				(if (> (size subtrainee_ids) !autoHierarchyMaxBreadth)
+					(let
+						(assoc
+							cluster_ids_map (compute_on_contained_entities (query_value_masses ".cluster_id"))
+						)
+
+						(declare (assoc
+							cluster_ids_by_size
+								(sort
+									(lambda
+										;decreasing order
+										(<
+											(get cluster_ids_map [(current_value 1)])
+											(get cluster_ids_map [(current_value 2)])
+										)
+									)
+									(indices cluster_ids_map)
+								)
+							extra_cluster_ids (tail cluster_ids_by_size (- (size subtrainee_ids) !autoHierarchyMaxBreadth))
+							distribute_cluster_cases (contained_entities (query_among ".cluster_id" extra_cluster_ids))
+						))
+
+						;predict the most similar cluster that is not among the extra_cluster_ids
+						(declare (assoc
+							forced_clusters
+								||(map
+									(lambda (first
+										(call !ReactDiscriminative (assoc
+											context_features !trainedFeatures
+											context_values (retrieve_from_entity (current_value 1) !trainedFeatures)
+											action_features [".cluster_id"]
+											return_action_values_only .true
+											use_case_weights .true
+											filtering_queries [(query_not_among ".cluster_id" extra_cluster_ids) (query_not_in_entity_list [(current_value 3)])]
+										))
+									))
+									distribute_cluster_cases
+								)
+
+						))
+
+						;update cluster id for each of the distribute cluster cases
+						(map
+							(lambda
+								(assign_to_entities (current_index) (assoc ".cluster_id" (current_value 1)))
+							)
+							(zip distribute_cluster_cases forced_clusters)
+						)
+
+						(assign (assoc
+							subtrainee_ids
+								(map
+									(lambda (concat !traineeId "_sub" (current_value)) )
+									(trunc cluster_ids_by_size !autoHierarchyMaxBreadth)
+								)
+						))
+					)
+				)
+
+				(map
+					(lambda (let
+						(assoc subtrainee_id (current_value 1))
+						(call create_subtrainee (assoc
+							filepath (retrieve_from_entity "filepath")
+							path [subtrainee_id]
+							child_id subtrainee_id
+						))
+
+						(set_entity_permissions [!traineeContainer subtrainee_id] .true)
+
+						(call_entity [!traineeContainer subtrainee_id] "set_feature_attributes" (assoc
+							feature_attributes (keep !featureAttributes features)
+						))
+
+						;set the minimal params needed for reacts on subtrainee by copying this trainee's parameters
+						(call_entity [!traineeContainer subtrainee_id] "set_subtrainee_params_for_react" (assoc
+							trainee_dataparams_map trainee_dataparams_map
+							trainee_dataparams_paths trainee_dataparams_paths
+							trainee_marginal_stats_map trainee_marginal_stats_map
+							trainee_expected_values_map trainee_expected_values_map
+							auto_hierarchy_depth_level (+ 1 !autoHierarchyDepthLevel)
+						))
+
+						(call_entity [!traineeContainer subtrainee_id] "set_auto_ablation_params" (assoc
+							;auto_ablation_enabled .false
+							min_num_cases !autoAblationMinNumCases
+							hierarchy_clustering_ratio !autoHierarchyClusteringRatio
+							auto_hierarchy_enabled .true
+							max_num_cases !autoAblationMaxNumCases
+							reduce_max_cases !postReduceMaxCases
+							auto_hierarchy_max_depth !autoHierarchyMaxDepth
+							auto_hierarchy_max_breadth !autoHierarchyMaxBreadth
+						))
+					))
+					subtrainee_ids
+				)
+
+				(assign_to_entities (assoc !autoHierarchyIds (sort subtrainee_ids) ))
+			)
+		)
+
+		;grab all the reduces cases slated for removal from storage
+		(declare (assoc
+			reduced_cases_values
+				(map
+					(lambda (retrieve_from_entity [!reducedCasesStorage (current_value 1)] features))
+					(contained_entities !reducedCasesStorage)
+				)
+		))
+
+		;train subtrainees
+		(call !TrainSubtraineeClusterIndices (assoc
+			cases reduced_cases_values
+			;predict clusters for all cases in (contained_entities !reducedCasesStorage)
+			predicted_clusters
+				||(map
+					(lambda (first
+						(call !ReactDiscriminative (assoc
+							context_features features
+							context_values (current_value 1)
+							action_features [".cluster_id"]
+							return_action_values_only .true
+							use_case_weights .true
+						))
+					))
+					reduced_cases_values
+				)
+		))
+
+		(assign_to_entities (assoc
+			!autoHierarchyCaseLoadMap
+				{
+					"self" (call !GetNumTrainingCases)
+					"total" (+ (get !autoHierarchyCaseLoadMap "total") (size cases))
+				}
+		))
+
+		;remove !reducedCasesStorage
+		(destroy_entities !reducedCasesStorage)
+	)
+
+	!TrainSubtraineeClusterIndices
+	(map
+		(lambda (let
+			(assoc
+				cluster_id (current_value 1)
+				subtrainee_id (concat !traineeId "_sub" (current_value 1))
+				cluster_indices
+					(filter
+						(lambda (= cluster_id (get predicted_clusters (current_value))))
+						(indices predicted_clusters)
+					)
+			)
+
+			(call_entity [!traineeContainer subtrainee_id] "train" (assoc
+				features features
+				cases (unzip cases cluster_indices)
+				session "none"
+				;allow training on reserved features to preserve all case data
+				allow_training_reserved_features .true
+			))
+		))
+		(values predicted_clusters .true)
+	)
+
+
+	set_subtrainee_params_for_react
+	(assign_to_entities (assoc
+		!dataParametersMap trainee_dataparams_map
+		!dataParametersPaths trainee_dataparams_paths
+		!featureMarginalStatsMap trainee_marginal_stats_map
+		!expectedValuesMap trainee_expected_values_map
+		!autoHierarchyDepthLevel auto_hierarchy_depth_level
+	))
 
 	;Helper method to create the actual full contained entity path by interleaving !traineeContainer with each name in the path
 	!ConvertNamePathToEntityPath
 	(weave (range !traineeContainer 1 (size path) 1) path)
 
-	;method to recurse down the the hierarchy to output the currently contained hierarchy as a nested assoc
+	;method to recurse down the hierarchy to output the currently contained hierarchy as a nested assoc
 	;with .false for trainees that are stored independently
 	!GetHierarchy
 	(append
@@ -1270,7 +1643,8 @@
 		(assoc
 			"id" (retrieve_from_entity "!traineeId")
 			"path" path_list
-			"contained" .true
+			"contained" !traineeIsContained
+			"ablation" !autoAblationEnabled
 			"children"
 				(map
 					(lambda
@@ -1296,12 +1670,33 @@
 									)
 								"contained" .false
 								"children" []
+								"num_cases" .null
 							)
 						)
 					)
 					(indices !childTraineeIsContainedMap)
 				)
+			"num_cases" (call !GetNumTrainingCases)
 		)
+	)
+
+	;recurse down the hierarchy to output the internally contained hierarchy as a nested assoc with only the trainees and number of cases for each
+	!GetInternalHierarchy
+	(assoc
+		"num_cases" (call !GetNumTrainingCases)
+		"children"
+			(map
+				(lambda
+					(get
+						(call_entity (list !traineeContainer (current_index 1)) "get_hierarchy" (assoc
+							internal_only .true
+						))
+						[1 "payload"]
+					)
+				)
+				;only keep internal subtrainees
+				(filter .true !childTraineeIsContainedMap .true)
+			)
 	)
 
 	;Returns the full entity path to a child trainee provided its unique trainee id if it is contained in the hierarchy.
@@ -1514,6 +1909,7 @@
 		;set the !parentId for the child
 		(call_entity child_entity_path "set_parent_id" (assoc
 			parent_id (call_entity path_to_parent "get_trainee_id")
+			is_contained is_contained
 		))
 	)
 

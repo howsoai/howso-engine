@@ -622,6 +622,9 @@
 			;Optional task_id to track progress of this long running operation. If unspecified, will use .null as the task_id.
 			#{type "string"}
 			task_id .null
+			;optional flag, specifying whether reduced cases should be removed completely (default behavior), or when true, removed into a storage container
+			#{type "boolean"}
+			remove_cases_into_storage .false
 			;optional flag specifying whether this method was called internally by another method.
 			;Defaults to .false, assuming this will be called by an external API/user.
 			#{type "boolean"}
@@ -924,6 +927,11 @@
 			cases_to_remove (contained_entities (query_equals ".keeping" .null) )
 		))
 
+		;remove called by hierarchy clustering, ensure all clusters have at least 30 cases in them
+		(if (and remove_cases_into_storage !autoHierarchyEnabled)
+			(call !FilterCasesToRemoveForClustering)
+		)
+
 		(if !tsTimeFeature
 			(call !FilterCasesToRemoveForTimeSeries (assoc ensure_enough_to_remove .true))
 		)
@@ -934,6 +942,7 @@
 			(call !RemoveCases (assoc
 				cases cases_to_remove
 				distribute_weight_feature distribute_weight_feature
+				remove_cases_into_storage remove_cases_into_storage
 			))
 
 			;else no cases to remove, clear caches for these added features so they can be cleared out quickly
@@ -1068,6 +1077,67 @@
 			)
 		)
 	)
+
+	;helper method to ensure that all clusters have at least 30 cases remaining in them by removing smaller cluster cases
+	;from cases_to_remove and adding the latest cases that were added to the core set to cases_to_remove
+	!FilterCasesToRemoveForClustering
+	(let
+		(assoc
+			small_cluster_map
+				(filter
+					(lambda (< (current_value) 30))
+					(compute_on_contained_entities
+						(query_not_in_entity_list cases_to_remove)
+						(query_value_masses ".cluster_id")
+					)
+				)
+		)
+
+		;nothing to do since all clusters have at least 30 cases
+		(if (= 0 (size small_cluster_map))
+			(conclude)
+		)
+
+		(declare (assoc
+			cluster_cases_to_keep
+				(apply "append"
+					(map
+						(lambda (let
+							(assoc
+								num_needed (current_value 1)
+								cluster_id (current_index 1)
+							)
+
+							(contained_entities
+								(query_in_entity_list cases_to_remove)
+								(query_equals ".cluster_id" cluster_id)
+								(query_max ".keeping" num_needed)
+							)
+						))
+						;a map of cluster_id -> number of needed cases
+						(map (lambda (- 30 (current_value))) small_cluster_map)
+					)
+				)
+			;last added cases for keeping will be used to pad cases for removal to replace the cluster cases needed to be kept
+			cases_to_pad_for_removal
+				(contained_entities
+					(query_not_in_entity_list cases_to_remove)
+					(query_max ".keeping" (size cluster_cases_to_keep))
+				)
+		))
+
+		(assign (assoc
+			cases_to_remove
+				(append
+					cases_to_pad_for_removal
+					(contained_entities
+						(query_in_entity_list cases_to_remove)
+						(query_not_in_entity_list cluster_cases_to_keep)
+					)
+				)
+		))
+	)
+
 
 
 	;helper method that merges duplicate cases during the reduce_data flow
