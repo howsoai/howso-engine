@@ -48,6 +48,7 @@
 			#{type "number" exclusive_min 0}
 			clustering_min_cluster_mass .null
 			;flag, if set to true, will enable auto_analyze and analyze with these specified features computing their values.
+			;additionally, these metrics will be recomputed with each analysis if analyze is set to true.
 			;note: if clustering, analyze will not include the clustered feature
 			;   Only applicable when reacting for the entire dataset,  when case_ids is null.
 			#{type "boolean"}
@@ -220,8 +221,6 @@
 			))
 		)
 
-		;flag set to true if similarity_conviction was requested without distance_contribution
-		(declare (assoc only_similiarity_conviction .false ))
 		(if (and
 				similarity_conviction
 				(or (= .null distance_contribution) (= .false distance_contribution))
@@ -238,7 +237,6 @@
 				;DCs do not exist for this feature set already, it must be additionally computed
 				(assign (assoc
 					distance_contribution ".distance_contribution"
-					only_similiarity_conviction .true
 				))
 			)
 		)
@@ -276,30 +274,39 @@
 
 		;when storing values for entire dataset, update feature attributes with the feature so it's known that the feature has been cached
 		(if (= .null case_ids)
-			(assign_to_entities (assoc
-				!featureAttributes
-					(append
-						!featureAttributes
-						(zip
-							(values computed_map)
-							(map
-								(lambda
-									(if (or (= "p_value_of_addition" (current_value)) (= "p_value_of_removal" (current_value)))
-										{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" 1} "computed" .true }
+			(seq
+				(assign_to_entities (assoc
+					!featureAttributes
+						(append
+							!featureAttributes
+							(zip
+								(values computed_map)
+								(map
+									(lambda
+										(if (or (= "p_value_of_addition" (current_value)) (= "p_value_of_removal" (current_value)))
+											{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" 1} "computed" .true }
 
-										;else convictions, entropy and distance contribution ranges are 0 to infinity
-										{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" .infinity}  "computed" .true }
+											;else convictions, entropy and distance contribution ranges are 0 to infinity
+											{"type" "continuous" "data_type" "number" "bounds" {"min" 0 "max" .infinity}  "computed" .true }
+										)
 									)
+									(indices computed_map)
 								)
-								(indices computed_map)
+							)
+							(if clustering
+								(associate clustering {"type" "nominal" "data_type" "number" "computed" .true })
+								{}
 							)
 						)
-						(if clustering
-							(associate clustering {"type" "nominal" "data_type" "number" "computed" .true })
-							{}
-						)
-					)
-			))
+				))
+				(assign_to_entities (assoc
+					!trainedFeatures (indices !featureAttributes)
+					!trainedFeaturesContextKey
+						(call !BuildContextFeaturesKey (assoc
+							context_features (indices !featureAttributes)
+						))
+				))
+			)
 		)
 
 		(declare (assoc
@@ -319,19 +326,8 @@
 			(assign_to_entities (assoc
 				!computedFeaturesMap
 					(assoc
-						"computed_features"
-							(values
-								;don't use distance_contribution as a feature for analysis if only similarity_conviction was explicitly specified
-								(if only_similiarity_conviction
-									(remove computed_map "distance_contribution")
-									computed_map
-								)
-							)
-						"computed_map"
-							(if only_similiarity_conviction
-								(modify computed_map "distance_contribution" .false)
-								computed_map
-							)
+						"computed_features" (values computed_map)
+						"computed_map" computed_map
 						"analyze" analyze
 						"context_features" features
 						"weight_feature" (if use_case_weights weight_feature)
@@ -459,6 +455,19 @@
 							)
 						)
 				))
+
+				(if valid_weight_feature
+					(assign (assoc
+						case_to_dc_map
+							(map
+								(lambda (/
+									(current_value)
+									(or (retrieve_from_entity (current_index) weight_feature) 1.0)
+								))
+								case_to_dc_map
+							)
+					))
+				)
 
 				(if distance_contribution
 					(seq
