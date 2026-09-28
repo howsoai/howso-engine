@@ -927,8 +927,8 @@
 			cases_to_remove (contained_entities (query_equals ".keeping" .null) )
 		))
 
-		;remove called by hierarchy clustering, ensure all clusters have at least 30 cases in them
-		(if (and remove_cases_into_storage !autoHierarchyEnabled)
+		;remove called after dataset has been clustered using the default clustering feature, ensure all clusters have at least 30 cases in them
+		(if (= ".cluster_id" (get !clusteringParametersMap "feature"))
 			(call !FilterCasesToRemoveForClustering)
 		)
 
@@ -1088,7 +1088,7 @@
 					(lambda (< (current_value) 30))
 					(compute_on_contained_entities
 						(query_not_in_entity_list cases_to_remove)
-						(query_value_masses ".cluster_id")
+						(query_value_masses ".cluster_id" distribute_weight_feature)
 					)
 				)
 		)
@@ -1104,17 +1104,43 @@
 					(map
 						(lambda (let
 							(assoc
-								num_needed (current_value 1)
+								mass_needed (current_value 1)
 								cluster_id (current_index 1)
+								;assoc of case id -> assoc with .case_weight and .keeping for each case
+								selected_cases_weights_map
+									(compute_on_contained_entities
+										(query_in_entity_list cases_to_remove)
+										(query_equals ".cluster_id" cluster_id)
+										(query_max distribute_weight_feature mass_needed)
+										(query_exists distribute_weight_feature)
+									)
+								;case ids sorted in order of selected, last to first
+								cases_sorted_by_weight
+									(sort
+										(lambda
+											;decreasing order, last select cases are ordered first
+											(<
+												(get selected_cases_weights_map [(current_value 1) distribute_weight_feature])
+												(get selected_cases_weights_map [(current_value 2) distribute_weight_feature])
+											)
+										)
+										(indices selected_cases_weights_map)
+									)
+								mass_of_cases 0
+								number_to_keep 0
 							)
 
-							(contained_entities
-								(query_in_entity_list cases_to_remove)
-								(query_equals ".cluster_id" cluster_id)
-								(query_max ".keeping" num_needed)
+							;compute how many cluster cases should be kept for the mass to be whatever is needed
+							(while (< mass_of_cases mass_needed)
+								(accum (assoc
+									mass_of_cases (get selected_cases_weights_map [(get cases_sorted_by_weight (current_index 2)) distribute_weight_feature])
+									number_to_keep 1
+								))
 							)
+
+							(trunc cases_sorted_by_weight number_to_keep)
 						))
-						;a map of cluster_id -> number of needed cases
+						;a map of cluster_id -> number of needed cases (total mass of needed cases when case weights are enabled)
 						(map (lambda (- 30 (current_value))) small_cluster_map)
 					)
 				)
@@ -1131,11 +1157,11 @@
 		(assign (assoc
 			cases_to_remove
 				(append
-					cases_to_pad_for_removal
 					(contained_entities
 						(query_in_entity_list cases_to_remove)
 						(query_not_in_entity_list cluster_cases_to_keep)
 					)
+					cases_to_pad_for_removal
 				)
 		))
 	)
