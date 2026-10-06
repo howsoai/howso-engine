@@ -32,7 +32,8 @@
 			#{type "list" values "string"}
 			group_id_features .null
 			;a list of lists of lists of values corresponding to a list of sets of feature values, where the values are ordered corresponding to
-			;	the features
+			;	the features. If in a time-series Trainee, the engine will attempt to derive the time-series feature values for each group if none
+			;	of the derived feature data is given.
 			#{type "list" values {type "list" values {type "list"} } min_size 1}
 			new_cases .null
 			;a list of lists of tuples containing the session id and index that uniquely select trained cases. Each outer sublist makes a list of case indices
@@ -92,22 +93,6 @@
 				given_feature_names group_id_features
 			))
 		)
-		(if (and
-				group_id_features
-				(<
-					(size (keep
-						(zip features)
-						group_id_features
-					))
-					(size group_id_features)
-				)
-			)
-			(conclude
-				(call !Return (assoc
-					errors [(concat "All features in `group_id_features` must also be given in `features` and `new_cases`.")]
-				))
-			)
-		)
 
 		(if (not (xor
 				new_cases
@@ -125,6 +110,26 @@
 			(conclude
 				(call !Return (assoc
 					errors ["`features` must be specified when using `new_cases`."]
+				))
+			)
+		)
+
+		;if using new_cases/features and group_id_features,
+		;then all group_id_features must be in features
+		(if (and
+				(size new_cases)
+				(size group_id_features)
+				(<
+					(size (keep
+						(zip features)
+						group_id_features
+					))
+					(size group_id_features)
+				)
+			)
+			(conclude
+				(call !Return (assoc
+					errors [(concat "All features in `group_id_features` must also be given in `features` and `new_cases`.")]
 				))
 			)
 		)
@@ -299,75 +304,6 @@
 
 		(if !inactiveFeaturesNeedCaching (call !UpdateInactiveFeatures))
 
-		;if features aren't specified, assume all !trainedFeatures will need to have their mae calculated
-		(if (= 0 (size features))
-			(assign (assoc
-				features
-					(if (size action_features)
-						(filter (lambda (not (contains_value action_features (current_value)))) !trainedFeatures)
-						!trainedFeatures
-					)
-			))
-		)
-
-
-		;if user doesn't want to use case weights, change weight_feature to '.none'
-		(if (= .false use_case_weights)
-			(assign (assoc weight_feature ".none"))
-		)
-
-		(declare (assoc
-			data_params_map
-				(call !GetDataParameters (assoc
-					feature .null
-					context_features context_features
-					weight_feature weight_feature
-				))
-			valid_weight_feature .false
-
-			action_values .null
-			output_influential_cases .null
-			output_caps_map .null
-			feature_full_residuals_map .null
-			cases_avg_distance_contribution .null
-			avg_new_cases_residual_contribution .null
-			new_case_entropies_value .null
-			average_new_cases_conviction_addition .null
-			average_new_cases_conviction_removal .null
-			kl_divergence_addition_value .null
-			kl_divergence_removal_value .null
-			p_value_of_addition_value .null
-			p_value_of_removal_value .null
-			mean_similarity_conviction .null
-		))
-
-		(call !UpdateCaseWeightParameters)
-
-		(declare (assoc
-			feature_weights
-				;only overwrite with inactive features if feature weights already exist
-				(if (and (size !inactiveFeaturesMap) (size (get data_params_map "featureWeights")))
-					(append
-						(get data_params_map "featureWeights")
-						(map 1 !inactiveFeaturesMap)
-					)
-				)
-			feature_deviations (get data_params_map "featureDeviations")
-			closest_k (get data_params_map "k")
-			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
-			max_lag_index_value .null
-		))
-		(if ts_feature_lag_amount_map
-			(assign (assoc max_lag_index_value (apply "max" ts_feature_lag_amount_map) ))
-		)
-
-		;closest k must be at least 2 smaller than dataset size, i.e., a dataset of 5 needs a K of 3 or less:
-		;when knocking out a case during conviction calculations, each remaining case searches for K cases around itself
-		;meaning that the K must be at least 2 less than the dataset size
-		(if (and (< dataset_size (+ closest_k 2)) (~ 0 closest_k))
-			(assign (assoc closest_k (- dataset_size 2)))
-		)
-
 		;if given new cases, they may need to be encoded or have time-series features derived.
 		(if (size new_cases)
 			(if !tsTimeFeature
@@ -378,8 +314,15 @@
 						series_id_features (get !tsFeaturesMap "series_id_features")
 					)
 
-					;true if all series_id_features are in `features`. otherwise cannot derive if series id values are not known
-					(if (= (size series_id_features) (size (keep feature_index_map series_id_features)))
+					;Do not derive the time series feature values unless both are true:
+					;a) all series id features are present
+					;b) none of the derived data is already given
+					(if (and
+							(= (size series_id_features) (size (keep feature_index_map series_id_features)))
+							(not (size
+								(keep feature_index_map (indices !derivedFeaturesMap))
+							))
+						)
 						(let
 							(assoc
 								series_id_feature_indices (unzip feature_index_map series_id_features)
@@ -485,11 +428,77 @@
 			)
 		)
 
-		(if (and
-				(not (size context_features))
-				(size features)
-			)
+		(if (= 0 (size features))
+			;this path cannot execute if new_cases is specified. An error would have been raised earlier.
+			;So this is naturally for existing case flows.
+			(assign (assoc
+				features
+					(if (size action_features)
+						(filter (lambda (not (contains_value action_features (current_value)))) !trainedFeatures)
+						!trainedFeatures
+					)
+			))
+		)
+
+		(if (not (size context_features))
 			(assign (assoc context_features features))
+		)
+
+		;if user doesn't want to use case weights, change weight_feature to '.none'
+		(if (= .false use_case_weights)
+			(assign (assoc weight_feature ".none"))
+		)
+
+		(declare (assoc
+			data_params_map
+				(call !GetDataParameters (assoc
+					feature .null
+					context_features context_features
+					weight_feature weight_feature
+				))
+			valid_weight_feature .false
+
+			action_values .null
+			output_influential_cases .null
+			output_caps_map .null
+			feature_full_residuals_map .null
+			cases_avg_distance_contribution .null
+			avg_new_cases_residual_contribution .null
+			new_case_entropies_value .null
+			average_new_cases_conviction_addition .null
+			average_new_cases_conviction_removal .null
+			kl_divergence_addition_value .null
+			kl_divergence_removal_value .null
+			p_value_of_addition_value .null
+			p_value_of_removal_value .null
+			mean_similarity_conviction .null
+		))
+
+		(call !UpdateCaseWeightParameters)
+
+		(declare (assoc
+			feature_weights
+				;only overwrite with inactive features if feature weights already exist
+				(if (and (size !inactiveFeaturesMap) (size (get data_params_map "featureWeights")))
+					(append
+						(get data_params_map "featureWeights")
+						(map 1 !inactiveFeaturesMap)
+					)
+				)
+			feature_deviations (get data_params_map "featureDeviations")
+			closest_k (get data_params_map "k")
+			ts_feature_lag_amount_map (if !tsTimeFeature (call !BuildTSFeatureLagAmountMap))
+			max_lag_index_value .null
+		))
+		(if ts_feature_lag_amount_map
+			(assign (assoc max_lag_index_value (apply "max" ts_feature_lag_amount_map) ))
+		)
+
+		;closest k must be at least 2 smaller than dataset size, i.e., a dataset of 5 needs a K of 3 or less:
+		;when knocking out a case during conviction calculations, each remaining case searches for K cases around itself
+		;meaning that the K must be at least 2 less than the dataset size
+		(if (and (< dataset_size (+ closest_k 2)) (~ 0 closest_k))
+			(assign (assoc closest_k (- dataset_size 2)))
 		)
 
 		;cache average case entropies and distance contributions if necessary
