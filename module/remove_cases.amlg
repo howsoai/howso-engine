@@ -335,6 +335,20 @@
 			)
 	))
 
+	; Use a Large-Scale approach (Geometric Skipping) to populate reservoir
+	; To avoid per-record calculations at scale, use the property that the distance between "successes" in a Bernoulli process follows a Geometric distribution.
+	; However, because there are $k$ independent slots, find the minimum skip distance across all $k$ slots.
+	;
+	; The distance $S$ until the next record is selected for *any* of the $k$ slots follows a Geometric distribution with success probability $p = 1 - (1 - 1/N)^k$.
+	; For very large $N$, this is approximately $p \approx k/N$.
+	;
+	; **The optimized workflow for a batch of $M$ records:**
+	; 1. Calculate the skip distance $S$ by sampling from $Geometric(p)$.
+	; 2. If $S > M$, discard the entire batch of $M$ records immediately.
+	; 3. If $S \leq M$, jump to the $S$-th record.
+	; 4. For that record, determine how many slots it wins: $X \sim B(k, 1/N)$.
+	; 5. Update the reservoir at $X$ random indices.
+	; 6. Repeat from step 1 for the remainder of the batch.
 	!PopulateReservoir
 	(declare
 		(assoc
@@ -349,10 +363,8 @@
 			case_id .null
 			num_slots_to_update 1
 			slots []
-			reservoir_case_list (retrieve_from_entity !reservoirContainer "caseList")
 			update_reservoir .false
-			reservoir_cases_to_remove []
-			new_reservoir_cases []
+			slots_to_replace_map {}
 		))
 
 		(while (< selected_index num_cases)
@@ -365,45 +377,50 @@
 			))
 
 			;no need update reservoir
-			(if (> selected_index num_cases)
+			(if (>= selected_index num_cases)
 				(conclude)
 			)
 
 			(assign (assoc
-				update_reservoir .true
-				case_id (get case_ids selected_index)
-				;;;TODO:  Binomial(k=!reservoirSize, p=1/total)
-				num_slots_to_update 1
-
-				slots
-					(if (= 1 num_slots_to_update)
-						[(floor (* (rand) !reservoirSize))]
-						(rand (range 0 (- !reservoirSize 1)) num_slots_to_update .true)
-					)
-
+				num_slots_to_update
+					;sample from binomial distribution: Binomial(k=!reservoirSize, p=1/total)
+					(call !SampleBinomialInversion (assoc
+						k !reservoirSize
+						p (/ 1 total)
+					))
 			))
 
-			(map
-				(lambda (seq
-					(accum (assoc
-						new_reservoir_cases case_id
-						reservoir_cases_to_remove (get reservoir_case_list (current_value 1))
+			(if num_slots_to_update
+				(seq
+					(assign (assoc
+						update_reservoir .true
+						case_id (get case_ids selected_index)
+						slots
+							(if (= 1 num_slots_to_update)
+								[(floor (* (rand) !reservoirSize))]
+
+								(rand (range 0 (- !reservoirSize 1)) num_slots_to_update .true)
+							)
 					))
-					(accum "reservoir_case_list" (current_value) case_id)
-				))
-				slots
+
+					(accum (assoc
+						slots_to_replace_map (zip slots (map case_id slots))
+					))
+				)
 			)
 		)
 
 		(if update_reservoir
 			(let
 				(assoc
+					reservoir_case_list (retrieve_from_entity !reservoirContainer "caseList")
+
 					;assoc of case_id -> count for each case that may be removed in reservoir
 					reservoir_cases_count_map
 						(map
 							(lambda (first (current_value)))
 							(compute_on_contained_entities !reservoirContainer
-								(query_in_entity_list reservoir_cases_to_remove)
+								(query_in_entity_list (unzip reservoir_case_list (indices slots_to_replace_map)))
 								(query_exists ".case_count")
 							)
 						)
@@ -416,30 +433,35 @@
 						)
 						(accum_to_entities [!reservoirContainer (current_value 1)] (assoc ".case_count" 1))
 					))
-					new_reservoir_cases
+					(values slots_to_replace_map)
 				)
 
 				;update all the counts
 				(map
 					(lambda (accum "reservoir_cases_count_map" (current_value) -1) )
-					reservoir_cases_to_remove
+					(unzip reservoir_case_list (indices slots_to_replace_map))
 				)
 
 				;remove cases with a count of 0
 				(map
 					(lambda
-						(if (= 0 (get reservoir_cases_count_map (current_value)))
+						(if (= 0 (current_value))
 							;cases can only be removed by container entity
-							(call_entity !reservoirContainer "remove_case" (assoc id (current_value 1)))
+							(call_entity !reservoirContainer "remove_case" (assoc id (current_index 1)))
 						)
 					)
-					reservoir_cases_to_remove
+					reservoir_cases_count_map
 				)
 
 				;update case list and total
 				(assign_to_entities !reservoirContainer (assoc
-					"caseList" reservoir_case_list
 					"total" total
+					"caseList"
+						;overwrite slots with corresponding cases in reservoir_case_list
+						(apply
+							(lambda (modify reservoir_case_list))
+							(weave (indices slots_to_replace_map) (values slots_to_replace_map))
+						)
 				))
 			)
 		)
