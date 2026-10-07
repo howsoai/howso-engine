@@ -889,12 +889,7 @@
 		)
 
 		(declare (assoc
-			pre_combine_dataset_size
-				(if (or !autoAblationEnabled (!= 0 (size (contained_entities (query_exists ".case_weight")))))
-					(compute_on_contained_entities (query_sum (if !autoAblationEnabled !autoAblationWeightFeature ".case_weight")))
-					;else it's just the number of cases
-					(call !GetNumTrainingCases)
-				)
+			pre_combine_dataset_size (call !GetTraineeMass)
 			has_inactive_features (size !inactiveFeaturesMap)
 		))
 
@@ -949,6 +944,7 @@
 					subtrainees
 				))
 			warnings .null
+			merge_reservoir_map { "self" (if !hasReservoir pre_combine_dataset_size 0) }
 		))
 
 		(if (> num_case_collisions 5)
@@ -956,7 +952,69 @@
 				warnings (associate (concat "Detected multiple (" num_case_collisions ") case id collisions, please verify different random seeds were used during trainee creation."))
 			))
 		)
-		;iterate over each subtrainee,  move their cases and sessions over to trainee and remove the subtrainee
+
+		(map
+			(lambda
+				(if (contains_entity [!traineeContainer (current_value 1) !reservoirContainer])
+					(accum
+						"merge_reservoir_map"
+						(current_value)
+						(get
+							(call_entity [!traineeContainer (current_value 1)] "get_num_training_cases")
+							[1 "payload" "mass"]
+						)
+					)
+				)
+			)
+			subtrainees
+		)
+
+		(if (apply "+" merge_reservoir_map)
+			(let
+				(assoc
+					total
+						;update reservoir total
+						(apply "+" (map
+							(lambda
+								(if (= "self" (current_value))
+									(if !hasReservoir (retrieve_from_entity !reservoirContainer "total") 0)
+
+									(retrieve_from_entity [!traineeContainer (current_value 1) !reservoirContainer] "total")
+								)
+							)
+							(indices merge_reservoir_map)
+						))
+				)
+
+				;create assoc of trainee -> list of reservoir cases to keep
+				(assign (assoc
+					merge_reservoir_map
+						(map
+							(lambda
+								(if (= "self" (current_index))
+									(if !hasReservoir
+										(rand (retrieve_from_entity !reservoirContainer "caseList") (current_value))
+										[]
+									)
+
+									(rand (retrieve_from_entity [!traineeContainer (current_index 1) !reservoirContainer] "caseList") (current_value))
+								)
+							)
+							;compute how many cases to keep from each trainee, assoc of trainee -> number of cases
+							(map
+								(lambda (* !reservoirSize (current_value)))
+								(normalize merge_reservoir_map)
+							)
+						)
+				))
+
+				;;;TODO:
+				;move the selected cases in merge_reservoir_map into reservoir, update caseList and total
+
+			)
+		)
+
+		;iterate over each subtrainee, move their cases and sessions over to trainee and remove the subtrainee
 		(map
 			(lambda (let
 				(assoc subtrainee [!traineeContainer (current_value 2)])
