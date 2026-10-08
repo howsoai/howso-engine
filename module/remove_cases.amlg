@@ -358,12 +358,15 @@
 
 		(declare (assoc
 			num_cases (or (size case_ids) (size cases))
+			is_case_ids (if (size case_ids) .true .false)
 			total (+ (retrieve_from_entity !reservoirContainer "total") num_cases)
 			selected_index 0
 			case_id .null
 			num_slots_to_update 1
 			slots []
 			update_reservoir .false
+
+			;assoc of replacement slot -> case id  if case_ids provided, or selected index of new case if cases provided
 			slots_to_replace_map {}
 		))
 
@@ -394,7 +397,8 @@
 				(seq
 					(assign (assoc
 						update_reservoir .true
-						case_id (get case_ids selected_index)
+						;if cases are provided instead of case_ids, just store the selected_index, populate with case id later after creating the case
+						case_id (if is_case_ids (get case_ids selected_index) selected_index)
 						slots
 							(if (= 1 num_slots_to_update)
 								[(floor (* (rand) !reservoirSize))]
@@ -426,14 +430,54 @@
 						)
 				)
 
-				(map
-					(lambda (seq
-						(if (not (contains_entity [!reservoirContainer (current_value 1)]))
-							(clone_entities (current_value) [!reservoirContainer (current_value 1)])
+				(if is_case_ids
+					;copy cases to reservoir and update their case counts
+					(map
+						(lambda (seq
+							(if (not (contains_entity [!reservoirContainer (current_value 1)]))
+								(clone_entities (current_value) [!reservoirContainer (current_value 1)])
+							)
+							(accum_to_entities [!reservoirContainer (current_value 1)] (assoc ".case_count" 1))
+						))
+						(values slots_to_replace_map)
+					)
+
+					;else passed in raw case data, create the cases and since slots_to_replace_map is an assoc of slot -> selected_index,
+					;update it so it becomes slot -> case_id
+					(let
+						(assoc
+							;assoc of selected_index -> case id
+							selected_index_to_case_id_map
+								;iterate over assoc of selected indices
+								(map
+									(lambda
+										;create case and output case_id ;;;TODO: verify
+										(first (create_entities [!reservoirContainer]
+											(zip
+												!trainedFeatures
+												(get cases (current_index))
+											)
+										))
+									)
+									(zip (values slots_to_replace_map))
+								)
 						)
-						(accum_to_entities [!reservoirContainer (current_value 1)] (assoc ".case_count" 1))
-					))
-					(values slots_to_replace_map)
+
+						;update values in slots_to_replace_map to be case_ids and update the newly created case counts
+						(assign (assoc
+							slots_to_replace_map
+								(map
+									(lambda (let
+										(assoc
+											case_id (get selected_index_to_case_id_map (current_value 1))
+										)
+										(accum_to_entities [!reservoirContainer case_id] (assoc ".case_count" 1))
+										case_id
+									))
+									slots_to_replace_map
+								)
+						))
+					)
 				)
 
 				;update all the counts
