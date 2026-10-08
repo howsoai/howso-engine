@@ -1,0 +1,453 @@
+;Contains methods for mantaining reservoir cases
+{
+
+	!CreateAndPopulareReservoir
+	(let
+		(assoc
+			;pick random cases to clone into reservoir
+			rand_cases
+				(if (> (size all_case_ids) !reservoirSize)
+					(trunc all_case_ids !reservoirSize)
+
+					;else populate with replacement
+					(rand all_case_ids !reservoirSize)
+				)
+		)
+
+		(create_entities !reservoirContainer {
+			"remove_case" (lambda (destroy_entities id))
+			"total" (size rand_cases)
+			"caseList" rand_cases
+		})
+		(assign_to_entities (assoc !hasReservoir .true))
+
+		;copy all the unique cases from the random list into reservoir
+		(map
+			(lambda (seq
+				(if (not (contains_entity [!reservoirContainer (current_value 1)]))
+					(clone_entities (current_value) [!reservoirContainer (current_value 1)])
+				)
+				(accum_to_entities [!reservoirContainer (current_value 1)] (assoc ".case_count" 1))
+			))
+			rand_cases
+		)
+
+		(if (> (size all_case_ids) !reservoirSize)
+			(call !PopulateReservoir (assoc
+				case_ids (tail all_case_ids (- (size all_case_ids) !reservoirSize))
+			))
+		)
+	)
+
+
+	;helper methot to combine reservoirs from subtrainees with this trainee during combine_with_subtrainees()
+	!CombineSubtraineeReservoirs
+	(let
+		(assoc
+			total
+				;update reservoir total
+				(apply "+" (map
+					(lambda
+						(if (= "self" (current_value))
+							(if !hasReservoir (retrieve_from_entity !reservoirContainer "total") 0)
+
+							(retrieve_from_entity [!traineeContainer (current_value 1) !reservoirContainer] "total")
+						)
+					)
+					(indices merge_reservoir_map)
+				))
+			new_case_list []
+		)
+
+		;create assoc of trainee -> list of reservoir cases to keep
+		(assign (assoc
+			merge_reservoir_map
+				(map
+					(lambda
+						(if (= "self" (current_index))
+							(if !hasReservoir
+								(rand (retrieve_from_entity !reservoirContainer "caseList") (current_value))
+								[]
+							)
+
+							(rand (retrieve_from_entity [!traineeContainer (current_index 1) !reservoirContainer] "caseList") (current_value))
+						)
+					)
+					;compute how many cases to keep from each trainee, assoc of trainee -> number of cases
+					(map
+						(lambda (* !reservoirSize (current_value)))
+						(normalize merge_reservoir_map)
+					)
+				)
+		))
+
+		(if (not !hasReservoir)
+			(seq
+				(create_entities !reservoirContainer {
+					"remove_case" (lambda (destroy_entities id))
+					"total" 0
+					"caseList" []
+				})
+				(assign_to_entities (assoc !hasReservoir .true))
+			)
+		)
+
+		(map
+			(lambda
+				(if (!= "self" (current_index))
+					(let
+						(assoc
+							trainee (current_index 1)
+							;case ids in reservoirs should virtually never have the same ids as those in this trainee's reservoir,
+							;but check for collisions just in case
+							collision_cases
+								(contained_entities !reservoirContainer
+									(query_in_entity_list (current_value 1))
+								)
+							has_collision_cases (> (size collision_cases) 0)
+						)
+						(declare (assoc
+							new_case_ids
+								;this is a subtrainee, move cases to this reservoir
+								(map
+									(lambda (let
+										(assoc case_id (current_value 1))
+
+										;skip this case_id if it's a collision one
+										(if (and has_collision_cases (contains_value collision_cases case_id))
+											(conclude .null)
+										)
+
+										;move entity once
+										(if (not (contains_entity [!reservoirContainer case_id]))
+											(move_entities [!traineeContainer trainee !reservoirContainer case_id] [!reservoirContainer case_id])
+										)
+
+										case_id
+									))
+									(current_value 1)
+								)
+						))
+
+						;remove the nulls if there are collisions
+						(if has_collision_cases
+							(assign (assoc new_case_ids (filter new_case_ids) ))
+						)
+
+						(if (size new_case_ids)
+							(accum (assoc new_case_list new_case_ids))
+						)
+					)
+				)
+			)
+			merge_reservoir_map
+		)
+
+		(declare (assoc
+			self_cases_to_keep (get merge_reservoir_map "self")
+			;number of extra cases to keep from own reservoir to ensure the total size remains as !reservoirSize
+			num_extra_pad_cases
+				(if (< (+ (size self_cases_to_keep) (size new_case_list) ) !reservoirSize)
+					(-
+						!reservoirSize
+						(+ (size self_cases_to_keep) (size new_case_list) )
+					)
+
+					0
+				)
+			extra_cases
+				(if num_extra_pad_cases
+					;randomly pick num_extra_pad_cases cases from own reservoir to keep
+					(contained_entities !reservoirContainer
+						(query_not_in_entity_list self_cases_to_keep)
+						(query_select num_extra_pad_cases .null (rand))
+					)
+
+					[]
+				)
+		))
+
+		(assign (assoc new_case_list (append self_cases_to_keep new_case_list extra_cases) ))
+
+		;remove cases not in list of cases to keep in own reservoir
+		(map
+			(lambda
+				(call_entity !reservoirContainer "remove_case" (assoc id (current_value 1) ))
+			)
+			(contained_entities !reservoirContainer
+				(query_in_entity_list (retrieve_from_entity !reservoirContainer "caseList"))
+				(query_not_in_entity_list self_cases_to_keep)
+				(if (size extra_cases)
+					(query_not_in_entity_list extra_cases)
+					[]
+				)
+			)
+		)
+
+		;update case count for all the cases in the reservoir
+		(map
+			(lambda
+				(assign_to_entities [!reservoirContainer (current_index 1)] (assoc ".case_count" (current_value 1) ))
+			)
+			;create assoc of case id -> count of times it is in the list
+			(zip
+				(lambda (+ 1 (current_value 1)))
+				new_case_list
+				(map 1 new_case_list)
+			)
+		)
+
+		(assign_to_entities !reservoirContainer (assoc
+			"caseList" new_case_list
+			"total" total
+		))
+	)
+
+
+	; Use a Large-Scale approach (Geometric Skipping) to populate reservoir
+	; To avoid per-record calculations at scale, use the property that the distance between "successes" in a Bernoulli process follows a Geometric distribution.
+	; However, because there are $k$ independent slots, find the minimum skip distance across all $k$ slots.
+	;
+	; The distance $S$ until the next record is selected for *any* of the $k$ slots follows a Geometric distribution with success probability $p = 1 - (1 - 1/N)^k$.
+	; For very large $N$, this is approximately $p \approx k/N$.
+	;
+	; **The optimized workflow for a batch of $M$ records:**
+	; 1. Calculate the skip distance $S$ by sampling from $Geometric(p)$.
+	; 2. If $S > M$, discard the entire batch of $M$ records immediately.
+	; 3. If $S \leq M$, jump to the $S$-th record.
+	; 4. For that record, determine how many slots it wins: $X \sim B(k, 1/N)$.
+	; 5. Update the reservoir at $X$ random indices.
+	; 6. Repeat from step 1 for the remainder of the batch.
+	!PopulateReservoir
+	(declare
+		(assoc
+			case_ids []
+			cases []
+			features !trainedFeatures
+		)
+
+		(declare (assoc
+			num_cases (or (size case_ids) (size cases))
+			is_case_ids (if (size case_ids) .true .false)
+			total (+ (retrieve_from_entity !reservoirContainer "total") num_cases)
+			selected_index 0
+			case_id .null
+			num_slots_to_update 1
+			slots []
+			update_reservoir .false
+
+			;assoc of replacement slot -> case id  if case_ids provided, or selected index of new case if cases provided
+			slots_to_replace_map {}
+		))
+
+		(while (< selected_index num_cases)
+			; p = 1 - (1 - 1/total) ^ reservoir_size
+			(accum (assoc
+				selected_index
+					(call !SampleFromGeometricDistribution (assoc
+						p  (- 1 (pow (- 1 (/ 1 total)) !reservoirSize) )
+					))
+			))
+
+			;no need update reservoir
+			(if (>= selected_index num_cases)
+				(conclude)
+			)
+
+			(assign (assoc
+				num_slots_to_update
+					;sample from binomial distribution: Binomial(k=!reservoirSize, p=1/total)
+					(call !SampleBinomialInversion (assoc
+						k !reservoirSize
+						p (/ 1 total)
+					))
+			))
+
+			(if num_slots_to_update
+				(seq
+					(assign (assoc
+						update_reservoir .true
+						;if cases are provided instead of case_ids, just store the selected_index, populate with case id later after creating the case
+						case_id (if is_case_ids (get case_ids selected_index) selected_index)
+						slots
+							(if (= 1 num_slots_to_update)
+								[(floor (* (rand) !reservoirSize))]
+
+								(rand (range 0 (- !reservoirSize 1)) num_slots_to_update .true)
+							)
+					))
+
+					(accum (assoc
+						slots_to_replace_map (zip slots (map case_id slots))
+					))
+				)
+			)
+		)
+
+		(if update_reservoir
+			(let
+				(assoc
+					reservoir_case_list (retrieve_from_entity !reservoirContainer "caseList")
+
+					;assoc of case_id -> count for each case that may be removed in reservoir
+					reservoir_cases_count_map
+						(map
+							(lambda (first (current_value)))
+							(compute_on_contained_entities !reservoirContainer
+								(query_in_entity_list (unzip reservoir_case_list (indices slots_to_replace_map)))
+								(query_exists ".case_count")
+							)
+						)
+				)
+
+				(if is_case_ids
+					;copy cases to reservoir and update their case counts
+					(map
+						(lambda (seq
+							(if (not (contains_entity [!reservoirContainer (current_value 1)]))
+								(clone_entities (current_value) [!reservoirContainer (current_value 1)])
+							)
+							(accum_to_entities [!reservoirContainer (current_value 1)] (assoc ".case_count" 1))
+						))
+						(values slots_to_replace_map)
+					)
+
+					;else passed in raw case data, create the cases and since slots_to_replace_map is an assoc of slot -> selected_index,
+					;update it so it becomes slot -> case_id
+					(let
+						(assoc
+							;assoc of selected_index -> case id
+							selected_index_to_case_id_map
+								;iterate over assoc of selected indices
+								(map
+									(lambda
+										;create case and output case_id ;;;TODO: verify
+										(first (create_entities [!reservoirContainer]
+											(zip
+												features
+												(get cases (current_index))
+											)
+										))
+									)
+									(zip (values slots_to_replace_map))
+								)
+						)
+
+						;update values in slots_to_replace_map to be case_ids and update the newly created case counts
+						(assign (assoc
+							slots_to_replace_map
+								(map
+									(lambda (let
+										(assoc
+											case_id (get selected_index_to_case_id_map (current_value 1))
+										)
+										(accum_to_entities [!reservoirContainer case_id] (assoc ".case_count" 1))
+										case_id
+									))
+									slots_to_replace_map
+								)
+						))
+					)
+				)
+
+				;update all the counts
+				(map
+					(lambda (accum "reservoir_cases_count_map" (current_value) -1) )
+					(unzip reservoir_case_list (indices slots_to_replace_map))
+				)
+
+				;remove cases with a count of 0
+				(map
+					(lambda
+						(if (= 0 (current_value))
+							;cases can only be removed by container entity
+							(call_entity !reservoirContainer "remove_case" (assoc id (current_index 1) ))
+						)
+					)
+					reservoir_cases_count_map
+				)
+
+				;update case list and total
+				(assign_to_entities !reservoirContainer (assoc
+					"total" total
+					"caseList"
+						;overwrite slots with corresponding cases in reservoir_case_list
+						(apply
+							(lambda (modify reservoir_case_list))
+							(weave (indices slots_to_replace_map) (values slots_to_replace_map))
+						)
+				))
+			)
+		)
+	)
+
+
+	;Helper method to sample from the Geometric distribution given a probability 'p'
+	;uses the formula:  floor(ln(1-random()) / ln(1-p))
+	!SampleFromGeometricDistribution
+	(floor (/
+		(log (- 1 (rand)))
+		(log (- 1 p))
+	) )
+
+
+	;select from a binomial distribution: select from 'k' trials the number of times a trial had a probability < 'p'
+	;
+	; def sample_binomial_inversion(k, p):
+    ; """
+    ; Fast Inversion Method. Best for small k * p.
+    ; Directly loops through the CDF using a recurrence relation for speed.
+    ; """
+    ; u = random.random()
+    ; q = 1.0 - p
+    ; # Initial probability mass at P(X=0)
+    ; p_k = q ** k
+    ; cdf = p_k
+    ; x = 0
+
+    ; while u > cdf:
+    ;     x += 1
+    ;     # Recurrence relation: P(X=x) = P(X=x-1) * (k - x + 1)/x * (p/q)
+    ;     p_k *= ((k - x + 1) / x) * (p / q)
+    ;     cdf += p_k
+    ;     if x >= k:  # Safety boundary
+    ;         return k
+    ; return x
+	;
+	;parameters:
+	; k: number of samples/trials
+	; p: probability
+	!SampleBinomialInversion
+	(declare
+		(assoc
+			k 1000
+			p 0.001
+		)
+
+		(declare (assoc
+			u (rand)
+			q (- 1.0 p)
+			p_k (pow q k)
+			cdf (modify p_k)
+			x 0
+		))
+
+		(while (> u cdf)
+			(accum (assoc x 1))
+			(assign (assoc
+				p_k
+					(*
+						p_k
+						(/ (+ (- k x) 1) x)
+						(/ p q)
+					)
+				cdf (+ cdf p_k)
+			))
+			(if (>= x k) (conclude))
+		)
+
+		;output x
+		x
+	)
+
+}
