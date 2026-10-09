@@ -381,6 +381,83 @@
 		)
 	)
 
+	;helper method for react aggregate to select cases from reservoir, populates 'sampled_reservoir_cases' and adds warnings as appropriate
+	!SelectCasesFromReservoir
+	(let
+		(assoc
+			num_samples_needed
+				(if num_samples
+					num_samples
+
+					(> sample_model_fraction 0)
+					(* sample_model_fraction num_training_cases)
+
+					;else default is 1000
+					1000
+				)
+		)
+
+		(if (and num_samples (> num_samples_needed !reservoirSize))
+			(accum (assoc
+				warnings (associate (concat "The specified \"num_samples\" exceeds reservoir storage, using all " !reservoirSize " cases in reservoir." ))
+			))
+
+			(and (> sample_model_fraction 0) (> num_samples_needed !reservoirSize))
+			(accum (assoc
+				warnings (associate (concat "The specified \"sample_model_fraction\" exceeds reservoir storage, using all " !reservoirSize " cases in reservoir." ))
+			))
+
+			;else if the number of cases remaining after the condition query is too small, warn
+			(and
+				(size action_condition_filter_query)
+				(<
+					(compute_on_contained_entities !reservoirContainer
+						action_condition_filter_query
+						(query_sum ".case_count")
+					)
+					num_samples_needed
+				)
+			)
+			(accum (assoc
+				warnings (associate (concat "The specified \"action_condition\" selects fewer than the desired " num_samples_needed " number of samples." ))
+			))
+		)
+
+		(assign (assoc
+			sampled_reservoir_cases
+				;each case id is the full path case id from a case in the reservoir
+				(map
+					(lambda [!reservoirContainer (current_value 1)])
+
+					(if (size action_condition_filter_query)
+						(let
+							(assoc
+								unique_conditioned_cases_map (compute_on_contained_entities !reservoirContainer action_condition_filter_query)
+								conditioned_cases
+									(filter
+										(lambda (contains_index unique_conditioned_cases_map (current_value)))
+										(retrieve_from_entity !reservoirContainer "caseList")
+									)
+							)
+							;randomly select (without replacement) the specified number of cases from the conditioned reservoir cases
+							(if (< num_samples_needed (size conditioned_cases))
+								(rand conditioned_cases num_samples_needed .true)
+								conditioned_cases
+							)
+						)
+
+						(if (< num_samples_needed !reservoirSize)
+							;randomly select (without replacement) the specified number of cases from the reservoir
+							(rand (retrieve_from_entity !reservoirContainer "caseList") num_samples_needed .true)
+
+							;else use all the cases in reservoir
+							(retrieve_from_entity !reservoirContainer "caseList")
+						)
+					)
+				)
+		))
+	)
+
 
 	;Helper method to sample from the Geometric distribution given a probability 'p'
 	;uses the formula:  floor(ln(1-random()) / ln(1-p))
