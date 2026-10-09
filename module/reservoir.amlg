@@ -300,6 +300,23 @@
 						)
 				)
 
+				;compute and output what should be moved into reservoir without actually doing it
+				(if read_only_mode
+					(seq
+						(accum (assoc
+							reservoir_updated_slot_case_map
+								;store the actual cases data
+								(map
+									(lambda (get cases (current_value)))
+									slots_to_replace_map
+								)
+							reservoir_total_increment num_cases
+						))
+						(assign (assoc reservoir_features features ))
+						(conclude)
+					)
+				)
+
 				(if is_case_ids
 					;copy cases to reservoir and update their case counts
 					(map
@@ -380,6 +397,82 @@
 			)
 		)
 	)
+
+
+	;Helper method for process_train_payload() to populate reservoir from the train payload
+	!PopulateReservoirFromTrainPayload
+	(let
+		(assoc
+			reservoir_case_list (retrieve_from_entity !reservoirContainer "caseList")
+			total (+ (retrieve_from_entity !reservoirContainer "total") reservoir_total_increment)
+			;assoc of case_id -> count for each case that may be removed in reservoir
+			reservoir_cases_count_map
+				(map
+					(lambda (first (current_value)))
+					(compute_on_contained_entities !reservoirContainer
+						(query_in_entity_list (unzip reservoir_case_list (indices reservoir_updated_slot_case_map)))
+						(query_exists ".case_count")
+					)
+				)
+		)
+
+		;update all the counts
+		(map
+			(lambda (accum "reservoir_cases_count_map" (current_value) -1) )
+			(unzip reservoir_case_list (indices reservoir_updated_slot_case_map))
+		)
+
+		;remove all cases with a count of 0
+		(map
+			(lambda
+				(call_entity !reservoirContainer "remove_case" (assoc id (current_value 1) ))
+			)
+			(indices (filter 0 reservoir_cases_count_map .true))
+		)
+
+		;create cases from 'reservoir_updated_slot_case_map'
+		(declare (assoc
+			create_case_values_to_case_id_map
+				;iterate over assoc of selected indices
+				(map
+					(lambda
+						;create case and output case_id ;;;TODO: verify
+						(first (create_entities [!reservoirContainer]
+							(zip
+								reservoir_features
+								(current_index)
+							)
+						))
+					)
+					(zip (values reservoir_updated_slot_case_map))
+				)
+		))
+
+		(assign (assoc
+			reservoir_updated_slot_case_map
+				(map
+					(lambda (let
+						(assoc
+							case_id (get create_case_values_to_case_id_map (current_value 1))
+						)
+						(accum_to_entities [!reservoirContainer case_id] (assoc ".case_count" 1))
+						case_id
+					))
+					reservoir_updated_slot_case_map
+				)
+		))
+
+		(assign_to_entities !reservoirContainer (assoc
+			"total" total
+			"caseList"
+				;overwrite slots with corresponding cases in reservoir_case_list
+				(apply
+					(lambda (modify reservoir_case_list))
+					(weave (indices reservoir_updated_slot_case_map) (values reservoir_updated_slot_case_map))
+				)
+		))
+	)
+
 
 	;helper method for react aggregate to select cases from reservoir, populates 'sampled_reservoir_cases' and adds warnings as appropriate
 	!SelectCasesFromReservoir
