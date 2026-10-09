@@ -889,12 +889,7 @@
 		)
 
 		(declare (assoc
-			pre_combine_dataset_size
-				(if (or !autoAblationEnabled (!= 0 (size (contained_entities (query_exists ".case_weight")))))
-					(compute_on_contained_entities (query_sum (if !autoAblationEnabled !autoAblationWeightFeature ".case_weight")))
-					;else it's just the number of cases
-					(call !GetNumTrainingCases)
-				)
+			pre_combine_dataset_size (call !GetTraineeMass)
 			has_inactive_features (size !inactiveFeaturesMap)
 		))
 
@@ -949,6 +944,7 @@
 					subtrainees
 				))
 			warnings .null
+			merge_reservoir_map { "self" (if !hasReservoir pre_combine_dataset_size 0) }
 		))
 
 		(if (> num_case_collisions 5)
@@ -956,7 +952,30 @@
 				warnings (associate (concat "Detected multiple (" num_case_collisions ") case id collisions, please verify different random seeds were used during trainee creation."))
 			))
 		)
-		;iterate over each subtrainee,  move their cases and sessions over to trainee and remove the subtrainee
+
+		;populate merge_reservoir_map to be an assoc of: trainee -> mass of cases
+		(map
+			(lambda
+				(if (contains_entity [!traineeContainer (current_value 1) !reservoirContainer])
+					(accum
+						"merge_reservoir_map"
+						(current_value)
+						(get
+							(call_entity [!traineeContainer (current_value 1)] "get_num_training_cases")
+							[1 "payload" "mass"]
+						)
+					)
+				)
+			)
+			subtrainees
+		)
+
+		;if there are subtrainee reservoirs, combine them
+		(if (apply "+" merge_reservoir_map)
+			(call !CombineSubtraineeReservoirs)
+		)
+
+		;iterate over each subtrainee, move their cases and sessions over to trainee and remove the subtrainee
 		(map
 			(lambda (let
 				(assoc subtrainee [!traineeContainer (current_value 2)])
