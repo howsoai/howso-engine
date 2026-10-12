@@ -616,6 +616,10 @@
 			;	default to the value stored within the Trainee via 'set_auto_ablation_params', which defaults to 50,000.
 			#{type "number"}
 			reduce_max_cases !postReduceMaxCases
+			;Minimum count of cases in a cluster to preserve when reducing a dataset that has been clustered. Defaults to 2.
+			;This will ensure no cluster is reduced to less than this amount of cases. Specifying 0 disables preservation.
+			#{type "number"}
+			min_preserved_cluster_count !minPreservedClusterCount
 			;skip auto analyzing as cases are removed
 			#{type "boolean"}
 			skip_auto_analyze .false
@@ -662,7 +666,7 @@
 			(if (size low_weight_cases)
 				(call !RemoveCases (assoc
 					cases low_weight_cases
-					distribute_weight_feature low_weight_cases
+					distribute_weight_feature distribute_weight_feature
 				))
 			)
 		)
@@ -799,17 +803,13 @@
 												)
 											)
 										)
-								)
 
-								(declare (assoc
 									coreset_size
 										(if lowest_ns_cases_trunc_n
 											(size (contained_entities (query_not_equals ".keeping" .null )))
 											(- num_cases (size low_ns_case_ratio_map))
 										)
-								))
 
-								(declare (assoc
 									num_cases_to_keep
 										(min
 											;grow coreset in relation to its current size.
@@ -822,12 +822,10 @@
 											;if approaching max size, select as many cases needed to reach limit.
 											(max 1 (- reduce_max_cases coreset_size))
 										)
-								))
 
-								;largest of the lowest neighbor surprisal ratio
-								(declare (assoc
+									;largest of the lowest neighbor surprisal ratio
 									max_lowest_ns_ratio (apply "max" low_ns_case_ratio_map)
-								))
+								)
 
 								;if enough cases have been selected, and ratios have fallen below the cutoff, then end case selection
 								;after this iteration.
@@ -879,16 +877,7 @@
 								(if (= 1 num_cases_to_keep)
 									(trunc (index_max low_ns_case_ratio_map) 1)
 
-									(sort
-										(lambda
-											(-
-												(get low_ns_case_ratio_map (current_value 1))
-												(get low_ns_case_ratio_map (current_value))
-											)
-										)
-										(indices low_ns_case_ratio_map)
-										num_cases_to_keep
-									)
+									(indices (sort .false low_ns_case_ratio_map num_cases_to_keep))
 								)
 							)
 						)
@@ -931,9 +920,10 @@
 						)
 				))
 
+				;duplicate merging may leave fewer cases than the requested target; stop once all survivors are kept
 				(if (>=
 						(size (contained_entities (query_not_equals ".keeping" .null) ))
-						reduce_max_cases
+						(min reduce_max_cases num_cases)
 					)
 					(assign (assoc done .true))
 				)
@@ -946,7 +936,7 @@
 		))
 
 		;remove called after dataset has been clustered using the default clustering feature, ensure all clusters have at least 30 cases in them
-		(if (= ".cluster_id" (get !clusteringParametersMap "feature"))
+		(if (and min_preserved_cluster_count (= ".cluster_id" (get !clusteringParametersMap "feature")))
 			(call !FilterCasesToRemoveForClustering)
 		)
 
@@ -1096,22 +1086,24 @@
 		)
 	)
 
-	;helper method to ensure that all clusters have at least 30 cases remaining in them by removing smaller cluster cases
-	;from cases_to_remove and adding the latest cases that were added to the core set to cases_to_remove
+
+	;helper method to ensure that all clusters have at least min_preserved_cluster_count cases remaining in them
+	;by removing these smaller cluster cases from cases_to_remove and adding the latest cases from other clusters that were added to the core set to cases_to_remove
 	!FilterCasesToRemoveForClustering
 	(let
 		(assoc
 			small_cluster_map
 				(filter
-					(lambda (< (current_value) 30))
+					(lambda (< (current_value) min_preserved_cluster_count))
 					(compute_on_contained_entities
+						;consider only cases that are being kept
 						(query_not_in_entity_list cases_to_remove)
-						(query_value_masses ".cluster_id" distribute_weight_feature)
+						(query_value_masses ".cluster_id")
 					)
 				)
 		)
 
-		;nothing to do since all clusters have at least 30 cases
+		;nothing to do since all clusters that are kept have at least min_preserved_cluster_count cases
 		(if (= 0 (size small_cluster_map))
 			(conclude)
 		)
@@ -1120,46 +1112,17 @@
 			cluster_cases_to_keep
 				(apply "append"
 					(map
-						(lambda (let
-							(assoc
-								mass_needed (current_value 1)
-								cluster_id (current_index 1)
-								;assoc of case id -> assoc with .case_weight and .keeping for each case
-								selected_cases_weights_map
-									(compute_on_contained_entities
-										(query_in_entity_list cases_to_remove)
-										(query_equals ".cluster_id" cluster_id)
-										(query_max distribute_weight_feature mass_needed)
-										(query_exists distribute_weight_feature)
-									)
-								;case ids sorted in order of selected, last to first
-								cases_sorted_by_weight
-									(sort
-										(lambda
-											;decreasing order, last select cases are ordered first
-											(<
-												(get selected_cases_weights_map [(current_value 1) distribute_weight_feature])
-												(get selected_cases_weights_map [(current_value 2) distribute_weight_feature])
-											)
-										)
-										(indices selected_cases_weights_map)
-									)
-								mass_of_cases 0
-								number_to_keep 0
+						(lambda
+							(contained_entities
+								(query_in_entity_list cases_to_remove)
+								;(current_index) is the cluster id
+								(query_equals ".cluster_id" (current_index))
+								;(current_value) is the number of cases needed
+								(query_max distribute_weight_feature (current_value))
 							)
-
-							;compute how many cluster cases should be kept for the mass to be whatever is needed
-							(while (< mass_of_cases mass_needed)
-								(accum (assoc
-									mass_of_cases (get selected_cases_weights_map [(get cases_sorted_by_weight (current_index 2)) distribute_weight_feature])
-									number_to_keep 1
-								))
-							)
-
-							(trunc cases_sorted_by_weight number_to_keep)
-						))
+						)
 						;a map of cluster_id -> number of needed cases (total mass of needed cases when case weights are enabled)
-						(map (lambda (- 30 (current_value))) small_cluster_map)
+						(map (lambda (- min_preserved_cluster_count (current_value))) small_cluster_map)
 					)
 				)
 			;last added cases for keeping will be used to pad cases for removal to replace the cluster cases needed to be kept
@@ -1183,8 +1146,6 @@
 				)
 		))
 	)
-
-
 
 	;helper method that merges duplicate cases during the reduce_data flow
 	;uses the precomputed min_neighbor_surprisal_map and neighbor_surprisals_map to find and merge duplicates
