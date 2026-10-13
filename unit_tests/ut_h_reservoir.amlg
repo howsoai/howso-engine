@@ -1,0 +1,134 @@
+;real-data concurrency tests for scale.amlg
+(seq
+	(assign_to_entities (load "unit_test.amlg"))
+	(call (load "unit_test_howso.amlg") (assoc name "ut_h_reservoir.amlg"))
+
+	; The data set is y=x^2.
+	(declare (assoc
+		!CreateSquareCases
+			(lambda (map
+				(lambda
+					(list
+						(current_value 1)
+						(* (current_value 1) (current_value 1))
+					)
+				)
+				xs
+			))
+	))
+
+	(print "set_feature_attributes\n")
+	(call_entity "howso" "set_feature_attributes" (assoc
+		feature_attributes (assoc
+			"x" (assoc "type" "continuous")
+			"y" (assoc "type" "continuous")
+		)
+	))
+
+	(print "set_auto_ablation_params\n")
+	(call_entity "howso" "set_auto_ablation_params" (assoc
+		auto_ablation_enabled .true
+		min_num_cases 100
+		max_num_cases 200
+		reduce_max_cases 100
+		reservoir_size 100
+	))
+
+	(print "train\n")
+	(call_entity "howso" "train" (assoc
+		cases (call !CreateSquareCases (assoc xs (range 0 999)))
+		features (list "x" "y")
+		session "unit_test"
+	))
+
+	(print "analyze\n")
+	(call_entity "howso" "analyze" (assoc))
+
+	(print "reduce_data and populate reservoir\n")
+	(call_entity "howso" "reduce_data" (assoc))
+
+	(declare (assoc
+		first_pass_cases (call_entity "howso" "get_cases" (assoc features (list "x")))
+	))
+	(print "get_cases succeeded: ")
+	(call assert_same (assoc
+		obs (first first_pass_cases)
+		exp 1
+	))
+	(print "only 100 cases remain: ")
+	(call assert_same (assoc
+		exp 100
+		obs (size
+				(get first_pass_cases (list 1 "payload" "cases"))
+			)
+	))
+
+	; ;would be payload for cases in the 400-500 range
+	(declare (assoc
+		train_payload
+			(call_entity "howso" "compute_train_payload" (assoc
+				cases (call !CreateSquareCases (assoc xs (range 800 1199)))
+				features (list "x" "y")
+				session "unit_test"
+			))
+	))
+	(print "compute_train_payload succeeded: ")
+	(call assert_same (assoc
+		obs (first train_payload)
+		exp 1
+	))
+
+	(print "payload contains reservoir features: ")
+	(call assert_same (assoc
+		obs (size (get train_payload [1 "payload" "reservoir_features"]))
+		exp 3
+	))
+
+	(print "payload contains reservoir increment: ")
+	(call assert_same (assoc
+		obs (get train_payload [1 "payload" "reservoir_total_increment"])
+		exp 400
+	))
+
+	(declare (assoc
+		reservoir_slot_map (get train_payload [1 "payload" "reservoir_updated_slot_case_map"])
+	))
+
+	(print "payload contains reservoir cases: ")
+	(call assert_true (assoc
+		obs (> (size reservoir_slot_map) 1)
+	))
+
+
+	(declare (assoc
+		result (call_entity "howso" "process_train_payload" (get train_payload [1 "payload"]))
+	))
+
+	(print "Reservoir total updated correctly: ")
+	(call assert_same (assoc
+		exp 1400
+		obs (retrieve_from_entity ["howso" ".reservoir_container"] "total")
+	))
+
+
+	(declare (assoc
+		first_replaced_reservoir_index (first (sort (indices reservoir_slot_map)) )
+	))
+	(print "Reservoir cases updated correctly: ")
+	(declare (assoc
+		replaced_case_id
+			(get
+				(retrieve_from_entity ["howso" ".reservoir_container"] "caseList")
+				first_replaced_reservoir_index
+			)
+	))
+
+	(call assert_same (assoc
+		obs (retrieve_from_entity ["howso" ".reservoir_container" replaced_case_id] ["x" "y" ".case_weight"])
+		exp (get reservoir_slot_map first_replaced_reservoir_index)
+	))
+
+	(call exit_if_failures (assoc msg "Reservoir train with ablation and train payload."))
+
+	(call exit_if_failures (assoc msg unit_test_name))
+)
