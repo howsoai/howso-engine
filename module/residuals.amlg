@@ -382,34 +382,69 @@
 	;if there are more cases than the sample size, randomly select that many cases, by default cases are in random order
 	!SelectCaseIdsForResiduals
 	(if (and (> num_training_cases num_samples) (> num_training_cases 1000))
-		(if robust_residuals
+		;dealing with large datasets
+		(if (and use_case_weights !hasReservoir)
+			;should be using reservoir cases for sampling
+			(call !SelectCasesFromReservoir (assoc sample_with_replacement robust_residuals))
+
+			;else not using reservoir, sample from dataset with replacement
+			robust_residuals
 			(call !SampleCases (assoc
 				num num_samples
 				rand_seed (rand)
 				case_weight_feature (if valid_weight_feature weight_feature)
 			))
-			;grab samples from the dataset
+
+			;else full residuals, grab samples without replacement from the dataset
 			(call !AllCases (assoc num num_samples rand_seed (rand)))
 		)
 
+		;else if dealing with a tiny dataset or where its size <= num_samples
 		(if robust_residuals
 			(if (= "deviations" robust_residuals)
 				;for local (superfull) deviations, if the dataset is tiny, use more samples than in dataset to compute SDM values
-				(call !SampleCases (assoc
-					num (min num_samples (* num_training_cases (pow 2 (size features))))
-					case_weight_feature (if valid_weight_feature weight_feature)
+				(if (and use_case_weights !hasReservoir)
+					;should be using reservoir cases for sampling
+					(call !SelectCasesFromReservoir (assoc
+						sample_with_replacement .true
+						num_samples (min num_samples (* num_training_cases (pow 2 (size features))))
+					))
+
+					(call !SampleCases (assoc
+						num (min num_samples (* num_training_cases (pow 2 (size features))))
+						case_weight_feature (if valid_weight_feature weight_feature)
+					))
+				)
+
+				;else computing robust residuals and should be using reservoir cases for sampling
+				(and use_case_weights !hasReservoir)
+				(call !SelectCasesFromReservoir (assoc
+					sample_with_replacement .true
+					num_samples num_samples
 				))
 
+				;else computing normal robust residuals
 				(call !SampleCases (assoc
 					num num_samples
 					case_weight_feature (if valid_weight_feature weight_feature)
 				))
 			)
 
-			;else just use all the case ids because the dataset size is <= num_samples or the dataset is small
+			;else use all the case ids
 			(seq
 				(assign (assoc using_all_cases .true ))
-				(call !AllCases)
+				(if (and use_case_weights !hasReservoir)
+					(values
+						(call !SelectCasesFromReservoir (assoc
+							sample_with_replacement .false
+							num_samples num_samples
+						))
+						.true
+					)
+
+					;else use all cases without replacement
+					(call !AllCases)
+				)
 			)
 		)
 	)
@@ -776,7 +811,13 @@
 									(compute_on_contained_entities
 										(if focal_case
 											(query_not_in_entity_list (list case_id focal_case))
-											(query_not_in_entity_list (list case_id))
+
+											;ignore cases that are duplicated in !reservoirContainer
+											(if (and (~ [] case_id) (= !reservoirContainer (first case_id)))
+												(query_not_in_entity_list [(last case_id)])
+
+												(query_not_in_entity_list [case_id])
+											)
 										)
 										(if (size context_condition_filter_query)
 											context_condition_filter_query
