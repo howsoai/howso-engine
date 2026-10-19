@@ -96,7 +96,7 @@ performance_test() {
   echo "Running howso-engine performance tests with amalgam version \"${amlg_version}\"..."
   "${amlg_exe}" ./run_performance_tests.amlg | tee /tmp/pt_results
   reset_version_file
-  local pt_res=$(cat /tmp/pt_results | grep "PASSED : Total comprehensive test execution time" | wc -l)
+  local pt_res=$(cat /tmp/pt_results | grep "PASSED : Total test execution time" | wc -l)
   if [ "$pt_res" \< 1 ]; then
     cat /tmp/pt_results
     exit 81
