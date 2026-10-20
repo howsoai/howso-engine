@@ -74,13 +74,6 @@
 			;	each case is only held out of its own query. group_id_features are not used to hold out any trained cases.
 			#{type "boolean"}
 			non_holdout_distance_contributions .false
-			;calculate and output the self support of each group: the geometric mean over the group's cases of each case's
-			;	distance contribution holding out the rest of the group divided by its distance contribution without holding out
-			;	the rest of the group. Values well above 1 indicate the group's cases are much closer to each other than to the
-			;	rest of the data. Reuses the distance_contributions and non_holdout_distance_contributions computations when
-			;	those are also requested.
-			#{type "boolean"}
-			self_support .false
 			;flag, if set to true will scale influence weights by each case's weight_feature weight.
 			;   If a weight is missing, uses 1 as the weight. If unspecified, case weights will be used if the trainee has them.
 			#{ref "UseCaseWeights"}
@@ -205,7 +198,6 @@
 							distance_contributions distance_contributions
 							residual_contributions residual_contributions
 							non_holdout_distance_contributions non_holdout_distance_contributions
-							self_support self_support
 							similarity_conviction similarity_conviction
 							weight_feature weight_feature
 							use_case_weights use_case_weights
@@ -263,7 +255,6 @@
 	; residual_contributions : calculate and output residual contribution ratios in the output assoc
 	; non_holdout_distance_contributions : calculate and output the average distance contribution of the group's cases without
 	;	holding out the rest of the group (each case is only held out of its own query)
-	; self_support : calculate and output the geometric mean over cases of (holdout distance contribution / non-holdout distance contribution)
 	; familiarity_conviction_addition: calculate and output familiarity conviction of adding the specified new_cases in the output assoc
 	; familiarity_conviction_removal: calculate and output familiarity conviction of removing the specified new_cases in the output assoc
 	; kl_divergence_addition: default to false, calculate and output the KL divergence of adding the specified new_cases in the output assoc
@@ -295,7 +286,6 @@
 			distance_contributions .false
 			residual_contributions .false
 			non_holdout_distance_contributions .false
-			self_support .false
 			similarity_conviction .true
 			filter_fanout_values .false
 			use_case_weights .null
@@ -317,7 +307,6 @@
 					"distance_contribution" 0
 					"residual_contribution" 0
 					"non_holdout_distance_contribution" 0
-					"self_support" 1
 					"base_average_distance_contribution" 0
 					"combined_average_distance_contribution" 0
 				)
@@ -499,9 +488,6 @@
 			feature_full_residuals_map .null
 			cases_avg_distance_contribution .null
 			cases_avg_non_holdout_distance_contribution .null
-			case_distance_contributions_map .null
-			case_non_holdout_distance_contributions_map .null
-			self_support_value .null
 			avg_new_cases_residual_contribution .null
 			new_case_entropies_value .null
 			average_new_cases_conviction_addition .null
@@ -614,45 +600,12 @@
 				)
 		))
 
-		(if (or distance_contributions self_support)
+		(if distance_contributions
 			(call !ComputeNewCasesDistanceContributions)
 		)
 
-		(if (or non_holdout_distance_contributions self_support)
+		(if non_holdout_distance_contributions
 			(call !ComputeNonHoldoutDistanceContributions)
-		)
-
-		(if self_support
-			(assign (assoc
-				self_support_value
-					(let
-						(assoc
-							;cases whose ratio is a finite positive number, i.e., both distance contributions are positive
-							valid_case_ids
-								(filter
-									(lambda (and
-										(> (get case_distance_contributions_map (current_value)) 0)
-										(> (get case_non_holdout_distance_contributions_map (current_value)) 0)
-									))
-									(indices case_distance_contributions_map)
-								)
-						)
-						(if (size valid_case_ids)
-							;geometric mean because self support is a ratio
-							(generalized_mean
-								(map
-									(lambda (/
-										(get case_distance_contributions_map (current_value))
-										(get case_non_holdout_distance_contributions_map (current_value))
-									))
-									valid_case_ids
-								)
-								0
-							)
-							.null
-						)
-					)
-			))
 		)
 
 		(if residual_contributions
@@ -788,10 +741,6 @@
 				)
 				(assoc)
 			)
-			(if self_support
-				(assoc "self_support" self_support_value)
-				(assoc)
-			)
 			(if similarity_conviction
 				(assoc "similarity_conviction" mean_similarity_conviction)
 				(assoc)
@@ -892,60 +841,54 @@
 
 	;Helper method to compute dataset avg distance contribution and new cases' avg distance contribution
 	!ComputeNewCasesDistanceContributions
-	(seq
-		(assign (assoc
-			case_distance_contributions_map
-				(compute_on_contained_entities
-					filtering_queries
-					||(query_entity_distance_contributions
-						closest_k
-						context_features
-						case_ids
-						(get data_params_map "p")
-						feature_weights
-						!queryFeatureAttributeTypeMap
-						feature_deviations
-						.null
-						(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
-						(if valid_weight_feature weight_feature .null)
-						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-						"fixed rand seed"
-						.null ;radius
-						!numericalPrecision
-					)
+	(assign (assoc
+		cases_avg_distance_contribution
+			(generalized_mean (compute_on_contained_entities
+				filtering_queries
+				||(query_entity_distance_contributions
+					closest_k
+					context_features
+					case_ids
+					(get data_params_map "p")
+					feature_weights
+					!queryFeatureAttributeTypeMap
+					feature_deviations
+					.null
+					(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
+					(if valid_weight_feature weight_feature .null)
+					;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+					"fixed rand seed"
+					.null ;radius
+					!numericalPrecision
 				)
-		))
-		(assign (assoc cases_avg_distance_contribution (generalized_mean case_distance_contributions_map) ))
-	)
+			))
+	))
 
 	;Helper method to compute the avg distance contribution of the group's cases without holding out the rest of the group.
 	;Each case is only held out of its own query. group_id_features filters are intentionally not applied: the trained cases
 	;they would hold out are treated as part of the group, which is not held out here.
 	!ComputeNonHoldoutDistanceContributions
-	(seq
-		(assign (assoc
-			case_non_holdout_distance_contributions_map
-				(compute_on_contained_entities
-					||(query_entity_distance_contributions
-						closest_k
-						context_features
-						case_ids
-						(get data_params_map "p")
-						feature_weights
-						!queryFeatureAttributeTypeMap
-						feature_deviations
-						.null
-						(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
-						(if valid_weight_feature weight_feature .null)
-						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-						"fixed rand seed"
-						.null ;radius
-						!numericalPrecision
-					)
+	(assign (assoc
+		cases_avg_non_holdout_distance_contribution
+			(generalized_mean (compute_on_contained_entities
+				||(query_entity_distance_contributions
+					closest_k
+					context_features
+					case_ids
+					(get data_params_map "p")
+					feature_weights
+					!queryFeatureAttributeTypeMap
+					feature_deviations
+					.null
+					(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
+					(if valid_weight_feature weight_feature .null)
+					;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+					"fixed rand seed"
+					.null ;radius
+					!numericalPrecision
 				)
-		))
-		(assign (assoc cases_avg_non_holdout_distance_contribution (generalized_mean case_non_holdout_distance_contributions_map) ))
-	)
+			))
+	))
 
 	;Helper method to compute average residual contribution for a group of cases
 	!ComputeNewCasesResidualContributions
