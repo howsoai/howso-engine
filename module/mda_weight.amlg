@@ -368,7 +368,7 @@
 						(get feature_indices_map feature)
 						(current_index 1)
 					)
-			
+
 				residuals (get feature_residuals_lists feature_index)
 
 				;keep only indices of cases where feature was used in query and its residual is null
@@ -764,132 +764,158 @@
 
 			;baseline isn't specified, declare it on the stack here
 			baseline_data_parameters_map data_params_map
-		))
 
-		;iterate over an assoc of MDA maps per feature and convert to a normalized probability feature mda matrix
-		(zip
-			features
-			||(map
-				(lambda (let
-					(assoc
-						target_feature (current_value 1)
-						feature_index (current_index 1)
-						target_feature_residual (get baseline_data_parameters_map ["featureResiduals" (current_value 2)])
-						;the second value is the nullness
-						target_null_residual (get null_residual_map (current_value 1))
-					)
+			probs_matrix
+				;iterate over an assoc of MDA maps per feature and convert to a normalized probability feature mda matrix
+				(zip
+					features
+					||(map
+						(lambda (let
+							(assoc
+								target_feature (current_value 1)
+								feature_index (current_index 1)
+								target_feature_residual (get baseline_data_parameters_map ["featureResiduals" (current_value 2)])
+								;the second value is the nullness
+								target_null_residual (get null_residual_map (current_value 1))
+							)
 
-					(declare (assoc
-						probabilities_of_contribution_map
-							;iterate over an assoc map of MDA values per feature and convert to probabilities
-							(map
-								(lambda (let
-									;triple of [ AC values, AC nulls, % nulls ]
-									(assoc mda_tuple (current_value 1) )
+							(declare (assoc
+								probabilities_of_contribution_map
+									;iterate over an assoc map of MDA values per feature and convert to probabilities
+									(map
+										(lambda (let
+											;triple of [ AC values, AC nulls, % nulls ]
+											(assoc mda_tuple (current_value 1) )
 
-									;skip if mda_feature = target_feature
-									(if (and (not estimating_residual_lower_bound) (= (current_index) target_feature)) (conclude 0) )
+											;skip if mda_feature = target_feature
+											(if (and (not estimating_residual_lower_bound) (= (current_index) target_feature)) (conclude 0) )
 
-									;LK metric (based on exponential)
-									;This is the LK metric measuring the distance between an exponential function
-									;and the Dirac delta function (zero). This measures the distance between
-									;the decrease in mean residual (the mda) and zero, given some uncertainty
-									;on that mean residual (the target feature residual).
-									(declare (assoc
-										lk_value
-											(call !LK_metric_exp (assoc
-												difference (first mda_tuple)
-												deviation target_feature_residual
+											;LK metric (based on exponential)
+											;This is the LK metric measuring the distance between an exponential function
+											;and the Dirac delta function (zero). This measures the distance between
+											;the decrease in mean residual (the mda) and zero, given some uncertainty
+											;on that mean residual (the target feature residual).
+											(declare (assoc
+												lk_value
+													(call !LK_metric_exp (assoc
+														difference (first mda_tuple)
+														deviation target_feature_residual
+													))
+												null_lk_value
+													(call !LK_metric_exp (assoc
+														difference (get mda_tuple 1)
+														deviation target_null_residual
+													))
 											))
-										null_lk_value
-											(call !LK_metric_exp (assoc
-												difference (get mda_tuple 1)
-												deviation target_null_residual
-											))
-									))
 
-									;surprisal =  lk_value / target_feature_residual
-									;Surprisal (surprisal - assumption) = surprisal - 1
-									;prob of observation = e^(-Surprisal)
-									;prob of contribution = 1 - prob of observation
-									(max
-										(-
-											1
-											(exp
+											;surprisal =  lk_value / target_feature_residual
+											;Surprisal (surprisal - assumption) = surprisal - 1
+											;prob of observation = e^(-Surprisal)
+											;prob of contribution = 1 - prob of observation
+											(max
 												(-
-													(+
+													1
+													(exp
+														(-
+															(+
 
-														(*
-															(/ lk_value target_feature_residual)
-															(- 1 (last mda_tuple))
+																(*
+																	(/ lk_value target_feature_residual)
+																	(- 1 (last mda_tuple))
+																)
+																(or (*
+																	(/ null_lk_value target_null_residual)
+																	(last mda_tuple)
+																))
+																-1
+															)
 														)
-														(or (*
-															(/ null_lk_value target_null_residual)
-															(last mda_tuple)
-														))
-														-1
 													)
 												)
+												0
+											)
+										))
+										;eg, if mda_matrix has three features, A[0-10], B[0-100], C[0-1000] with the following residuals:
+										; [
+										;  	[0	20	300]
+										;	[4	0	100]
+										;	[-2	40	0  ]
+										; ]
+										;it could be transposed and converted into:
+										; {
+										;	"A"	{ "A" 0   "B" 4   "C" -2 }
+										;	"B" { "A" 20  "B" 0   "C" 40 }
+										;	"C"	{ "A" 300 "B" 100 "C" 0  }
+										; }
+										;this outputs an assoc for for the current single target_feature, e.g.: "B" { "A" 20 "B" 0 "C" 40}
+										(zip
+											features
+											(map
+												(lambda (get (current_value) feature_index))
+												mda_matrix
 											)
 										)
-										0
 									)
-								))
-								;eg, if mda_matrix has three features, A[0-10], B[0-100], C[0-1000] with the following residuals:
-								; [
-								;  	[0	20	300]
-								;	[4	0	100]
-								;	[-2	40	0  ]
-								; ]
-								;it could be transposed and converted into:
-								; {
-								;	"A"	{ "A" 0   "B" 4   "C" -2 }
-								;	"B" { "A" 20  "B" 0   "C" 40 }
-								;	"C"	{ "A" 300 "B" 100 "C" 0  }
-								; }
-								;this outputs an assoc for for the current single target_feature, e.g.: "B" { "A" 20 "B" 0 "C" 40}
-								(zip
-									features
-									(map
-										(lambda (get (current_value) feature_index))
-										mda_matrix
-									)
-								)
-							)
-					))
+							))
 
-					(declare (assoc total_probs (apply "+" probabilities_of_contribution_map) ))
-
-					;normalize probabilities for use as feature weights
-					(if total_probs
-						;replace 0's for any feature that isn't the target feature with smallest_probability
-						(map
-							(lambda
-								(if (or (> (current_value) 0) (= target_feature (current_index)))
-									(/ (current_value) total_probs)
-
-									(if (contains_index !inactiveFeaturesMap (current_index))
-										0
-										smallest_probability
-									)
-								)
-							)
 							probabilities_of_contribution_map
+
+
+						))
+						features
+					)
+				)
+		))
+
+		(declare (assoc
+			normalized_probs_matrix
+				(map
+					(lambda (let
+						(assoc
+							total_probs (apply "+" (current_value 1))
+							target_feature (current_index 1)
 						)
 
-						;else set them all to 1 because this feature had no affect on others, except inactives should remain 0
-						(if (size !inactiveFeaturesMap)
-							(append
-								(map 1 probabilities_of_contribution_map)
-								(map 0 (keep !inactiveFeaturesMap features) )
+						;normalize probabilities for use as feature weights
+						(if total_probs
+							;replace 0's for any feature that isn't the target feature with smallest_probability
+							(map
+								(lambda
+									(if (or (> (current_value) 0) (= target_feature (current_index)))
+										(/ (current_value) total_probs)
+
+										(if (contains_index !inactiveFeaturesMap (current_index))
+											0
+											smallest_probability
+										)
+									)
+								)
+								(current_value)
 							)
 
-							(map 1 probabilities_of_contribution_map)
+							;else set them all to 1 because this feature had no affect on others, except inactives should remain 0
+							(if (size !inactiveFeaturesMap)
+								(append
+									(map 1 (current_value))
+									(map 0 (keep !inactiveFeaturesMap features) )
+								)
+
+								(map 1 (current_value))
+							)
 						)
-					)
-				))
-				features
-			)
+
+					))
+					probs_matrix
+				)
+		))
+
+		(if in_analyze
+			{
+				"raw_probs_matrix" probs_matrix
+				"normalized_probs_matrix" normalized_probs_matrix
+			}
+
+			normalized_probs_matrix
 		)
 	)
 
@@ -1676,6 +1702,54 @@
 			!numericalPrecision
 			feature
 		)
+	)
+
+
+
+	;computes eigenvector centrality for each node via power iteration, returns a list of centralities (L1 normalized, sums to 1)
+	;in the same order as the rows of the adjacency matrix
+	;parameters:
+	; adjacency_matrix: list of lists of values, square adjacency matrix where element [i][j] is the weight of the edge from node i to node j
+	; max_iterations: maximum number of power iterations to perform
+	; tolerance: delta value to stop iterating once the L1 change in the centrality vector is below this value times the number of nodes
+	!ComputeEigenvectorCentrality
+	(declare
+		(assoc
+			adjacency_matrix (list)
+			max_iterations 100
+			tolerance 0.00001
+		)
+
+		(if (= 0 (size adjacency_matrix)) (return []))
+
+		(declare (assoc
+			threshold (* (size adjacency_matrix) tolerance)
+			;start with a uniform vector
+			centralities (normalize (map 1 adjacency_matrix))
+			previous_centralities .null
+			change .infinity
+		))
+
+		;power iteration on (I + A) instead of A, which has the same eigenvectors but avoids
+		;oscillating on periodic graphs such as bipartite ones
+		(while (and (< (current_index) max_iterations) (>= change threshold))
+			(assign (assoc
+				previous_centralities centralities
+				centralities
+					(normalize (map
+						(lambda
+							(+
+								(get previous_centralities (current_index))
+								(dot_product (current_value) previous_centralities)
+							)
+						)
+						adjacency_matrix
+					))
+				change (generalized_distance centralities previous_centralities 1)
+			))
+		)
+
+		centralities
 	)
 
 }
