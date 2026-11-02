@@ -714,8 +714,11 @@
 								(query_max_difference (current_index) (get !cyclicFeaturesMap (current_index)) )
 							)
 						)
-						;only for continuous features
-						(remove (zip features) (indices !nominalsMap))
+						;only for continuous, non-edit distance features
+						(remove
+							(zip features)
+							(append (indices !nominalsMap) (indices !editDistanceFeatureTypesMap))
+						)
 					)
 			))
 
@@ -814,6 +817,8 @@
 		# 			"entropy" ["number" "null"]
 		# 			"percentile_25" ["number" "null"]
 		# 			"percentile_75" ["number" "null"]
+		# 			"min_size" ["number" "null"]
+		# 			"max_size" ["number" "null"]
 		# 		}
 		# 	}
 		# }
@@ -900,7 +905,7 @@
 	)
 
 
-	;calculates and caches all marginal stats (min, max, median, mean, mode, count, uniques,  mean_absdev, variance, stddev, skew, kurtosis, entropy)
+	;calculates and caches all marginal stats (min, max, median, mean, mode, count, uniques,  mean_absdev, variance, stddev, skew, kurtosis, entropy, min_size, max_size)
 	;for all features
 	;
 	;parameters:
@@ -922,7 +927,8 @@
 					(lambda (let
 						(assoc
 							feature (current_index 1)
-
+							min_size .null
+							max_size .null
 							min .null
 							max .null
 							mean .null
@@ -940,77 +946,109 @@
 
 						(if feature_is_continuous
 							(seq
-								(assign (assoc
-									min
-										(retrieve_from_entity
-											(first (contained_entities
-												filtering_queries
-												(query_min feature 1)
-											))
-											feature
-										)
-									max
-										(retrieve_from_entity
-											(first (contained_entities
-												filtering_queries
-												(query_max feature 1)
-											))
-											feature
-										)
-									mean
-										(compute_on_contained_entities
-											filtering_queries
-											(query_not_equals feature .null)
-											;calculate arithmetic average
-											(query_generalized_mean feature 1 weight_feature)
-										)
-									median
-										(compute_on_contained_entities filtering_queries (query_quantile feature 0.5 weight_feature))
-									percentile_25
-										(compute_on_contained_entities filtering_queries (query_quantile feature 0.25 weight_feature))
-									percentile_75
-										(compute_on_contained_entities filtering_queries (query_quantile feature 0.75 weight_feature))
-								))
+								;edit distance features compute min and max using sizes of values
+								(if (contains_index !editDistanceFeatureTypesMap feature)
+									(let
+										(assoc
+											sizes
+												(if (or
+														(= "string" (get !editDistanceFeatureTypesMap feature))
+														(= "string_mixable" (get !editDistanceFeatureTypesMap feature))
+													)
+													(map
+														(lambda (size (current_value)))
+														;all unique feature values
+														(indices (compute_on_contained_entities
+															(query_not_equals feature .null)
+															(query_value_masses feature)
+														))
+													)
 
-								(assign (assoc
-									mean_absdev
-										(compute_on_contained_entities
-											filtering_queries
-											(query_not_equals feature .null)
-											(query_generalized_mean feature 1 weight_feature mean .true .true)
+													;else not a string, use (total_size)
+													(map
+														(lambda (total_size (current_value)))
+														;all unique feature values
+														(indices (compute_on_contained_entities
+															(query_not_equals feature .null)
+															(query_value_masses feature)
+														))
+													)
+												)
 										)
-									variance
-										(compute_on_contained_entities
-											filtering_queries
-											(query_not_equals feature .null)
-											(query_generalized_mean feature 2 weight_feature mean .true)
-										)
-								))
+										(assign (assoc
+											max_size (apply "max" sizes)
+											min_size (apply "min" sizes)
+										))
+									)
 
-								(assign (assoc
-									stddev (sqrt variance)
-									skew
-										(/
+									;else non-edit distance, compute values normally
+									(assign (assoc
+										min
+											(retrieve_from_entity
+												(first (contained_entities
+													filtering_queries
+													(query_min feature 1)
+												))
+												feature
+											)
+										max
+											(retrieve_from_entity
+												(first (contained_entities
+													filtering_queries
+													(query_max feature 1)
+												))
+												feature
+											)
+										mean
 											(compute_on_contained_entities
 												filtering_queries
 												(query_not_equals feature .null)
-												(query_generalized_mean feature 3 weight_feature mean .true)
+												;calculate arithmetic average
+												(query_generalized_mean feature 1 weight_feature)
 											)
-											(pow variance 1.5)
-										)
-									kurtosis
-										(-
+										median
+											(compute_on_contained_entities filtering_queries (query_quantile feature 0.5 weight_feature))
+										percentile_25
+											(compute_on_contained_entities filtering_queries (query_quantile feature 0.25 weight_feature))
+										percentile_75
+											(compute_on_contained_entities filtering_queries (query_quantile feature 0.75 weight_feature))
+
+										mean_absdev
+											(compute_on_contained_entities
+												filtering_queries
+												(query_not_equals feature .null)
+												(query_generalized_mean feature 1 weight_feature mean .true .true)
+											)
+										variance
+											(compute_on_contained_entities
+												filtering_queries
+												(query_not_equals feature .null)
+												(query_generalized_mean feature 2 weight_feature mean .true)
+											)
+										stddev (sqrt variance)
+										skew
 											(/
 												(compute_on_contained_entities
 													filtering_queries
 													(query_not_equals feature .null)
-													(query_generalized_mean feature 4 weight_feature mean .true)
+													(query_generalized_mean feature 3 weight_feature mean .true)
 												)
-												(pow variance 2)
+												(pow variance 1.5)
 											)
-											3
-										)
-								))
+										kurtosis
+											(-
+												(/
+													(compute_on_contained_entities
+														filtering_queries
+														(query_not_equals feature .null)
+														(query_generalized_mean feature 4 weight_feature mean .true)
+													)
+													(pow variance 2)
+												)
+												3
+											)
+									))
+								)
 							)
 						)
 
@@ -1078,6 +1116,8 @@
 							skew skew
 							kurtosis kurtosis
 							entropy entropy
+							min_size min_size
+							max_size max_size
 						)
 					))
 					(zip features)

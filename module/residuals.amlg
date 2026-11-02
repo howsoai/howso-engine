@@ -708,7 +708,7 @@
 									;unique random features (not with replacement)
 									.true
 								)
-							
+
 							;assoc of all removed features to their residual values
 							removed_features_map
 								(if target_residual_feature
@@ -1060,7 +1060,13 @@
 											(compute_on_contained_entities
 												(if focal_case
 													(query_not_in_entity_list (list case_id focal_case))
-													(query_not_in_entity_list (list case_id))
+
+													;ignore cases that are duplicated in !reservoirContainer
+													(if (and (~ [] case_id) (= !reservoirContainer (first case_id)))
+														(query_not_in_entity_list [(last case_id)])
+
+														(query_not_in_entity_list [case_id])
+													)
 												)
 												(if (size context_condition_filter_query)
 													context_condition_filter_query
@@ -1166,16 +1172,24 @@
 							))
 						)
 					)
+
+				derived_value
+					(call
+						(call !ParseDerivedFeatureCode (assoc
+							code_string (get !featureAttributes [feature "derived_feature_code"])
+							value (lambda (if (= lag 0) (get case feature) ) )
+						))
+						{"case" values_for_derivation_map}
+						!sandboxedComputeLimits
+					)
 			))
 
+			(if feature_is_edit_distance
+				;edit distance features output a pair of: of values and corresponding weights
+				[[derived_value] [1.0]]
 
-			(call
-				(call !ParseDerivedFeatureCode (assoc
-					code_string (get !featureAttributes [feature "derived_feature_code"])
-					value (lambda (if (= lag 0) (get case feature) ) )
-				))
-				{"case" values_for_derivation_map}
-				!sandboxedComputeLimits
+				;else output the derived value as-is
+				derived_value
 			)
 		)
 
@@ -1279,8 +1293,17 @@
 						(- 1 (or (get categorical_action_probabilities_map [feature .null]) ) )
 
 						;edit distance features handle nulls like any other value
+						;edit feature diff is the dot product of edit distances between case value and similar cases's values and their corresponding weights
 						feature_is_edit_distance
-						(edit_distance case_feature_value interpolated_value (get !codeFeatureDomainAttributesMap feature) )
+						(dot_product
+							(map
+								(lambda
+									(edit_distance case_feature_value (current_value) (get !codeFeatureDomainAttributesMap feature) )
+								)
+								(first interpolated_value)
+							)
+							(last interpolated_value)
+						)
 
 						;else continuous feature, actual is null, output 1 - CAP of null
 						(- 1 (or (get categorical_action_probabilities_map feature) ) )
@@ -1300,8 +1323,17 @@
 						)
 					)
 
+					;edit feature diff is the dot product of edit distances between case value and similar cases's values and their corresponding weights
 					feature_is_edit_distance
-					(edit_distance case_feature_value interpolated_value (get !codeFeatureDomainAttributesMap feature) )
+					(dot_product
+						(map
+							(lambda
+								(edit_distance case_feature_value (current_value) (get !codeFeatureDomainAttributesMap feature) )
+							)
+							(first interpolated_value)
+						)
+						(last interpolated_value)
+					)
 
 					(abs (- case_feature_value interpolated_value))
 				)
@@ -1379,9 +1411,10 @@
 		)
 	)
 
-	;output assoc of 1-based ranks for specified values. duplicates are averaged out
+	;returns an assoc of value -> rank for the given list of values, where ranks are 1-based positions in sorted order
+	;and tied values share the average of their positions, e.g. a value at positions 4, 5, and 6 has rank 5
 	;parameters:
-	;  values: list of values
+	; values: list of values to rank
 	!GetRankMapForValues
 	(declare
 		(assoc
@@ -1404,9 +1437,8 @@
 					(accum (assoc num_dupe 1))
 				)
 
-				;average out rank based on number of dupes and round up to nearest integer
-				;e.g. if a value has ranks 4 5 6, average out its rank to be 5
-				(round (- (current_value) (/ num_dupe 2)) 1)
+				;after the last duplicate this is the average of the value's positions
+				(- (current_value) (/ num_dupe 2))
 			))
 
 			(sort values)
@@ -1721,7 +1753,59 @@
 								]
 							)
 
-							;for continuous output a list of: max_uncertainty_delta, null_null_uncertainty_delta
+							(contains_index !editDistanceFeatureTypesMap feature)
+							(let
+								(assoc
+									mad
+										(call !ComputeEditDistanceMAD (assoc
+											feature feature
+											vals
+												(values (map
+													(lambda (first (current_value)))
+													(compute_on_contained_entities
+														(query_not_equals feature .null)
+														(query_sample 50 (if valid_weight_feature weight_feature))
+														(query_exists feature)
+													)
+												))
+											num_pairs_to_sample 100
+										))
+									max_uncertainty
+										;twice the largest size value of the feature
+										(*
+											2
+											(apply "max" (map
+												(lambda (size (first (current_value))))
+												(compute_on_contained_entities
+													(query_not_equals feature .null)
+													(query_exists feature)
+												)
+											))
+										)
+								)
+								[
+									max_uncertainty
+									;MAD * (1 - CK)
+									;CK = Cohen's Kappa = (accuracy - mass) / (1 - mass)
+									;increases when accuracy exceeds probability mass
+									(*
+										mad
+										(-
+											1
+											(max
+												;Cohen's Kappa
+												(/
+													(- null_accuracy null_probability_mass)
+													(- 1 null_probability_mass)
+												)
+												0
+											)
+										)
+									)
+								]
+							)
+
+							;else continuous. output a list of: max_uncertainty_delta, null_null_uncertainty_delta
 							(let
 								(assoc
 									max_uncertainty
