@@ -984,153 +984,142 @@
 				(zip
 					numeric_continuous_features
 					||(map
-						(lambda (if
-							(size (current_value))
+						(lambda (let
 							(assoc
-								;Spearman's coefficient is the Pearson correlation of the ranks of the actual and predicted values,
-								;where tied values share the average of their ranks
-								spearman_coeff
-									;must have at least 2 values to compute spearman coefficient
-									(if (> (size (current_value 1)) 1)
+								feature (get numeric_continuous_features (current_index 1))
+								feature_has_nulls (contains_index continuous_with_nulls_map feature)
+								;only used to hold cases with non-null values and non-null residuals when evaluating a
+								;continuous feature with nulls, shared by the spearman and r^2 computations below
+								valid_cases
+									(if feature_has_nulls
+										(filter (lambda (!= .null (first (current_value)))) (current_value 1))
+									)
+							)
+
+							(if (size (current_value))
+								(assoc
+									;Spearman's coefficient is the Pearson correlation of the ranks of the actual and predicted values,
+									;where tied values share the average of their ranks
+									spearman_coeff
+										;must have at least 2 non-null values to compute spearman coefficient
+										(if (> (size (if feature_has_nulls valid_cases (current_value 1))) 1)
+											(let
+												(assoc
+													actual_values
+														(map
+															(lambda (get (current_value) actual_offset))
+															(if feature_has_nulls valid_cases (current_value 2))
+														)
+													predicted_values
+														(map
+															(lambda (last (current_value)))
+															(if feature_has_nulls valid_cases (current_value 2))
+														)
+												)
+												(declare (assoc
+													actual_ranks_map (call !GetRankMapForValues (assoc values actual_values))
+													predicted_ranks_map (call !GetRankMapForValues (assoc values predicted_values))
+
+													actual_ranks (unzip actual_ranks_map actual_values)
+													predicted_ranks (unzip predicted_ranks_map predicted_values)
+
+													actual_mean (generalized_mean actual_ranks)
+													predicted_mean (generalized_mean predicted_ranks)
+
+													actual_deviations (map (lambda (- (current_value) actual_mean)) actual_ranks)
+													predicted_deviations (map (lambda (- (current_value) predicted_mean)) predicted_ranks)
+
+													covariance (dot_product actual_deviations predicted_deviations)
+													actual_sum_squares (dot_product actual_deviations actual_deviations)
+													predicted_sum_squares (dot_product predicted_deviations predicted_deviations)
+												))
+
+												;undefined when all actual or all predicted values are the same
+												(if (and (> actual_sum_squares 0) (> predicted_sum_squares 0))
+													(/ covariance (sqrt (* actual_sum_squares predicted_sum_squares)))
+
+													;else warn and output a null due to undefined behavior
+													(seq
+														(accum (assoc
+															warnings
+																(associate (concat
+																	"The Spearman correlation coefficient is undefined for " feature
+																	" when either the array of predicted or actual values is constant."
+																))
+														))
+														.null
+													)
+												)
+											)
+										)
+
+									;R squared = 1 - sum(|actual-predicted|^2) / sum(|actual-mean|^2)
+									r_squared
 										(let
 											(assoc
-												actual_values (map (lambda (get (current_value) actual_offset)) (current_value 2))
-												predicted_values (map (lambda (last (current_value))) (current_value 2))
+												mean_value
+													;average of all actual values
+													(generalized_mean (map
+														(lambda (get (current_value) actual_offset))
+														(if feature_has_nulls valid_cases (current_value 2))
+													))
+												sum_res_squared
+													(apply "+" (map
+														(lambda (pow (first (current_value)) 2))
+														(if feature_has_nulls valid_cases (current_value 2))
+													))
+												sum_tot_squared 0
 											)
-											(declare (assoc
-												actual_ranks_map (call !GetRankMapForValues (assoc values actual_values))
-												predicted_ranks_map (call !GetRankMapForValues (assoc values predicted_values))
 
-												actual_ranks (unzip actual_ranks_map actual_values)
-												predicted_ranks (unzip predicted_ranks_map predicted_values)
-
-												actual_mean (generalized_mean actual_ranks)
-												predicted_mean (generalized_mean predicted_ranks)
-
-												actual_deviations (map (lambda (- (current_value) actual_mean)) actual_ranks)
-												predicted_deviations (map (lambda (- (current_value) predicted_mean)) predicted_ranks)
-
-												covariance (dot_product actual_deviations predicted_deviations)
-												actual_sum_squares (dot_product actual_deviations actual_deviations)
-												predicted_sum_squares (dot_product predicted_deviations predicted_deviations)
+											(assign (assoc
+												sum_tot_squared
+													(apply "+"
+														(map
+															(lambda
+																;(mean - actual)^2
+																(pow (- mean_value (get (current_value) actual_offset)) 2)
+															)
+															(if feature_has_nulls valid_cases (current_value 2))
+														)
+													)
 											))
 
-											;undefined when all actual or all predicted values are the same
-											(if (and (> actual_sum_squares 0) (> predicted_sum_squares 0))
-												(/ covariance (sqrt (* actual_sum_squares predicted_sum_squares)))
-
-												;else warn and output a null due to undefined behavior
-												(seq
-													(accum (assoc
-														warnings
-															(associate (concat
-																"The Spearman correlation coefficient is undefined for " (current_index 3)
-																" when either the array of predicted or actual values is constant."
-															))
-													))
-													.null
+											;output r^2 value:  1 - SSres / SStot
+											;cap the smallest allowed r2 value to the float min value of -3.4028234663852886e+38
+											(if (and (!= .null sum_res_squared) (> sum_tot_squared 0))
+												(max
+													(- 1 (/ sum_res_squared sum_tot_squared))
+													-340282346638528859811704183484516925440
 												)
 											)
 										)
-									)
 
-								;R squared = 1 - sum(|actual-predicted|^2) / sum(|actual-mean|^2)
-								r_squared
-									(let
-										(assoc
-											mean_value
-												;average of all actual values
-												(generalized_mean (map (lambda (get (current_value) actual_offset)) (current_value 2)) )
-											sum_res_squared
-												(apply "+" (map (lambda (pow (first (current_value)) 2)) (current_value 2)) )
-											sum_tot_squared 0
-										)
-
-										(assign (assoc
-											sum_tot_squared
-												(apply "+"
-													(map
-														(lambda
-															;(mean - actual)^2
-															(pow (- mean_value (get (current_value) actual_offset)) 2)
-														)
-														(current_value 2)
-													)
-												)
-										))
-
-										;output r^2 value:  1 - SSres / SStot
-										;cap the smallest allowed r2 value to the float min value of -3.4028234663852886e+38
-										(max
-											(- 1 (/ sum_res_squared sum_tot_squared))
-											-340282346638528859811704183484516925440
-										)
-									)
-
-								;smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100
-								smape
-									(*
-										(generalized_mean
-											(map
-												(lambda (let
-													(assoc
-														smape_numerator
-															(abs (-
-																(get (current_value 1) predicted_offset)
-																(get (current_value 1) actual_offset)
-															))
-														smape_denominator
-															(/
-																(+
-																	(abs (get (current_value 1) actual_offset))
-																	(abs (get (current_value 1) predicted_offset))
-																)
-																2
-															)
-													)
-													(if (= smape_denominator 0)
-														;if the denominator is 0, that means actual and predicted are both 0
-														; which should have a error of 0
-														0
-														(/ smape_numerator smape_denominator)
-													)
-												))
-												(current_value 1)
-											)
-										)
-										100
-									)
-
-								;adjusted_smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100 where min gap / 2 is added to both the actual and predicted values.
-								adjusted_smape
-									(let
-										(assoc
-											half_min_gap (get !cachedFeatureHalfMinGapMap (get numeric_continuous_features (current_index 2)))
-										)
+									;smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100
+									smape
 										(*
 											(generalized_mean
 												(map
 													(lambda (let
 														(assoc
-															adjusted_smape_numerator
+															smape_numerator
 																(abs (-
-																	(+ (get (current_value 1) predicted_offset) half_min_gap)
-																	(+ (get (current_value 1) actual_offset) half_min_gap)
+																	(get (current_value 1) predicted_offset)
+																	(get (current_value 1) actual_offset)
 																))
-															adjusted_smape_denominator
+															smape_denominator
 																(/
 																	(+
-																		(+ (abs (get (current_value 1) actual_offset)) half_min_gap)
-																		(+ (abs (get (current_value 1) predicted_offset)) half_min_gap)
+																		(abs (get (current_value 1) actual_offset))
+																		(abs (get (current_value 1) predicted_offset))
 																	)
 																	2
 																)
 														)
-														(if (= adjusted_smape_denominator 0)
-															;if the denominator is 0, that means actual and predictd are both 0
+														(if (= smape_denominator 0)
+															;if the denominator is 0, that means actual and predicted are both 0
 															; which should have a error of 0
 															0
-															(/ adjusted_smape_numerator adjusted_smape_denominator)
+															(/ smape_numerator smape_denominator)
 														)
 													))
 													(current_value 1)
@@ -1138,8 +1127,47 @@
 											)
 											100
 										)
-									)
 
+									;adjusted_smape = |predicted - actual| / ((|actual| + |predicted|) / 2) * 100 where min gap / 2 is added to both the actual and predicted values.
+									adjusted_smape
+										(let
+											(assoc
+												half_min_gap (get !cachedFeatureHalfMinGapMap (get numeric_continuous_features (current_index 2)))
+											)
+											(*
+												(generalized_mean
+													(map
+														(lambda (let
+															(assoc
+																adjusted_smape_numerator
+																	(abs (-
+																		(+ (get (current_value 1) predicted_offset) half_min_gap)
+																		(+ (get (current_value 1) actual_offset) half_min_gap)
+																	))
+																adjusted_smape_denominator
+																	(/
+																		(+
+																			(+ (abs (get (current_value 1) actual_offset)) half_min_gap)
+																			(+ (abs (get (current_value 1) predicted_offset)) half_min_gap)
+																		)
+																		2
+																	)
+															)
+															(if (= adjusted_smape_denominator 0)
+																;if the denominator is 0, that means actual and predictd are both 0
+																; which should have a error of 0
+																0
+																(/ adjusted_smape_numerator adjusted_smape_denominator)
+															)
+														))
+														(current_value 1)
+													)
+												)
+												100
+											)
+										)
+
+								)
 							)
 						))
 						(unzip feature_residuals_lists numeric_continuous_indices)
