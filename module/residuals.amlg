@@ -1460,7 +1460,7 @@
 
 		(declare (assoc
 			context_map (zip context_features)
-			features_list (values (append context_features features_with_nulls) .true)
+			features_list (values (append context_features features_with_nulls (if !tsTimeFeature [".series_index"] [])) .true)
 
 			;assoc of feature -> number of cases with nulls
 			null_cases_counts_map (map (lambda (size (current_value))) null_cases_map)
@@ -1536,22 +1536,40 @@
 						)
 
 						;iterate over list of cases that have nulls for this feature and predict each one,
-						;output a list of 1s and 0s where every correctly predicted null is a 1
+						;output a list of the probability mass that each prediction places on null
 						(map
 							(lambda (let
 								(assoc
 									case_id (current_value 1)
 									case_values_map (zip features_list (retrieve_from_entity (current_value 1) features_list))
-									interpolated_value 0
-									react_context_features
-										(if robust_residuals
-											;grab a random set of context features when computing robust residuals
-											(filter (lambda (< (rand) 0.5)) all_react_context_features)
+									fanout_features_queries .null
+								)
 
-											;otherwise use the whole set
+								(declare (assoc
+									react_context_features
+										;for time series, remove lag/delta/rate context features that are undefined at this case's series index
+										(if !tsTimeFeature
+											(call !FilterContextsBySeriesIndex (assoc
+												all_context_features all_react_context_features
+												series_index (get case_values_map ".series_index")
+											))
+
 											all_react_context_features
 										)
-									fanout_features_queries .null
+								))
+
+								;grab a random set of context features when computing robust residuals.
+								;each context feature is independently enabled with a probability of 0.5, which results in the same
+								;distribution of context sets per predicted feature as the binomial selection done in !RunRobustResiduals
+								(if robust_residuals
+									(assign (assoc
+										react_context_features (filter (lambda (< (rand) 0.5)) react_context_features)
+									))
+								)
+
+								;no context features means there is no local data, fall back to the global probability mass of nulls
+								(if (= 0 (size react_context_features))
+									(conclude (get null_probability_mass_map feature))
 								)
 
 								(if (and
@@ -1604,32 +1622,56 @@
 										)
 								))
 
-								(assign (assoc
-									interpolated_value
-										;no local_cases_map means we use expected feature value
-										(if (size (first candidate_cases_lists))
-											(call !InterpolateActionValues (assoc
-												action_feature feature
-												candidate_case_ids (first candidate_cases_lists)
-												candidate_case_weights (get candidate_cases_lists 1)
-												candidate_case_values (last candidate_cases_lists)
-												allow_nulls .true
-												output_influence_weights .false
-											))
+								;no local data means we fall back to the global probability mass of nulls
+								(if (= 0 (size (first candidate_cases_lists)))
+									(conclude (get null_probability_mass_map feature))
+								)
 
-											;else there's no local data, return expected values
-											(if feature_is_nominal
-												;pull global probability for feature
-												(get (call !ComputeNominalClassProbabilities (assoc feature feature)) feature)
-
-												;else get continuous expected value
-												(call !CalculateFeatureExpectedValue (assoc feature feature allow_nulls .true ))
-											)
-										)
+								(declare (assoc
+									candidate_case_weights (get candidate_cases_lists 1)
+									candidate_case_values (last candidate_cases_lists)
 								))
 
-								;output a 1 if predicted a null correctly, else a 0
-								(+ (= .null interpolated_value))
+								;if there are perfect matches (infinite weights), only consider those, each weighted equally
+								(if (contains_value candidate_case_weights .infinity)
+									(let
+										(assoc
+											perfect_match_indices
+												(filter
+													(lambda (= .infinity (get candidate_case_weights (current_value))))
+													(indices candidate_case_weights)
+												)
+										)
+										(assign (assoc
+											candidate_case_values (unzip candidate_case_values perfect_match_indices)
+											candidate_case_weights (map 1 perfect_match_indices)
+										))
+									)
+								)
+
+								(declare (assoc total_weight (apply "+" candidate_case_weights) ))
+
+								;output the probability mass of the predicted distribution that is on null
+								(if (> total_weight 0)
+									(/
+										(apply "+"
+											(unzip
+												candidate_case_weights
+												(filter
+													(lambda (= .null (get candidate_case_values (current_value))))
+													(indices candidate_case_values)
+												)
+											)
+										)
+										total_weight
+									)
+
+									;else all weights are zero, treat all neighbors as equally weighted
+									(/
+										(size (filter (lambda (= .null (current_value))) candidate_case_values))
+										(size candidate_case_values)
+									)
+								)
 							))
 							null_case_ids
 						)
@@ -1651,7 +1693,7 @@
 			)
 		)
 
-		;create a map of feature -> null prediction probability by averaging out all the correctly predicted nulls for each feature
+		;create a map of feature -> null prediction probability by averaging out the predicted null probability mass for each feature
 		(assign (assoc
 			null_accuracies_map
 				(append
@@ -1714,16 +1756,21 @@
 
 									;else "max value" - Cohen's Kappa.
 									;as null accuracy exceeds the probability mass, the null-null deviation shrinks
-									(-
-										(- 1 (/ (max num_training_cases num_samples)))
-										(max
-											;Cohen's Kappa = (accuracy - mass) / (1 - mass)
-											(/
-												(- null_accuracy null_probability_mass)
-												(- 1 null_probability_mass)
+									;floored at the smallest value reasonably close to 0.0 (mirroring the max value above)
+									;so that a Kappa near or at 1 cannot produce a zero or negative deviation
+									(max
+										(-
+											(- 1 (/ (max num_training_cases num_samples)))
+											(max
+												;Cohen's Kappa = (accuracy - mass) / (1 - mass)
+												(/
+													(- null_accuracy null_probability_mass)
+													(- 1 null_probability_mass)
+												)
+												0
 											)
-											0
 										)
+										(/ (max num_training_cases num_samples))
 									)
 								)
 							]
