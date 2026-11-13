@@ -119,6 +119,9 @@
 			;Defaults to .false, assuming this will be called by an external API/user.
 			#{type "boolean"}
 			internal .false
+			;optional flag, if true analyzes all subtrainees in hierarchy when auto hierarchy and auto ablation are enabled
+			#{type "boolean"}
+			analyze_hierarchy_subtrainees .false
 		)
 		(call !ValidateParameters)
 		(call !ValidateFeatures)
@@ -222,6 +225,7 @@
 					"convergence_samples_growth_rate" convergence_samples_growth_rate
 					"convergence_min_size" convergence_min_size
 					"reduce_only" reduce_only
+					"analyze_hierarchy_subtrainees" analyze_hierarchy_subtrainees
 				)
 		))
 
@@ -569,6 +573,28 @@
 				))
 			)
 		)
+
+		;recursively analyze all subtrainees in in hierarchy when auto hierarchy and auto ablation are enabled
+		(if (and analyze_hierarchy_subtrainees !autoHierarchyEnabled !autoAblationEnabled)
+			(map
+				(lambda (let
+					(assoc
+						sub_hierarchy
+							(get
+								(call_entity [!traineeContainer (current_value 2)] "get_hierarchy" (assoc
+									internal_only .true
+								))
+								[1 "payload" "children"]
+							)
+					)
+					;only need to analyze subtrainee if they have their own subtrainees
+					(if (size sub_hierarchy)
+						(call_entity [!traineeContainer (current_value 1)] "auto_analyze")
+					)
+				))
+				!autoHierarchyIds
+			)
+		)
 	)
 
 	;called on none or one action feature at a time by Analyze()
@@ -867,31 +893,45 @@
 			))
 		)
 
-		;if there are computed features that are to be analyzed (e.g., 'similarity_conviction') append them to context_features
-		(if (size (get !computedFeaturesMap "computed_features"))
-			(assign (assoc
-				context_features
-					(values
-						(append
-							(if (= 0 (size context_features)) !trainedFeatures context_features)
-							(get !computedFeaturesMap "computed_features")
-						)
-						.true
-					)
-			))
-		)
+		;flag set to false when context_features were specified for this analyze call and true when they were not provided
+		(declare (assoc unspecified_context_features .false ))
 
 		;if analyze is being called without any context features, default them to the full set of all features
 		;targeted_model will already have be set to 'targetless' if no features are passed in
 		(if (= 0 (size context_features))
 			(assign (assoc
+				unspecified_context_features .true
 				context_features !trainedFeatures
-				context_features_key !trainedFeaturesContextKey
 			))
-
-			;else build custom context feature key
-			(assign (assoc context_features_key (call !BuildContextFeaturesKey (assoc context_features context_features)) ))
 		)
+
+		;analyze_hierarchy_subtrainees analyze should automatically include .cluster_id if there are subtrainees
+		(if (and analyze_hierarchy_subtrainees !autoHierarchyEnabled !autoAblationEnabled)
+			(if (not (contains_value context_features ".cluster_id"))
+				(accum (assoc context_features ".cluster_id"))
+			)
+		)
+
+		;if there are computed features that are to be analyzed (e.g., 'similarity_conviction') append them to context_features
+		(if (size (get !computedFeaturesMap "computed_features"))
+			(assign (assoc
+				context_features
+					(values
+						(append context_features (get !computedFeaturesMap "computed_features") )
+						.true
+					)
+			))
+		)
+
+		(assign (assoc
+			context_features_key
+				(if (and unspecified_context_features (= (size !trainedFeatures) (size context_features)))
+					!trainedFeaturesContextKey
+
+					;else build custom context feature key
+			 		(call !BuildContextFeaturesKey (assoc context_features context_features))
+				)
+		))
 
 		;if auto ablation is on and the user has not overridden the default, set use_case_weights to true
 		(if (and !autoAblationEnabled (!= .false use_case_weights) )
@@ -1024,37 +1064,39 @@
 				)
 		))
 
-		;check if auto analysis is enabled and the analysis threshold should be increased
-		(if (and
-				!autoAnalyzeEnabled
-				(>= !dataMassChangeSinceLastAnalyze !autoAnalyzeThreshold)
-			)
-			(let
-				(assoc
-					total_case_mass
-						(if use_case_weights
-							(compute_on_contained_entities
-								(query_not_equals weight_feature .null)
-								(query_sum weight_feature)
-							)
-
-							;else it's 1 per case, thus the total mass is num_cases
-							num_cases
+		(declare (assoc
+			total_case_mass
+				(if use_case_weights
+					(compute_on_contained_entities
+						(query_not_equals weight_feature .null)
+						(query_sum weight_feature)
 					)
-				)
 
-				(assign_to_entities (assoc
-					!autoAnalyzeThreshold
-						;!autoAnalyzeThreshold is a delta from the previous threshold.
-						;if several case deletions cause the above formula to return < 0, default
-						; to the default !autoAnalyzeThreshold.
-						(max
-							(- (* total_case_mass !autoAnalyzeGrowthFactorAmount) !autoAnalyzeThreshold)
-							100
-						)
-				))
-			)
+					;else it's 1 per case, thus the total mass is num_cases
+					num_cases
+				)
+		))
+
+		;if there are cases that were reduced to storage prior to this analyze call, count them as well
+		(if (size (contained_entities !reducedCasesStorageContainer))
+			(accum (assoc
+				total_case_mass (size (contained_entities !reducedCasesStorageContainer))
+			))
 		)
+
+		(assign_to_entities (assoc
+			!autoAnalyzeThreshold
+				;!autoAnalyzeThreshold is a delta from the previous threshold.
+				;defaults to !autoAnalyzeThreshold, but when auto analyze is not enabled, this analyze was called
+				;'out of cycle' of auto analyze, update the threshold relative to the current dataset mass
+				(max
+					(-
+						(* total_case_mass !autoAnalyzeGrowthFactorAmount)
+						(if !autoAnalyzeEnabled !autoAnalyzeThreshold total_case_mass)
+					)
+					100
+				)
+		))
 
 		;reset !dataMassChangeSinceLastAnalyze since we are now analyzing
 		(assign_to_entities (assoc !dataMassChangeSinceLastAnalyze 0.0 ))
