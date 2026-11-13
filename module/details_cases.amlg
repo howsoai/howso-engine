@@ -76,17 +76,16 @@
 			accumulated_influence_weight_percent 0
 			;number of cases that make up the threshold (default of 99%) of the influence weight
 			influential_k 0
-			item_retrieval_set
-				(zip (append
+			case_features
+				(append
 					(if (get details "most_similar_cases_features")
 						(get details "most_similar_cases_features")
 						features
 					)
 					!internalLabelSession
 					!internalLabelSessionTrainingIndex
-					!internalLabelImputed
 					extra_features
-				))
+				)
 		))
 
 		;for generated cases, influential cases can exceed the local k_parameter
@@ -129,18 +128,9 @@
 		(declare (assoc
 			audit_data
 				(map
-					(lambda (let
-						(assoc
-							case_data (retrieve_from_entity (current_value 1) item_retrieval_set)
-						)
-
-						;don't show imputed list if it's empty
-						(if (= .null (get case_data !internalLabelImputed))
-							(remove case_data !internalLabelImputed)
-
-							case_data
-						)
-					))
+					(lambda
+						(retrieve_from_entity (current_value) case_features)
+					)
 					candidate_case_ids
 				)
 		))
@@ -150,18 +140,20 @@
 			audit_data
 				(map
 					(lambda
-						(append (current_value)
-							(assoc
-								".influence_weight"
-									(/ (or (get influence_weights_map (get candidate_case_ids (current_index 1)))) total_influence_weight)
-							)
+						(append
+							(current_value)
+							;".influence_weight"
+							(/ (or (get influence_weights_map (get candidate_case_ids (current_index)))) total_influence_weight)
 							(if output_raw_influence_weights
-								(assoc
-									".raw_influence_weight"
-										(get closest_cases_map (get candidate_case_ids (current_index 1)))
-								)
+								;".raw_influence_weight"
+								(get closest_cases_map (get candidate_case_ids (current_index)))
 								;else append nothing
-								(assoc)
+								[]
+							)
+							;compute and set conviction for each of the similar cases if requested
+							(if (and (!= .null !storedCaseConvictionsFeatureAddition) (get details "influential_cases_familiarity_convictions"))
+								(retrieve_from_entity (get candidate_case_ids (current_index)) !storedCaseConvictionsFeatureAddition)
+								[]
 							)
 						)
 					)
@@ -169,35 +161,41 @@
 				)
 		))
 
-		;compute and set conviction for each of the similar cases if requested
-		(if (and (get details "influential_cases_familiarity_convictions") (!= .null !storedCaseConvictionsFeatureAddition))
-			(assign (assoc
-				audit_data
-					(map
-						(lambda (let
-							(assoc
-								familiarity_conviction
-									(retrieve_from_entity (get candidate_case_ids (current_index 1)) !storedCaseConvictionsFeatureAddition)
-							)
-
-							;set the conviction in the audit_data output
-							(modify (current_value) !storedCaseConvictionsFeatureAddition familiarity_conviction)
-						))
-						audit_data
+		(accum (assoc
+			case_features
+				(append
+					".influence_weight"
+					(if output_raw_influence_weights
+						".raw_influence_weight"
+						[]
 					)
-			))
-		)
+					(if (and (get details "influential_cases_familiarity_convictions") (!= .null !storedCaseConvictionsFeatureAddition))
+						!storedCaseConvictionsFeatureAddition
+						[]
+					)
+				)
+		))
 
 		;update the output details with this audit data
 		(accum (assoc
 			output
-				(assoc "influential_cases"
-					(if (and (not skip_decoding) (or !hasEncodedFeatures has_rounded_features))
-						(call !ConvertToOutputFromCaseList (assoc cases audit_data))
+				(assoc
+					"influential_cases"
+						{
+							"features" case_features
+							"cases"
+								{
+									(if (and (not skip_decoding) (or !hasEncodedFeatures has_rounded_features))
+										(call !ConvertToOutputFromCaseList (assoc
+											cases audit_data
+											case_features case_features
+										))
 
-						;else just return the cases as-is
-						audit_data
-					)
+										;else just return the cases as-is
+										audit_data
+									)
+								}
+						}
 				)
 		))
 	)
@@ -279,40 +277,29 @@
 		)
 
 		(declare (assoc
-			item_retrieval_set
-				(zip (append
+			case_features
+				(append
 					(if (get details "most_similar_cases_features")
 						(get details "most_similar_cases_features")
 						features
 					)
 					!internalLabelSession
 					!internalLabelSessionTrainingIndex
-					!internalLabelImputed
 					extra_features
-				))
+				)
 		))
 
 		;pull all the feature values for the cases
 		(declare (assoc
 			audit_data
 				(map
-					(lambda (let
-						(assoc
-							case_data
-								(modify
-									(retrieve_from_entity (first (current_value 1)) item_retrieval_set)
-									".distance"
-									(last (current_value 1))
-								)
+					(lambda
+						(append
+							(retrieve_from_entity (first (current_value)) case_features)
+							;append ".distance" to each case
+							(last (current_value))
 						)
-
-						;don't show imputed list if it's empty
-						(if (= .null (get case_data !internalLabelImputed))
-							(remove case_data !internalLabelImputed)
-
-							case_data
-						)
-					))
+					)
 					;case indices
 					(if (get details "distance_ratio")
 						(trunc (first local_cases_tuple))
@@ -325,6 +312,8 @@
 					)
 				)
 		))
+
+		(accum (assoc case_features ".distance"))
 
 		;clear out the query results if they were either weighted or specified a number of similar cases
 		;otherwise keep them for reuse in other details where applicable
@@ -348,12 +337,19 @@
 			output
 				(assoc
 					"most_similar_cases"
-						(if (and (not skip_decoding) !hasEncodedFeatures)
-							(call !ConvertToOutputFromCaseList (assoc cases audit_data))
+						{
+							"features" case_features
+							"cases"
+								(if (and (not skip_decoding) (or !hasEncodedFeatures has_rounded_features))
+									(call !ConvertToOutputFromCaseList (assoc
+										cases audit_data
+										case_features case_features
+									))
 
-							;else just return the cases as-is
-							audit_data
-						)
+									;else just return the cases as-is
+									audit_data
+								)
+						}
 				)
 		))
 	)
@@ -446,17 +442,16 @@
 					extra_features extra_features
 					num_cases_returned num_exemplars
 				))
-			item_retrieval_set
-				(zip (append
+			case_features
+				(append
 					(if (get details "most_similar_cases_features")
 						(get details "most_similar_cases_features")
 						features
 					)
 					!internalLabelSession
 					!internalLabelSessionTrainingIndex
-					!internalLabelImputed
 					extra_features
-				))
+				)
 		))
 
 		;if there is no influence_weights_map, calculate it
@@ -511,17 +506,9 @@
 		(declare (assoc
 			audit_data
 				(map
-					(lambda (let
-						(assoc
-							case_data (retrieve_from_entity (current_value 1) item_retrieval_set)
-						)
-						;don't show imputed list if it's empty
-						(if (= .null (get case_data !internalLabelImputed))
-							(remove case_data !internalLabelImputed)
-
-							case_data
-						)
-					))
+					(lambda
+						(retrieve_from_entity (current_value) case_features)
+					)
 					candidate_case_ids
 				)
 		))
@@ -535,11 +522,17 @@
 			audit_data
 				(map
 					(lambda
-						(modify (current_value) ".influence_weight"
+						(append
+							(current_value)
 							(if total_influence_weight
 								(/ (or (get influence_weights_map (get candidate_case_ids (current_index)))) total_influence_weight)
 								; don't divide by an invalid total_influence_weight to prevent outputting nan
 								0
+							)
+							;compute and set conviction for each of the boundary cases if requested
+							(if (and (get details "boundary_cases_familiarity_convictions") (!= .null !storedCaseConvictionsFeatureAddition))
+								(retrieve_from_entity (get candidate_case_ids (current_index)) !storedCaseConvictionsFeatureAddition)
+								[]
 							)
 						)
 					)
@@ -547,34 +540,34 @@
 				)
 		))
 
-		;compute and set conviction for each of the boundary cases if requested
-		(if (and (get details "boundary_cases_familiarity_convictions") (!= .null !storedCaseConvictionsFeatureAddition))
-			(assign (assoc
-				audit_data
-					(map
-						(lambda (let
-							(assoc
-								familiarity_conviction
-									(retrieve_from_entity (get candidate_case_ids (current_index 1)) !storedCaseConvictionsFeatureAddition)
-							)
-
-							;set the conviction in the audit_data output
-							(modify (current_value) !storedCaseConvictionsFeatureAddition familiarity_conviction)
-						))
-						audit_data
+		(accum (assoc
+			case_features
+				(append
+					".influence_weight"
+					(if (and (get details "boundary_cases_familiarity_convictions") (!= .null !storedCaseConvictionsFeatureAddition))
+						!storedCaseConvictionsFeatureAddition
+						[]
 					)
-			))
-		)
+				)
+		))
 
 		(accum (assoc
 			output
-				(assoc "boundary_cases"
-					(if (and (not skip_decoding) !hasEncodedFeatures)
-						(call !ConvertToOutputFromCaseList (assoc cases audit_data))
+				(assoc
+					"boundary_cases"
+						{
+							"features" case_features
+							"cases"
+								(if (and (not skip_decoding) (or !hasEncodedFeatures has_rounded_features))
+									(call !ConvertToOutputFromCaseList (assoc
+										cases audit_data
+										case_features case_features
+									))
 
-						;else just return the cases as-is
-						audit_data
-					)
+									;else just return the cases as-is
+									audit_data
+								)
+						}
 				)
 		))
 	)
