@@ -484,10 +484,13 @@
 			(seq
 				(declare (assoc
 					case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
-				))
-				(declare (assoc
 					series_detail_values_map (map (lambda (list)) (zip (indices case_detail_values_map)))
 				))
+
+				;influential cases during series generation output assoc of entity id -> influence instead of the usual case data
+				(if (get details "influential_cases")
+					(assign (assoc details (modify details "influential_cases" "entity_ids") ))
+				)
 			)
 		)
 
@@ -870,7 +873,18 @@
 
 							(seq
 								(if (contains_index case_detail_values_map "influential_cases")
-									(call !NormalizeReactSeriesInfluentialCases)
+									(assign (assoc
+										case_detail_values_map
+											(modify
+												case_detail_values_map
+												"influential_cases"
+												(normalize
+													(call !ReduceAssocsAddValues (assoc
+														list_of_assocs (get case_detail_values_map "influential_cases")
+													))
+												)
+											)
+									))
 								)
 
 								(if (contains_index case_detail_values_map "categorical_action_probabilities")
@@ -879,7 +893,9 @@
 											(modify
 												case_detail_values_map
 												"categorical_action_probabilities"
-												(call !NormalizeReactSeriesCAP (assoc caps (get case_detail_values_map "categorical_action_probabilities") ))
+												(call !NormalizeReactSeriesCAP (assoc
+													caps (get case_detail_values_map "categorical_action_probabilities")
+												))
 											)
 									))
 								)
@@ -940,56 +956,67 @@
 
 		;if output_details, entire_series_data is a list of assocs, one assoc per row
 		(if output_details
-			;reduce all the detail assocs into one assoc where each key is a list of items corresponding to each row
+			;convert all the detail assocs into one assoc where each key is a list of items corresponding to each row
 			;eg:
 			; {
-			;	'categorical_action_probabilties' [ {'a' 0.4 'b' 0.5}  {'a' 0.2 'b' 0.8} ]
+			;	'categorical_action_probabilties' [ { feature_a {'a' 0.4 'b' 0.5} } { feature_b {'a' 0.2 'b' 0.8} } ]
 			;	'generate_attempts' [ 1 2 ]
 			;}
-			(assign (assoc
-				series_detail_values_map (call !ReformatMultipleDetailsIntoOneAssoc (assoc react_list entire_detail_data))
-					; (if (> (size entire_detail_data) 1)
-					; 	(reduce
-					; 		(lambda
-					; 			(map
-					; 				(lambda
-					; 					(append
-					; 						(if (= 1 (current_index 1))
-					; 							;if first item is a list or assoc, wrap in a list to accumulate as an individual item
-					; 							(if (size (first (current_value)))
-					; 								[(first (current_value 1))]
-					; 								;else just accumulate number values
-					; 								(first (current_value))
-					; 							)
-					; 							;else just accumulate number values
-					; 							(first (current_value))
-					; 						)
+			(let
+				(assoc
+					influence_features
+						(if (contains_index series_detail_values_map "influential_cases")
+							(values (append features !internalLabelSession !internalLabelSessionTrainingIndex) .true)
+						)
+				)
 
-					; 						;if item is a list or assoc, wrap in a list to accumulate as an individual item
-					; 						(if (size (last (current_value)))
-					; 							[(last (current_value 1))]
-					; 							;else just accumulate number values
-					; 							(last (current_value))
-					; 						)
-					; 					)
-					; 				)
-					; 				;accumulate all the details
-					; 				(previous_result)
-					; 				(current_value)
-					; 			)
-					; 		)
-					; 		entire_detail_data
-					; 	)
+				(assign (assoc
+					series_detail_values_map
+						(map
+							(lambda (let
+								(assoc detail_key (current_index 1))
 
-					; 	;if only 1, then the reduce will not do anything. Instead, wrap the details in an extra list and drop "series_data"
-					; 	(map
-					; 		(lambda
-					; 			[(current_value 1)]
-					; 		)
-					; 		(first entire_detail_data)
-					; 	)
-					; )
-			))
+								;create a single influential_cases assoc with 'features' and 'cases'
+								(if (= detail_key "influential_cases")
+									{
+										"features" (append influence_features ".influence_weight")
+										"cases"
+											;iterate over each influential_cases, which is an assoc of case id -> influence weight and pull all the relevant data
+											(map
+												(lambda
+													;iterate over the list of influential case ids
+													(map
+														(lambda
+															;append the influence weight as the last feature value
+															(append
+																(retrieve_from_entity (current_value) influence_features)
+																(get
+																	;(current_value 1) here referenes outside this map, to the (current_value) from the outer map
+																	;iterating over entire_detail_data which contains the whole influenial_cases assoc
+																	(current_value 1)
+																	;this (current_value 1) is the case id, same as (current_value) in the retrieve_from_entity above
+																	["influential_cases" (current_value 1)]
+																)
+															)
+														)
+														;pull just the case ids from the influential cases so that this becomes a list, one entry per case
+														(indices (get (current_value) "influential_cases"))
+													)
+												)
+												entire_detail_data
+											)
+									}
+
+									(map
+										(lambda (get (current_value) detail_key) )
+										entire_detail_data
+									)
+								)
+							))
+							series_detail_values_map
+						)
+				))
+			)
 		)
 
 		;backfill entire entire_series_data with the stationary feature value(s)
