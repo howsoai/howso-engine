@@ -11,9 +11,10 @@
 			;excluding any features stored by previous calls to this method
 			#{type "list" values "string"}
 			features .null
-			;the list of case ids for the dataset to calculate conviction for
-			#{type "list" values {type "list" values ["string" "number"] min_size 2 max_size 2}}
-			case_ids .null
+			;list of pair (list) of session id and index, where index is the original 0-based session_training_index of the
+			;	case as it was trained, of the cases to calculate for. If unspecified, calculates for every case.
+			#{ref "CaseIndices"}
+			case_indices .null
 			;true or string, if true will use default value of ".familiarity_conviction_addition" for feature name
 			#{type ["boolean" "string"]}
 			familiarity_conviction_addition .null
@@ -51,7 +52,7 @@
 			;flag, if set to true, will enable auto_analyze and analyze with these specified features computing their values.
 			;additionally, these metrics will be recomputed with each analysis if analyze is set to true.
 			;note: if clustering, analyze will not include the clustered feature
-			;   Only applicable when reacting for the entire dataset,  when case_ids is null.
+			;   Only applicable when reacting for the entire dataset,  when case_indices is null.
 			#{type "boolean"}
 			analyze .null
 			;flag, if true, queries will filter out cases with the same fanned out values when predicting the value of a fanout feature.
@@ -80,6 +81,11 @@
 		(call !ValidateParameters)
 
 		(declare (assoc
+			;the queries below select cases by their ids
+			case_ids
+				(if (!= .null case_indices)
+					(call !GetCaseIds (assoc case_indices case_indices))
+				)
 			valid_weight_feature .false
 			warnings (assoc)
 			num_steps 0
@@ -125,8 +131,13 @@
 
 		(declare (assoc
 			dataset_size (call !GetNumTrainingCases)
-			;need to cache computed DC values to be able to approximate any of these listed computations during future train calls
-			cache_values (or familiarity_conviction_addition p_value_of_addition familiarity_conviction_removal p_value_of_removal)
+			;need to cache computed DC values to be able to approximate any of these listed computations during future train calls,
+			;only when computing for every case, since the cached values describe the whole dataset
+			cache_values
+				(and
+					(= .null case_ids)
+					(or familiarity_conviction_addition p_value_of_addition familiarity_conviction_removal p_value_of_removal)
+				)
 		))
 		(declare (assoc
 			num_reacts (if (= .null case_ids) dataset_size (size case_ids))
@@ -401,28 +412,34 @@
 					case_to_dc_map
 						(if (and
 								!tsTimeFeature
-								(contains_value features !tsTimeFeature)
+								(size (keep ts_feature_lag_amount_map features))
 							)
-							;must compute each distance contribution separately so that future cases can be filtered out.
+							;future cases are intentionally not filtered out: DC is a density estimate over the whole dataset,
+							;and a time-dependent reference set would inflate the DCs of cases early in the time range.
+							;must compute each distance contribution separately so that each case only uses the
+							;lag/delta/rate features that could be derived for its position in its series
 							||(map
 								(lambda (let
 									(assoc
 										case_id (current_index 1)
-										context_map (zip features (retrieve_from_entity (current_index 1) features))
+										allowed_features
+											(call !FilterContextsBySeriesIndex (assoc
+												all_context_features features
+												series_index (retrieve_from_entity case_id ".series_index")
+											))
 									)
 
 									(first
 										(compute_on_contained_entities
-											(call !ComputeTimeSeriesFilterFutureCasesQuery (assoc include_same_time .true))
 											(query_entity_distance_contributions
 												closest_k
-												features
+												allowed_features
 												[case_id]
 												p_parameter
 												feature_weights
 												!queryFeatureAttributeTypeMap
 												feature_deviations
-												features ;weight selection feature
+												allowed_features ;weight selection features, must match the features used for the distances
 												(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
 												(if valid_weight_feature weight_feature .null)
 												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -916,6 +933,33 @@
 			distance_contribution_feature ".distance_contribution"
 		)
 
+		;the requested features before any series-index filtering, used to check whether the stored distance contributions
+		;of the local cases were computed with the same original feature set
+		(declare (assoc unfiltered_features features))
+
+		;if time-series and the .series_index of the case is known, only use the features that could be derived
+		;for that case (exclude lag/delta/rate features inside the null triangle at the start of a series)
+		(if (and !tsTimeFeature (contains_value features ".series_index"))
+			(let
+				(assoc
+					ts_feature_lag_amount_map
+						(if ts_feature_lag_amount_map ts_feature_lag_amount_map (call !BuildTSFeatureLagAmountMap))
+					case_values_map (zip features feature_values)
+				)
+				(declare (assoc
+					max_lag_index_value (if (size ts_feature_lag_amount_map) (apply "max" ts_feature_lag_amount_map) 0)
+				))
+				(assign (assoc
+					features
+						(call !FilterContextsBySeriesIndex (assoc
+							all_context_features features
+							series_index (get case_values_map ".series_index")
+						))
+					feature_values (unzip case_values_map features)
+				))
+			)
+		)
+
 		(declare (assoc
 			feature_weights
 				(if (size (get data_params_map "featureProbabilitiesMap"))
@@ -1004,8 +1048,10 @@
 						;or number of cases in datasets does not equal the number of cases with distance contributions,
 						;if not all cases have distance_contribution, must calculate distance_contribution for nearest neighbors
 						(!= (size (contained_entities (query_exists distance_contribution_feature) )) (call !GetNumTrainingCases))
-						;or features don't match feature set that was used to store DCs
-						(not (contains_index !storedDistanceContributionsFeatureMap (apply "concat" (sort features))) )
+						;or features don't match feature set that was used to store DCs. Compare the original (unfiltered)
+						;features: stored DCs were computed from that same feature set, each case only dropping its own
+						;underivable series lag features, so they are still valid when this case's lags were filtered
+						(not (contains_index !storedDistanceContributionsFeatureMap (apply "concat" (sort unfiltered_features))) )
 					)
 					(compute_on_contained_entities
 						filtering_queries
