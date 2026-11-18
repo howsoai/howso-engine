@@ -412,28 +412,34 @@
 					case_to_dc_map
 						(if (and
 								!tsTimeFeature
-								(contains_value features !tsTimeFeature)
+								(size (keep ts_feature_lag_amount_map features))
 							)
-							;must compute each distance contribution separately so that future cases can be filtered out.
+							;future cases are intentionally not filtered out: DC is a density estimate over the whole dataset,
+							;and a time-dependent reference set would inflate the DCs of cases early in the time range.
+							;must compute each distance contribution separately so that each case only uses the
+							;lag/delta/rate features that could be derived for its position in its series
 							||(map
 								(lambda (let
 									(assoc
 										case_id (current_index 1)
-										context_map (zip features (retrieve_from_entity (current_index 1) features))
+										allowed_features
+											(call !FilterContextsBySeriesIndex (assoc
+												all_context_features features
+												series_index (retrieve_from_entity case_id ".series_index")
+											))
 									)
 
 									(first
 										(compute_on_contained_entities
-											(call !ComputeTimeSeriesFilterFutureCasesQuery (assoc include_same_time .true))
 											(query_entity_distance_contributions
 												closest_k
-												features
+												allowed_features
 												[case_id]
 												p_parameter
 												feature_weights
 												!queryFeatureAttributeTypeMap
 												feature_deviations
-												features ;weight selection feature
+												allowed_features ;weight selection features, must match the features used for the distances
 												(if (= dt_parameter "surprisal_to_prob") "surprisal" dt_parameter )
 												(if valid_weight_feature weight_feature .null)
 												;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
@@ -927,6 +933,33 @@
 			distance_contribution_feature ".distance_contribution"
 		)
 
+		;the requested features before any series-index filtering, used to check whether the stored distance contributions
+		;of the local cases were computed with the same original feature set
+		(declare (assoc unfiltered_features features))
+
+		;if time-series and the .series_index of the case is known, only use the features that could be derived
+		;for that case (exclude lag/delta/rate features inside the null triangle at the start of a series)
+		(if (and !tsTimeFeature (contains_value features ".series_index"))
+			(let
+				(assoc
+					ts_feature_lag_amount_map
+						(if ts_feature_lag_amount_map ts_feature_lag_amount_map (call !BuildTSFeatureLagAmountMap))
+					case_values_map (zip features feature_values)
+				)
+				(declare (assoc
+					max_lag_index_value (if (size ts_feature_lag_amount_map) (apply "max" ts_feature_lag_amount_map) 0)
+				))
+				(assign (assoc
+					features
+						(call !FilterContextsBySeriesIndex (assoc
+							all_context_features features
+							series_index (get case_values_map ".series_index")
+						))
+					feature_values (unzip case_values_map features)
+				))
+			)
+		)
+
 		(declare (assoc
 			feature_weights
 				(if (size (get data_params_map "featureProbabilitiesMap"))
@@ -1015,8 +1048,10 @@
 						;or number of cases in datasets does not equal the number of cases with distance contributions,
 						;if not all cases have distance_contribution, must calculate distance_contribution for nearest neighbors
 						(!= (size (contained_entities (query_exists distance_contribution_feature) )) (call !GetNumTrainingCases))
-						;or features don't match feature set that was used to store DCs
-						(not (contains_index !storedDistanceContributionsFeatureMap (apply "concat" (sort features))) )
+						;or features don't match feature set that was used to store DCs. Compare the original (unfiltered)
+						;features: stored DCs were computed from that same feature set, each case only dropping its own
+						;underivable series lag features, so they are still valid when this case's lags were filtered
+						(not (contains_index !storedDistanceContributionsFeatureMap (apply "concat" (sort unfiltered_features))) )
 					)
 					(compute_on_contained_entities
 						filtering_queries
