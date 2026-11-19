@@ -823,57 +823,25 @@
 
 	;Helper method to compute and cache average case distance contribution for the dataset
 	!CacheAverageCaseDistanceContribution
-	(let
-		(assoc
-			base_distance_contributions_map
-				(compute_on_contained_entities
-					||(query_entity_distance_contributions
-						closest_k
-						context_features
-						.null
-						(get data_params_map "p")
-						feature_weights
-						!queryFeatureAttributeTypeMap
-						feature_deviations
-						.null
-						(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
-						(if valid_weight_feature weight_feature .null)
-						;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-						"fixed rand seed"
-						.null ;radius
-						!numericalPrecision
-					)
-				)
-		)
-
-		(assign_to_entities (assoc
-			!averageCaseDistanceContribution (generalized_mean base_distance_contributions_map)
-		))
-	)
+	(assign_to_entities (assoc
+		!averageCaseDistanceContribution
+			(generalized_mean
+				(call !ComputeCaseDistanceContributionsMap (assoc
+					dc_case_ids .null
+				))
+			)
+	))
 
 	;Helper method to compute dataset avg distance contribution and new cases' avg distance contribution
 	!ComputeIsolationDistanceContributions
 	(assign (assoc
 		cases_avg_isolation_distance_contribution
-			(generalized_mean (compute_on_contained_entities
-				filtering_queries
-				||(query_entity_distance_contributions
-					closest_k
-					context_features
-					case_ids
-					(get data_params_map "p")
-					feature_weights
-					!queryFeatureAttributeTypeMap
-					feature_deviations
-					.null
-					(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
-					(if valid_weight_feature weight_feature .null)
-					;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-					"fixed rand seed"
-					.null ;radius
-					!numericalPrecision
-				)
-			))
+			(generalized_mean
+				(call !ComputeCaseDistanceContributionsMap (assoc
+					dc_case_ids case_ids
+					dc_filtering_queries filtering_queries
+				))
+			)
 	))
 
 	;Helper method to compute the avg distance contribution of the group's cases without holding out the rest of the group.
@@ -882,25 +850,117 @@
 	!ComputeDistanceContributions
 	(assign (assoc
 		cases_avg_distance_contribution
-			(generalized_mean (compute_on_contained_entities
-				||(query_entity_distance_contributions
-					closest_k
-					context_features
-					case_ids
-					(get data_params_map "p")
-					feature_weights
-					!queryFeatureAttributeTypeMap
-					feature_deviations
-					.null
-					(if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
-					(if valid_weight_feature weight_feature .null)
-					;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
-					"fixed rand seed"
-					.null ;radius
-					!numericalPrecision
-				)
-			))
+			(generalized_mean
+				(call !ComputeCaseDistanceContributionsMap (assoc
+					dc_case_ids case_ids
+				))
+			)
 	))
+
+	;Helper method that computes the distance contribution of each of the specified cases as react_into_features does
+	;Returns an assoc of case id -> distance contribution.
+	;Accesses closest_k, context_features, data_params_map, feature_deviations, ts_feature_lag_amount_map,
+	;max_lag_index_value, valid_weight_feature and weight_feature from the calling scope.
+	;parameters:
+	; dc_case_ids: list of case ids to compute distance contributions for, .null computes them for all cases
+	; dc_filtering_queries: list of queries restricting the cases used as neighbors (e.g., holding out a group)
+	!ComputeCaseDistanceContributionsMap
+	(declare
+		(assoc
+			dc_case_ids .null
+			dc_filtering_queries []
+		)
+
+		(declare (assoc
+			dc_feature_weights
+				(if (size (get data_params_map "featureProbabilitiesMap"))
+					(get data_params_map "featureProbabilitiesMap")
+					(get data_params_map "featureWeights")
+				)
+			dt_value (if (= (get data_params_map "dt") "surprisal_to_prob") "surprisal" (get data_params_map "dt") )
+		))
+
+		(declare (assoc
+			case_to_dc_map
+				(if (and
+						!tsTimeFeature
+						(size (keep ts_feature_lag_amount_map context_features))
+					)
+					||(map
+						(lambda (let
+							(assoc
+								case_id (current_index 1)
+								allowed_features
+									(call !FilterContextsBySeriesIndex (assoc
+										all_context_features context_features
+										series_index (retrieve_from_entity case_id ".series_index")
+									))
+							)
+
+							(first
+								(compute_on_contained_entities
+									dc_filtering_queries
+									(query_entity_distance_contributions
+										closest_k
+										allowed_features
+										[case_id]
+										(get data_params_map "p")
+										dc_feature_weights
+										!queryFeatureAttributeTypeMap
+										feature_deviations
+										allowed_features ;weight selection features, must match the features used for the distances
+										dt_value
+										(if valid_weight_feature weight_feature .null)
+										;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+										"fixed rand seed"
+										.null ;radius
+										!numericalPrecision
+									)
+								)
+							)
+						))
+						(if dc_case_ids
+							(zip dc_case_ids)
+							(zip (call !AllCases))
+						)
+					)
+
+					;otherwise can compute them all in one pass
+					(compute_on_contained_entities
+						dc_filtering_queries
+						||(query_entity_distance_contributions
+							closest_k
+							context_features
+							dc_case_ids
+							(get data_params_map "p")
+							dc_feature_weights
+							!queryFeatureAttributeTypeMap
+							feature_deviations
+							context_features ;weight selection features
+							dt_value
+							(if valid_weight_feature weight_feature .null)
+							;use a fixed random seed to guarantee deterministic behavior for reacts (named "fixed rand seed")
+							"fixed rand seed"
+							.null ;radius
+							!numericalPrecision
+						)
+					)
+				)
+		))
+
+		;weighted distance contributions are scaled by each case's own weight, divide it back out
+		(if valid_weight_feature
+			(map
+				(lambda (/
+					(current_value)
+					(or (retrieve_from_entity (current_index) weight_feature) 1.0)
+				))
+				case_to_dc_map
+			)
+
+			case_to_dc_map
+		)
+	)
 
 	;Helper method to compute average residual contribution for a group of cases
 	!ComputeNewCasesResidualContributions
