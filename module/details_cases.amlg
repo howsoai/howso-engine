@@ -471,8 +471,8 @@
 					extra_features extra_features
 					num_cases_returned num_exemplars
 				))
-			case_features
-				(append
+			item_retrieval_set
+				(zip (append
 					(if (get details "most_similar_cases_features")
 						(get details "most_similar_cases_features")
 						features
@@ -480,7 +480,7 @@
 					!internalLabelSession
 					!internalLabelSessionTrainingIndex
 					extra_features
-				)
+				))
 		))
 
 		;if there is no influence_weights_map, calculate it
@@ -536,7 +536,7 @@
 			audit_data
 				(map
 					(lambda
-						(retrieve_from_entity (current_value) case_features)
+						(retrieve_from_entity (current_value) item_retrieval_set)
 					)
 					candidate_case_ids
 				)
@@ -544,24 +544,37 @@
 
 
 		;influence weight is scaled by the total and should add up to 1, assuming there are influence weights on boundary cases
-		(declare (assoc total_influence_weight (apply "+" influence_weights_map)))
+		(declare (assoc
+			total_influence_weight (apply "+" influence_weights_map)
+			include_fc_addition (and (get details "boundary_cases_familiarity_convictions") (!= .null !storedCaseConvictionsFeatureAddition))
+		))
 
 		;append influence weight to output and normalize it by the total_influence_weight
 		(assign (assoc
 			audit_data
 				(map
 					(lambda
-						(append
-							(current_value)
-							(if total_influence_weight
-								(/ (or (get influence_weights_map (get candidate_case_ids (current_index)))) total_influence_weight)
-								; don't divide by an invalid total_influence_weight to prevent outputting nan
-								0
+						;add .influence_weight and set conviction for each of the boundary cases if requested
+						(if include_fc_addition
+							(modify (current_value)
+								".influence_weight"
+									(if total_influence_weight
+										(/ (or (get influence_weights_map (get candidate_case_ids (current_index)))) total_influence_weight)
+										; don't divide by an invalid total_influence_weight to prevent outputting nan
+										0
+									)
+								!storedCaseConvictionsFeatureAddition
+									(retrieve_from_entity (get candidate_case_ids (current_index)) !storedCaseConvictionsFeatureAddition)
 							)
-							;compute and set conviction for each of the boundary cases if requested
-							(if (and (get details "boundary_cases_familiarity_convictions") (!= .null !storedCaseConvictionsFeatureAddition))
-								(retrieve_from_entity (get candidate_case_ids (current_index)) !storedCaseConvictionsFeatureAddition)
-								[]
+
+							;else only add .influence_weight
+							(modify (current_value)
+								".influence_weight"
+									(if total_influence_weight
+										(/ (or (get influence_weights_map (get candidate_case_ids (current_index)))) total_influence_weight)
+										; don't divide by an invalid total_influence_weight to prevent outputting nan
+										0
+									)
 							)
 						)
 					)
@@ -570,33 +583,31 @@
 		))
 
 		(accum (assoc
-			case_features
-				(append
-					".influence_weight"
-					(if (and (get details "boundary_cases_familiarity_convictions") (!= .null !storedCaseConvictionsFeatureAddition))
-						!storedCaseConvictionsFeatureAddition
-						[]
-					)
-				)
-		))
-
-		(accum (assoc
 			output
-				(assoc
-					"boundary_cases"
-						{
-							"features" case_features
-							"values"
-								(if (and (not skip_decoding) (or !hasEncodedFeatures has_rounded_features))
-									(call !ConvertToOutputFromCaseList (assoc
-										cases audit_data
-										case_features case_features
-									))
-
-									;else just return the cases as-is
-									audit_data
+				(assoc "boundary_cases"
+					(if (and (not skip_decoding) !hasEncodedFeatures)
+						(let
+							(assoc case_features (indices (first audit_data)) )
+							(map
+								(lambda
+									(zip
+										case_features
+										(call !ConvertToOutput (assoc
+											features case_features
+											feature_values (unzip (current_value 1) case_features)
+											has_rounded_features !hasRoundedFeatures
+											has_datetime_features !hasDateTimeFeatures
+											has_string_ordinals !hasStringOrdinals
+										))
+									)
 								)
-						}
+								audit_data
+							)
+						)
+
+						;else just return the cases as-is
+						audit_data
+					)
 				)
 		))
 	)
