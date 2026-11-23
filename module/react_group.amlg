@@ -231,31 +231,20 @@
 				)
 		))
 
-		;convert react_results to a dict of react key -> lists of values (one per group)
-		;e.g., for 3 groups: (assoc "distance_contribution" (list 1 2 3) )
-		(declare (assoc react_group_keys (indices (first react_results)) ))
-
 		(call !ProgressClear)
+
 		(call !Return (assoc
 			payload
 				(append
-					(assoc "context_features" output_context_features)
-					(zip
-						react_group_keys
-						(map
-							(lambda (let
-								(assoc key (current_value 1))
-								(map
-									(lambda (get (current_value) key))
-									react_results
-								)
-							))
-							react_group_keys
-						)
-					)
+					{"context_features" output_context_features}
+
+					;convert react_results to a dict of react key -> lists of values (one per group)
+					;e.g., for 3 groups: (assoc "distance_contribution" (list 1 2 3) )
+					(call !ReformatMultipleDetailsIntoOneAssoc (assoc react_list react_results))
+
 					(if (size action_features)
-						(assoc "action_features" action_features)
-						(assoc)
+						{"action_features" action_features}
+						{}
 					)
 				)
 			warnings (indices warnings)
@@ -1201,7 +1190,7 @@
 										(append
 											details
 											{
-												"influential_cases" .true
+												"influential_cases" "entity_ids"
 												"influential_cases_raw_weights" .true
 												"most_similar_cases" (!= .null desired_conviction) ;need to compute max gaps if generative
 												"num_most_similar_cases" 30 ;need max of k and 30, but k always < 30 in targetless
@@ -1240,74 +1229,35 @@
 					(let
 						(assoc
 							all_inf_cases
-								(apply
-									"append"
-									(get output_map "influential_cases")
+								(normalize
+									(call !ReduceAssocsAddValues (assoc
+										list_of_assocs (get output_map "influential_cases")
+									))
 								)
 						)
 
-						(declare (assoc
-							case_influence_map
-								;this is a map of case-index (tuple of session and training index) to total influence
-								(normalize (zip
-									(lambda (+ (current_value) (current_value 1)))
-									(map (lambda [(get (current_value 1) ".session") (get (current_value 1) ".session_training_index") ]) all_inf_cases)
-									;weights
-									(let
-										(assoc
-											all_inf_case_weights (map (lambda (get (current_value) ".raw_influence_weight")) all_inf_cases)
-										)
-										;if all weights are zero, then use uniform weights
-										(if (= 0 (apply "+" all_inf_case_weights))
-											(map 1 all_inf_case_weights)
-											all_inf_case_weights
-										)
-									)
-								))
-							case_values_map
-								;this is a map of case-index (tuple of session and training index) to map of features->value (including session/index)
-								(zip
-									(map (lambda [(get (current_value 1) ".session") (get (current_value 1) ".session_training_index") ]) all_inf_cases)
-									(map (lambda (remove (current_value) [".influence_weight" ".raw_influence_weight"])) all_inf_cases)
-								)
+						;if all weights are zero, use uniform weights
+						(if (= 0 (apply "+" all_inf_cases))
+							(map (/ 1 (size all_inf_cases)) all_inf_cases)
 
-						))
-
-						(map
-							(lambda
-								(append
-									(get case_values_map [(current_value 1)])
-									(associate
-										!internalLabelSession (first (current_value 1))
-										!internalLabelSessionTrainingIndex (last (current_value 1))
-										;need to wrap the case-index tuple in an extra list so that it is not interpreted
-										;as a walk path
-										".influence_weight" (get case_influence_map [(current_value 2)])
-									)
-
-								)
-							)
-							(indices case_influence_map)
+							all_inf_cases
 						)
 					)
 			))
 
 			(declare (assoc
-				group_inf_case_weights (map (lambda (get (current_value) ".influence_weight")) group_influential_cases)
-				group_inf_case_ids
-					(map
-						(lambda
-							(call !GetCaseId (assoc
-								session (get (current_value 1) ".session")
-								session_training_index (get (current_value) ".session_training_index")
-							))
-						)
-						group_influential_cases
-					)
+				group_inf_case_weights (values group_influential_cases)
+				group_inf_case_ids (indices group_influential_cases)
 				feature_has_continuous_nulls
 					(and
 						(not (contains_index !nominalsMap action_feature))
 						(!= .false (get !featureNullRatiosMap [action_feature "has_nulls"]))
+					)
+				;list ordered by group_inf_case_ids of:  assoc of action feature -> value
+				group_inf_action_values_maps
+					(map
+						(lambda (retrieve_from_entity (current_value) (zip action_features)))
+						group_inf_case_ids
 					)
 			))
 
@@ -1334,7 +1284,7 @@
 												(lambda
 													(get (current_value) action_feature)
 												)
-												group_influential_cases
+												group_inf_action_values_maps
 											)
 									))
 
@@ -1350,7 +1300,7 @@
 															(lambda
 																(get (current_value) action_feature)
 															)
-															group_influential_cases
+															group_inf_action_values_maps
 														)
 														group_inf_case_weights
 													))
@@ -1387,7 +1337,7 @@
 																(lambda
 																	(get (current_value) action_feature)
 																)
-																group_influential_cases
+																group_inf_action_values_maps
 															)
 													))
 											)
@@ -1488,10 +1438,49 @@
 				))
 			)
 
+			(declare (assoc
+				influence_features
+					(if (get details "influential_cases")
+						(values (append action_features context_features !internalLabelSession !internalLabelSessionTrainingIndex) .true)
+					)
+			))
+
 			(append
-				{"action_values" action_values}
+				{
+					"action_values"
+						(if (and (not skip_decoding) !hasEncodedFeatures)
+							(call !ConvertToOutput (assoc
+								features action_features
+								feature_values action_values
+							))
+
+							action_values
+						)
+				}
 				(if (get details "influential_cases")
-					{"influential_cases" group_influential_cases}
+					{
+						"influential_cases"
+							{
+								"features" (append influence_features ".influence_weight")
+								"values"
+									(map
+										(lambda (append
+											(if (and (not skip_decoding) !hasEncodedFeatures)
+												(call !ConvertToOutput (assoc
+													features influence_features
+													feature_values (retrieve_from_entity (current_value 1) influence_features)
+												))
+
+												(retrieve_from_entity (current_value) influence_features)
+											)
+
+											;append the weight as the last feature value to align with ".influence_weight"
+											(get group_inf_case_weights (current_index))
+										))
+										group_inf_case_ids
+									)
+							}
+					}
 					{}
 				)
 				(if (get details "feature_full_residuals")
