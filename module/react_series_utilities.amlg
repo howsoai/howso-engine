@@ -188,7 +188,7 @@
 							;explicitly do not include these specific selection details in the output for react details
 							(remove
 								(zip requested_details)
-								["num_most_similar_cases" "num_most_similar_case_indices" "num_boundary_cases" "selected_prediction_stats" "features" "series_residuals_num_samples" "most_similar_cases_features"]
+								["num_most_similar_cases" "num_most_similar_case_indices" "num_boundary_cases" "selected_prediction_stats" "features" "series_residuals_num_samples" "most_similar_cases_features" "influential_cases_raw_weights" "influential_cases_familiarity_convictions"]
 							)
 						)
 						(assoc)
@@ -485,11 +485,21 @@
 				(declare (assoc
 					case_detail_values_map (call !CreateCaseDetailValuesMapFromDetails (assoc details requested_details))
 					series_detail_values_map (map (lambda (list)) (zip (indices case_detail_values_map)))
+					;raw influence weights are not applicable to synthesised cases
+					output_raw_influence_weights (if desired_conviction .false (get details "influential_cases_raw_weights"))
 				))
 
 				;influential cases during series generation output assoc of entity id -> influence instead of the usual case data
 				(if (get details "influential_cases")
 					(assign (assoc details (modify details "influential_cases" "entity_ids") ))
+				)
+
+				;remove influential_cases_raw_weights key if doing generative series
+				(if (and
+						(not output_raw_influence_weights)
+						(get details "influential_cases_raw_weights")
+					)
+					(assign (assoc details (remove details "influential_cases_raw_weights") ))
 				)
 			)
 		)
@@ -878,10 +888,28 @@
 											(modify
 												case_detail_values_map
 												"influential_cases"
-												(normalize
-													(call !ReduceAssocsAddValues (assoc
-														list_of_assocs (get case_detail_values_map "influential_cases")
-													))
+												(if output_raw_influence_weights
+													;assoc of case id -> [normalized accumulated influence weight, accumulated raw influence weight]
+													(map
+														(lambda (current_value))
+														(normalize
+															(call !ReduceAssocsAddValuesTuple (assoc
+																list_of_assocs (get case_detail_values_map "influential_cases")
+																index 0
+															))
+														)
+														(call !ReduceAssocsAddValuesTuple (assoc
+															list_of_assocs (get case_detail_values_map "influential_cases")
+															index 1
+														))
+													)
+
+													;else assoc of case id -> normalized accumulated influence weight
+													(normalize
+														(call !ReduceAssocsAddValues (assoc
+															list_of_assocs (get case_detail_values_map "influential_cases")
+														))
+													)
 												)
 											)
 									))
@@ -966,7 +994,21 @@
 				(assoc
 					influence_features
 						(if (contains_index series_detail_values_map "influential_cases")
-							(values (append features !internalLabelSession !internalLabelSessionTrainingIndex) .true)
+							(values
+								(append
+									(if (get details "most_similar_cases_features")
+										(get details "most_similar_cases_features")
+										features
+									)
+									!internalLabelSession
+									!internalLabelSessionTrainingIndex
+									(if (and (!= .null !storedCaseConvictionsFeatureAddition) (get details "influential_cases_familiarity_convictions"))
+										!storedCaseConvictionsFeatureAddition
+										[]
+									)
+								)
+								.true
+							)
 						)
 				)
 
@@ -979,7 +1021,12 @@
 								;create a single influential_cases assoc with 'features' and 'cases'
 								(if (= detail_key "influential_cases")
 									{
-										"features" (append influence_features ".influence_weight")
+										"features"
+											(append
+												influence_features
+												".influence_weight"
+												(if output_raw_influence_weights ".raw_influence_weight" [])
+											)
 										"values"
 											;iterate over each influential_cases, which is an assoc of case id -> influence weight and pull all the relevant data
 											(map
@@ -987,7 +1034,7 @@
 													;iterate over the list of influential case ids
 													(map
 														(lambda
-															;append the influence weight as the last feature value
+															;append the influence weights as the last feature values
 															(append
 																(if (and (not skip_decoding) !hasEncodedFeatures)
 																	(call !ConvertToOutput (assoc
@@ -997,6 +1044,7 @@
 
 																	(retrieve_from_entity (current_value) influence_features)
 																)
+																;get .influence_weight (and .raw_influence_weight since they'll be a pair if requested)
 																(get
 																	;(current_value 1) references outside this map, to the (current_value) from the outer map
 																	;iterating over entire_detail_data which contains the whole influenial_cases assoc
